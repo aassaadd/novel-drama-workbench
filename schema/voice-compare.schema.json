@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://novel-drama.local/schema/voice-compare.schema.json",
+  "title": "配音对比试听记录（voice compare）",
+  "description": "落盘 assets/voice/compare/<lineId>_<batchId>.json。不写台词行产物、不改 tts 状态、不进时间轴，仅用于选型。",
+  "type": "object",
+  "required": ["id", "line_id", "text", "batch_id", "items", "created_at"],
+  "additionalProperties": false,
+  "properties": {
+    "id": { "type": "string", "pattern": "^cmp_[0-9A-Za-z]{6,32}$" },
+    "line_id": { "type": "string", "pattern": "^lin_[0-9A-Za-z]{6,32}$" },
+    "text": { "type": "string", "minLength": 1 },
+    "emotion": { "type": ["string", "null"], "maxLength": 60 },
+    "variant_id": { "type": ["string", "null"], "pattern": "^vav_[0-9A-Za-z]{6,32}$" },
+    "batch_id": { "type": "string", "pattern": "^cmpb_[0-9A-Za-z]{6,32}$" },
+    "items": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/item" },
+      "description": "每个 provider 一条；同文本、同情绪、同变体、同切块，只变 provider"
+    },
+    "winner_provider_id": { "type": ["string", "null"], "maxLength": 64, "description": "人工盲听结论；只作建议，不自动改绑定" },
+    "created_at": { "type": "string", "format": "date-time" }
+  },
+  "$defs": {
+    "item": {
+      "type": "object",
+      "required": ["provider_id", "status"],
+      "additionalProperties": false,
+      "properties": {
+        "provider_id": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "model_version": { "type": ["string", "null"], "maxLength": 100 },
+        "status": { "type": "string", "enum": ["ready", "failed"] },
+        "asset_id": { "type": ["string", "null"], "description": "status=ready 时必填" },
+        "duration_ms": { "type": ["integer", "null"], "minimum": 0 },
+        "applied": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "description": "实际生效的能力项，用于解释差异",
+          "properties": {
+            "emotion": { "type": "boolean" },
+            "speed": { "type": "boolean" },
+            "ssml": { "type": "boolean" },
+            "nonverbal": { "type": "boolean" }
+          }
+        },
+        "code": { "type": ["string", "null"], "maxLength": 64, "description": "统一错误码；status=failed 时填写" },
+        "message": { "type": ["string", "null"], "maxLength": 500 }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "status": { "const": "ready" } }, "required": ["status"] },
+          "then": { "required": ["asset_id"] }
+        },
+        {
+          "if": { "properties": { "status": { "const": "failed" } }, "required": ["status"] },
+          "then": { "required": ["code"] }
+        }
+      ]
+    }
+  }
+}

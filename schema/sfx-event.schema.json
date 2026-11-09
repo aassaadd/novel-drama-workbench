@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://novel-drama.local/schema/sfx-event.schema.json",
+  "title": "音效事件",
+  "type": "object",
+  "required": ["id", "scene_id", "index", "kind", "prompt", "duration_ms", "position", "revision"],
+  "additionalProperties": false,
+  "properties": {
+    "id": { "type": "string", "pattern": "^sfx_[0-9A-Za-z]{6,32}$" },
+    "scene_id": { "type": "string", "pattern": "^scn_[0-9A-Za-z]{6,32}$" },
+    "index": { "type": "integer", "minimum": 0 },
+    "kind": { "type": "string", "enum": ["ambience", "foley", "impact", "transition", "music_sting"] },
+    "prompt": { "type": "string", "minLength": 1, "maxLength": 1000 },
+    "duration_ms": { "type": "integer", "minimum": 100, "maximum": 600000 },
+    "loop": { "type": "boolean" },
+    "gain_db": { "type": "number", "minimum": -60, "maximum": 12 },
+    "fade_in_ms": { "type": "integer", "minimum": 0, "maximum": 30000 },
+    "fade_out_ms": { "type": "integer", "minimum": 0, "maximum": 30000 },
+    "position": { "$ref": "#/$defs/position" },
+    "anchor": { "$ref": "director-script.schema.json#/$defs/anchor", "description": "v2：回指正文段落块；用于改文后判断是否需要重排" },
+    "asset": { "$ref": "#/$defs/asset" },
+    "revision": { "type": "integer", "minimum": 1 }
+  },
+  "$defs": {
+    "position": {
+      "type": "object",
+      "required": ["mode"],
+      "additionalProperties": false,
+      "properties": {
+        "mode": { "type": "string", "enum": ["before_line", "after_line", "during_line", "shot_start", "shot_end", "absolute"] },
+        "line_id": {
+          "type": ["string", "null"],
+          "pattern": "^lin_[0-9A-Za-z]{6,32}$",
+          "description": "相对模式必填；锚点行被删除时降级为镜头开头（shot_start）并告警"
+        },
+        "offset_ms": { "type": "integer", "minimum": -600000, "maximum": 600000 }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "mode": { "enum": ["before_line", "after_line", "during_line"] } }, "required": ["mode"] },
+          "then": { "required": ["line_id"] }
+        }
+      ]
+    },
+    "asset": {
+      "type": "object",
+      "required": ["status"],
+      "additionalProperties": false,
+      "properties": {
+        "status": { "type": "string", "enum": ["pending", "running", "ready", "failed", "skipped"] },
+        "asset_id": { "type": ["string", "null"] },
+        "actual_duration_ms": { "type": ["integer", "null"], "minimum": 0 },
+        "adapter": { "type": ["string", "null"] },
+        "cache_key": { "type": ["string", "null"] },
+        "error": { "type": ["object", "null"], "additionalProperties": true }
+      }
+    }
+  }
+}

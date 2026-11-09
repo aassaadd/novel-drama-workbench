@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+
+# 本机配置（含密钥，绝不入库）
+config/config.yaml
+
+# 工程媒体与中间产物（工程目录通常不放在仓库内，这里兜底）
+**/assets/voice/
+**/assets/sfx/
+**/assets/image/
+**/assets/video/
+**/renders/
+**/exports/
+**/.ndw/
+**/timelines/
+
+# 本地验证产生的音频与侧车（脚本与依赖快照仍入库）
+var/**/*.wav
+var/**/*.wav.json
+var/ab_test/out/
+
+# macOS
+.DS_Store

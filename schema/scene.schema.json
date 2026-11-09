@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://novel-drama.local/schema/scene.schema.json",
+  "title": "场景",
+  "description": "章节内的叙事单元，内嵌台词行、音效、关键图、短视频段落。",
+  "type": "object",
+  "required": ["id", "chapter_id", "index", "status", "revision"],
+  "additionalProperties": false,
+  "properties": {
+    "id": { "type": "string", "pattern": "^scn_[0-9A-Za-z]{6,32}$" },
+    "chapter_id": { "type": "string", "pattern": "^chp_[0-9A-Za-z]{6,32}$" },
+    "index": { "type": "integer", "minimum": 0 },
+    "title": { "type": ["string", "null"], "maxLength": 200 },
+    "location": { "type": ["string", "null"], "maxLength": 200 },
+    "time_of_day": { "type": "string", "enum": ["dawn", "morning", "day", "dusk", "night", "unknown"] },
+    "mood": { "type": ["string", "null"], "maxLength": 100 },
+    "goal": { "type": ["string", "null"], "maxLength": 500 },
+    "summary": { "type": ["string", "null"], "maxLength": 2000 },
+    "source_text": { "type": ["string", "null"], "maxLength": 200000, "description": "场景原始正文，供切分溯源与重新切台词使用" },
+    "character_ids": {
+      "type": "array",
+      "items": { "type": "string", "pattern": "^chr_[0-9A-Za-z]{6,32}$" },
+      "uniqueItems": true
+    },
+    "target_duration_ms": { "type": ["integer", "null"], "minimum": 0 },
+    "status": { "type": "string", "enum": ["draft", "ready", "voiced", "done"] },
+    "lines": { "type": "array", "items": { "$ref": "line.schema.json" } },
+    "sfx_events": { "type": "array", "items": { "$ref": "sfx-event.schema.json" } },
+    "key_images": { "type": "array", "items": { "$ref": "key-image.schema.json" } },
+    "video_segments": { "type": "array", "items": { "$ref": "video-segment.schema.json" } },
+    "revision": { "type": "integer", "minimum": 1 }
+  }
+}

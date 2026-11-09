@@ -1,0 +1,121 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://novel-drama.local/schema/character.schema.json",
+  "title": "角色表（characters.json）",
+  "description": "chr_narrator 为保留 ID，代表旁白，不可删除。v2 起音色库独立为 voices.json，角色通过 voice_library_id + 变体绑定引用。",
+  "type": "object",
+  "required": ["schema_version", "characters"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "type": "integer", "const": 1 },
+    "characters": { "type": "array", "items": { "$ref": "#/$defs/character" } }
+  },
+  "$defs": {
+    "timestamp": { "type": "string", "format": "date-time" },
+    "character": {
+      "type": "object",
+      "required": ["id", "name", "role", "created_at", "updated_at"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "pattern": "^chr_[0-9A-Za-z]{6,32}$" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 60 },
+        "aliases": { "type": "array", "items": { "type": "string", "maxLength": 60 }, "uniqueItems": true },
+        "role": { "type": "string", "enum": ["protagonist", "antagonist", "supporting", "narrator", "minor"] },
+        "gender": { "type": ["string", "null"], "enum": ["male", "female", "other", "unknown", null] },
+        "age_range": { "type": ["string", "null"], "maxLength": 40 },
+        "personality": { "type": "array", "items": { "type": "string", "maxLength": 40 } },
+        "background": { "type": "string", "maxLength": 2000 },
+        "speech_style": { "$ref": "#/$defs/speech_style" },
+        "voice_binding": { "$ref": "#/$defs/voice_binding", "description": "使用 TTS 时必填 voice_id" },
+        "appearance_prompt": { "type": "string", "maxLength": 2000 },
+        "negative_prompt": { "type": "string", "maxLength": 1000 },
+        "portrait_asset": { "type": ["string", "null"] },
+        "state": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "description": "v2：角色当前状态卡，供续写一致性与设定检索使用",
+          "properties": {
+            "situation": { "type": ["string", "null"], "maxLength": 1000 },
+            "relationship_notes": {
+              "type": ["object", "null"],
+              "description": "v2：其他角色 ID → 关系备注",
+              "additionalProperties": { "type": "string", "maxLength": 500 }
+            },
+            "knowledge": { "type": ["array", "null"], "items": { "type": "string", "maxLength": 200 } },
+            "as_of_chapter_id": { "type": ["string", "null"], "pattern": "^chp_[0-9A-Za-z]{6,32}$" }
+          }
+        },
+        "created_at": { "$ref": "#/$defs/timestamp" },
+        "updated_at": { "$ref": "#/$defs/timestamp" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "role": { "const": "narrator" } }, "required": ["role"] },
+          "then": { "properties": { "id": { "const": "chr_narrator" } } }
+        }
+      ]
+    },
+    "speech_style": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "tempo": { "type": ["string", "null"], "maxLength": 40 },
+        "pitch": { "type": ["string", "null"], "maxLength": 40 },
+        "accent": { "type": ["string", "null"], "maxLength": 40 },
+        "catchphrases": { "type": "array", "items": { "type": "string", "maxLength": 60 } }
+      }
+    },
+    "voice_binding": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["adapter"],
+      "description": "v1 用 voice_id；v2 用 voice_library_id + default_variant_id，二者至少一个",
+      "anyOf": [
+        { "required": ["voice_id"] },
+        { "required": ["voice_library_id"] }
+      ],
+      "properties": {
+        "adapter": { "type": "string", "maxLength": 40 },
+        "voice_id": { "type": ["string", "null"], "maxLength": 120, "description": "v1 兼容字段" },
+        "voice_library_id": {
+          "type": ["string", "null"],
+          "pattern": "^voc_[0-9A-Za-z]{6,32}$",
+          "description": "v2：指向 voices.json 的音色 ID，优先于 voice_id"
+        },
+        "default_variant_id": {
+          "type": ["string", "null"],
+          "pattern": "^vav_[0-9A-Za-z]{6,32}$",
+          "description": "v2：默认音色变体；情绪未命中映射时使用"
+        },
+        "emotion_variant_map": {
+          "type": "object",
+          "description": "v2：情绪 → 音色变体 ID；Qwen3-TTS 克隆不支持指令控情绪，只能切换参考音频变体",
+          "additionalProperties": { "type": "string", "pattern": "^vav_[0-9A-Za-z]{6,32}$" }
+        },
+        "fallback_voice_id": {
+          "type": ["string", "null"],
+          "pattern": "^voc_[0-9A-Za-z]{6,32}$",
+          "description": "v2：首选音色不可用时的替代音色"
+        },
+        "provider_id": {
+          "type": ["string", "null"],
+          "maxLength": 64,
+          "description": "v2：角色级 TTS provider 覆盖；为空时用工程 default_provider_id"
+        },
+        "fallback_provider_id": {
+          "type": ["string", "null"],
+          "maxLength": 64,
+          "description": "v2：角色首选 provider 不可用时的替代 provider；为空时走工程 provider_order"
+        },
+        "reference_audio": { "type": ["string", "null"] },
+        "seed": { "type": ["integer", "null"] },
+        "speed": { "type": "number", "minimum": 0.5, "maximum": 2.0 },
+        "emotion_map": {
+          "type": "object",
+          "additionalProperties": { "type": "string", "maxLength": 60 },
+          "description": "统一情绪枚举 → 具体引擎情绪标签"
+        }
+      }
+    }
+  }
+}

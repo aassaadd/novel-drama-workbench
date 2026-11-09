@@ -1,0 +1,173 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://novel-drama.local/schema/setting-bible.schema.json",
+  "title": "设定库（settings/bible.json）",
+  "description": "设定工坊唯一写入；小说、导演脚本、配音、图像、视频只读。settings_revision 变更即代表设定更新。",
+  "type": "object",
+  "required": ["schema_version", "settings_revision", "work_id", "premise", "world", "outline", "style", "created_at", "updated_at"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "type": "integer", "const": 1 },
+    "settings_revision": { "type": "integer", "minimum": 1, "description": "设定库版本，任何设定变更 +1" },
+    "work_id": { "type": "string", "pattern": "^wrk_[0-9A-Za-z]{6,32}$" },
+    "premise": { "$ref": "#/$defs/premise" },
+    "world": { "$ref": "#/$defs/world" },
+    "outline": { "$ref": "#/$defs/outline" },
+    "style": { "$ref": "#/$defs/style" },
+    "continuity": { "$ref": "#/$defs/continuity" },
+    "characters_ref": { "type": "string", "description": "角色表相对路径，默认 characters.json" },
+    "voices_ref": { "type": "string", "description": "音色库相对路径，默认 voices.json" },
+    "created_at": { "type": "string", "format": "date-time" },
+    "updated_at": { "type": "string", "format": "date-time" }
+  },
+  "$defs": {
+    "id": { "type": "string", "pattern": "^[a-z]{3}_[0-9A-Za-z]{6,32}$" },
+    "premise": {
+      "type": "object",
+      "required": ["logline"],
+      "additionalProperties": false,
+      "properties": {
+        "logline": { "type": "string", "minLength": 1, "maxLength": 500, "description": "一句话故事" },
+        "theme": { "type": "string", "maxLength": 500, "description": "主题与母题" },
+        "core_conflict": { "type": "string", "maxLength": 1000 },
+        "ending_intent": { "type": "string", "maxLength": 1000, "description": "结局意图，防止续写跑偏" },
+        "target_audience": { "type": "string", "maxLength": 200 },
+        "target_length": { "type": "string", "enum": ["short", "novella", "novel", "series"] }
+      }
+    },
+    "world": {
+      "type": "object",
+      "required": ["era"],
+      "additionalProperties": false,
+      "properties": {
+        "era": { "type": "string", "maxLength": 200, "description": "时代背景" },
+        "locations": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/location" }
+        },
+        "rules": {
+          "type": "array",
+          "items": { "type": "string", "maxLength": 500 },
+          "description": "世界硬规则（超自然设定、物理限制等）"
+        },
+        "factions": { "type": "array", "items": { "type": "string", "maxLength": 200 } },
+        "glossary": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/glossary_entry" },
+          "description": "专有名词表，供上下文装配与一致性检查"
+        }
+      }
+    },
+    "location": {
+      "type": "object",
+      "required": ["id", "name"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "pattern": "^loc_[0-9A-Za-z]{6,32}$" },
+        "name": { "type": "string", "maxLength": 120 },
+        "description": { "type": "string", "maxLength": 1000 },
+        "atmosphere": { "type": "string", "maxLength": 300, "description": "供音效与画面提示词使用" }
+      }
+    },
+    "glossary_entry": {
+      "type": "object",
+      "required": ["term", "meaning"],
+      "additionalProperties": false,
+      "properties": {
+        "term": { "type": "string", "maxLength": 120 },
+        "meaning": { "type": "string", "maxLength": 1000 },
+        "aliases": { "type": "array", "items": { "type": "string", "maxLength": 120 } }
+      }
+    },
+    "outline": {
+      "type": "object",
+      "required": ["acts"],
+      "additionalProperties": false,
+      "properties": {
+        "acts": { "type": "array", "items": { "$ref": "#/$defs/act" } }
+      }
+    },
+    "act": {
+      "type": "object",
+      "required": ["id", "title", "chapters"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "pattern": "^act_[0-9A-Za-z]{6,32}$" },
+        "title": { "type": "string", "maxLength": 200 },
+        "summary": { "type": "string", "maxLength": 2000 },
+        "chapters": { "type": "array", "items": { "$ref": "#/$defs/outline_chapter" } }
+      }
+    },
+    "outline_chapter": {
+      "type": "object",
+      "required": ["id", "index", "title"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "pattern": "^chp_[0-9A-Za-z]{6,32}$" },
+        "index": { "type": "integer", "minimum": 1 },
+        "title": { "type": "string", "maxLength": 200 },
+        "summary": { "type": "string", "maxLength": 2000 },
+        "beats": { "type": "array", "items": { "$ref": "#/$defs/beat" } },
+        "pov_character_id": { "type": ["string", "null"], "pattern": "^chr_[0-9A-Za-z]{6,32}$" }
+      }
+    },
+    "beat": {
+      "type": "object",
+      "required": ["id", "summary"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "pattern": "^bea_[0-9A-Za-z]{6,32}$" },
+        "summary": { "type": "string", "maxLength": 1000 },
+        "character_ids": { "type": "array", "items": { "type": "string", "pattern": "^chr_[0-9A-Za-z]{6,32}$" } },
+        "turning_point": { "type": "boolean", "description": "是否关键转折，供配图/视频优先级使用" },
+        "target_words": { "type": "integer", "minimum": 0, "maximum": 20000 }
+      }
+    },
+    "style": {
+      "type": "object",
+      "required": ["tone"],
+      "additionalProperties": false,
+      "properties": {
+        "tone": { "type": "string", "maxLength": 300, "description": "整体气质，如冷峻、克制" },
+        "pov": { "type": "string", "enum": ["first", "third_limited", "third_omniscient", "second"] },
+        "tense": { "type": "string", "enum": ["past", "present"] },
+        "prose_style": { "type": "string", "maxLength": 1000, "description": "句式、修辞、篇幅偏好" },
+        "forbidden": { "type": "array", "items": { "type": "string", "maxLength": 200 }, "description": "禁止出现的内容或写法" },
+        "visual_style": { "type": "string", "maxLength": 500, "description": "全书统一画面风格，供图像提示词拼装" }
+      }
+    },
+    "continuity": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "timeline": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["at", "event"],
+            "additionalProperties": false,
+            "properties": {
+              "at": { "type": "string", "maxLength": 200, "description": "时间点，可为故事内时间或相对时间" },
+              "event": { "type": "string", "maxLength": 1000 },
+              "chapter_id": { "type": ["string", "null"], "pattern": "^chp_[0-9A-Za-z]{6,32}$" }
+            }
+          }
+        },
+        "open_threads": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["id", "text"],
+            "additionalProperties": false,
+            "properties": {
+              "id": { "type": "string", "pattern": "^thr_[0-9A-Za-z]{6,32}$" },
+              "text": { "type": "string", "maxLength": 1000 },
+              "status": { "type": "string", "enum": ["open", "resolved", "abandoned"] }
+            }
+          },
+          "description": "伏笔与未回收线索，供续写保持一致"
+        }
+      }
+    }
+  }
+}

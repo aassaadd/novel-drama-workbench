@@ -1,0 +1,126 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://novel-drama.local/schema/chapter.schema.json",
+  "title": "章节（chapters/<chapterId>.json）",
+  "type": "object",
+  "required": ["id", "work_id", "index", "title", "status", "revision", "created_at", "updated_at"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "type": "integer", "const": 1 },
+    "id": { "type": "string", "pattern": "^chp_[0-9A-Za-z]{6,32}$" },
+    "work_id": { "type": "string", "pattern": "^wrk_[0-9A-Za-z]{6,32}$" },
+    "index": { "type": "integer", "minimum": 1 },
+    "title": { "type": "string", "minLength": 1, "maxLength": 200 },
+    "outline": { "type": ["string", "null"], "maxLength": 8000 },
+    "synopsis": { "type": ["string", "null"], "maxLength": 4000, "description": "滚动摘要，供后续章节上下文使用" },
+    "content": { "type": ["string", "null"], "maxLength": 200000 },
+    "pov_character_id": { "type": ["string", "null"], "pattern": "^chr_[0-9A-Za-z]{6,32}$" },
+    "word_count": { "type": ["integer", "null"], "minimum": 0 },
+    "status": {
+      "type": "string",
+      "enum": ["draft", "written", "split", "scripted", "voiced", "visualized", "composed", "stale"],
+      "description": "v2 推荐使用 draft→written→scripted→voiced→visualized→composed；split 为 v1 兼容值"
+    },
+    "blocks": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/block" },
+      "description": "正文段落块（由 content 派生，可重建），是导演脚本锚点的定位基础"
+    },
+    "script_path": {
+      "type": ["string", "null"],
+      "description": "导演脚本相对路径，如 scripts/<chapterId>.json；空表示尚未生成"
+    },
+    "source": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "description": "导入时的原文快照引用（正文存 .ndw/imports/，这里只留引用与哈希）",
+      "required": ["snapshot_id", "file", "sha256", "chars", "imported_at"],
+      "properties": {
+        "snapshot_id": { "type": "string" },
+        "file": { "type": "string", "description": "相对工程根目录的快照路径，如 .ndw/imports/chp_x.txt" },
+        "sha256": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "chars": { "type": "integer", "minimum": 0 },
+        "imported_at": { "type": "string", "format": "date-time" },
+        "source_path": { "type": ["string", "null"] },
+        "tool": { "type": ["string", "null"], "description": "触发导入的命令，如 novel import" }
+      }
+    },
+    "continuations": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/continuation" },
+      "description": "续写/改写会话记录"
+    },
+    "scenes": { "type": "array", "items": { "$ref": "scene.schema.json" }, "description": "v1 兼容：场景内嵌；v2 由导演脚本的 shots 承接" },
+    "revision": { "type": "integer", "minimum": 1 },
+    "created_at": { "type": "string", "format": "date-time" },
+    "updated_at": { "type": "string", "format": "date-time" }
+  },
+  "$defs": {
+    "block": {
+      "type": "object",
+      "required": ["id", "index", "kind", "char_start", "char_end", "text_hash"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "pattern": "^blk_[0-9A-Za-z]{6,32}$" },
+        "index": { "type": "integer", "minimum": 0 },
+        "kind": { "type": "string", "enum": ["paragraph", "dialogue", "heading"] },
+        "char_start": { "type": "integer", "minimum": 0 },
+        "char_end": { "type": "integer", "minimum": 0 },
+        "text_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+      }
+    },
+    "continuation": {
+      "type": "object",
+      "required": ["id", "mode", "context", "status", "created_at"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "pattern": "^cnt_[0-9A-Za-z]{6,32}$" },
+        "mode": { "type": "string", "enum": ["continue", "outline_driven", "rewrite_range"] },
+        "instruction": { "type": ["string", "null"], "maxLength": 4000 },
+        "target_words": { "type": ["integer", "null"], "minimum": 100, "maximum": 20000 },
+        "outline_ref": { "type": ["string", "null"], "maxLength": 300 },
+        "range": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "required": ["char_start", "char_end"],
+          "properties": {
+            "char_start": { "type": "integer", "minimum": 0 },
+            "char_end": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "context": {
+          "type": "object",
+          "required": ["include_bible"],
+          "additionalProperties": false,
+          "properties": {
+            "include_bible": { "type": "boolean" },
+            "include_character_cards": { "type": "array", "items": { "type": "string", "pattern": "^chr_[0-9A-Za-z]{6,32}$" } },
+            "include_previous_summaries": { "type": "integer", "minimum": 0, "maximum": 20 },
+            "include_recent_chars": { "type": "integer", "minimum": 0, "maximum": 100000 },
+            "budget_tokens": { "type": "integer", "minimum": 1024, "maximum": 262144 }
+          }
+        },
+        "status": { "type": "string", "enum": ["pending", "running", "done", "failed", "canceled"] },
+        "produced": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "required": ["char_start", "char_end"],
+          "properties": {
+            "char_start": { "type": "integer", "minimum": 0 },
+            "char_end": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "model": { "type": ["string", "null"], "maxLength": 200 },
+        "usage": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "properties": {
+            "prompt_tokens": { "type": "integer", "minimum": 0 },
+            "completion_tokens": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "created_at": { "type": "string", "format": "date-time" }
+      }
+    }
+  }
+}

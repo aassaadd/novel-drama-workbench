@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://novel-drama.local/schema/line.schema.json",
+  "title": "台词行 / 旁白",
+  "description": "时间轴最小锚点，也是配音最小单位。旁白为 kind=narration 且 speaker_id=chr_narrator。",
+  "type": "object",
+  "required": ["id", "scene_id", "index", "kind", "speaker_id", "text", "emotion", "revision"],
+  "additionalProperties": false,
+  "properties": {
+    "id": { "type": "string", "pattern": "^lin_[0-9A-Za-z]{6,32}$" },
+    "scene_id": { "type": "string", "pattern": "^scn_[0-9A-Za-z]{6,32}$" },
+    "index": { "type": "integer", "minimum": 0 },
+    "kind": { "type": "string", "enum": ["dialogue", "narration", "inner_monologue"] },
+    "speaker_id": { "type": "string", "pattern": "^chr_[0-9A-Za-z]{6,32}$" },
+    "text": { "type": "string", "minLength": 1, "maxLength": 5000 },
+    "emotion": {
+      "type": "string",
+      "enum": ["neutral", "joy", "sad", "angry", "fear", "surprise", "tender", "excited", "whisper", "serious"]
+    },
+    "emotion_intensity": { "type": "number", "minimum": 0, "maximum": 1 },
+    "paralinguistic": {
+      "type": "array",
+      "items": { "type": "string", "enum": ["laugh", "sigh", "breath", "cry", "whisper"] },
+      "uniqueItems": true,
+      "description": "v2：副语言，自动路由硬条件"
+    },
+    "target_duration_ms": { "type": ["integer", "null"], "minimum": 0 },
+    "speed": { "type": "number", "minimum": 0.5, "maximum": 2.0 },
+    "pause_before_ms": { "type": "integer", "minimum": 0, "maximum": 60000 },
+    "pause_after_ms": { "type": "integer", "minimum": 0, "maximum": 60000 },
+    "delivery_note": { "type": ["string", "null"], "maxLength": 500 },
+    "voice": { "$ref": "director-script.schema.json#/$defs/voice_override", "description": "v2：行级音色/变体覆盖" },
+    "anchor": { "$ref": "director-script.schema.json#/$defs/anchor", "description": "v2：回指正文段落块" },
+    "inferred": { "type": "boolean", "description": "是否由模型切分/标注得出" },
+    "confidence": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
+    "tts": { "$ref": "#/$defs/tts" },
+    "revision": { "type": "integer", "minimum": 1 }
+  },
+  "$defs": {
+    "tts": {
+      "type": "object",
+      "required": ["status"],
+      "additionalProperties": false,
+      "properties": {
+        "status": { "type": "string", "enum": ["pending", "running", "ready", "failed", "stale"] },
+        "asset_id": { "type": ["string", "null"], "description": "相对工程根目录的音频路径" },
+        "duration_ms": { "type": ["integer", "null"], "minimum": 0, "description": "实测时长；为空表示未合成" },
+        "adapter": { "type": ["string", "null"] },
+        "voice_id": { "type": ["string", "null"] },
+        "variant_id": { "type": ["string", "null"], "pattern": "^vav_[0-9A-Za-z]{6,32}$", "description": "v2：实际使用的音色变体，用于排查漂移" },
+        "provider_id": { "type": ["string", "null"], "maxLength": 64, "description": "v2：实际使用的 TTS provider" },
+        "model_version": { "type": ["string", "null"], "maxLength": 100, "description": "v2：实际模型版本，切换后需重算" },
+        "routing": { "$ref": "director-script.schema.json#/$defs/routing", "description": "v2：自动路由决策" },
+        "chunks": {
+          "type": "array",
+          "items": { "$ref": "director-script.schema.json#/$defs/tts_chunk" },
+          "description": "v2：切块合成记录，重录只重跑文本变化的块"
+        },
+        "synthesized_revision": { "type": ["integer", "null"], "description": "不等于行 revision 即为过期" },
+        "actual_speed": { "type": ["number", "null"] },
+        "error": { "type": ["object", "null"], "additionalProperties": true },
+        "updated_at": { "type": ["string", "null"], "format": "date-time" }
+      }
+    }
+  }
+}

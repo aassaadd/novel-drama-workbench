@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://novel-drama.local/schema/timeline.schema.json",
+  "title": "时间轴（timelines/<chapterId>.timeline.json）",
+  "description": "派生物，可由工程数据重建；人工微调后 revision+1。",
+  "type": "object",
+  "required": ["schema_version", "id", "chapter_id", "revision", "duration_ms", "sample_rate", "channels", "source_hash", "tracks"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "type": "integer", "const": 1 },
+    "id": { "type": "string", "pattern": "^tml_[0-9A-Za-z]{6,32}$" },
+    "chapter_id": { "type": "string", "pattern": "^chp_[0-9A-Za-z]{6,32}$" },
+    "revision": { "type": "integer", "minimum": 1 },
+    "duration_ms": { "type": "integer", "minimum": 0 },
+    "sample_rate": { "type": "integer", "minimum": 8000 },
+    "channels": { "type": "integer", "enum": [1, 2] },
+    "built_at": { "type": ["string", "null"], "format": "date-time" },
+    "source_hash": { "type": "string", "description": "输入实体 revision 集合的哈希，用于判断是否需重建" },
+    "tracks": { "type": "array", "items": { "$ref": "#/$defs/track" } },
+    "markers": { "type": "array", "items": { "$ref": "#/$defs/marker" } },
+    "warnings": { "type": "array", "items": { "type": "string" } }
+  },
+  "$defs": {
+    "track": {
+      "type": "object",
+      "required": ["id", "kind", "items"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string" },
+        "kind": { "type": "string", "enum": ["voice", "sfx", "music", "video", "image"] },
+        "name": { "type": "string" },
+        "muted": { "type": "boolean" },
+        "items": { "type": "array", "items": { "$ref": "#/$defs/item" } }
+      }
+    },
+    "item": {
+      "type": "object",
+      "required": ["source_kind", "source_id", "start_ms", "end_ms"],
+      "additionalProperties": false,
+      "properties": {
+        "source_kind": { "type": "string", "enum": ["line", "sfx", "key_image", "video_segment"] },
+        "source_id": { "type": "string" },
+        "asset_id": { "type": ["string", "null"] },
+        "start_ms": { "type": "integer", "minimum": 0 },
+        "end_ms": { "type": "integer", "minimum": 0 },
+        "gain_db": { "type": "number", "minimum": -60, "maximum": 12 },
+        "fade_in_ms": { "type": "integer", "minimum": 0 },
+        "fade_out_ms": { "type": "integer", "minimum": 0 },
+        "estimated": { "type": "boolean", "description": "时长是否为估算（未实测）" },
+        "label": { "type": ["string", "null"], "maxLength": 200 }
+      }
+    },
+    "marker": {
+      "type": "object",
+      "required": ["at_ms", "label"],
+      "additionalProperties": false,
+      "properties": {
+        "at_ms": { "type": "integer", "minimum": 0 },
+        "label": { "type": "string", "maxLength": 200 }
+      }
+    }
+  }
+}

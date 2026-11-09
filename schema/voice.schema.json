@@ -1,0 +1,162 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://novel-drama.local/schema/voice.schema.json",
+  "title": "音色库（voices.json）",
+  "description": "工程级音色库，与 TTS provider 解耦。Qwen3-TTS 1.7B 为参考实现：9 个预设音色；3 秒参考音频零样本克隆，可按情绪准备多套变体并预计算 prompt 缓存。变体在具体 provider 上是否可用由 provider_availability 决定。",
+  "type": "object",
+  "required": ["schema_version", "voices"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "type": "integer", "const": 1 },
+    "voices": { "type": "array", "items": { "$ref": "#/$defs/voice" } }
+  },
+  "$defs": {
+    "voice": {
+      "type": "object",
+      "description": "一个角色可用的音色集合；角色绑定默认变体 + 情绪到变体的映射。",
+      "required": ["id", "name", "status", "default_variant_id", "variants", "revision", "created_at", "updated_at"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "pattern": "^voc_[0-9A-Za-z]{6,32}$" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "engine": { "type": ["string", "null"], "description": "v1 兼容字段；v2 已与 provider 解耦，建议留空" },
+        "default_provider_id": { "type": ["string", "null"], "maxLength": 64, "description": "该音色的建议 provider；空则跟随工程默认" },
+        "language": { "type": "string", "pattern": "^[a-z]{2}-[A-Z]{2}$" },
+        "gender": { "type": "string", "enum": ["male", "female", "other", "unknown"] },
+        "tags": { "type": "array", "items": { "type": "string", "maxLength": 40 } },
+        "default_variant_id": {
+          "type": "string",
+          "pattern": "^vav_[0-9A-Za-z]{6,32}$",
+          "description": "默认变体；台词行未命中情绪映射时使用"
+        },
+        "variants": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/variant" } },
+        "status": { "type": "string", "enum": ["ready", "unusable", "archived"] },
+        "revision": { "type": "integer", "minimum": 1 },
+        "created_at": { "type": "string", "format": "date-time" },
+        "updated_at": { "type": "string", "format": "date-time" }
+      }
+    },
+    "variant": {
+      "type": "object",
+      "description": "一套可用于合成的音色素材：预设音色、克隆参考音频，或按情绪准备的多套参考。",
+      "required": ["id", "name", "source", "emotion_tags", "status", "created_at"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "pattern": "^vav_[0-9A-Za-z]{6,32}$" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 120, "description": "如「默认」「愤怒」「低语」" },
+        "source": { "type": "string", "enum": ["preset", "cloned", "recorded"] },
+        "emotion_tags": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "enum": ["default", "neutral", "joy", "sad", "angry", "fear", "surprise", "tender", "excited", "whisper", "serious"]
+          },
+          "description": "该变体适用的情绪；default 表示兜底"
+        },
+        "preset_name": {
+          "type": ["string", "null"],
+          "enum": ["Vivian", "Serena", "Uncle_Fu", "Dylan", "Eric", "Ryan", "Aiden", "Ono_Anna", "Sohee", null],
+          "description": "9 个预设音色；Dylan 为北京话，Eric 为四川话"
+        },
+        "reference": { "$ref": "#/$defs/reference" },
+        "prompt_cache": { "$ref": "#/$defs/prompt_cache" },
+        "consent": { "$ref": "#/$defs/consent" },
+        "quality": { "$ref": "#/$defs/quality" },
+        "provider_availability": {
+          "type": "array",
+          "description": "provider × 变体：同一份参考在不同克隆实现上效果不同，逐个记录可用性与试听结论",
+          "items": { "$ref": "#/$defs/provider_availability" }
+        },
+        "status": { "type": "string", "enum": ["ready", "pending", "unusable"] },
+        "created_at": { "type": "string", "format": "date-time" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "source": { "const": "preset" } }, "required": ["source"] },
+          "then": { "required": ["preset_name"] }
+        },
+        {
+          "if": { "properties": { "source": { "enum": ["cloned", "recorded"] } }, "required": ["source"] },
+          "then": { "required": ["reference", "consent"] }
+        },
+        {
+          "if": { "properties": { "source": { "enum": ["cloned", "recorded"] } }, "required": ["source"] },
+          "then": {
+            "properties": {
+              "consent": {
+                "properties": { "confirmed": { "const": true } },
+                "required": ["confirmed"]
+              }
+            }
+          }
+        }
+      ]
+    },
+    "reference": {
+      "type": "object",
+      "required": ["audio_path", "duration_ms"],
+      "additionalProperties": false,
+      "properties": {
+        "audio_path": { "type": "string", "description": "参考音频相对路径" },
+        "duration_ms": {
+          "type": "integer",
+          "minimum": 2000,
+          "maximum": 20000,
+          "description": "克隆最少 3 秒；按情绪准备建议 5~15 秒"
+        },
+        "text": { "type": ["string", "null"], "maxLength": 2000, "description": "参考音频对应文本（可选）" },
+        "snr_db": { "type": ["number", "null"] },
+        "channels": { "type": ["integer", "null"], "enum": [1, 2, null] },
+        "sample_rate": { "type": ["integer", "null"], "minimum": 16000, "maximum": 96000 }
+      }
+    },
+    "prompt_cache": {
+      "type": "object",
+      "description": "voice_clone_prompt 预计算结果；全篇复用同一份可避免音色漂移。",
+      "required": ["status"],
+      "additionalProperties": false,
+      "properties": {
+        "status": { "type": "string", "enum": ["pending", "ready", "failed"] },
+        "path": { "type": ["string", "null"], "description": "缓存文件相对路径，如 assets/voices/prompts/vav_xxx.pt" },
+        "hash": { "type": ["string", "null"], "description": "参考音频与参数哈希，参考变更时失效" },
+        "model": { "type": ["string", "null"], "maxLength": 200 },
+        "created_at": { "type": ["string", "null"], "format": "date-time" }
+      }
+    },
+    "consent": {
+      "type": "object",
+      "required": ["confirmed"],
+      "additionalProperties": false,
+      "properties": {
+        "confirmed": { "type": "boolean", "description": "本人或已获授权；必须为 true 才能合成" },
+        "note": { "type": ["string", "null"], "maxLength": 1000 },
+        "evidence_path": { "type": ["string", "null"], "description": "授权凭证留存路径（可选）" }
+      }
+    },
+    "quality": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "status": { "type": "string", "enum": ["unchecked", "pass", "warn", "fail"] },
+        "notes": { "type": "array", "items": { "type": "string", "maxLength": 200 } },
+        "checked_at": { "type": ["string", "null"], "format": "date-time" }
+      }
+    },
+    "provider_availability": {
+      "type": "object",
+      "required": ["provider_id", "status"],
+      "additionalProperties": false,
+      "properties": {
+        "provider_id": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "status": { "type": "string", "enum": ["ready", "pending", "unusable"] },
+        "clone_supported": { "type": "boolean", "description": "该 provider 是否支持用这份参考音频克隆" },
+        "preview_asset_id": { "type": ["string", "null"], "description": "该 provider 上的试听产物路径" },
+        "similarity_note": { "type": ["string", "null"], "maxLength": 500 },
+        "reason": { "type": ["string", "null"], "maxLength": 500, "description": "不可用原因，如不支持克隆/素材质量不足" },
+        "checked_at": { "type": ["string", "null"], "format": "date-time" }
+      }
+    }
+  }
+}

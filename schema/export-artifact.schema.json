@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://novel-drama.local/schema/export-artifact.schema.json",
+  "title": "导出产物",
+  "type": "object",
+  "required": ["id", "scope", "kind", "path", "status", "created_at"],
+  "additionalProperties": false,
+  "properties": {
+    "id": { "type": "string", "pattern": "^exp_[0-9A-Za-z]{6,32}$" },
+    "scope": { "type": "string", "enum": ["chapter", "work"] },
+    "chapter_id": { "type": ["string", "null"], "pattern": "^chp_[0-9A-Za-z]{6,32}$" },
+    "kind": { "type": "string", "enum": ["mp4", "mp3", "wav", "srt", "manifest"] },
+    "path": { "type": "string", "description": "相对工程根目录" },
+    "status": { "type": "string", "enum": ["pending", "running", "ready", "failed"] },
+    "duration_ms": { "type": ["integer", "null"], "minimum": 0 },
+    "size_bytes": { "type": ["integer", "null"], "minimum": 0 },
+    "spec": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "properties": {
+        "sample_rate": { "type": "integer" },
+        "channels": { "type": "integer", "enum": [1, 2] },
+        "loudness_lufs": { "type": "number" },
+        "video": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "properties": {
+            "width": { "type": "integer" },
+            "height": { "type": "integer" },
+            "fps": { "type": "integer" }
+          }
+        }
+      }
+    },
+    "timeline_revision": { "type": ["integer", "null"], "minimum": 1 },
+    "error": { "type": ["object", "null"], "additionalProperties": true },
+    "created_at": { "type": "string", "format": "date-time" }
+  }
+}

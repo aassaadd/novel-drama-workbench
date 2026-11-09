@@ -1,0 +1,87 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://novel-drama.local/schema/render-job.schema.json",
+  "title": "渲染任务",
+  "description": "队列中的一条任务；同一幂等键只保留一条。",
+  "type": "object",
+  "required": ["id", "kind", "target", "status", "priority", "idempotency_key", "attempts", "max_attempts", "created_at"],
+  "additionalProperties": false,
+  "properties": {
+    "id": { "type": "string", "pattern": "^job_[0-9A-Za-z]{6,32}$" },
+    "kind": { "type": "string", "enum": ["writing", "tts", "sfx", "image", "video", "mix", "export"] },
+    "target": { "$ref": "#/$defs/target" },
+    "status": {
+      "type": "string",
+      "enum": ["queued", "running", "succeeded", "failed", "canceled", "interrupted", "skipped"]
+    },
+    "priority": { "type": "integer", "minimum": 0, "maximum": 1000 },
+    "idempotency_key": { "type": "string", "minLength": 8 },
+    "params_hash": { "type": ["string", "null"] },
+    "attempts": { "type": "integer", "minimum": 0 },
+    "max_attempts": { "type": "integer", "minimum": 1, "maximum": 10 },
+    "depends_on": {
+      "type": "array",
+      "items": { "type": "string", "pattern": "^job_[0-9A-Za-z]{6,32}$" },
+      "uniqueItems": true
+    },
+    "adapter": { "type": ["string", "null"] },
+    "error": { "$ref": "#/$defs/error" },
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["kind", "path"],
+        "additionalProperties": false,
+        "properties": {
+          "kind": { "type": "string" },
+          "path": { "type": "string" },
+          "meta": { "type": "object", "additionalProperties": true }
+        }
+      }
+    },
+    "timings": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "queued_at": { "type": ["string", "null"], "format": "date-time" },
+        "started_at": { "type": ["string", "null"], "format": "date-time" },
+        "finished_at": { "type": ["string", "null"], "format": "date-time" },
+        "duration_ms": { "type": ["integer", "null"], "minimum": 0 }
+      }
+    },
+    "logs_path": { "type": ["string", "null"] },
+    "created_at": { "type": "string", "format": "date-time" }
+  },
+  "$defs": {
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "work_id": { "type": "string", "pattern": "^wrk_[0-9A-Za-z]{6,32}$" },
+        "chapter_id": { "type": "string", "pattern": "^chp_[0-9A-Za-z]{6,32}$" },
+        "scene_id": { "type": "string", "pattern": "^scn_[0-9A-Za-z]{6,32}$" },
+        "line_id": { "type": "string", "pattern": "^lin_[0-9A-Za-z]{6,32}$" },
+        "sfx_id": { "type": "string", "pattern": "^sfx_[0-9A-Za-z]{6,32}$" },
+        "key_image_id": { "type": "string", "pattern": "^img_[0-9A-Za-z]{6,32}$" },
+        "video_segment_id": { "type": "string", "pattern": "^vid_[0-9A-Za-z]{6,32}$" },
+        "timeline_id": { "type": "string", "pattern": "^tml_[0-9A-Za-z]{6,32}$" }
+      }
+    },
+    "error": {
+      "type": ["object", "null"],
+      "required": ["code", "message"],
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "type": "string",
+          "enum": ["NOT_IMPLEMENTED", "UNAVAILABLE", "TIMEOUT", "RATE_LIMITED", "INVALID_INPUT", "UPSTREAM_ERROR", "CONTENT_BLOCKED"]
+        },
+        "message": { "type": "string" },
+        "retryable": { "type": "boolean" },
+        "at": { "type": "string", "format": "date-time" },
+        "detail": { "type": ["object", "null"], "additionalProperties": true }
+      }
+    }
+  }
+}

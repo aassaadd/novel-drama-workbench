@@ -1,0 +1,247 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://novel-drama.local/schema/project.schema.json",
+  "title": "工程（project.json）",
+  "description": "一个作品对应一个工程目录的根索引文件。",
+  "type": "object",
+  "required": ["schema_version", "work", "settings"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "type": "integer", "const": 1 },
+    "work": { "$ref": "#/$defs/work" },
+    "settings": { "$ref": "#/$defs/settings" }
+  },
+  "$defs": {
+    "id": { "type": "string", "pattern": "^[a-z]{3}_[0-9A-Za-z]{6,32}$" },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "work": {
+      "type": "object",
+      "required": ["id", "title", "language", "created_at", "updated_at"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "pattern": "^wrk_[0-9A-Za-z]{6,32}$" },
+        "title": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "author": { "type": "string", "maxLength": 100 },
+        "genre": { "type": "array", "items": { "type": "string", "maxLength": 40 }, "uniqueItems": true },
+        "logline": { "type": "string", "maxLength": 500 },
+        "language": { "type": "string", "pattern": "^[a-z]{2}-[A-Z]{2}$" },
+        "usage": {
+          "type": "string",
+          "enum": ["commercial", "personal"],
+          "description": "v2：作品用途；commercial 时许可受限 provider 直接出局"
+        },
+        "style_guide": { "type": "string", "maxLength": 2000 },
+        "target_duration_ms": { "type": "integer", "minimum": 0 },
+        "created_at": { "$ref": "#/$defs/timestamp" },
+        "updated_at": { "$ref": "#/$defs/timestamp" }
+      }
+    },
+    "settings": {
+      "type": "object",
+      "required": ["writing", "tts", "sfx", "comfy", "output", "gpu"],
+      "additionalProperties": false,
+      "properties": {
+        "writing": { "$ref": "#/$defs/writing" },
+        "tts": { "$ref": "#/$defs/tts" },
+        "sfx": { "$ref": "#/$defs/sfx" },
+        "comfy": { "$ref": "#/$defs/comfy" },
+        "output": { "$ref": "#/$defs/output" },
+        "gpu": { "$ref": "#/$defs/gpu" },
+        "bible": { "$ref": "#/$defs/bible_ref" },
+        "tools": {
+          "type": "object",
+          "description": "v2：工具 → 数据目录映射，供界面与 CLI 按工具归档",
+          "additionalProperties": false,
+          "properties": {
+            "settings": { "type": "string" },
+            "novel": { "type": "string" },
+            "script": { "type": "string" },
+            "voice": { "type": "string" },
+            "image": { "type": "string" },
+            "video": { "type": "string" },
+            "compose": { "type": "string" }
+          }
+        }
+      }
+    },
+    "writing": {
+      "description": "写作模型固定使用本机 omlx（OpenAI 兼容 HTTP，已实测）。",
+      "type": "object",
+      "required": ["adapter"],
+      "additionalProperties": false,
+      "properties": {
+        "adapter": { "type": "string", "const": "omlx" },
+        "protocol": { "type": ["string", "null"], "enum": ["openai_compatible", null], "description": "实测为 openai_compatible；旧工程可为 null" },
+        "endpoint": { "type": ["string", "null"], "format": "uri", "description": "实测 http://127.0.0.1:9000；旧工程可为 null" },
+        "api_key": { "type": ["string", "null"], "description": "非空时按 Authorization: Bearer <key> 发送" },
+        "cli_path": { "type": ["string", "null"], "description": "保留字段；omlx 实测为 HTTP，不使用" },
+        "model": { "type": "string", "maxLength": 200 },
+        "available_models": { "type": "array", "items": { "type": "string" }, "description": "实测快照，不做权重管理" },
+        "context_window": { "type": "integer", "minimum": 1024, "maximum": 1048576 },
+        "memory_ceiling_gb": { "type": ["number", "null"], "description": "实测 29.48；仅用于告警与调度提示" },
+        "idle_timeout_s": { "type": ["integer", "null"], "description": "null 表示不自动卸载，必须显式卸载" },
+        "max_concurrency": { "type": "integer", "minimum": 1, "maximum": 64, "description": "服务端能力上限；工作台仍串行使用" },
+        "request_timeout_s": { "type": "integer", "minimum": 1 },
+        "connect_timeout_s": { "type": "integer", "minimum": 1 },
+        "max_retries": { "type": "integer", "minimum": 0, "maximum": 10 },
+        "max_tokens": { "type": "integer", "minimum": 1 },
+        "enable_thinking": { "type": "boolean", "description": "chat_template_kwargs.enable_thinking" },
+        "unload": { "$ref": "#/$defs/unload" },
+        "stop": { "type": "array", "items": { "type": "string" }, "maxItems": 8 },
+        "temperature": { "type": "number", "minimum": 0, "maximum": 2 },
+        "stream": { "type": "boolean" }
+      }
+    },
+    "unload": {
+      "type": "object",
+      "required": ["enabled", "path"],
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "path": { "type": "string", "description": "卸载端点路径，含 {model_id} 占位" },
+        "policy": { "type": "string", "enum": ["after_text_task", "never", "always"] }
+      }
+    },
+    "tts": {
+      "type": "object",
+      "required": ["adapter"],
+      "additionalProperties": false,
+      "properties": {
+        "adapter": { "type": "string" },
+        "model": { "type": ["string", "null"], "maxLength": 200, "description": "v2：Qwen3-TTS-1.7B" },
+        "voice_library_path": { "type": "string", "description": "v2：音色库相对路径，默认 voices.json" },
+        "default_voice_id": { "type": ["string", "null"] },
+        "default_provider_id": {
+          "type": ["string", "null"],
+          "maxLength": 64,
+          "description": "v2：全局默认 TTS provider；行/角色未覆盖时使用"
+        },
+        "provider_order": {
+          "type": "array",
+          "items": { "type": "string", "maxLength": 64 },
+          "uniqueItems": true,
+          "description": "v2：回落链顺序；首选不可用时按序尝试"
+        },
+        "providers": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/tts_provider_ref" },
+          "description": "v2：本工程启用过的 provider 快照；完整能力矩阵见 config/config.yaml"
+        },
+        "comparison_keep": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 20,
+          "description": "v2：对比试听默认保留的候选数"
+        },
+        "routing": { "$ref": "#/$defs/tts_routing" },
+        "sample_rate": { "type": "integer", "minimum": 8000, "maximum": 96000 },
+        "max_chunk_ms": { "type": "integer", "minimum": 5000, "maximum": 40000, "description": "v2：单次合成硬上限" },
+        "chunk_silence_ms": { "type": "integer", "minimum": 0, "maximum": 1000, "description": "v2：切块间的目标净间隔（头尾保留的气口会从插入量中扣除）" },
+        "max_speed_delta": { "type": "number", "minimum": 0, "maximum": 0.5, "description": "v2：atempo 超过该比例需人工确认" }
+      }
+    },
+    "tts_routing": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "v2：自动路由配置",
+      "properties": {
+        "mode": { "type": "string", "enum": ["auto", "manual"] },
+        "lock_provider_id": { "type": ["string", "null"], "maxLength": 64 },
+        "weights": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "capability": { "type": "number", "minimum": 0 },
+            "quality": { "type": "number", "minimum": 0 },
+            "consistency": { "type": "number", "minimum": 0 },
+            "latency": { "type": "number", "minimum": 0 },
+            "resource": { "type": "number", "minimum": 0 }
+          }
+        },
+        "policy_revision": { "type": "integer", "minimum": 1 },
+        "retry_original_first": { "type": "boolean" },
+        "allow_noncommercial": { "type": "boolean" }
+      }
+    },
+    "tts_provider_ref": {
+      "type": "object",
+      "required": ["provider_id", "model"],
+      "additionalProperties": false,
+      "description": "v2：工程内 provider 快照，只存标识不做能力声明；能力矩阵在 config/config.yaml",
+      "properties": {
+        "provider_id": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "model": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "model_version": { "type": ["string", "null"], "maxLength": 100 },
+        "enabled": { "type": "boolean" }
+      }
+    },
+    "sfx": {
+      "type": "object",
+      "required": ["adapter"],
+      "additionalProperties": false,
+      "properties": {
+        "adapter": { "type": "string" },
+        "default_gain_db": { "type": "number", "minimum": -60, "maximum": 12 }
+      }
+    },
+    "comfy": {
+      "type": "object",
+      "required": ["base_url", "templates"],
+      "additionalProperties": false,
+      "properties": {
+        "base_url": { "type": "string", "format": "uri" },
+        "poll_interval_ms": { "type": "integer", "minimum": 200, "maximum": 10000 },
+        "request_timeout_ms": { "type": "integer", "minimum": 1000 },
+        "job_timeout_ms": { "type": "integer", "minimum": 10000 },
+        "status_timeout_ms": { "type": "integer", "minimum": 1000, "maximum": 30000 },
+        "templates": {
+          "type": "object",
+          "required": ["image", "video_t2v", "video_i2v"],
+          "additionalProperties": false,
+          "properties": {
+            "image": { "type": "string" },
+            "video_t2v": { "type": "string" },
+            "video_i2v": { "type": "string" }
+          }
+        }
+      }
+    },
+    "output": {
+      "type": "object",
+      "required": ["sample_rate", "channels", "video_max_ms"],
+      "additionalProperties": false,
+      "properties": {
+        "sample_rate": { "type": "integer", "minimum": 8000, "maximum": 96000 },
+        "channels": { "type": "integer", "enum": [1, 2] },
+        "loudness_target_lufs": { "type": "number", "minimum": -40, "maximum": -5 },
+        "video_max_ms": { "type": "integer", "enum": [5000] },
+        "image_width": { "type": "integer", "minimum": 256, "maximum": 4096 },
+        "image_height": { "type": "integer", "minimum": 256, "maximum": 4096 }
+      }
+    },
+    "gpu": {
+      "type": "object",
+      "required": ["lock_path", "max_concurrent"],
+      "additionalProperties": false,
+      "properties": {
+        "lock_path": { "type": "string" },
+        "max_concurrent": { "type": "integer", "const": 1, "description": "单卡串行，固定为 1" },
+        "unload_on_switch": {
+          "type": "string",
+          "enum": ["auto", "never", "always"],
+          "description": "v2：切换到 ComfyUI 类任务前是否卸载 omlx 模型；auto 表示按内存与任务类型判断"
+        },
+        "poll_interval_ms": { "type": "integer", "minimum": 200, "maximum": 10000 }
+      }
+    },
+    "bible_ref": {
+      "type": "object",
+      "required": ["path"],
+      "additionalProperties": false,
+      "properties": {
+        "path": { "type": "string", "description": "设定库相对路径，默认 settings/bible.json" },
+        "revision": { "type": ["integer", "null"], "minimum": 1, "description": "当前依赖的设定版本，与 bible.settings_revision 对齐" }
+      }
+    }
+  }
+}

@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://novel-drama.local/schema/video-segment.schema.json",
+  "title": "短视频段落 / 动画元素",
+  "description": "时长硬上限 5000ms；生成失败可回退到静态关键图。v1 用 anchor_line_id，v2 用 anchor（二者至少一个）。",
+  "type": "object",
+  "required": ["id", "duration_ms", "mode", "prompt", "audio_policy", "revision"],
+  "anyOf": [
+    { "required": ["anchor_line_id"], "description": "v1：锚定台词行" },
+    { "required": ["anchor"], "description": "v2：锚定正文块区间" }
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "id": { "type": "string", "pattern": "^vid_[0-9A-Za-z]{6,32}$" },
+    "scene_id": { "type": "string", "pattern": "^scn_[0-9A-Za-z]{6,32}$", "description": "v1 所属场景；v2 由所在镜头隐含，可省略" },
+    "anchor_line_id": { "type": "string", "pattern": "^lin_[0-9A-Za-z]{6,32}$" },
+    "anchor": { "$ref": "director-script.schema.json#/$defs/anchor", "description": "v2：回指正文段落块，用于改文后判定是否需要重做" },
+    "status": { "type": "string", "enum": ["pending", "queued", "generating", "candidates_ready", "selected", "failed", "skipped", "stale"], "description": "v2 动画状态" },
+    "camera_move": { "type": ["string", "null"], "enum": ["static", "slow_push_in", "pan_left", "pan_right", "handheld", null], "description": "v2 运镜" },
+    "visual_id": { "type": ["string", "null"], "pattern": "^img_[0-9A-Za-z]{6,32}$", "description": "v2：与 source_image_id 等价，i2v 首帧" },
+    "start_offset_ms": { "type": "integer", "minimum": -60000, "maximum": 60000 },
+    "duration_ms": { "type": "integer", "minimum": 1000, "maximum": 5000 },
+    "mode": { "type": "string", "enum": ["t2v", "i2v"] },
+    "source_image_id": {
+      "type": ["string", "null"],
+      "pattern": "^img_[0-9A-Za-z]{6,32}$",
+      "description": "i2v 必填：首帧关键图"
+    },
+    "prompt": { "type": "string", "minLength": 1, "maxLength": 4000 },
+    "negative_prompt": { "type": ["string", "null"], "maxLength": 2000 },
+    "fps": { "type": "integer", "minimum": 8, "maximum": 60 },
+    "workflow_template_id": { "type": "string", "minLength": 1 },
+    "params": { "type": "object", "additionalProperties": true },
+    "audio_policy": { "type": "string", "enum": ["keep", "mute", "duck"] },
+    "fallback_image_id": { "type": ["string", "null"], "pattern": "^img_[0-9A-Za-z]{6,32}$" },
+    "asset": { "$ref": "#/$defs/asset" },
+    "draw": { "$ref": "director-script.schema.json#/$defs/draw", "description": "v2 抽卡：批量条数、候选保留期、已选中候选" },
+    "candidates": {
+      "type": "array",
+      "items": { "$ref": "director-script.schema.json#/$defs/candidate" },
+      "description": "v2 抽卡候选；选中项进入时间轴"
+    },
+    "revision": { "type": "integer", "minimum": 1 }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "mode": { "const": "i2v" } }, "required": ["mode"] },
+      "then": { "anyOf": [{ "required": ["source_image_id"] }, { "required": ["visual_id"] }] }
+    }
+  ],
+  "$defs": {
+    "asset": {
+      "type": "object",
+      "required": ["status"],
+      "additionalProperties": false,
+      "properties": {
+        "status": { "type": "string", "enum": ["pending", "queued", "running", "ready", "failed", "skipped"] },
+        "asset_id": { "type": ["string", "null"] },
+        "job_id": { "type": ["string", "null"], "pattern": "^job_[0-9A-Za-z]{6,32}$" },
+        "actual_duration_ms": { "type": ["integer", "null"] },
+        "error": { "type": ["object", "null"], "additionalProperties": true }
+      }
+    }
+  }
+}

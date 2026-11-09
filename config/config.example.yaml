@@ -1,0 +1,92 @@
+# 工作台本机配置（复制为 config/config.yaml 后修改）
+# 注意：此文件可含密钥与绝对路径，config.yaml 已被 .gitignore 忽略。
+
+# 最近打开的工程目录（可选，CLI 也可用 --project 指定）
+project_root: null
+
+# 适配器装配：未知名称直接报错，不做静默回退
+adapters:
+  writing: omlx        # 写作模型固定 omlx
+  tts: placeholder     # 占位：未对接
+  sfx: placeholder     # 占位：未对接
+  comfyui: local       # 本机 ComfyUI HTTP
+
+# omlx（写作 LLM）：已实测为 OpenAI 兼容本地 HTTP 服务
+omlx:
+  protocol: openai_compatible   # 实测结论：OpenAI 兼容 HTTP（非 CLI）
+  endpoint: http://127.0.0.1:9000
+  api_key: "1111"               # Authorization: Bearer <api_key>
+  model: Qwen3.8-27B-oQ4e-mtp   # 以 GET /v1/models 返回的 id 为准
+  available_models:             # 服务端已安装模型（约 16 GB / 19 GB）
+    - Qwen3.8-27B-oQ4e-mtp
+    - Qwen3.8-27B-Uncensored-OptiQ-4bit
+  context_window: 262144        # 262K
+  memory_ceiling_gb: 29.48      # 内存天花板，超出会 OOM
+  idle_timeout_s: null          # 服务端不会自动卸载，必须显式卸载
+  max_concurrency: 8            # 服务端上限；工作台仍固定 1 路，与 ComfyUI 串行
+  request_timeout_s: 300        # 单次请求超时（长文续写可调大）
+  connect_timeout_s: 5          # 连接超时（自检/卸载用）
+  max_retries: 2                # 仅对可重试错误（超时/限流/5xx/不可达）重试
+  temperature: 0.8
+  max_tokens: 2048
+  stop: []
+  enable_thinking: false        # 通过 chat_template_kwargs 关闭思考，降低延迟
+  unload:
+    enabled: true
+    path: /v1/models/{model_id}/unload   # 实测可用；管理页另有 /admin/api/models/{id}/unload
+    policy: after_text_task              # after_text_task | before_media | never
+
+# TTS：多 provider + 自动路由（完整字段见 config/config.yaml 与本机 design-v2 §5）
+tts:
+  default_provider_id: indextts_25
+  provider_order: [indextts_25, cosyvoice3_mlx]
+  providers:
+    # 走「子进程 + 独立 Python 3.11 环境」，因为官方要求 <3.12 且钉 torch 2.8.*
+    - provider_id: indextts_25
+      model: IndexTTS-2.5
+      backend: torch-mps
+      weights_path: indextts_25           # 相对 paths.models_root
+      enabled: true
+      runtime:
+        python: ~/git/index-tts-official/.venv/bin/python
+        repo: ~/git/index-tts-official
+        timeout_s: 1800
+      capabilities:
+        # 情绪通路三选一：emo_vector_8d / emo_text / emo_audio_prompt，冲突直接报错
+        emotion_control: emo_vector_8d
+        emotion_instruction: true
+        emotion_reference_variants: true
+        emotion_intensity_levels: 4
+
+# ComfyUI（图像 / 视频唯一出口）
+comfyui:
+  base_url: http://127.0.0.1:8188
+  poll_interval_ms: 1000
+  request_timeout_ms: 30000
+  job_timeout_ms: 1800000
+  status_timeout_ms: 10000
+  templates_dir: config/comfy
+  templates:
+    image: qwen_image_2.1_3stage
+    video_t2v: minimax_h3_5s
+    video_i2v: ltx_2.3_i2v
+
+# 串行 GPU 队列：单卡，最大并发固定 1，与 ComfyUI 共用同一把锁
+gpu:
+  lock_path: /Volumes/other/gpu.lock
+  max_concurrent: 1
+  poll_interval_s: 2
+
+# 输出规格默认值（可被工程 project.json 覆盖）
+output:
+  sample_rate: 48000
+  channels: 2
+  loudness_target_lufs: -16
+  video_max_ms: 5000
+  image_width: 1328
+  image_height: 1328
+
+# ffmpeg 可执行文件（M4 混音用）
+ffmpeg:
+  binary: ffmpeg
+  probe_binary: ffprobe

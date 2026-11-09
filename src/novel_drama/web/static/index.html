@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>台词校对 · novel-drama-workbench</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <span class="brand">台词校对</span>
+    <label class="field">
+      工程
+      <input id="projectPath" list="projectList" placeholder="~/novels/xxx" spellcheck="false" />
+      <datalist id="projectList"></datalist>
+    </label>
+    <button id="btnOpen" class="btn">打开</button>
+    <label class="field">
+      章节
+      <select id="chapterSelect"></select>
+    </label>
+    <button id="btnReload" class="btn">刷新</button>
+    <span id="hint" class="hint"></span>
+  </header>
+
+  <section class="badges" id="badges"></section>
+
+  <main class="layout">
+    <div class="table-wrap">
+      <div class="table-inner">
+        <div class="thead" id="thead">
+          <span class="c-index">序号</span>
+          <span class="c-kind">类型</span>
+          <span class="c-speaker">说话人</span>
+          <span class="c-text">文本</span>
+          <span class="c-num">情绪</span>
+          <span class="c-num">强度</span>
+          <span class="c-num">语速</span>
+          <span class="c-state">状态</span>
+          <span class="c-num">时长</span>
+          <span class="c-num">前停</span>
+          <span class="c-num">后停</span>
+        </div>
+        <div class="viewport" id="viewport">
+          <div class="spacer" id="spacer">
+            <div class="rows" id="rows"></div>
+          </div>
+        </div>
+      </div>
+      <div class="empty" id="empty" hidden>还没有台词行：先在终端执行 <code>scene split</code> 与 <code>line split</code>。</div>
+    </div>
+
+    <aside class="inspector" id="inspector">
+      <div class="inspector-head">
+        <span id="lineId">未选中行</span>
+        <span id="lineState" class="state-badge"></span>
+      </div>
+      <div class="inspector-body" id="form" hidden>
+        <label class="stack">文本
+          <textarea id="fText" rows="4"></textarea>
+        </label>
+        <div class="row2">
+          <label class="stack">类型
+            <select id="fKind">
+              <option value="dialogue">对白</option>
+              <option value="narration">旁白</option>
+              <option value="inner_monologue">独白</option>
+            </select>
+          </label>
+          <label class="stack">情绪
+            <select id="fEmotion"></select>
+          </label>
+        </div>
+        <div class="row2">
+          <label class="stack">强度 <output id="oIntensity"></output>
+            <input id="fIntensity" type="range" min="0" max="1" step="0.05" />
+          </label>
+          <label class="stack">语速
+            <input id="fSpeed" type="number" min="0.5" max="2" step="0.05" />
+          </label>
+        </div>
+        <div class="row2">
+          <label class="stack">前停顿 ms
+            <input id="fPauseBefore" type="number" min="0" max="5000" step="10" />
+          </label>
+          <label class="stack">后停顿 ms
+            <input id="fPauseAfter" type="number" min="0" max="5000" step="10" />
+          </label>
+        </div>
+        <label class="stack">交付说明
+          <input id="fNote" placeholder="如：压着嗓子、别拖尾音" />
+        </label>
+        <div class="actions">
+          <button id="btnSave" class="btn primary">保存</button>
+          <button id="btnRevert" class="btn">回滚到上次生成</button>
+        </div>
+        <div class="diff">
+          <div class="diff-title">当前参数 vs 上次生成</div>
+          <div id="diffBody" class="diff-body">—</div>
+        </div>
+      </div>
+    </aside>
+  </main>
+
+  <footer class="runbar">
+    <span class="run-info" id="runInfo">本次将生成 — 行</span>
+    <div class="run-track"><div class="run-fill" id="runFill"></div></div>
+    <span class="run-progress" id="runProgress"></span>
+    <button id="btnStart" class="btn primary" disabled>开始生成</button>
+  </footer>
+
+  <div id="toast" class="toast" hidden></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>

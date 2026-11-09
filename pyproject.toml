@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "novel-drama-workbench"
+version = "0.1.0"
+description = "小说 → 分角色配音 + 音效 → 有声剧 → 关键配图 / 5 秒短视频的本地工作台"
+requires-python = ">=3.10"
+dependencies = [
+    "PyYAML>=6.0",
+    "jsonschema>=4.20",
+]
+
+[project.optional-dependencies]
+web = ["fastapi>=0.110", "uvicorn>=0.27"]
+
+[project.scripts]
+ndw = "novel_drama.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+novel_drama = ["py.typed"]

@@ -1,0 +1,143 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://novel-drama.local/schema/tts-provider.schema.json",
+  "title": "TTS Provider 配置与能力矩阵（config/config.yaml → tts）",
+  "description": "外置配置，不进工程、不进源码。YAML 转 JSON 后按本 schema 校验。工程内只存 provider_id + model + model_version 引用。",
+  "type": "object",
+  "required": ["providers"],
+  "additionalProperties": false,
+  "properties": {
+    "default_provider_id": {
+      "type": ["string", "null"],
+      "maxLength": 64,
+      "description": "全局默认 provider；工程 project.json 可覆盖"
+    },
+    "provider_order": {
+      "type": "array",
+      "items": { "type": "string", "maxLength": 64 },
+      "uniqueItems": true,
+      "description": "回落链顺序；取第一个健康且能力满足者"
+    },
+    "providers": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/provider" }
+    }
+  },
+  "$defs": {
+    "provider": {
+      "type": "object",
+      "required": ["provider_id", "model", "backend", "capabilities"],
+      "additionalProperties": false,
+      "properties": {
+        "provider_id": { "type": "string", "pattern": "^[a-z][a-z0-9_]{1,63}$" },
+        "display_name": { "type": "string", "maxLength": 100 },
+        "model": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "model_version": { "type": ["string", "null"], "maxLength": 100, "description": "写入产物溯源；变化即失效重算" },
+        "backend": {
+          "type": "string",
+          "enum": ["mlx", "torch_mps", "torch_cuda", "http", "cli"],
+          "description": "决定显存占用判断、卸载方式与是否走 GPU 锁"
+        },
+        "weights_path": { "type": ["string", "null"], "description": "本地权重路径；只在配置文件出现，不写进工程与产物" },
+        "endpoint": { "type": ["string", "null"], "format": "uri" },
+        "api_key": { "type": ["string", "null"], "description": "不推荐；优先 api_key_env，禁止明文进源码与工程" },
+        "api_key_env": { "type": ["string", "null"], "maxLength": 100 },
+        "health_path": { "type": ["string", "null"], "maxLength": 200 },
+        "vram_estimate_gb": { "type": ["number", "null"], "minimum": 0 },
+        "max_concurrent": { "type": "integer", "minimum": 1, "maximum": 64 },
+        "supports_batch": { "type": "boolean" },
+        "unload": { "$ref": "#/$defs/unload" },
+        "capabilities": { "$ref": "#/$defs/capabilities" }
+      }
+    },
+    "unload": {
+      "type": "object",
+      "required": ["enabled"],
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "path": { "type": ["string", "null"], "description": "卸载端点，含 {model} 占位" },
+        "policy": { "type": "string", "enum": ["on_switch", "never", "always"] }
+      }
+    },
+    "capabilities": {
+      "type": "object",
+      "required": [
+        "emotion_control",
+        "voice_clone",
+        "max_text_chars",
+        "max_text_ms",
+        "license",
+        "commercial_use"
+      ],
+      "additionalProperties": false,
+      "description": "上层只按能力挑 provider，不按模型名写死分支",
+      "properties": {
+        "emotion_control": {
+          "type": "string",
+          "enum": ["instruct", "reference", "none"],
+          "description": "instruct 写指令 / reference 选变体 / none 忽略并告警"
+        },
+        "emotion_instruction": { "type": "boolean", "description": "是否支持自然语言情绪指令" },
+        "emotion_reference_variants": { "type": "boolean", "description": "是否靠切换参考音频变体表达情绪" },
+        "emotion_intensity_levels": { "type": "integer", "minimum": 0, "description": "情绪强度分档数；0 表示不分档" },
+        "voice_clone": { "type": "boolean" },
+        "clone_min_ref_ms": { "type": "integer", "minimum": 0 },
+        "clone_recommended_ref_ms": { "type": "integer", "minimum": 0 },
+        "clone_prompt_cache": { "type": "boolean", "description": "可预算 prompt 缓存并复用，避免全篇漂移" },
+        "max_variants_per_voice": { "type": "integer", "minimum": 1 },
+        "max_text_chars": { "type": "integer", "minimum": 1, "description": "单次合成文本上限；切块取候选 provider 最小值" },
+        "max_text_ms": { "type": "integer", "minimum": 1000 },
+        "nonverbal": {
+          "type": "array",
+          "items": { "type": "string", "enum": ["laugh", "sigh", "breath", "cry", "scream"] },
+          "uniqueItems": true,
+          "description": "支持的非语言发声；不支持的事件不得路由到该 provider"
+        },
+        "nonverbal_control": {
+          "type": "string",
+          "enum": ["native", "reference", "none"],
+          "description": "副语言的实现方式：原生标记 / 切换参考变体 / 不支持"
+        },
+        "native_duration_control": { "type": "boolean", "description": "是否支持目标时长控制" },
+        "sample_rates": { "type": "array", "items": { "type": "integer", "minimum": 8000, "maximum": 96000 }, "minItems": 1 },
+        "output_formats": { "type": "array", "items": { "type": "string", "enum": ["wav", "mp3", "flac", "ogg"] }, "minItems": 1 },
+        "ssml": { "type": "boolean" },
+        "pause_control": { "type": "string", "enum": ["ssml", "silence_event", "none"] },
+        "streaming": { "type": "boolean" },
+        "native_speed": { "type": "boolean", "description": "为 false 时语速只能后期 atempo" },
+        "native_pitch": { "type": "boolean" },
+        "languages": { "type": "array", "items": { "type": "string", "pattern": "^[a-z]{2}-[A-Z]{2}$" } },
+        "license": { "type": "string", "maxLength": 100 },
+        "license_gate": {
+          "type": "string",
+          "enum": ["none", "approval_required", "non_commercial"],
+          "description": "许可门槛；商用工程只允许 none"
+        },
+        "commercial_use": { "type": "boolean", "description": "为 false 时商用作品过滤该 provider" },
+        "license_note": { "type": ["string", "null"], "maxLength": 500 },
+        "quality_tier": {
+          "type": "string",
+          "enum": ["draft", "standard", "premium"],
+          "description": "质量档位，自动路由打分用"
+        },
+        "latency_tier": {
+          "type": "string",
+          "enum": ["fast", "standard", "slow"],
+          "description": "耗时档位，自动路由打分用"
+        },
+        "consistency": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "同角色一致性偏好",
+          "properties": {
+            "stability": { "type": "string", "enum": ["high", "medium", "low"] },
+            "pin_per_character": { "type": "boolean", "description": "是否优先让同一角色固定用本 provider" }
+          }
+        },
+        "allow_auto_select": { "type": "boolean", "description": "是否允许被自动路由选中；false 只能手动指定" }
+      }
+    }
+  }
+}
