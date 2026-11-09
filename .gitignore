@@ -24,6 +24,7 @@ config/config.yaml
 var/**/*.wav
 var/**/*.wav.json
 var/ab_test/out/
+var/tts/compare/
 
 # macOS
 .DS_Store
