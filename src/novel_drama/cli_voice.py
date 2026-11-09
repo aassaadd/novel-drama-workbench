@@ -397,5 +397,16 @@ def _apply_script_to_chapter(store: ProjectStore, chapter: dict, script: dict) -
             added += 1
     chapter["revision"] = int(chapter.get("revision") or 1) + 1
     chapter["updated_at"] = now_iso()
+    # 把镜头里的音效/画面/动画物化进场景，供时间轴与渲染使用
+    from .director.materialize import materialize_media
+
+    media = materialize_media(chapter, script)
     store.save_chapter(chapter)
-    return {"scenes_created": created, "lines_added": added, "lines_updated": updated}
+    return {
+        "scenes_created": created,
+        "lines_added": added,
+        "lines_updated": updated,
+        "sfx_added": media["sfx_added"],
+        "images_added": media["image_added"],
+        "videos_added": media["video_added"],
+    }

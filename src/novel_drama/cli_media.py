@@ -275,7 +275,7 @@ def cmd_concat(args, config: AppConfig) -> int:
 
 
 def cmd_mux(args, config: AppConfig) -> int:
-    """混流：默认只出计划，--render 明确报未实现。"""
+    """混流：默认只出计划，--render 执行音画合成。"""
     store = _resolve_store(args, config)
     path = store.timeline_path(args.chapter)
     if not path.exists():
@@ -283,16 +283,28 @@ def cmd_mux(args, config: AppConfig) -> int:
     timeline = json.loads(path.read_text(encoding="utf-8"))
     mix_plan = plan_mix(timeline, store.root)
     plan = plan_mux(timeline, store.root, mix_plan)
-    if args.render:
-        from .media import mux as run_mux
+    plan["binary"] = config.get("ffmpeg.binary", "ffmpeg")
+    if not args.render:
+        _emit(
+            args,
+            f"[{plan['status']}] {plan['reason']}\n输出计划 {plan['output']}\n"
+            + ("\n".join(f"  ! {item}" for item in plan["blockers"]) or "  前置条件齐全"),
+            plan,
+        )
+        return EXIT_OK
+    if plan["blockers"]:
+        raise PreconditionError("；".join(plan["blockers"]))
 
-        run_mux(plan)
+    from .media import mux as run_mux
+
+    result = run_mux(plan)
     _emit(
         args,
-        f"[{plan['status']}] {plan['reason']}\n输出计划 {plan['output']}\n" + "\n".join(f"  - {item}" for item in plan["blockers"]),
-        plan,
+        f"混流完成：{result['path']}\n  时长 {result['duration_ms']}ms  片段 {result['clips']} 个  "
+        f"音轨 {result['audio']}  耗时 {result['elapsed_ms']}ms",
+        result,
     )
-    return EXIT_NOT_IMPLEMENTED
+    return EXIT_OK
 
 
 # ---------------- timeline / mix / export ----------------
@@ -345,7 +357,7 @@ def cmd_timeline(args, config: AppConfig) -> int:
 
 
 def cmd_export(args, config: AppConfig) -> int:
-    """导出 SRT 字幕与时间轴清单（派生文件，不依赖模型）。"""
+    """导出：默认只出 SRT/清单/时间表；--format bundle 额外收 MP3/MP4 与交付说明。"""
     store = _resolve_store(args, config)
     path = store.timeline_path(args.chapter)
     if not path.exists():
@@ -354,7 +366,29 @@ def cmd_export(args, config: AppConfig) -> int:
     chapter = store.load_chapter(args.chapter)
     characters = {item["id"]: item for item in store.load_characters()["characters"]}
     out_dir = Path(args.out_dir) if args.out_dir else store.root / "exports"
-    result = write_export(timeline, chapter, characters, out_dir, _silence_events(store, chapter["id"]))
+    silences = _silence_events(store, chapter["id"])
+    if getattr(args, "format", "srt") == "bundle":
+        from .media import export_bundle
+
+        result = export_bundle(
+            store,
+            chapter,
+            timeline,
+            characters,
+            silences,
+            out_dir=out_dir,
+            binary=config.get("ffmpeg.binary", "ffmpeg"),
+        )
+        lines = [f"交付包: {result['dir']}"]
+        for item in result["artifacts"]:
+            lines.append(f"  - {item['kind']:<8} {item['status']:<8} {item['path']}")
+        lines.append(f"清单: {result['bundle']}")
+        lines.append(f"说明: {result['readme']}")
+        if result["missing"]:
+            lines.extend(["缺失项："] + [f"  ! {item}" for item in result["missing"]])
+        _emit(args, "\n".join(lines), result)
+        return EXIT_OK
+    result = write_export(timeline, chapter, characters, out_dir, silences)
     _emit(
         args,
         f"SRT: {result['srt']}\n清单: {result['manifest']}\n时间表: {result['schedule']}\n字幕条目: {result['entries']}",

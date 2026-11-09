@@ -6,10 +6,17 @@ project_root: null
 
 # 适配器装配：未知名称直接报错，不做静默回退
 adapters:
-  writing: omlx        # 写作模型固定 omlx
+  writing: offline     # offline=本地规则写作（零依赖）；omlx=接入本地 LLM
   tts: placeholder     # 占位：未对接
-  sfx: placeholder     # 占位：未对接
-  comfyui: local       # 本机 ComfyUI HTTP
+  sfx: offline         # offline=ffmpeg 合成音效；接模型后改 model
+  comfyui: local       # 本机 ComfyUI HTTP（配图/视频真实模型分支）
+
+# 外部能力提供方（写作/音效/配图/视频）：缺省全部走离线实现，接模型后逐项切换
+providers:
+  writing: offline     # offline | omlx
+  sfx: offline         # offline | model
+  image: offline       # offline | comfyui
+  video: offline       # offline | comfyui
 
 # omlx（写作 LLM）：已实测为 OpenAI 兼容本地 HTTP 服务
 omlx:

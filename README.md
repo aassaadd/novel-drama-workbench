@@ -220,16 +220,31 @@ PYTHONPATH=src .venv/bin/python tests/smoke_test.py   # 期望输出 SMOKE OK
 | 模块 | 状态 | 说明 |
 | --- | --- | --- |
 | 工程数据层 | 可用 | 建工程、章节/角色读写、原子落盘、schema 校验 |
+| 设定库 | 可用 | `settings/bible.json`：premise / world / outline / style / continuity，`setting show|set|world|validate|import|export`；每次写入 `settings_revision +1` |
+| 大纲设计 | 可用 | `outline generate`（模型调用，缺省离线实现）→ `outline apply` 落地成章节 |
+| 章节生成 | 可用 | `chapter generate` 按设定库 + 节拍产出正文，字数可配，重复执行需 `--regen` |
 | 文本切分 | 可用 | 规则版场景切分（空行/转场词/字数上限）、台词切分（引号/旁白/内心独白）、说话人别名匹配 |
-| 时间轴 | 可用（估算） | 语音/音效/图/视频轨排布，未合成时用估算时长并告警 |
+| 导演标注 | 可用 | `script suggest [--apply]` 产出镜头/旁白/情绪/音效/画面/视频位标注，并物化成场景内媒体条目 |
+| 时间轴 | 可用 | 语音/音效/图/视频轨排布，未合成时用估算时长并告警 |
 | 串行队列与锁 | 可用 | 持久化队列、跨进程 GPU 锁、幂等、失败重试、断点续跑 |
-| CLI | 可用 | M1 全链路真实可跑；模型阶段返回 `NOT_IMPLEMENTED` |
-| Web 骨架 | 可用 | 只读工作台页面（`web/static/`）+ `/api` 只读接口；写操作仍走 CLI |
-| 写作适配（omlx） | 占位 | 等协议确认后回填 |
-| TTS provider 层 | 可用 | 主力 IndexTTS 2.5（子进程调用独立 3.11 环境，8 维情绪向量 / emo_text / emo_audio_prompt 三通路互斥）；备用 CosyVoice3-0.5B(MLX)。两者均已实测出音 |
-| 音效 | 占位 | 本机无音效模型权重，`sfx` 显式返回 `NOT_IMPLEMENTED` |
-| ComfyUI 网关 | 占位 | 仅模板扫描可用，网络调用未启用 |
-| 混音 / 导出 | 可用 | `mix --render` 分轨混音 + 响度规整；`export` 产出 SRT/清单/时间表；MP4 混流（`mux`）仍 `NOT_IMPLEMENTED` |
+| CLI | 可用 | 全链路可跑；`produce` 一次串起 15 个阶段并落 `.ndw/runs/<run_id>.json` |
+| Web 工作台 | 可用 | 7 个页签（项目/大纲/章节/导演标注/台词校对/音效·配图·视频/导出），写操作全部转调 CLI |
+| 写作适配 | 可用（模型为占位） | 离线实现确定性产文；`omlx` 协议未回填 |
+| TTS provider 层 | 可用 | 主力 IndexTTS 2.5（子进程调用独立 3.11 环境，8 维情绪向量 / emo_text / emo_audio_prompt 三通路互斥）；备用 CosyVoice3-0.5B(MLX)。均已实测出音；`offline_dub` 仅供无模型验收 |
+| 音效 | 可用（模型为占位） | 离线实现用 ffmpeg lavfi 合成 5 类环境/拟音/冲击/转场/和弦，真出 WAV |
+| 配图 | 可用（模型为占位） | 离线实现用 Pillow 渲染渐变 + 标题 + 提示词，真出 PNG（长边 ≤1536） |
+| 视频位 | 可用（模型为占位） | 离线实现用 ffmpeg 把静帧渲成 500–5000ms 片段，真出 MP4 |
+| 混音 / 混流 / 导出 | 可用 | `mix --render` 分轨混音 + 响度规整；`mux --render` 逐段渲片 + concat + AAC 合流；`export --format bundle` 产出 MP4/MP3/SRT/manifest/bundle/README |
+
+## 离线端到端验收（不接任何模型）
+
+```bash
+.venv/bin/python3.12 tests/e2e_offline.py
+```
+
+默认在外部卷的 `ndw_runs/e2e_offline/proj_<时间戳>` 建工程（可用 `NDW_E2E_DIR` 改根目录；测试工程与运行时配置都落在仓库外，仓库里只有 fixture），
+用 `tests/fixtures/e2e_offline.yaml`（写作/音效/配图/视频全离线，配音走 `offline_dub`），
+从建项目一路跑到导出交付包，末尾逐项校验 `renders/*.mp4`、`exports/*.{mp3,mp4,srt,bundle.json}` 与 `README.txt`。
 
 ## 里程碑与完成判定
 
@@ -242,9 +257,8 @@ PYTHONPATH=src .venv/bin/python tests/smoke_test.py   # 期望输出 SMOKE OK
 
 ## 本轮已知限制
 
-- omlx 的具体协议未回填，`WritingAdapter` 只提供接口与对接说明，无网络/进程调用。
-- TTS 与音效适配器均为占位，`tts run` / `sfx run` 执行必失败（`NOT_IMPLEMENTED`）。
-- ComfyUI 仅有模板目录扫描；`comfy health` 返回不可用。
-- 混音与导出未实现，`mix` 只打印 ffmpeg 计划。
-- 前端页面未实现，`serve` 仅提供 API 骨架。
+- 写作、音效、配图、视频位四类**模型调用**仍是离线实现：接口、数据、状态、UI、失败处理都已按真实契约落地，换成真模型只需新增 adapter 并改 `providers.*`，上层不用动。
+- `omlx` 写作协议未回填，`OmlxWritingAdapter` 仍抛 `NOT_IMPLEMENTED`；`offline_dub` 只是验收用占位配音 provider，真实链路默认仍是 IndexTTS 2.5。
+- 配音是逐行串行合成（IndexTTS 单进程），46 行约需 10 分钟；`produce` 支持断点续跑，重跑只补未完成阶段。
+- `line split` 会把叙述句也切成行，长章节的配音行数偏多（后续可按段落合并叙述行）。
 - 产品层面的开放问题（音色来源、音效生成方式、导出规格等）见 [docs/PRD.md](docs/PRD.md) 的开放问题清单，未替用户做决定。

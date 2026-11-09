@@ -31,13 +31,17 @@ from .cli_line import (
 )
 from .cli_media import cmd_bgm, cmd_concat, cmd_export, cmd_mux, cmd_timeline, cmd_tts_batch
 from .cli_models import cmd_models_import, cmd_models_install, cmd_models_list, cmd_models_verify
+from .cli_produce import cmd_produce, cmd_run_show
+from .cli_setting import cmd_setting
 from .cli_voice import cmd_script, cmd_voice
+from .cli_writing import cmd_chapter_generate, cmd_outline, cmd_script_suggest
 from .config import AppConfig, load_config
-from .media import load_cues, plan_mix, render_mix
+from .media import load_cues, plan_mix, render_mix, run_media
 from .media.timeline_builder import build_timeline, summarize_timeline
 from .models import entities
 from .models.ids import now_iso
 from .orchestration import GpuQueue
+from .orchestration.produce import STAGES as PRODUCE_STAGES
 from .orchestration.pipeline import (
     build_media_jobs,
     build_tts_jobs,
@@ -549,38 +553,29 @@ def cmd_media(args, config: AppConfig) -> int:
         return EXIT_OK
 
     adapter = config.adapters.get("comfyui", "local") if kind != "sfx" else config.adapters.get("sfx", "placeholder")
-    jobs = build_media_jobs(chapter, kind, adapter=adapter)
     if getattr(args, "dry_run", False):
-        script_planned = 0
-        script_path = store.script_path(chapter["id"])
-        if script_path.exists():
-            script = json.loads(script_path.read_text(encoding="utf-8"))
-            key = {"image": "visuals", "video": "animations", "sfx": "sfx_events"}[kind]
-            script_planned = sum(len(shot.get(key) or []) for shot in script.get("shots") or [])
-        plan = {
-            "status": "NOT_IMPLEMENTED",
-            "kind": kind,
-            "adapter": adapter,
-            "jobs": len(jobs),
-            "planned_in_script": script_planned,
-            "items": [{"job_id": job["id"], "adapter": adapter, "kind": job["kind"]} for job in jobs],
-            "reason": f"{kind} 真实生成未接入：本轮只定义接口与 dry-run，不下载权重、不实跑。",
-        }
-        _emit(
-            args,
-            f"[NOT_IMPLEMENTED] {plan['reason']}\n"
-            f"章节待执行 {len(jobs)} 个任务，导演脚本已规划 {script_planned} 条（适配器 {adapter}）",
-            plan,
-        )
-        return EXIT_NOT_IMPLEMENTED
-    if not jobs:
-        raise PreconditionError(f"没有待执行的{kind}任务：请先规划并写入 {kind} 条目")
-    queue = _make_queue(store, config)
-    created = sum(1 for job in jobs if queue.enqueue(job)[1])
-    print(f"已入队 {created} 条{kind}任务（去重后）")
-    if getattr(args, "wait", False):
-        return _drain(queue)
-    return EXIT_OK
+        plan = run_media(store, config, chapter, kind, limit=getattr(args, "limit", None), dry_run=True)
+        _emit(args, f"[plan] {kind} 共 {plan['total']} 条，已就绪 {plan['skipped']} 条，待生成 {plan['total'] - plan['skipped']} 条（adapter={adapter}）", plan)
+        return EXIT_OK
+
+    result = run_media(
+        store,
+        config,
+        chapter,
+        kind,
+        force=bool(getattr(args, "force", False)),
+        limit=getattr(args, "limit", None),
+    )
+    lines = [
+        f"{kind} 生成完成：就绪 {result['ready']} / 跳过 {result['skipped']} / 失败 {result['failed']}（共 {result['total']} 条）"
+    ]
+    for item in result["items"]:
+        if item["status"] == "failed":
+            lines.append(f"  ! {item['id']}: {item['error']}")
+        elif item.get("path"):
+            lines.append(f"  - {item['id']} → {item['path']}")
+    _emit(args, "\n".join(lines), result)
+    return EXIT_FAILED if result["failed"] else EXIT_OK
 
 
 def cmd_mix(args, config: AppConfig) -> int:
@@ -820,6 +815,63 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--at", type=int, help="原文偏移（0 起算）")
     q.add_argument("--paragraph", type=int, help="原文段落序号（1 起算）")
     q.set_defaults(func=cmd_chapter_source)
+    q = p_sub.add_parser("generate", help="按大纲/节拍生成正文（离线写作或 LLM）")
+    q.add_argument("--chapter", required=True)
+    q.add_argument("--regen", action="store_true", help="已有正文时覆盖重写")
+    q.add_argument("--dry-run", action="store_true", help="只预览，不落盘")
+    q.set_defaults(func=cmd_chapter_generate)
+
+    p = sub.add_parser("setting", help="设定库（世界观/文风/大纲）")
+    p_sub = p.add_subparsers(dest="action", required=True)
+    p_sub.add_parser("init", help="生成设定库骨架").set_defaults(func=cmd_setting)
+    q = p_sub.add_parser("show", help="查看设定库")
+    q.add_argument("--section", choices=["premise", "world", "outline", "style", "continuity"])
+    q.set_defaults(func=cmd_setting)
+    q = p_sub.add_parser("validate", help="只校验不写盘")
+    q.set_defaults(func=cmd_setting)
+    q = p_sub.add_parser("set", help="修改标量字段")
+    for flag in (
+        "logline",
+        "theme",
+        "core_conflict",
+        "ending_intent",
+        "target_audience",
+        "target_length",
+        "era",
+        "tone",
+        "pov",
+        "tense",
+        "prose_style",
+        "visual_style",
+    ):
+        q.add_argument("--" + flag.replace("_", "-"), dest=flag)
+    q.set_defaults(func=cmd_setting)
+    q = p_sub.add_parser("world", help="增补世界设定（规则/阵营/地点/词条）")
+    q.add_argument("--add-rule", dest="add_rule", action="append", help="新增一条世界规则，可重复")
+    q.add_argument("--add-faction", dest="add_faction", action="append", help="新增一个阵营，可重复")
+    q.add_argument("--add-location", dest="add_location", help="`名称|描述|氛围`")
+    q.add_argument("--add-glossary", dest="add_glossary", help="`术语|释义`")
+    q.set_defaults(func=cmd_setting)
+    q = p_sub.add_parser("import", help="从 JSON 导入（work_id 必须一致）")
+    q.add_argument("--file", required=True)
+    q.set_defaults(func=cmd_setting)
+    q = p_sub.add_parser("export", help="导出为 JSON")
+    q.add_argument("--out")
+    q.set_defaults(func=cmd_setting)
+
+    p = sub.add_parser("outline", help="大纲（幕/章/节拍）")
+    p_sub = p.add_subparsers(dest="action", required=True)
+    p_sub.add_parser("show", help="查看大纲").set_defaults(func=cmd_outline)
+    q = p_sub.add_parser("generate", help="生成大纲并写入设定库")
+    q.add_argument("--acts", type=int, default=3)
+    q.add_argument("--chapters-per-act", dest="chapters_per_act", type=int, default=3)
+    q.add_argument("--beats-per-chapter", dest="beats_per_chapter", type=int, default=3)
+    q.add_argument("--words", type=int, default=1200, help="单章目标字数")
+    q.add_argument("--dry-run", action="store_true")
+    q.set_defaults(func=cmd_outline)
+    q = p_sub.add_parser("apply", help="把大纲落地成章节文件")
+    q.add_argument("--dry-run", action="store_true")
+    q.set_defaults(func=cmd_outline)
 
     p = sub.add_parser("character", help="角色与音色")
     p_sub = p.add_subparsers(dest="action", required=True)
@@ -918,6 +970,12 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("script", help="导演脚本（人工标注，规则解析）")
     p_sub = p.add_subparsers(dest="action", required=True)
     p_sub.add_parser("syntax", help="打印标注语法").set_defaults(func=cmd_script)
+    q = p_sub.add_parser("suggest", help="按场景与台词生成标注建议")
+    q.add_argument("--chapter", required=True)
+    q.add_argument("--apply", action="store_true", help="解析并同步进章节（含音效/画面/视频位）")
+    q.add_argument("--dry-run", action="store_true", help="只预览，不写盘")
+    q.add_argument("--out", help="标注文本输出路径，默认 scripts/<chapter>.markup.txt")
+    q.set_defaults(func=cmd_script_suggest)
     q = p_sub.add_parser("parse")
     q.add_argument("--chapter", required=True)
     q.add_argument("--file", required=True)
@@ -1064,10 +1122,11 @@ def build_parser() -> argparse.ArgumentParser:
         q = p_sub.add_parser("plan")
         q.add_argument("--chapter", required=True)
         q.set_defaults(func=cmd_media, media_kind=kind)
-        q = p_sub.add_parser("run")
+        q = p_sub.add_parser("run", help="真实生成（离线渲染器；--force 覆盖已就绪项）")
         q.add_argument("--chapter", required=True)
-        q.add_argument("--wait", action="store_true")
-        q.add_argument("--dry-run", action="store_true", help="只输出调用计划，明确报 NOT_IMPLEMENTED")
+        q.add_argument("--force", action="store_true", help="已就绪项也重新生成")
+        q.add_argument("--limit", type=int, help="本次最多处理条数")
+        q.add_argument("--dry-run", action="store_true", help="只统计待生成条目，不写盘")
         q.set_defaults(func=cmd_media, media_kind=kind)
 
     p = sub.add_parser("timeline", help="时间轴")
@@ -1110,9 +1169,9 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--chapter", required=True)
     q.set_defaults(func=cmd_bgm)
 
-    p = sub.add_parser("mux", help="混流（本轮只出计划）")
+    p = sub.add_parser("mux", help="混流：音轨 + 画面合成 MP4")
     p.add_argument("--chapter", required=True)
-    p.add_argument("--render", action="store_true", help="尝试执行（会报 NOT_IMPLEMENTED）")
+    p.add_argument("--render", action="store_true", help="真正执行混流（ffmpeg）")
     p.set_defaults(func=cmd_mux)
 
     p = sub.add_parser("mix", help="混音")
@@ -1122,7 +1181,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("export", help="导出成片")
     p.add_argument("--chapter", required=True)
-    p.add_argument("--format", default="srt", choices=["srt"], help="字幕格式（本轮 SRT）")
+    p.add_argument("--format", default="srt", choices=["srt", "bundle"], help="srt=字幕与清单 / bundle=交付包（MP3+MP4+SRT+README）")
     p.add_argument("--out-dir", dest="out_dir", help="输出目录，默认 <工程>/exports")
     p.set_defaults(func=cmd_export)
 
@@ -1176,6 +1235,22 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--key", required=True, help="目标目录键，如 cosyvoice3/8bit")
     q.add_argument("--keep-source", action="store_true", help="跨卷迁移后保留源目录（默认删除）")
     q.set_defaults(func=cmd_models_import)
+
+    p = sub.add_parser("produce", help="全链路编排：设定 → 大纲 → 正文 → 标注 → 配音 → 音效/配图/视频 → 混流 → 导出")
+    p.add_argument("--chapter", required=True)
+    p.add_argument("--from", dest="from_stage", choices=list(PRODUCE_STAGES))
+    p.add_argument("--to", dest="to_stage", choices=list(PRODUCE_STAGES))
+    p.add_argument("--no-resume", dest="no_resume", action="store_true", help="不跳过上次已成功的阶段")
+    p.add_argument("--force", action="store_true", help="强制重跑正文/脚本/媒体")
+    p.add_argument("--keep-going", dest="keep_going", action="store_true", help="阶段失败后继续后续阶段")
+    p.add_argument("--dry-run", action="store_true", help="只体检前置条件，不写盘")
+    p.set_defaults(func=cmd_produce)
+
+    p = sub.add_parser("run", help="查看编排记录")
+    p_sub = p.add_subparsers(dest="action", required=True)
+    q = p_sub.add_parser("show", help="查看某次或最近一次编排")
+    q.add_argument("--run", help="run_id；缺省取最近一次")
+    q.set_defaults(func=cmd_run_show)
 
     p = sub.add_parser("serve", help="启动本地 Web 工作台")
     p.add_argument("--host", default="127.0.0.1")

@@ -5,6 +5,7 @@ from __future__ import annotations
 from .model_store import resolve_weights
 from .providers.cosyvoice3_mlx import CosyVoice3MlxProvider
 from .providers.indextts25 import IndexTts25Provider
+from .providers.offline_dub import OfflineDubProvider
 from .providers.stubs import GlmTtsProvider, StepAudioEditXProvider
 from .types import ProviderSpec
 
@@ -14,6 +15,7 @@ _FACTORY = {
     "step_audio_editx": StepAudioEditXProvider,
     "glm_tts": GlmTtsProvider,
     "indextts_25": IndexTts25Provider,
+    "offline_dub": OfflineDubProvider,
 }
 
 # 按 model 关键字兜底识别

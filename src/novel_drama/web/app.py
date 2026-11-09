@@ -19,6 +19,22 @@ from .actions import fail_body, run
 
 STATIC_DIR = Path(__file__).with_name("static")
 
+#: 设定库可在界面上编辑的标量字段（与 `setting set` 的参数一一对应）
+SETTING_SCALARS = (
+    "logline",
+    "theme",
+    "core_conflict",
+    "ending_intent",
+    "target_audience",
+    "target_length",
+    "era",
+    "tone",
+    "pov",
+    "tense",
+    "prose_style",
+    "visual_style",
+)
+
 
 def create_app(project_root: str | None = None, config_path: str | None = None):
     """创建 FastAPI 应用。
@@ -267,6 +283,245 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         return _respond(
             _cli("--project", body["path"], "--json", "line", "revert", "--chapter", body["chapter"], "--line", body["line"])
         )
+
+    # ---------------- 全链路工作台（R14）----------------
+    # 与语音页同一套纪律：界面不重算业务，全部转调 CLI --json。
+
+    @app.get("/api/ui/setting")
+    def ui_setting(path: str = Query(...)):
+        """设定库全文（`setting show --json`）。"""
+        return _respond(_cli("--project", path, "--json", "setting", "show"))
+
+    @app.post("/api/ui/setting/set")
+    def ui_setting_set(body: dict) -> dict:
+        """修改设定库标量字段（`setting set`）。"""
+        argv = ["--project", body["path"], "--json", "setting", "set"]
+        fields = body.get("fields") or {}
+        for key in SETTING_SCALARS:
+            value = fields.get(key)
+            if value is None or value == "":
+                continue
+            argv += ["--" + key.replace("_", "-"), str(value)]
+        if len(argv) == 5:
+            raise HTTPException(status_code=400, detail={"code": 2, "message": "没有要修改的字段"})
+        return _respond(_cli(*argv))
+
+    @app.post("/api/ui/setting/world")
+    def ui_setting_world(body: dict) -> dict:
+        """增补世界设定（`setting world`）。"""
+        argv = ["--project", body["path"], "--json", "setting", "world"]
+        for rule in body.get("rules") or []:
+            if rule:
+                argv += ["--add-rule", rule]
+        for faction in body.get("factions") or []:
+            if faction:
+                argv += ["--add-faction", faction]
+        if body.get("location"):
+            argv += ["--add-location", body["location"]]
+        if body.get("glossary"):
+            argv += ["--add-glossary", body["glossary"]]
+        return _respond(_cli(*argv))
+
+    @app.get("/api/ui/outline")
+    def ui_outline(path: str = Query(...)):
+        """大纲（`outline show --json`）。"""
+        return _respond(_cli("--project", path, "--json", "outline", "show"))
+
+    @app.post("/api/ui/outline/generate")
+    def ui_outline_generate(body: dict) -> dict:
+        """生成大纲（`outline generate`）。"""
+        argv = ["--project", body["path"], "--json", "outline", "generate"]
+        for key, flag in (("acts", "--acts"), ("chapters_per_act", "--chapters-per-act"), ("beats_per_chapter", "--beats-per-chapter"), ("words", "--words")):
+            if body.get(key) is not None:
+                argv += [flag, str(body[key])]
+        if body.get("dry_run"):
+            argv.append("--dry-run")
+        return _respond(_cli(*argv))
+
+    @app.post("/api/ui/outline/apply")
+    def ui_outline_apply(body: dict) -> dict:
+        """大纲落地成章节（`outline apply`）。"""
+        argv = ["--project", body["path"], "--json", "outline", "apply"]
+        if body.get("dry_run"):
+            argv.append("--dry-run")
+        return _respond(_cli(*argv))
+
+    @app.post("/api/ui/chapter/generate")
+    def ui_chapter_generate(body: dict) -> dict:
+        """生成章节正文（`chapter generate`）。"""
+        argv = ["--project", body["path"], "--json", "chapter", "generate", "--chapter", body["chapter"]]
+        if body.get("regen"):
+            argv.append("--regen")
+        if body.get("dry_run"):
+            argv.append("--dry-run")
+        return _respond(_cli(*argv))
+
+    @app.post("/api/ui/scene/split")
+    def ui_scene_split(body: dict) -> dict:
+        """切分场景（`scene split`）。"""
+        argv = ["--project", body["path"], "--json", "scene", "split", "--chapter", body["chapter"]]
+        if body.get("force"):
+            argv.append("--force")
+        return _respond(_cli(*argv))
+
+    @app.post("/api/ui/line/split")
+    def ui_line_split(body: dict) -> dict:
+        """切分台词（`line split`）。"""
+        argv = ["--project", body["path"], "--json", "line", "split", "--chapter", body["chapter"]]
+        if body.get("force"):
+            argv.append("--force")
+        return _respond(_cli(*argv))
+
+    @app.get("/api/ui/script")
+    def ui_script(path: str = Query(...), chapter: str = Query(...)) -> dict:
+        """导演标注文本与脚本文件状态（读落盘产物，不重算）。"""
+        store = _store(path)
+        markup_path = store.root / "scripts" / f"{chapter}.markup.txt"
+        script_path = store.script_path(chapter)
+        return {
+            "markup_path": str(markup_path),
+            "markup": markup_path.read_text(encoding="utf-8") if markup_path.exists() else "",
+            "script_path": str(script_path),
+            "has_script": script_path.exists(),
+        }
+
+    @app.post("/api/ui/script/suggest")
+    def ui_script_suggest(body: dict) -> dict:
+        """生成标注建议（`script suggest`），可同时应用。"""
+        argv = ["--project", body["path"], "--json", "script", "suggest", "--chapter", body["chapter"]]
+        if body.get("apply"):
+            argv.append("--apply")
+        if body.get("dry_run"):
+            argv.append("--dry-run")
+        return _respond(_cli(*argv))
+
+    @app.get("/api/ui/media")
+    def ui_media(path: str = Query(...), chapter: str = Query(...)) -> dict:
+        """章节内三类媒体条目（从场景内嵌数据汇总，状态以 asset 为准）。"""
+        chapter_data = _store(path).load_chapter(chapter)
+        rows = {"sfx": [], "image": [], "video": []}
+        keys = {"sfx": "sfx_events", "image": "key_images", "video": "video_segments"}
+        for scene in chapter_data.get("scenes") or []:
+            for kind, key in keys.items():
+                for item in scene.get(key) or []:
+                    asset = item.get("asset") or {}
+                    rows[kind].append(
+                        {
+                            "id": item.get("id"),
+                            "scene_id": scene.get("id"),
+                            "index": item.get("index"),
+                            "prompt": item.get("prompt") or "",
+                            "kind": item.get("kind"),
+                            "mode": item.get("mode"),
+                            "duration_ms": item.get("duration_ms") or asset.get("actual_duration_ms"),
+                            "status": asset.get("status") or item.get("status") or "pending",
+                            "asset_id": asset.get("asset_id"),
+                            "error": asset.get("error"),
+                        }
+                    )
+        return rows
+
+    @app.post("/api/ui/media/run")
+    def ui_media_run(body: dict) -> dict:
+        """执行一类媒体生成（`media sfx|image|video run`）。"""
+        kind = body["kind"]
+        if kind not in ("sfx", "image", "video"):
+            raise HTTPException(status_code=400, detail={"code": 2, "message": f"未知媒体类型: {kind}"})
+        argv = ["--project", body["path"], "--json", kind, "run", "--chapter", body["chapter"]]
+        if body.get("force"):
+            argv.append("--force")
+        if body.get("limit") is not None:
+            argv += ["--limit", str(body["limit"])]
+        return _respond(_cli(*argv))
+
+    @app.post("/api/ui/produce")
+    def ui_produce(body: dict) -> dict:
+        """启动全链路编排（后台进程，进度靠 `run show` 反映）。"""
+        path, chapter = body["path"], body["chapter"]
+        argv = ["--project", path]
+        if config_path:
+            argv += ["--config", config_path]
+        argv += ["produce", "--chapter", chapter]
+        if body.get("from"):
+            argv += ["--from", body["from"]]
+        if body.get("to"):
+            argv += ["--to", body["to"]]
+        if body.get("force"):
+            argv.append("--force")
+        if body.get("keep_going"):
+            argv.append("--keep-going")
+        if body.get("no_resume"):
+            argv.append("--no-resume")
+
+        log_dir = ProjectStore(path).root / ".ndw" / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = log_dir / f"web-produce-{now_iso().replace(':', '').replace('-', '')}.log"
+        src_dir = Path(__file__).resolve().parents[2]
+        env = dict(os.environ)
+        env["PYTHONPATH"] = str(src_dir) + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+        with log_path.open("wb") as log:
+            process = subprocess.Popen(
+                [sys.executable, "-u", "-m", "novel_drama.cli", *argv],
+                cwd=str(src_dir),
+                stdin=subprocess.DEVNULL,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                env=env,
+                start_new_session=True,
+            )
+        return {"started": True, "pid": process.pid, "log": str(log_path)}
+
+    @app.get("/api/ui/produce/latest")
+    def ui_produce_latest(path: str = Query(...), run_id: str | None = Query(default=None)) -> dict:
+        """最近一次（或指定）编排记录（`run show --json`）。"""
+        argv = ["--project", path, "--json", "run", "show"]
+        if run_id:
+            argv += ["--run", run_id]
+        result = _cli(*argv)
+        if result.code != 0:
+            return {"run": None, "message": result.message}
+        return {"run": result.payload}
+
+    @app.get("/api/ui/exports")
+    def ui_exports(path: str = Query(...)) -> dict:
+        """列成片产物：`renders/` 与 `exports/` 下的文件。"""
+        from datetime import datetime
+
+        root = _store(path).root
+        files = []
+        for sub in ("renders", "exports"):
+            folder = root / sub
+            if not folder.exists():
+                continue
+            for item in sorted(folder.rglob("*")):
+                if not item.is_file():
+                    continue
+                stat = item.stat()
+                files.append(
+                    {
+                        "rel": str(item.relative_to(root)),
+                        "path": str(item),
+                        "size": stat.st_size,
+                        "mtime": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
+                    }
+                )
+        return {"root": str(root), "files": files}
+
+    @app.post("/api/ui/project/init")
+    def ui_project_init(body: dict) -> dict:
+        """新建工程（`init`），返回可直接用于后续请求的绝对路径。"""
+        argv = ["--json", "init", body["dir"], "--title", body["title"]]
+        if body.get("author"):
+            argv += ["--author", body["author"]]
+        for genre in body.get("genres") or []:
+            if genre:
+                argv += ["--genre", genre]
+        result = _cli(*argv)
+        if result.code != 0:
+            raise HTTPException(status_code=result.status, detail=fail_body(result))
+        payload = result.payload if isinstance(result.payload, dict) else {}
+        payload["root"] = str(ProjectStore(body["dir"]).root)
+        return payload
 
     if STATIC_DIR.exists():
         from fastapi.responses import FileResponse

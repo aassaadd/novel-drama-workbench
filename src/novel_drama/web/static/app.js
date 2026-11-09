@@ -220,12 +220,15 @@ async function openProject() {
       $("runInfo").textContent = "本次将生成 0 行";
       $("runProgress").textContent = "";
       $("btnStart").disabled = true;
+      NW.notifyProject();
       return;
     }
     const keep = chapters.some((item) => item.id === state.chapter);
     state.chapter = keep ? state.chapter : chapters[0].id;
     $("chapterSelect").value = state.chapter;
     await loadChapter();
+    NW.notifyProject();
+    NW.notifyChapter();
   } catch (error) {
     toast(`打开工程失败：${error.message}`);
   }
@@ -553,6 +556,7 @@ function bindEvents() {
     $("form").hidden = true;
     $("lineId").textContent = "未选中行";
     await loadChapter();
+    NW.notifyChapter();
   });
   $("badges").addEventListener("click", (event) => {
     const badge = event.target.closest(".badge");
@@ -585,9 +589,38 @@ function bindEvents() {
   window.addEventListener("resize", renderTable);
 }
 
+/* 对外暴露共享能力：其余页面复用同一套取数与提示，避免各写一份。
+ * 页面在 window.Pages 注册，由 core.js 的路由在激活时调用。 */
+const projectListeners = [];
+const chapterListeners = [];
+window.NW = {
+  state,
+  api,
+  toast,
+  qs,
+  escapeHtml,
+  fmt,
+  kindLabel,
+  openProject,
+  loadChapter,
+  onProject(fn) {
+    projectListeners.push(fn);
+  },
+  onChapter(fn) {
+    chapterListeners.push(fn);
+  },
+  notifyProject() {
+    projectListeners.forEach((fn) => fn());
+  },
+  notifyChapter() {
+    chapterListeners.forEach((fn) => fn());
+  },
+};
+
 async function boot() {
   fillEmotions();
   bindEvents();
+  if (window.Router) window.Router.init();
   await loadProjects();
   if (state.path) await openProject();
 }

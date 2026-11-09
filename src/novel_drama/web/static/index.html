@@ -3,12 +3,21 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>台词校对 · novel-drama-workbench</title>
+  <title>小说有声剧工作台 · novel-drama-workbench</title>
   <link rel="stylesheet" href="/static/styles.css" />
 </head>
 <body>
   <header class="topbar">
-    <span class="brand">台词校对</span>
+    <span class="brand">小说有声剧工作台</span>
+    <nav class="tabs" id="tabs">
+      <a href="#/project" data-view="project">项目</a>
+      <a href="#/outline" data-view="outline">大纲</a>
+      <a href="#/chapter" data-view="chapter">章节</a>
+      <a href="#/script" data-view="script">导演标注</a>
+      <a href="#/voice" data-view="voice">台词校对</a>
+      <a href="#/media" data-view="media">音效·配图·视频</a>
+      <a href="#/export" data-view="export">导出</a>
+    </nav>
     <label class="field">
       工程
       <input id="projectPath" list="projectList" placeholder="~/novels/xxx" spellcheck="false" />
@@ -23,93 +32,267 @@
     <span id="hint" class="hint"></span>
   </header>
 
-  <section class="badges" id="badges"></section>
+  <!-- ---------------- 台词校对（原有页面，行为不变） ---------------- -->
+  <section class="view" id="view-voice" hidden>
+    <section class="badges" id="badges"></section>
 
-  <main class="layout">
-    <div class="table-wrap">
-      <div class="table-inner">
-        <div class="thead" id="thead">
-          <span class="c-index">序号</span>
-          <span class="c-kind">类型</span>
-          <span class="c-speaker">说话人</span>
-          <span class="c-text">文本</span>
-          <span class="c-num">情绪</span>
-          <span class="c-num">强度</span>
-          <span class="c-num">语速</span>
-          <span class="c-state">状态</span>
-          <span class="c-num">时长</span>
-          <span class="c-num">前停</span>
-          <span class="c-num">后停</span>
-        </div>
-        <div class="viewport" id="viewport">
-          <div class="spacer" id="spacer">
-            <div class="rows" id="rows"></div>
+    <main class="layout">
+      <div class="table-wrap">
+        <div class="table-inner">
+          <div class="thead" id="thead">
+            <span class="c-index">序号</span>
+            <span class="c-kind">类型</span>
+            <span class="c-speaker">说话人</span>
+            <span class="c-text">文本</span>
+            <span class="c-num">情绪</span>
+            <span class="c-num">强度</span>
+            <span class="c-num">语速</span>
+            <span class="c-state">状态</span>
+            <span class="c-num">时长</span>
+            <span class="c-num">前停</span>
+            <span class="c-num">后停</span>
+          </div>
+          <div class="viewport" id="viewport">
+            <div class="spacer" id="spacer">
+              <div class="rows" id="rows"></div>
+            </div>
           </div>
         </div>
+        <div class="empty" id="empty" hidden>还没有台词行：先在终端执行 <code>scene split</code> 与 <code>line split</code>。</div>
       </div>
-      <div class="empty" id="empty" hidden>还没有台词行：先在终端执行 <code>scene split</code> 与 <code>line split</code>。</div>
+
+      <aside class="inspector" id="inspector">
+        <div class="inspector-head">
+          <span id="lineId">未选中行</span>
+          <span id="lineState" class="state-badge"></span>
+        </div>
+        <div class="inspector-body" id="form" hidden>
+          <label class="stack">文本
+            <textarea id="fText" rows="4"></textarea>
+          </label>
+          <div class="row2">
+            <label class="stack">类型
+              <select id="fKind">
+                <option value="dialogue">对白</option>
+                <option value="narration">旁白</option>
+                <option value="inner_monologue">独白</option>
+              </select>
+            </label>
+            <label class="stack">情绪
+              <select id="fEmotion"></select>
+            </label>
+          </div>
+          <div class="row2">
+            <label class="stack">强度 <output id="oIntensity"></output>
+              <input id="fIntensity" type="range" min="0" max="1" step="0.05" />
+            </label>
+            <label class="stack">语速
+              <input id="fSpeed" type="number" min="0.5" max="2" step="0.05" />
+            </label>
+          </div>
+          <div class="row2">
+            <label class="stack">前停顿 ms
+              <input id="fPauseBefore" type="number" min="0" max="5000" step="10" />
+            </label>
+            <label class="stack">后停顿 ms
+              <input id="fPauseAfter" type="number" min="0" max="5000" step="10" />
+            </label>
+          </div>
+          <label class="stack">交付说明
+            <input id="fNote" placeholder="如：压着嗓子、别拖尾音" />
+          </label>
+          <div class="actions">
+            <button id="btnSave" class="btn primary">保存</button>
+            <button id="btnRevert" class="btn">回滚到上次生成</button>
+          </div>
+          <div class="diff">
+            <div class="diff-title">当前参数 vs 上次生成</div>
+            <div id="diffBody" class="diff-body">—</div>
+          </div>
+        </div>
+      </aside>
+    </main>
+
+    <footer class="runbar">
+      <span class="run-info" id="runInfo">本次将生成 — 行</span>
+      <div class="run-track"><div class="run-fill" id="runFill"></div></div>
+      <span class="run-progress" id="runProgress"></span>
+      <button id="btnStart" class="btn primary" disabled>开始生成</button>
+    </footer>
+  </section>
+
+  <!-- ---------------- 项目与设定库 ---------------- -->
+  <section class="view page" id="view-project" hidden>
+    <div class="panel">
+      <h2>工程</h2>
+      <div id="pjInfo" class="kv">—</div>
+      <h3>设定库</h3>
+      <p class="muted">这些字段是章节生成与导演标注的唯一输入，改完点保存即写盘（settings_revision +1）。</p>
+      <div id="pjSettings" class="form-grid"></div>
+      <div class="actions">
+        <button id="pjSave" class="btn primary">保存设定</button>
+        <button id="pjExport" class="btn">导出设定 JSON</button>
+      </div>
+      <h3>世界设定</h3>
+      <div id="pjWorld" class="world-list"></div>
+      <div class="form-grid">
+        <label class="stack">规则
+          <input id="wRule" placeholder="如：夜里不能说出真名" />
+        </label>
+        <label class="stack">阵营
+          <input id="wFaction" placeholder="如：守夜人" />
+        </label>
+        <label class="stack">地点（名称|描述|氛围）
+          <input id="wLocation" placeholder="钟楼|城北最高的塔|压抑" />
+        </label>
+        <label class="stack">词条（术语|释义）
+          <input id="wGlossary" placeholder="回响|听见过去声音的能力" />
+        </label>
+      </div>
+      <div class="actions">
+        <button id="pjWorldAdd" class="btn">加入世界设定</button>
+      </div>
+      <h3>新建工程</h3>
+      <div class="form-grid">
+        <label class="stack">目录
+          <input id="npDir" placeholder="~/novels/new-book" spellcheck="false" />
+        </label>
+        <label class="stack">书名
+          <input id="npTitle" placeholder="书名" />
+        </label>
+        <label class="stack">作者
+          <input id="npAuthor" placeholder="可选" />
+        </label>
+        <label class="stack">题材
+          <input id="npGenre" placeholder="如：悬疑" />
+        </label>
+      </div>
+      <div class="actions">
+        <button id="npCreate" class="btn primary">创建并打开</button>
+      </div>
     </div>
+  </section>
 
-    <aside class="inspector" id="inspector">
-      <div class="inspector-head">
-        <span id="lineId">未选中行</span>
-        <span id="lineState" class="state-badge"></span>
-      </div>
-      <div class="inspector-body" id="form" hidden>
-        <label class="stack">文本
-          <textarea id="fText" rows="4"></textarea>
+  <!-- ---------------- 大纲 ---------------- -->
+  <section class="view page" id="view-outline" hidden>
+    <div class="panel">
+      <h2>大纲设计</h2>
+      <p class="muted">生成结果写入设定库，再「落地成章节」才会建章节文件。离线写作实现是确定性的，同样参数可复现。</p>
+      <div class="form-grid">
+        <label class="stack">幕数
+          <input id="olActs" type="number" min="1" max="12" value="3" />
         </label>
-        <div class="row2">
-          <label class="stack">类型
-            <select id="fKind">
-              <option value="dialogue">对白</option>
-              <option value="narration">旁白</option>
-              <option value="inner_monologue">独白</option>
-            </select>
-          </label>
-          <label class="stack">情绪
-            <select id="fEmotion"></select>
-          </label>
-        </div>
-        <div class="row2">
-          <label class="stack">强度 <output id="oIntensity"></output>
-            <input id="fIntensity" type="range" min="0" max="1" step="0.05" />
-          </label>
-          <label class="stack">语速
-            <input id="fSpeed" type="number" min="0.5" max="2" step="0.05" />
-          </label>
-        </div>
-        <div class="row2">
-          <label class="stack">前停顿 ms
-            <input id="fPauseBefore" type="number" min="0" max="5000" step="10" />
-          </label>
-          <label class="stack">后停顿 ms
-            <input id="fPauseAfter" type="number" min="0" max="5000" step="10" />
-          </label>
-        </div>
-        <label class="stack">交付说明
-          <input id="fNote" placeholder="如：压着嗓子、别拖尾音" />
+        <label class="stack">每幕章数
+          <input id="olChapters" type="number" min="1" max="12" value="3" />
         </label>
-        <div class="actions">
-          <button id="btnSave" class="btn primary">保存</button>
-          <button id="btnRevert" class="btn">回滚到上次生成</button>
-        </div>
-        <div class="diff">
-          <div class="diff-title">当前参数 vs 上次生成</div>
-          <div id="diffBody" class="diff-body">—</div>
-        </div>
+        <label class="stack">每章节拍
+          <input id="olBeats" type="number" min="1" max="12" value="3" />
+        </label>
+        <label class="stack">单章目标字数
+          <input id="olWords" type="number" min="200" max="8000" step="100" value="1200" />
+        </label>
       </div>
-    </aside>
-  </main>
+      <div class="actions">
+        <button id="olGenerate" class="btn primary">生成大纲</button>
+        <button id="olApply" class="btn">落地成章节</button>
+      </div>
+      <div id="olBody" class="outline-body">还没有大纲。</div>
+    </div>
+  </section>
 
-  <footer class="runbar">
-    <span class="run-info" id="runInfo">本次将生成 — 行</span>
-    <div class="run-track"><div class="run-fill" id="runFill"></div></div>
-    <span class="run-progress" id="runProgress"></span>
-    <button id="btnStart" class="btn primary" disabled>开始生成</button>
-  </footer>
+  <!-- ---------------- 章节 ---------------- -->
+  <section class="view page" id="view-chapter" hidden>
+    <div class="panel">
+      <h2>章节正文</h2>
+      <div id="chInfo" class="kv">—</div>
+      <div class="actions">
+        <label class="field"><input id="chRegen" type="checkbox" /> 覆盖重写</label>
+        <button id="chGenerate" class="btn primary">生成正文</button>
+        <button id="chScenes" class="btn">切分场景</button>
+        <button id="chLines" class="btn">切分台词</button>
+        <button id="chPreview" class="btn">预览（不写盘）</button>
+      </div>
+      <div id="chScenesBody" class="outline-body">—</div>
+      <h3>正文</h3>
+      <pre id="chContent" class="content-box">—</pre>
+    </div>
+  </section>
+
+  <!-- ---------------- 导演标注 ---------------- -->
+  <section class="view page" id="view-script" hidden>
+    <div class="panel">
+      <h2>导演标注（有声剧脚本）</h2>
+      <div id="scInfo" class="kv">—</div>
+      <div class="actions">
+        <button id="scSuggest" class="btn primary">生成标注建议</button>
+        <button id="scApply" class="btn">生成并应用（含音效/画面/视频位）</button>
+      </div>
+      <div id="scWarnings" class="warn-box" hidden></div>
+      <h3>标注文本</h3>
+      <pre id="scMarkup" class="content-box mono">—</pre>
+    </div>
+  </section>
+
+  <!-- ---------------- 音效·配图·视频 ---------------- -->
+  <section class="view page" id="view-media" hidden>
+    <div class="panel">
+      <h2>音效、配图与视频位</h2>
+      <p class="muted">条目由导演标注物化而来；「运行」调 ffmpeg / Pillow 真出文件，模型侧是离线占位实现。</p>
+      <label class="field"><input id="mdForce" type="checkbox" /> 已就绪项也重跑</label>
+      <div class="media-grid">
+        <div>
+          <h3>音效（sfx）<button id="mdRunSfx" class="btn small">运行</button></h3>
+          <div id="mdSfx" class="media-table">—</div>
+        </div>
+        <div>
+          <h3>配图（key image）<button id="mdRunImage" class="btn small">运行</button></h3>
+          <div id="mdImage" class="media-table">—</div>
+        </div>
+        <div>
+          <h3>视频位（video）<button id="mdRunVideo" class="btn small">运行</button></h3>
+          <div id="mdVideo" class="media-table">—</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ---------------- 导出 ---------------- -->
+  <section class="view page" id="view-export" hidden>
+    <div class="panel">
+      <h2>串成成品</h2>
+      <p class="muted">全链路由 <code>produce</code> 在后台执行，页面只轮询编排记录；也可只跑后半段（配音之后）。</p>
+      <div class="form-grid">
+        <label class="stack">起始阶段
+          <select id="exFrom"></select>
+        </label>
+        <label class="stack">结束阶段
+          <select id="exTo"></select>
+        </label>
+      </div>
+      <div class="actions">
+        <label class="field"><input id="exForce" type="checkbox" /> 强制重跑</label>
+        <label class="field"><input id="exResume" type="checkbox" checked /> 跳过已成功阶段</label>
+        <label class="field"><input id="exKeepGoing" type="checkbox" /> 失败继续</label>
+        <button id="exStart" class="btn primary">开始编排</button>
+      </div>
+      <div id="exStatus" class="muted">尚未启动。</div>
+      <div id="exStages" class="stage-table">—</div>
+      <h3>产物</h3>
+      <div id="exFiles" class="media-table">—</div>
+      <div class="actions">
+        <button id="exRefresh" class="btn">刷新产物</button>
+      </div>
+    </div>
+  </section>
 
   <div id="toast" class="toast" hidden></div>
+  <script src="/static/core.js"></script>
+  <script src="/static/page-project.js"></script>
+  <script src="/static/page-outline.js"></script>
+  <script src="/static/page-chapter.js"></script>
+  <script src="/static/page-script.js"></script>
+  <script src="/static/page-media.js"></script>
+  <script src="/static/page-export.js"></script>
   <script src="/static/app.js"></script>
 </body>
 </html>

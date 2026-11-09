@@ -17,6 +17,7 @@ _SUBDIRS = (
     "chapters",
     "timelines",
     "scripts",
+    "settings",
     "assets/voice",
     "assets/voice/lines",
     "assets/voice/ref",

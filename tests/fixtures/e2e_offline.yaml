@@ -1,0 +1,42 @@
+# 离线端到端验收专用配置（tests/e2e_offline.py 使用）
+# 目的：不装任何模型也能跑通「建项目 → 导出成品」。
+# 与 config/config.yaml 相互独立，不会影响本机真实链路。
+
+adapters:
+  writing: offline
+  tts: auto
+  sfx: offline
+
+# 写作/音效/配图/视频全部走离线实现（真实出文件，只是不用模型）
+providers:
+  writing: offline
+  sfx: offline
+  image: offline
+  video: offline
+
+tts:
+  default_provider_id: offline_dub
+  provider_order: [offline_dub]
+  # 逐行合成前会校验参考音频存在；离线 provider 不用它，但契约保持与真 provider 一致。
+  # 参考音频路径由 tests/e2e_offline.py 在运行时注入到临时配置里，仓库不存本机绝对路径。
+  providers:
+    - provider_id: offline_dub
+      model: offline-dub
+      model_version: "1"
+      display_name: 离线占位配音
+      backend: cpu
+      enabled: true
+      capabilities:
+        emotion_control: instruct
+        emotion_instruction: true
+        # 批次层按「逐行克隆」构造需求，离线 provider 接受参考音频但不做真实克隆，
+        # 这里声明能力只为通过硬过滤；真实链路永远不会用到这个 provider
+        voice_clone: true
+        clone_min_ref_ms: 0
+        max_text_chars: 500
+        output_formats: [wav]
+        sample_rates: [48000]
+        allow_auto_select: true    # 本文件只给验收用；真实配置里没有这个 provider
+        license: internal
+        license_gate: none
+        commercial_use: false

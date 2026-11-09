@@ -3,6 +3,7 @@
 from .project_store import ProjectStore, list_workspaces
 from .queue_store import QueueStore
 from .schema_validator import SchemaValidationError, validate
+from .settings_store import SettingsStore
 from .voice_store import (
     find_variant,
     find_voice,
@@ -16,6 +17,7 @@ __all__ = [
     "ProjectStore",
     "QueueStore",
     "SchemaValidationError",
+    "SettingsStore",
     "find_variant",
     "find_voice",
     "list_workspaces",
