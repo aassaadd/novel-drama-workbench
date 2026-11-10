@@ -405,6 +405,10 @@ def generate_chapter(store: ProjectStore, config: AppConfig, chapter_id: str, re
         turning = "是" if beat.get("turning_point") else "否"
         instruction_lines.append(f"{order}. {beat.get('summary')}（目标 {target} 字，转折点：{turning}）")
     instruction_lines.append(f"视角：{pov_label}；基调：{tone_label}。")
+    instruction_lines.append(
+        "人物必须按角色卡的性格、背景、说话方式和关系行动，像真人在这个世界里做选择；"
+        "不同角色用各自口吻说话，不要为了推进剧情强行改变立场。"
+    )
     instruction_lines.append("输出格式：只输出正文，不要写章节标题或小标题，不要解释；对白使用中文引号“”。")
     instruction = "\n".join(instruction_lines)
 
@@ -494,10 +498,25 @@ def suggest_script(store: ProjectStore, config: AppConfig, chapter_id: str, dry_
         raise ValueError(f"章节 {chapter_id} 的场景里没有任何台词行：先执行 ndw line split")
 
     adapter = build_writing_adapter(config, bible)
+    # 导演标注必须基于真实台词：把场景与台词写进提示词（metadata 不会发给真实模型）
+    scene_lines: list[str] = []
+    for scene in scenes_payload:
+        scene_lines.append(
+            f"【镜头 {scene['index'] + 1}】{scene['title']}｜地点：{scene['location']}｜时间：{scene['time_of_day']}｜情绪：{scene['mood']}"
+        )
+        for line in scene["lines"]:
+            speaker = line["speaker_name"] or "未知"
+            scene_lines.append(f"{speaker}：{line['text']}")
+    work = store.load_project().get("work") or {}
+    context = _project_context(work, bible)
+    prompt_parts = [context] if context else []
+    prompt_parts.append(f"作品《{chapter.get('title')}》待标注台词：")
+    prompt_parts.append("\n".join(scene_lines))
+    prompt_parts.append(f"任务：为以上 {len(scenes_payload)} 个镜头生成 NDW 标注文本（@shot / !sfx / !visual / !anim），保留台词原文与顺序，不要解释。")
     req = TextGenRequest(
         task="script",
         system="你是有声剧导演，输出 NDW 标注文本（@shot / !sfx / !visual / !anim），不要解释。",
-        messages=[Message("user", f"为章节《{chapter.get('title')}》生成导演标注，共 {len(scenes_payload)} 个镜头。")],
+        messages=[Message("user", "\n\n".join(prompt_parts))],
         stream=False,
         metadata={"scenes": scenes_payload, "style": bible.get("style") or {}},
     )
@@ -1296,16 +1315,20 @@ def generate_worlds(
     brief_text = str(brief or "").strip()
 
     world_store = WorldStore(store.root)
-    existing = [{"name": item.get("name"), "era": item.get("era")} for item in (world_store.list_worlds() if world_store.exists() else [])]
+    world_items = world_store.list_worlds() if world_store.exists() else []
+    existing = [{"name": item.get("name"), "era": item.get("era")} for item in world_items]
     ask = "生成世界设定列表，每条包含 name/era/summary/rules/factions/locations/glossary/visual_style；locations/glossary 必须是数组，元素为对象，不要用字符串包裹。"
     if wanted:
         ask += f"共 {wanted} 条世界。"
     if brief_text:
         ask += f"补充要求：{brief_text}。"
+    # 批量世界同样要贴合作品既有梗概、文风与已建世界，避免自造独立宇宙
+    context = _project_context(work, bible, None, world_items)
+    prompt = f"{context}\n\n任务：{ask}" if context else ask
     req = TextGenRequest(
         task="setting",
-        system="你是中文小说的世界观编辑，只输出一个 JSON 对象（键为 worlds），不要解释。",
-        messages=[Message("user", f"为《{work.get('title') or '未命名'}》{ask}")],
+        system="你是中文小说的世界观编辑，世界设定必须与给定的作品设定一致，只按工具参数输出，不要解释。",
+        messages=[Message("user", prompt)],
         stream=False,
         temperature=0.7,
         metadata={
@@ -1370,10 +1393,17 @@ def generate_settings(store: ProjectStore, config: AppConfig, step: str, overwri
     ask = f"为《{work.get('title') or '未命名'}》生成{label}，字段：{', '.join(allowed)}。"
     if brief_text:
         ask += f"补充要求：{brief_text}。"
+    # 生成某个分区时，把其他已完成的分区与已有世界作为上下文，避免设定互相矛盾
+    context_bible = dict(bible)
+    context_bible[step] = {}
+    world_store = WorldStore(store.root)
+    world_items = world_store.list_worlds() if world_store.exists() else []
+    context = _project_context(work, context_bible, None, world_items)
+    prompt = f"{context}\n\n任务：{ask}" if context else ask
     req = TextGenRequest(
         task="setting",
-        system="你是中文小说的设定编辑，只输出一个 JSON 对象，不要解释，不要输出 JSON 以外的内容。",
-        messages=[Message("user", ask)],
+        system="你是中文小说的设定编辑，设定必须与给定的作品信息一致，只按工具参数输出，不要解释。",
+        messages=[Message("user", prompt)],
         stream=False,
         temperature=0.7,
         metadata={
@@ -1609,16 +1639,22 @@ def generate_section(
     if key == "world":
         world_store = WorldStore(store.root)
         world_store.ensure()
+        worlds = world_store.list_worlds()
         existing = world_store.get(target_id) if target_id else None
         if target_id and existing is None:
             raise ValueError(f"世界条目不存在: {target_id}")
         ask = "生成一条完整世界设定，字段：name/era/summary/rules/factions/locations/glossary/visual_style；locations/glossary 必须是数组，元素为对象，不要用字符串包裹。"
         if brief_text:
             ask += f"补充要求：{brief_text}。"
+        if existing:
+            ask += f"这是对已有条目的改写，需保持连贯，现有内容：{json.dumps({field: existing.get(field) for field in ('name', 'era', 'summary')}, ensure_ascii=False)}。"
+        # 世界设定必须落在作品既有框架内：带上梗概、文风与已有世界
+        context = _project_context(work, bible, None, worlds)
+        prompt = f"{context}\n\n任务：{ask}" if context else ask
         req = TextGenRequest(
             task="setting",
-            system="你是中文小说的世界观编辑，只输出一个 JSON 对象，不要解释。",
-            messages=[Message("user", f"为《{work.get('title') or '未命名'}》{ask}")],
+            system="你是中文小说的世界观编辑，世界设定必须与给定的作品设定一致，只按工具参数输出，不要解释。",
+            messages=[Message("user", prompt)],
             stream=False,
             temperature=0.7,
             metadata={
@@ -1626,7 +1662,7 @@ def generate_section(
                 "work": work_payload,
                 "existing": _bible_digest(bible),
                 "existing_world": existing,
-                "worlds": [{"name": item.get("name"), "era": item.get("era")} for item in world_store.list_worlds()],
+                "worlds": [{"name": item.get("name"), "era": item.get("era")} for item in worlds],
                 "brief": brief_text,
                 "seed": work.get("id"),
             },
@@ -1725,10 +1761,18 @@ def polish_field(
     bible = SettingsStore(store.root).load_or_none() or {}
     work = store.load_project().get("work") or {}
     adapter = build_writing_adapter(config, bible)
+    # 润色要贴合作品文风：把项目设定与字段上下文一并交给模型
+    prompt_parts: list[str] = []
+    project_context = _project_context(work, bible)
+    if project_context:
+        prompt_parts.append(project_context)
+    if context:
+        prompt_parts.append(f"字段所在上下文：{context}")
+    prompt_parts.append(f"待润色字段 {key}：\n{source}")
     req = TextGenRequest(
         task="polish",
-        system="你是中文小说编辑，只润色给定字段，保持原意与信息量，只输出 JSON（键为 text）。",
-        messages=[Message("user", f"润色字段 {key}：{source}")],
+        system="你是中文小说编辑，润色要贴合作品设定与文风，保持原意与信息量，只输出 JSON（键为 text）。",
+        messages=[Message("user", "\n\n".join(prompt_parts))],
         stream=False,
         temperature=0.6,
         metadata={

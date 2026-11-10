@@ -26,6 +26,16 @@ POV_LABELS = {
 }
 #: 时态枚举的中文说明，未知取值原样展示
 TENSE_LABELS = {"past": "过去时", "present": "现在时"}
+#: 角色定位枚举的中文说明，避免角色卡里出现英文取值
+ROLE_LABELS = {
+    "protagonist": "主角",
+    "antagonist": "反派",
+    "supporting": "配角",
+    "minor": "龙套",
+    "narrator": "旁白",
+}
+#: 性别枚举的中文说明
+GENDER_LABELS = {"male": "男", "female": "女", "other": "其他", "unknown": "未知"}
 
 
 def _text(value) -> str:
@@ -203,6 +213,8 @@ class ContextAssembler:
                 {
                     "name": _text(character.get("name")),
                     "role": _text(character.get("role")),
+                    "gender": _text(character.get("gender")),
+                    "age_range": _text(character.get("age_range")),
                     "aliases": [str(item) for item in (character.get("aliases") or []) if _text(item)],
                     "personality": [str(item) for item in (character.get("personality") or []) if _text(item)],
                     "background": _text(character.get("background")),
@@ -225,7 +237,14 @@ class ContextAssembler:
         """
         cards: list[str] = []
         for card in models:
-            head = f"- {card['name']}（{card['role']}）"
+            role_label = ROLE_LABELS.get(card["role"], card["role"])
+            traits = [role_label]
+            gender_label = GENDER_LABELS.get(card.get("gender") or "", card.get("gender") or "")
+            if gender_label:
+                traits.append(gender_label)
+            if card.get("age_range"):
+                traits.append(card["age_range"])
+            head = f"- {card['name']}（{'，'.join(trait for trait in traits if trait)}）"
             if card["aliases"]:
                 head += "，别名：" + "、".join(card["aliases"])
             lines = [head]
@@ -401,6 +420,14 @@ class ContextAssembler:
             cards_text = self._render_cards(cards)
             if cards_text:
                 system_parts.append("角色卡：\n" + cards_text)
+            # 人物演绎准则：角色要像真人一样按人设与世界观行动，固定放在设定之后
+            system_parts.append(
+                "写作准则：\n"
+                "- 人物言行必须符合其性格、背景、说话方式与关系备注，不得为推进剧情改变人设；\n"
+                "- 人物只知道自己在故事中经历或被告知的信息，不能凭空说出未知事实；\n"
+                "- 让人物按自身目标与处境做出选择来推动剧情，而不是由作者安排；\n"
+                "- 世界规则与势力格局不可违背，人物行动须发生在设定允许的范围内。"
+            )
             system = "\n\n".join(part for part in system_parts if part)
 
             user_parts: list[str] = []
