@@ -129,6 +129,10 @@ class WritingAdapter(Protocol):
         """一次性返回完整文本。"""
         ...
 
+    def generate_tool(self, req: TextGenRequest, tool: dict, timeout_s: float | None = None) -> dict:
+        """以工具调用方式返回结构化参数（模型参数即结果）。"""
+        ...
+
     def stream(self, req: TextGenRequest) -> Iterator[TextGenChunk]:
         """流式返回增量文本。"""
         ...

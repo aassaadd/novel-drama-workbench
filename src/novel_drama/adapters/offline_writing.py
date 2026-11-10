@@ -179,6 +179,27 @@ class OfflineWritingAdapter:
             raw={"provider": "offline-writing", "task": task},
         )
 
+    def generate_tool(self, req: TextGenRequest, tool: dict, timeout_s: float | None = None) -> dict:
+        """离线实现工具调用：直接解析自身规则生成的结构化 JSON。
+
+        参数:
+            req: 统一文本请求（task/metadata 决定规则分支）。
+            tool: 工具定义；只读取 function.name 以兼容包装结构。
+            timeout_s: 忽略（本地规则无网络）。
+
+        返回:
+            与工具参数一致的结构化 dict。
+
+        异常:
+            ValueError: 规则输出不是合法 JSON。
+        """
+        payload = json.loads(self.generate(req).text)
+        name = str(((tool or {}).get("function") or {}).get("name") or "")
+        # 单人物规则输出多包一层 {"characters": [...]}，而工具参数要求平铺
+        if name == "emit_character" and isinstance(payload.get("characters"), list) and payload["characters"]:
+            return payload["characters"][0]
+        return payload
+
     def stream(self, req: TextGenRequest) -> Iterator[TextGenChunk]:
         """流式输出：离线实现一次性给出整段，再用 done 块收尾。
 

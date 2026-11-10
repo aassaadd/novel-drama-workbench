@@ -44,9 +44,15 @@ def _str_list(rows, item_limit: int) -> list[str]:
         raise ValueError("世界字段必须是字符串数组")
     result: list[str] = []
     for item in rows:
-        if isinstance(item, (dict, list)):
-            raise ValueError("世界字段的数组项必须是字符串")
-        text = _text(item)
+        if isinstance(item, dict):
+            # 模型有时把规则/势力写成对象，拼成「名称：说明」而不是直接报错
+            name = _text(item.get("name") or item.get("title"))
+            note = _text(item.get("description") or item.get("desc") or item.get("summary"))
+            text = f"{name}：{note}" if name and note else (name or note or "、".join(_text(value) for value in item.values()))
+        elif isinstance(item, list):
+            text = "、".join(_text(value) for value in item if not isinstance(value, (dict, list)))
+        else:
+            text = _text(item)
         if text:
             result.append(text[:item_limit])
     return result
@@ -102,18 +108,37 @@ def _glossary(rows) -> list[dict]:
     """
     if rows is None:
         return []
+    if isinstance(rows, str):
+        # 模型有时把词条写成整段文本，按换行/分号拆成多项
+        rows = [part.strip() for part in rows.replace("；", "\n").replace(";", "\n").splitlines() if part.strip()]
+    if isinstance(rows, dict):
+        # 单个词条对象，或「术语→释义」映射，统一成数组
+        rows = [rows] if any(key in rows for key in ("term", "name", "word")) else [
+            {"term": key, "meaning": value} for key, value in rows.items()
+        ]
     if not isinstance(rows, list):
         raise ValueError("glossary 必须是数组")
     result: list[dict] = []
-    for index, item in enumerate(rows):
+    for item in rows:
+        if isinstance(item, str):
+            # 「术语：释义」字符串拆成对象；拆不出释义的跳过
+            text = item.strip()
+            for sep in ("：", ":", "——", " - ", "—"):
+                if sep in text:
+                    head, tail = text.split(sep, 1)
+                    item = {"term": head.strip(), "meaning": tail.strip()}
+                    break
+            else:
+                continue
         if not isinstance(item, dict):
-            raise ValueError(f"glossary 第 {index + 1} 项必须是对象")
-        term = _text(item.get("term"))
-        if not term:
             continue
-        meaning = _text(item.get("meaning"))
-        if not meaning:
-            raise ValueError(f"glossary 第 {index + 1} 项「{term}」缺少释义")
+        term = _text(item.get("term") or item.get("name") or item.get("word"))
+        meaning = _text(
+            item.get("meaning") or item.get("definition") or item.get("description") or item.get("desc")
+        )
+        if not term or not meaning:
+            # 缺术语或释义的条目直接跳过，不让整次生成失败
+            continue
         entry = {"term": term[:120], "meaning": meaning[:1000]}
         aliases = _str_list(item.get("aliases"), 120)
         if aliases:

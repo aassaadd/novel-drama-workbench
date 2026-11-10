@@ -543,6 +543,36 @@ TENSE_OPTIONS = ("past", "present")
 LENGTH_OPTIONS = ("short", "novella", "novel", "series")
 ROLE_OPTIONS = ("protagonist", "antagonist", "supporting", "minor")
 GENDER_OPTIONS = ("male", "female", "other", "unknown")
+#: 模型偶尔把枚举写成中文（含括号说明），校验前先按前缀归一；长别名放前面避免误匹配
+CHOICE_ALIASES = {
+    "短篇": "short",
+    "中篇": "novella",
+    "长篇连载": "series",
+    "系列": "series",
+    "中长篇": "novella",
+    "长篇": "novel",
+    "第三人称有限": "third_limited",
+    "第三人称全知": "third_omniscient",
+    "第三人称": "third_limited",
+    "第一人称": "first",
+    "第二人称": "second",
+    "过去时": "past",
+    "现在时": "present",
+    "主角": "protagonist",
+    "男主": "protagonist",
+    "女主": "protagonist",
+    "反派": "antagonist",
+    "配角": "supporting",
+    "男配": "supporting",
+    "女配": "supporting",
+    "龙套": "minor",
+    "男性": "male",
+    "女性": "female",
+    "男": "male",
+    "女": "female",
+    "其他": "other",
+    "未知": "unknown",
+}
 #: 单字段润色白名单
 POLISH_FIELDS = (
     "logline",
@@ -596,26 +626,204 @@ def _extract_json_object(text: str) -> dict:
     return payload
 
 
-def _generate_json(adapter, req: TextGenRequest) -> dict:
-    """调用适配器并解析 JSON；解析失败自动重试一次。
+# ---------- 结构化生成工具（LLM function calling） ----------
+
+#: 世界条目参数 schema（单条与批量共用）
+_WORLD_TOOL_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "name": {"type": "string", "description": "世界/时代名称，80 字以内"},
+        "era": {"type": "string", "description": "时代背景，200 字以内"},
+        "summary": {"type": "string", "description": "世界概述，500 字以内"},
+        "rules": {"type": "array", "items": {"type": "string"}, "description": "世界规则/力量体系，每条 120 字以内"},
+        "factions": {"type": "array", "items": {"type": "string"}, "description": "主要势力，每条 120 字以内"},
+        "locations": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "description": {"type": "string"},
+                    "atmosphere": {"type": "string"},
+                },
+                "required": ["name"],
+            },
+            "description": "关键地点：JSON 数组，每个元素必须是对象（不要写成字符串），含 name/description/atmosphere",
+        },
+        "glossary": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "term": {"type": "string"},
+                    "meaning": {"type": "string"},
+                    "aliases": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["term", "meaning"],
+            },
+            "description": "专有名词表：JSON 数组，每个元素必须是对象（不要写成字符串），含 term/meaning",
+        },
+        "visual_style": {"type": "string", "description": "画面风格关键词，200 字以内"},
+    },
+    "required": ["name", "era"],
+}
+
+#: 人物条目参数 schema（单个与批量共用）
+_CHARACTER_TOOL_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "name": {"type": "string", "description": "姓名，60 字以内"},
+        "role": {
+            "type": "string",
+            "enum": list(ROLE_OPTIONS),
+            "description": "protagonist=主角，antagonist=反派，supporting=配角，minor=龙套",
+        },
+        "gender": {"type": "string", "enum": list(GENDER_OPTIONS)},
+        "age_range": {"type": "string", "description": "年龄区间，如「18-24」，40 字以内"},
+        "personality": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "3-5 个性格短标签，每个不超过 20 字",
+        },
+        "background": {"type": "string", "description": "人物背景，500 字以内"},
+        "appearance_prompt": {"type": "string", "description": "外貌提示词，用于配图"},
+        "negative_prompt": {"type": "string", "description": "配图负向提示词"},
+        "relationships": {
+            "type": "object",
+            "additionalProperties": {"type": "string"},
+            "description": "与其他人物/势力的关系（名字→备注）",
+        },
+        "state": {
+            "type": "object",
+            "properties": {
+                "relationship_notes": {"type": "object", "additionalProperties": {"type": "string"}}
+            },
+            "description": "人物状态；单人物生成时关系备注写在 relationship_notes",
+        },
+    },
+    "required": ["name"],
+}
+
+#: 梗概参数 schema
+_PREMISE_TOOL_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "logline": {"type": "string", "description": "一句话故事核心，120 字以内"},
+        "theme": {"type": "string", "description": "主题，200 字以内"},
+        "core_conflict": {"type": "string", "description": "核心冲突，300 字以内"},
+        "ending_intent": {"type": "string", "description": "结局意图，200 字以内"},
+        "target_audience": {"type": "string", "description": "目标读者，200 字以内"},
+        "target_length": {
+            "type": "string",
+            "enum": list(LENGTH_OPTIONS),
+            "description": "short=短篇，novella=中篇，novel=长篇，series=长篇连载",
+        },
+    },
+    "required": ["logline"],
+}
+
+#: 文风参数 schema
+_STYLE_TOOL_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "tone": {"type": "string", "description": "整体基调，200 字以内"},
+        "pov": {"type": "string", "enum": list(POV_OPTIONS), "description": "叙事视角"},
+        "tense": {"type": "string", "enum": list(TENSE_OPTIONS), "description": "时态"},
+        "prose_style": {"type": "string", "description": "文笔风格描述，500 字以内"},
+        "forbidden": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "需要避免的写法，每条 40 字以内",
+        },
+        "visual_style": {"type": "string", "description": "画面风格关键词，200 字以内"},
+    },
+    "required": ["tone"],
+}
+
+
+def _gen_tool(step: str | None) -> dict | None:
+    """按生成步骤返回对应的工具定义（OpenAI tools 单项）。
 
     参数:
-        adapter: 写作适配器。
-        req: 文本生成请求。
+        step: premise|style|world|worlds|character|characters。
 
     返回:
-        解析后的 dict。
+        工具定义 dict；未知步骤返回 None。
 
     异常:
-        ValueError: 连续两次都不是合法 JSON。
+        无。
     """
-    for _ in range(2):
-        result = adapter.generate(req)
-        try:
-            return _extract_json_object(result.text)
-        except ValueError:
-            continue
-    raise ValueError("LLM 返回内容不是合法 JSON")
+    if step == "premise":
+        return {
+            "type": "function",
+            "function": {"name": "emit_premise", "description": "输出故事梗概设定", "parameters": _PREMISE_TOOL_SCHEMA},
+        }
+    if step == "style":
+        return {
+            "type": "function",
+            "function": {"name": "emit_style", "description": "输出文风设定", "parameters": _STYLE_TOOL_SCHEMA},
+        }
+    if step == "world":
+        return {
+            "type": "function",
+            "function": {"name": "emit_world", "description": "输出一条完整世界设定", "parameters": _WORLD_TOOL_SCHEMA},
+        }
+    if step == "worlds":
+        return {
+            "type": "function",
+            "function": {
+                "name": "emit_worlds",
+                "description": "输出多条世界设定",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"worlds": {"type": "array", "items": _WORLD_TOOL_SCHEMA}},
+                    "required": ["worlds"],
+                },
+            },
+        }
+    if step == "character":
+        return {
+            "type": "function",
+            "function": {"name": "emit_character", "description": "输出一个完整人物设定", "parameters": _CHARACTER_TOOL_SCHEMA},
+        }
+    if step == "characters":
+        return {
+            "type": "function",
+            "function": {
+                "name": "emit_characters",
+                "description": "输出 1 名主角与 2-6 名主要配角",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"characters": {"type": "array", "items": _CHARACTER_TOOL_SCHEMA}},
+                    "required": ["characters"],
+                },
+            },
+        }
+    return None
+
+
+def _generate_json(adapter, req: TextGenRequest, step: str) -> dict:
+    """用 LLM 工具调用产出结构化参数（不再解析自由文本）。
+
+    参数:
+        adapter: 写作适配器（需实现 generate_tool）。
+        req: 文本生成请求。
+        step: 生成步骤（premise/style/world/worlds/character/characters），决定工具 schema。
+
+    返回:
+        工具参数解析后的 dict。
+
+    异常:
+        ValueError: 未知步骤或适配器不支持工具调用。
+        AdapterError: 模型未返回工具调用，或工具参数不合法。
+    """
+    tool = _gen_tool(step)
+    if tool is None:
+        raise ValueError(f"未知的生成步骤: {step or '(空)'}")
+    generate_tool = getattr(adapter, "generate_tool", None)
+    if generate_tool is None:
+        raise ValueError(f"写作适配器不支持工具调用: {type(adapter).__name__}")
+    return generate_tool(req, tool)
 
 
 def _check_text(value, limit: int, label: str, required: bool = False) -> str:
@@ -641,6 +849,26 @@ def _check_text(value, limit: int, label: str, required: bool = False) -> str:
     return text
 
 
+def _normalize_choice(value, options: tuple[str, ...]) -> str | None:
+    """把枚举值归一成英文选项（兼容模型输出的中文别名）。
+
+    参数:
+        value: 原始值。
+        options: 允许的取值。
+
+    返回:
+        归一后的枚举值；无法识别时返回 None。
+    """
+    text = str(value or "").strip()
+    if text in options:
+        return text
+    # 模型可能输出「中长篇小说，约15-20万字」这类中文，按最长别名命中，避免「中长篇」被「长篇」抢走
+    for alias, canonical in sorted(CHOICE_ALIASES.items(), key=lambda item: -len(item[0])):
+        if alias in text and canonical in options:
+            return canonical
+    return None
+
+
 def _check_choice(value, options: tuple[str, ...], label: str) -> str:
     """校验枚举字段。
 
@@ -650,15 +878,16 @@ def _check_choice(value, options: tuple[str, ...], label: str) -> str:
         label: 字段中文名。
 
     返回:
-        去空白后的枚举值。
+        归一后的枚举值。
 
     异常:
         ValueError: 取值不在枚举内。
     """
-    text = str(value or "").strip()
-    if text not in options:
+    normalized = _normalize_choice(value, options)
+    if normalized is None:
+        text = str(value or "").strip()
         raise ValueError(f"{label}取值非法: {text or '(空)'}（可选 {'/'.join(options)}）")
-    return text
+    return normalized
 
 
 def _clean_str_list(rows, item_limit: int, label: str) -> list[str]:
@@ -733,15 +962,40 @@ def _clean_glossary(rows) -> list[dict]:
     """
     if rows is None:
         return []
+    if isinstance(rows, str):
+        # 模型有时把词条写成整段文本，按换行/分号拆成多项
+        rows = [part.strip() for part in rows.replace("；", "\n").replace(";", "\n").splitlines() if part.strip()]
+    if isinstance(rows, dict):
+        # 单个词条对象，或「术语→释义」映射，统一成数组
+        rows = [rows] if any(key in rows for key in ("term", "name", "word")) else [
+            {"term": key, "meaning": value} for key, value in rows.items()
+        ]
     if not isinstance(rows, list):
         raise ValueError("glossary 必须是数组")
     result = []
     for index, item in enumerate(rows):
+        if isinstance(item, str):
+            # 模型常把词条写成「术语：释义」字符串，这里拆成对象
+            text = str(item).strip()
+            for sep in ("：", ":", "——", " - ", "—"):
+                if sep in text:
+                    term, meaning = text.split(sep, 1)
+                    item = {"term": term.strip(), "meaning": meaning.strip()}
+                    break
+            else:
+                item = {"term": text, "meaning": text}
         if not isinstance(item, dict):
-            raise ValueError(f"glossary 第 {index + 1} 项必须是对象")
+            # 无法识别的项直接跳过，不让整次生成失败
+            continue
+        # 模型常用 name/definition 等别名，统一成 term/meaning
+        term = item.get("term") or item.get("name") or item.get("word")
+        meaning = item.get("meaning") or item.get("definition") or item.get("description") or item.get("desc")
+        if not str(meaning or "").strip():
+            # 只有术语没有释义时跳过，不让整次生成失败
+            continue
         entry = {
-            "term": _check_text(item.get("term"), 120, f"glossary 第 {index + 1} 项术语", required=True),
-            "meaning": _check_text(item.get("meaning"), 1000, f"glossary 第 {index + 1} 项释义", required=True),
+            "term": _check_text(term, 120, f"glossary 第 {index + 1} 项术语", required=True),
+            "meaning": _check_text(meaning, 1000, f"glossary 第 {index + 1} 项释义", required=True),
         }
         aliases = _clean_str_list(item.get("aliases"), 120, f"glossary 第 {index + 1} 项别名")
         if aliases:
@@ -915,7 +1169,7 @@ def generate_worlds(
 
     world_store = WorldStore(store.root)
     existing = [{"name": item.get("name"), "era": item.get("era")} for item in (world_store.list_worlds() if world_store.exists() else [])]
-    ask = "生成世界设定列表，每条包含 name/era/summary/rules/factions/locations/glossary/visual_style。"
+    ask = "生成世界设定列表，每条包含 name/era/summary/rules/factions/locations/glossary/visual_style；locations/glossary 必须是数组，元素为对象，不要用字符串包裹。"
     if wanted:
         ask += f"共 {wanted} 条世界。"
     if brief_text:
@@ -937,7 +1191,7 @@ def generate_worlds(
             "seed": work.get("id"),
         },
     )
-    payload = _generate_json(adapter, req)
+    payload = _generate_json(adapter, req, "worlds")
     rows = payload.get("worlds")
     if isinstance(rows, dict):
         rows = [rows]
@@ -1003,7 +1257,7 @@ def generate_settings(store: ProjectStore, config: AppConfig, step: str, overwri
             "seed": work.get("id"),
         },
     )
-    payload = _generate_json(adapter, req)
+    payload = _generate_json(adapter, req, step)
     if isinstance(payload.get(step), dict):
         payload = payload[step]
     fields = _clean_setting_fields(step, payload)
@@ -1063,7 +1317,7 @@ def generate_characters(store: ProjectStore, config: AppConfig, count: int | Non
             "seed": work.get("id"),
         },
     )
-    payload = _generate_json(adapter, req)
+    payload = _generate_json(adapter, req, "characters")
     rows = payload.get("characters")
     if not isinstance(rows, list) or not rows:
         raise ValueError("LLM 返回的人物列表为空")
@@ -1077,12 +1331,8 @@ def generate_characters(store: ProjectStore, config: AppConfig, count: int | Non
         if name in seen:
             raise ValueError(f"人物姓名重复: {name}")
         seen.add(name)
-        role = str(row.get("role") or "supporting").strip()
-        if role not in ROLE_OPTIONS:
-            raise ValueError(f"人物 {name} 的 role 非法: {role}（可选 {'/'.join(ROLE_OPTIONS)}）")
-        gender = str(row.get("gender") or "unknown").strip()
-        if gender not in GENDER_OPTIONS:
-            gender = "unknown"
+        role = _normalize_choice(row.get("role"), ROLE_OPTIONS) or "supporting"
+        gender = _normalize_choice(row.get("gender"), GENDER_OPTIONS) or "unknown"
         relationships = row.get("relationships") or {}
         if not isinstance(relationships, dict):
             relationships = {}
@@ -1092,7 +1342,7 @@ def generate_characters(store: ProjectStore, config: AppConfig, count: int | Non
                 "role": role,
                 "gender": gender,
                 "age_range": _check_text(row.get("age_range"), 40, f"人物 {name} 的年龄区间") or None,
-                "personality": _clean_str_list(row.get("personality"), 40, f"人物 {name} 的性格"),
+                "personality": _clean_str_list(row.get("personality"), 120, f"人物 {name} 的性格"),
                 "background": _check_text(row.get("background"), 2000, f"人物 {name} 的背景"),
                 "appearance_prompt": _check_text(row.get("appearance_prompt"), 2000, f"人物 {name} 的外貌提示词"),
                 "negative_prompt": _check_text(row.get("negative_prompt"), 1000, f"人物 {name} 的负向提示词"),
@@ -1127,12 +1377,8 @@ def _clean_character_entry(row: dict) -> dict:
     if not isinstance(row, dict):
         raise ValueError("人物必须是 JSON 对象")
     name = _check_text(row.get("name"), 60, "人物姓名", required=True)
-    role = str(row.get("role") or "supporting").strip()
-    if role not in ROLE_OPTIONS:
-        role = "supporting"
-    gender = str(row.get("gender") or "unknown").strip()
-    if gender not in GENDER_OPTIONS:
-        gender = "unknown"
+    role = _normalize_choice(row.get("role"), ROLE_OPTIONS) or "supporting"
+    gender = _normalize_choice(row.get("gender"), GENDER_OPTIONS) or "unknown"
     state = row.get("state") if isinstance(row.get("state"), dict) else {}
     notes = state.get("relationship_notes")
     if not isinstance(notes, dict):
@@ -1142,7 +1388,7 @@ def _clean_character_entry(row: dict) -> dict:
         "role": role,
         "gender": gender,
         "age_range": _check_text(row.get("age_range"), 40, f"人物 {name} 的年龄区间") or None,
-        "personality": _clean_str_list(row.get("personality"), 40, f"人物 {name} 的性格"),
+        "personality": _clean_str_list(row.get("personality"), 120, f"人物 {name} 的性格"),
         "background": _check_text(row.get("background"), 2000, f"人物 {name} 的背景"),
         "appearance_prompt": _check_text(row.get("appearance_prompt"), 2000, f"人物 {name} 的外貌提示词"),
         "negative_prompt": _check_text(row.get("negative_prompt"), 1000, f"人物 {name} 的负向提示词"),
@@ -1232,7 +1478,7 @@ def generate_section(
         existing = world_store.get(target_id) if target_id else None
         if target_id and existing is None:
             raise ValueError(f"世界条目不存在: {target_id}")
-        ask = "生成一条完整世界设定，字段：name/era/summary/rules/factions/locations/glossary/visual_style。"
+        ask = "生成一条完整世界设定，字段：name/era/summary/rules/factions/locations/glossary/visual_style；locations/glossary 必须是数组，元素为对象，不要用字符串包裹。"
         if brief_text:
             ask += f"补充要求：{brief_text}。"
         req = TextGenRequest(
@@ -1251,7 +1497,7 @@ def generate_section(
                 "seed": work.get("id"),
             },
         )
-        payload = _generate_json(adapter, req)
+        payload = _generate_json(adapter, req, "world")
         if isinstance(payload.get("world"), dict):
             payload = payload["world"]
         entry = clean_world_entry(payload)
@@ -1265,7 +1511,7 @@ def generate_section(
     existing_char = next((item for item in characters if item.get("id") == target_id), None) if target_id else None
     if target_id and existing_char is None:
         raise ValueError(f"角色不存在: {target_id}")
-    ask = "生成一个完整人物设定，字段：name/role/gender/age_range/personality/background/appearance_prompt/negative_prompt/state.relationship_notes。"
+    ask = "生成一个完整人物设定，字段：name/role/gender/age_range/personality/background/appearance_prompt/negative_prompt/state.relationship_notes；personality 写 3-5 个短标签，每个不超过 20 字。"
     if brief_text:
         ask += f"补充要求：{brief_text}。"
     req = TextGenRequest(
@@ -1285,11 +1531,14 @@ def generate_section(
             "seed": work.get("id"),
         },
     )
-    payload = _generate_json(adapter, req)
+    payload = _generate_json(adapter, req, "character")
     raw = payload.get("character")
     if not isinstance(raw, dict):
         rows = payload.get("characters")
         raw = rows[0] if isinstance(rows, list) and rows else None
+    if not isinstance(raw, dict) and any(key in payload for key in ("name", "role", "personality")):
+        # 模型常把人物字段直接平铺返回，不再包一层 character
+        raw = payload
     if not isinstance(raw, dict):
         raise ValueError("LLM 返回的人物不是合法 JSON 对象")
     entry = _clean_character_entry(raw)

@@ -26,6 +26,8 @@ from .base import AdapterError, ErrorCode, HealthStatus, TextGenChunk, TextGenRe
 DEFAULT_TIMEOUT_S = 300.0
 # 连接超时（秒）；用于快速判断服务是否可达
 CONNECT_TIMEOUT_S = 5.0
+# 工具调用时的最小输出预算；thinking 模型的 reasoning_tokens 也计入 max_tokens，给少了参数会被截断
+TOOL_MIN_MAX_TOKENS = 4096
 
 
 class OmlxWritingAdapter:
@@ -354,6 +356,72 @@ class OmlxWritingAdapter:
             raw=data,
         )
 
+    def generate_tool(self, req: TextGenRequest, tool: dict, timeout_s: float | None = None) -> dict:
+        """以工具调用（function calling）方式生成结构化结果。
+
+        用 `tool_choice` 强制模型只调用指定函数，模型参数即结构化结果，
+        避免自由文本里夹杂解释导致 JSON 解析失败。
+
+        参数:
+            req: 统一文本请求（system/messages/temperature 等照常使用）。
+            tool: 单个工具定义，形如
+                {"type": "function", "function": {"name", "description", "parameters"}}。
+            timeout_s: 覆盖默认超时；结构化输出较长可放宽。
+
+        返回:
+            工具参数解析后的 dict（等同 tool_calls[0].function.arguments）。
+
+        异常:
+            AdapterError: 配置缺失、服务不可达、未返回 tool_calls 或参数不是 JSON 对象。
+        """
+        self._require_ready()
+        function = (tool or {}).get("function") or {}
+        name = str(function.get("name") or "").strip()
+        if not name:
+            raise AdapterError(ErrorCode.INVALID_INPUT, "工具定义缺少 function.name")
+
+        payload = self._build_payload(req, stream=False)
+        payload["tools"] = [tool]
+        payload["tool_choice"] = {"type": "function", "function": {"name": name}}
+        # thinking 模型的 reasoning_tokens 同样占用 max_tokens，预算太小会把参数截断
+        payload["max_tokens"] = max(int(payload.get("max_tokens") or 0), TOOL_MIN_MAX_TOKENS)
+
+        data = self._request_json("POST", "/v1/chat/completions", payload, timeout_s=timeout_s)
+        choices = data.get("choices") or []
+        if not choices:
+            raise AdapterError(
+                ErrorCode.UPSTREAM_ERROR,
+                f"omlx 返回空 choices：{str(data)[:300]}",
+                detail={"path": "/v1/chat/completions"},
+            )
+        finish = str(choices[0].get("finish_reason") or "")
+        message = choices[0].get("message") or {}
+        calls = message.get("tool_calls") or []
+        if not calls:
+            raise AdapterError(
+                ErrorCode.UPSTREAM_ERROR,
+                f"omlx 未返回工具调用 {name}（finish_reason={finish or '空'}）",
+                detail={"raw": str(data)[:1000]},
+            )
+        arguments = ((calls[0] or {}).get("function") or {}).get("arguments")
+        if isinstance(arguments, dict):
+            return arguments
+        try:
+            parsed = json.loads(str(arguments or ""))
+        except json.JSONDecodeError as exc:
+            raise AdapterError(
+                ErrorCode.UPSTREAM_ERROR,
+                f"工具调用 {name} 的参数不是合法 JSON：{exc}",
+                detail={"arguments": str(arguments)[:1000]},
+            ) from exc
+        if not isinstance(parsed, dict):
+            raise AdapterError(
+                ErrorCode.UPSTREAM_ERROR,
+                f"工具调用 {name} 的参数不是 JSON 对象：{str(parsed)[:200]}",
+                detail={"arguments": str(arguments)[:1000]},
+            )
+        return parsed
+
     def stream(self, req: TextGenRequest) -> Iterator[TextGenChunk]:
         """流式生成文本（POST /v1/chat/completions，stream=true，SSE）。
 
@@ -471,6 +539,10 @@ class UnavailableWritingAdapter:
 
     def unload(self, model: str | None = None) -> dict:
         """未装配时无法卸载。"""
+        raise AdapterError(ErrorCode.NOT_IMPLEMENTED, f"写作能力不可用：{self.reason}")
+
+    def generate_tool(self, req: TextGenRequest, tool: dict, timeout_s: float | None = None) -> dict:
+        """未装配时无法做工具调用。"""
         raise AdapterError(ErrorCode.NOT_IMPLEMENTED, f"写作能力不可用：{self.reason}")
 
     def list_models(self) -> list[dict]:
