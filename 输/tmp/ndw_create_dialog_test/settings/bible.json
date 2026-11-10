@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "settings_revision": 1,
+  "work_id": "wrk_01M73BSP06M2C7F4VTF97W5P64",
+  "premise": {
+    "logline": "《手》的一句话故事待填写",
+    "theme": "",
+    "core_conflict": "",
+    "ending_intent": "",
+    "target_audience": "",
+    "target_length": "novella"
+  },
+  "world": {
+    "era": "待填写",
+    "locations": [],
+    "rules": [],
+    "factions": [],
+    "glossary": []
+  },
+  "outline": {
+    "acts": []
+  },
+  "style": {
+    "tone": "克制",
+    "pov": "third_limited",
+    "tense": "past",
+    "prose_style": "",
+    "forbidden": [],
+    "visual_style": ""
+  },
+  "continuity": {
+    "timeline": [],
+    "open_threads": []
+  },
+  "characters_ref": "characters.json",
+  "voices_ref": "voices.json",
+  "created_at": "2026-11-10T18:33:47Z",
+  "updated_at": "2026-11-10T18:33:47Z"
+}

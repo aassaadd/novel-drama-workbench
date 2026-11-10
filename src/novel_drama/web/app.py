@@ -1287,6 +1287,34 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         payload["root"] = str(ProjectStore(body["dir"]).root)
         return payload
 
+    @app.post("/api/ui/project/pick-dir")
+    def ui_project_pick_dir() -> dict:
+        """弹出 macOS 原生「选择文件夹」面板，返回选中的绝对路径。
+
+        返回:
+            `{"path": 绝对路径}`；用户点取消时 `{"path": ""}`。
+
+        异常:
+            HTTPException 500: 非 macOS，或 osascript 调用失败 / 超时。
+        """
+        if sys.platform != "darwin":
+            raise HTTPException(status_code=500, detail={"code": 3, "message": "当前系统不支持选择文件夹"})
+        # 直接由 osascript 弹原生面板，不经过 System Events，免掉额外的自动化授权
+        script = 'POSIX path of (choose folder with prompt "选择工程目录")'
+        try:
+            result = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=300)
+        except subprocess.TimeoutExpired as exc:
+            raise HTTPException(status_code=500, detail={"code": 3, "message": "选择目录超时"}) from exc
+        if result.returncode != 0:
+            stderr = result.stderr.strip()
+            # 用户点「取消」时 osascript 返回 -128，不当作错误打扰
+            if "-128" in stderr or "User canceled" in stderr:
+                return {"path": ""}
+            raise HTTPException(status_code=500, detail={"code": 3, "message": f"选择目录失败：{stderr or result.returncode}"})
+        # choose folder 的 POSIX path 末尾带斜杠，去掉后与手输路径保持一致
+        picked = result.stdout.strip().rstrip("/") or "/"
+        return {"path": picked}
+
     @app.get("/api/ui/file")
     def ui_file(path: str = Query(...), project: str = Query(...)):
         """只读返回工程内单个文件，供页面内联预览图片 / 音频 / 视频。

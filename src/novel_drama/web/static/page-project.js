@@ -379,8 +379,15 @@
     if (busy) return false;
     const targetDir = String(dir || "").trim();
     const targetTitle = String(title || "").trim();
-    if (!targetDir || !targetTitle) {
-      NW.toast("目录与书名都要填");
+    // 分开提示并聚焦到缺的那一项，避免只说「都要填」却不知道哪项空着
+    if (!targetDir) {
+      NW.toast("请填写工程目录");
+      if (el("npDir")) el("npDir").focus();
+      return false;
+    }
+    if (!targetTitle) {
+      NW.toast("请填写书名");
+      if (el("npTitle")) el("npTitle").focus();
       return false;
     }
     busy = true;
@@ -424,10 +431,13 @@
       <h3 class="modal-title">新建工程</h3>
       <p class="modal-hint">只需要目录与书名；作者、题材建完后在「作品信息」里补。</p>
       <label class="stack">目录
-        <input id="npDir" placeholder="~/novels/new-book" spellcheck="false" />
+        <span class="field-action">
+          <input id="npDir" placeholder="例如：~/novels/new-book" spellcheck="false" />
+          <button class="btn small" type="button" data-act="pick">选择…</button>
+        </span>
       </label>
       <label class="stack">书名
-        <input id="npTitle" placeholder="书名" />
+        <input id="npTitle" placeholder="例如：长安十二时辰" />
       </label>
       <div class="modal-foot">
         <button class="btn" type="button" data-act="cancel">取消</button>
@@ -462,9 +472,27 @@
     });
     dialog.querySelector('[data-act="cancel"]').addEventListener("click", close);
     dialog.querySelector('[data-act="create"]').addEventListener("click", submit);
+
+    /* 目录选择：调后端弹 macOS 原生文件夹面板，选中后回填输入框。 */
+    const pickButton = dialog.querySelector('[data-act="pick"]');
+    pickButton.addEventListener("click", async () => {
+      pickButton.disabled = true;
+      pickButton.textContent = "选择中…";
+      try {
+        const picked = await NW.api("/api/ui/project/pick-dir", { method: "POST" });
+        if (picked.path) el("npDir").value = picked.path;
+      } catch (error) {
+        NW.toast(`选择目录失败：${error.message}`);
+      } finally {
+        pickButton.textContent = "选择…";
+        pickButton.disabled = false;
+      }
+    });
     dialog.querySelectorAll("input").forEach((input) => {
       input.addEventListener("keydown", (event) => {
         if (event.key !== "Enter") return;
+        // 中文输入法选词时也会发 Enter，此时输入框内容还没提交，不能当作创建
+        if (event.isComposing || event.keyCode === 229) return;
         event.preventDefault();
         submit();
       });
