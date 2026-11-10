@@ -63,6 +63,15 @@
   /* 生成结果里的内部字段：预览不展示，但回填时原样保留 */
   const INTERNAL_FIELDS = new Set(["id", "created_at", "updated_at", "cover_asset"]);
 
+  /* 枚举字段的可选值：预览里渲染成下拉菜单，避免手改出非法值 */
+  const FIELD_ENUMS = {
+    target_length: { short: "短篇", novella: "中篇", novel: "长篇", series: "长篇连载" },
+    pov: { first: "第一人称", third_limited: "第三人称·有限", third_omniscient: "第三人称·全知", second: "第二人称" },
+    tense: { past: "过去时", present: "现在时" },
+    role: { protagonist: "主角", antagonist: "反派", supporting: "配角", minor: "龙套" },
+    gender: { male: "男", female: "女", other: "其他", unknown: "性别未知" },
+  };
+
   const boundRoots = new WeakSet(); // 已绑定的委托根节点，保证重复 bind 不重复监听
   const el = (id) => document.getElementById(id);
   let previewMask = null; // 当前生成预览浮层（单例）
@@ -300,6 +309,7 @@
     keys.forEach((key) => {
       const original = fields[key];
       const text = fieldText(original);
+      const enums = FIELD_ENUMS[key];
       const wrapper = document.createElement("div");
       wrapper.className = "gen-field";
 
@@ -311,35 +321,60 @@
       nameNode.textContent = FIELD_LABELS[key] || key;
       head.appendChild(nameNode);
 
-      const count = document.createElement("span");
-      count.className = "gen-field-count";
-      count.textContent = `${text.length} 字`;
-      head.appendChild(count);
-
-      const zoom = document.createElement("button");
-      zoom.type = "button";
-      zoom.className = "btn small amplify-btn";
-      zoom.textContent = "⤢";
-      zoom.title = "放大编辑";
-      zoom.setAttribute("data-amplify", "");
       const inputId = `gen-field-${++fieldSeq}`;
-      zoom.dataset.target = inputId;
-      zoom.dataset.title = FIELD_LABELS[key] || key;
-      head.appendChild(zoom);
+      let read;
 
-      const textarea = document.createElement("textarea");
-      textarea.className = "gen-input";
-      textarea.id = inputId;
-      textarea.value = text;
-      textarea.rows = Math.min(8, Math.max(2, text.split("\n").length));
-      textarea.addEventListener("input", () => {
-        count.textContent = `${textarea.value.length} 字`;
-      });
+      if (enums) {
+        /* 枚举字段：用下拉菜单展示，值不在枚举里时保留一条「未识别」，避免静默丢数据 */
+        const current = text.trim();
+        const select = document.createElement("select");
+        select.className = "gen-input";
+        select.id = inputId;
+        const addOption = (value, label) => {
+          const option = document.createElement("option");
+          option.value = value;
+          option.textContent = label;
+          select.appendChild(option);
+        };
+        if (!current) addOption("", "（未选择）");
+        if (current && !(current in enums)) addOption(current, `${current}（未识别）`);
+        Object.entries(enums).forEach(([value, label]) => addOption(value, label));
+        select.value = current;
+        wrapper.appendChild(head);
+        wrapper.appendChild(select);
+        read = () => select.value;
+      } else {
+        const count = document.createElement("span");
+        count.className = "gen-field-count";
+        count.textContent = `${text.length} 字`;
+        head.appendChild(count);
 
-      wrapper.appendChild(head);
-      wrapper.appendChild(textarea);
+        const zoom = document.createElement("button");
+        zoom.type = "button";
+        zoom.className = "btn small amplify-btn";
+        zoom.textContent = "⤢";
+        zoom.title = "放大编辑";
+        zoom.setAttribute("data-amplify", "");
+        zoom.dataset.target = inputId;
+        zoom.dataset.title = FIELD_LABELS[key] || key;
+        head.appendChild(zoom);
+
+        const textarea = document.createElement("textarea");
+        textarea.className = "gen-input";
+        textarea.id = inputId;
+        textarea.value = text;
+        textarea.rows = Math.min(8, Math.max(2, text.split("\n").length));
+        textarea.addEventListener("input", () => {
+          count.textContent = `${textarea.value.length} 字`;
+        });
+
+        wrapper.appendChild(head);
+        wrapper.appendChild(textarea);
+        read = () => (textarea.value === fieldText(original) ? original : parseFieldText(textarea.value, original));
+      }
+
       list.appendChild(wrapper);
-      entries.push({ key, original, textarea });
+      entries.push({ key, read });
     });
 
     dialog.appendChild(list);
@@ -362,10 +397,7 @@
       const result = Object.assign({}, fields);
       entries.forEach((entry) => {
         // 未改动的字段原样保留（包括 id / 时间戳），只解析真正编辑过的字段
-        result[entry.key] =
-          entry.textarea.value === fieldText(entry.original)
-            ? entry.original
-            : parseFieldText(entry.textarea.value, entry.original);
+        result[entry.key] = entry.read();
       });
       closePreview();
       if (typeof opts.onApply === "function") opts.onApply(result);

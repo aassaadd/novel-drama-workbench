@@ -101,10 +101,22 @@ def generate_outline(
     characters = store.load_characters()["characters"]
     adapter = build_writing_adapter(config, bible)
 
+    # 工具参数里的 character_ids 需要真实 id，把角色表一并写进提示词
+    char_rows = _characters_payload(characters)
+    context_parts = [f"为《{work.get('title') or '未命名'}》生成 {acts} 幕大纲，每幕 {chapters_per_act} 章，每章 {beats_per_chapter} 个节拍。"]
+    logline = (bible.get("premise") or {}).get("logline")
+    if logline:
+        context_parts.append(f"一句话故事：{logline}")
+    genres = work.get("genre") or []
+    if genres:
+        context_parts.append(f"题材：{'、'.join(str(item) for item in genres)}")
+    if char_rows:
+        context_parts.append("可用人物（id=姓名）：" + "、".join(f"{item['id']}={item.get('name')}" for item in char_rows))
+
     req = TextGenRequest(
         task="outline",
-        system="你是长篇小说的结构编辑，只输出 JSON，不要解释。",
-        messages=[Message("user", f"为《{work.get('title')}》生成 {acts} 幕大纲，每幕 {chapters_per_act} 章，每章 {beats_per_chapter} 个节拍。")],
+        system="你是长篇小说的结构编辑，按工具参数输出大纲，不要解释。",
+        messages=[Message("user", "\n".join(context_parts))],
         stream=False,
         metadata={
             "acts": acts,
@@ -112,32 +124,28 @@ def generate_outline(
             "beats_per_chapter": beats_per_chapter,
             "chapter_words": chapter_words,
             "title": work.get("title"),
-            "logline": (bible.get("premise") or {}).get("logline"),
-            "genre": work.get("genre") or [],
-            "characters": _characters_payload(characters),
+            "logline": logline,
+            "genre": genres,
+            "characters": char_rows,
         },
     )
-    result = adapter.generate(req)
-    try:
-        payload = json.loads(result.text)
-        raw_acts = payload["acts"]
-        if not isinstance(raw_acts, list) or not raw_acts:
-            raise ValueError("acts 为空")
-    except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
-        raise AdapterError(
-            ErrorCode.INVALID_INPUT,
-            f"写作适配器返回的大纲不是合法 JSON：{exc}；原始输出前 200 字：{result.text[:200]}",
-            detail={"raw": result.text[:2000]},
-        ) from exc
+    payload = _generate_json(adapter, req, "outline")
+    raw_acts = payload.get("acts")
+    if not isinstance(raw_acts, list) or not raw_acts:
+        raise AdapterError(ErrorCode.INVALID_INPUT, "写作适配器返回的大纲为空：acts 必须是非空数组")
 
     # 结构化补全：分配稳定 ID、合并到设定库（不覆盖已有正文）
     built_acts = []
     chapter_count = 0
     beat_count = 0
     for act_index, raw_act in enumerate(raw_acts):
+        if not isinstance(raw_act, dict):
+            raise AdapterError(ErrorCode.INVALID_INPUT, f"大纲第 {act_index + 1} 幕必须是对象，实际为：{str(raw_act)[:80]}")
         act = SettingsStore.new_act(raw_act.get("title") or f"第{act_index + 1}幕", raw_act.get("summary") or "")
         for raw_chapter in raw_act.get("chapters") or []:
             chapter_count += 1
+            if not isinstance(raw_chapter, dict):
+                raise AdapterError(ErrorCode.INVALID_INPUT, f"大纲第 {chapter_count} 章必须是对象，实际为：{str(raw_chapter)[:80]}")
             existing = None
             for item in settings_store.all_outline_chapters(bible):
                 if int(item.get("index") or 0) == chapter_count:
@@ -152,6 +160,8 @@ def generate_outline(
             )
             for raw_beat in raw_chapter.get("beats") or []:
                 beat_count += 1
+                if not isinstance(raw_beat, dict):
+                    raise AdapterError(ErrorCode.INVALID_INPUT, f"大纲第 {beat_count} 个节拍必须是对象，实际为：{str(raw_beat)[:80]}")
                 outline_chapter["beats"].append(
                     SettingsStore.new_beat(
                         raw_beat.get("summary") or f"第{beat_count}个节拍",
@@ -173,7 +183,7 @@ def generate_outline(
         "acts": built_acts,
         "chapters": chapter_count,
         "beats": beat_count,
-        "provider": getattr(result, "model", "") or "offline-writing",
+        "provider": getattr(adapter, "model", "") or "offline-writing",
         "settings_revision": bible.get("settings_revision"),
         "binding": binding,
         "golden_three": golden,
@@ -741,11 +751,62 @@ _STYLE_TOOL_SCHEMA = {
 }
 
 
+#: 大纲参数 schema（幕→章→节拍三层结构）
+_OUTLINE_TOOL_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "acts": {
+            "type": "array",
+            "description": "幕列表，按顺序排列",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string", "description": "幕标题，80 字以内"},
+                    "summary": {"type": "string", "description": "本幕概要，300 字以内"},
+                    "chapters": {
+                        "type": "array",
+                        "description": "本幕章节，按顺序排列",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "title": {"type": "string", "description": "章节标题，80 字以内"},
+                                "summary": {"type": "string", "description": "本章概要，300 字以内"},
+                                "beats": {
+                                    "type": "array",
+                                    "description": "本章节拍，每个元素必须是对象（不要写成字符串）",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "summary": {"type": "string", "description": "节拍内容，200 字以内"},
+                                            "character_ids": {
+                                                "type": "array",
+                                                "items": {"type": "string"},
+                                                "description": "参与人物 id，从给定角色表中选取，可为空",
+                                            },
+                                            "turning_point": {"type": "boolean", "description": "是否为本章转折点"},
+                                            "target_words": {"type": "integer", "description": "该节拍目标字数"},
+                                        },
+                                        "required": ["summary"],
+                                    },
+                                },
+                            },
+                            "required": ["title"],
+                        },
+                    },
+                },
+                "required": ["title"],
+            },
+        }
+    },
+    "required": ["acts"],
+}
+
+
 def _gen_tool(step: str | None) -> dict | None:
     """按生成步骤返回对应的工具定义（OpenAI tools 单项）。
 
     参数:
-        step: premise|style|world|worlds|character|characters。
+        step: outline|premise|style|world|worlds|character|characters。
 
     返回:
         工具定义 dict；未知步骤返回 None。
@@ -753,6 +814,11 @@ def _gen_tool(step: str | None) -> dict | None:
     异常:
         无。
     """
+    if step == "outline":
+        return {
+            "type": "function",
+            "function": {"name": "emit_outline", "description": "输出幕/章/节拍大纲", "parameters": _OUTLINE_TOOL_SCHEMA},
+        }
     if step == "premise":
         return {
             "type": "function",
@@ -791,7 +857,7 @@ def _gen_tool(step: str | None) -> dict | None:
             "type": "function",
             "function": {
                 "name": "emit_characters",
-                "description": "输出 1 名主角与 2-6 名主要配角",
+                "description": "输出人物设定：数量按需求自行判断（至少 1 名主角），不要凑数",
                 "parameters": {
                     "type": "object",
                     "properties": {"characters": {"type": "array", "items": _CHARACTER_TOOL_SCHEMA}},
@@ -1277,12 +1343,12 @@ def generate_settings(store: ProjectStore, config: AppConfig, step: str, overwri
 
 
 def generate_characters(store: ProjectStore, config: AppConfig, count: int | None = None, brief: str | None = None) -> dict:
-    """生成主角与主要配角（只返回结果，不写盘）。
+    """生成人物设定（只返回结果，不写盘）。
 
     参数:
         store: 工程。
         config: 本机配置。
-        count: 期望人物总数（含主角），缺省交给模型按 1 主角 + 2–6 配角产出。
+        count: 期望人物总数；为空时由模型按需求自行判断需要几个角色。
         brief: 用户补充要求（拼进提示词，离线实现会写进人物小传/性格）。
 
     返回:
@@ -1290,7 +1356,7 @@ def generate_characters(store: ProjectStore, config: AppConfig, count: int | Non
         appearance_prompt, negative_prompt, relationships}]}。
 
     异常:
-        ValueError: 模型输出不是合法 JSON，或缺少主角 / 配角数量越界 / 重名。
+        ValueError: 模型输出不是合法 JSON 或重名。
     """
     settings_store = SettingsStore(store.root)
     bible = settings_store.load_or_none() or {}
@@ -1299,7 +1365,9 @@ def generate_characters(store: ProjectStore, config: AppConfig, count: int | Non
     adapter = build_writing_adapter(config, bible)
     brief_text = str(brief or "").strip()
 
-    ask = f"为《{work.get('title') or '未命名'}》生成 1 名主角与 2–6 名主要配角。"
+    ask = f"为《{work.get('title') or '未命名'}》生成人物设定：根据需求自行判断需要几个角色（至少 1 名主角，其余按剧情需要决定数量与定位），不要凑数。"
+    if count:
+        ask += f"本次共生成 {count} 个角色。"
     if brief_text:
         ask += f"补充要求：{brief_text}。"
     req = TextGenRequest(
@@ -1353,11 +1421,9 @@ def generate_characters(store: ProjectStore, config: AppConfig, count: int | Non
             }
         )
 
+    # 角色数量与定位由需求决定，这里只保证至少有一个主角，不再限定配角人数
     if not any(item["role"] == "protagonist" for item in characters):
         raise ValueError("人物里至少需要 1 个 protagonist（主角）")
-    supporting = [item for item in characters if item["role"] in ("antagonist", "supporting", "minor")]
-    if not 2 <= len(supporting) <= 6:
-        raise ValueError(f"配角数量必须为 2–6 人（当前 {len(supporting)} 人）")
     return {"characters": characters}
 
 

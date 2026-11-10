@@ -1876,6 +1876,12 @@ table.grid td.wrap { word-break: break-word; }
   resize: vertical;
 }
 
+/* 生成预览中的枚举字段用下拉菜单展示，不需要文本域高度与拉伸 */
+select.gen-input {
+  min-height: 36px;
+  resize: none;
+}
+
 .gen-input:focus { outline: none; border-color: var(--accent); }
 
 /* 生成世界的候选勾选列表 */

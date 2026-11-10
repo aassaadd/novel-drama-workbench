@@ -144,16 +144,36 @@
   }
 
   /* 「生成需求输入」薄封装：标题 + 多行文本，允许为空提交，交给调用方判断。
-   * 参数：options {title, placeholder, onSave}
+   * 需求按标题缓存在 localStorage，下次点开自动带出上次填写的内容。
+   * 参数：options {title, placeholder, value, onSave}
    * 返回：无。
    */
   function openBrief(options) {
     const opts = options || {};
+    const title = opts.title || "生成需求";
+    const cacheKey = `ndw.brief.${title}`;
+    let cached = "";
+    if (opts.value === undefined) {
+      try {
+        cached = localStorage.getItem(cacheKey) || "";
+      } catch (error) {
+        // 隐私模式下 localStorage 不可用，退化为不带缓存
+      }
+    }
     open({
-      title: opts.title || "生成需求",
+      title,
+      value: opts.value === undefined ? cached : opts.value,
       placeholder: opts.placeholder || "",
+      hint: cached ? "已带出上次填写的需求，可直接修改后重新生成" : "",
       submitText: "生成",
-      onSave: opts.onSave,
+      onSave(text) {
+        try {
+          localStorage.setItem(cacheKey, String(text || ""));
+        } catch (error) {
+          // 写入失败不影响本次生成
+        }
+        if (typeof opts.onSave === "function") opts.onSave(text);
+      },
     });
   }
 
