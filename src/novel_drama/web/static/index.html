@@ -212,6 +212,15 @@
 
               <!-- 设定库两分区：梗概 / 文风，每区右上角「✨ 按需求生成」只回填不落盘 -->
               <div id="pjSettings" class="settings-sections">
+                <!-- 画面风格：图片与视频统一读这一份，固定模板下拉 + 可自定义 -->
+                <div class="card">
+                  <div class="card-head">
+                    <h3>画面风格（图片 / 视频统一）</h3>
+                  </div>
+                  <p class="muted">选一个固定风格模板：全身像、头像、三视图与所有视频镜头都按它生成，全片风格一致。</p>
+                  <div id="pjVisualFields" class="form-grid"></div>
+                </div>
+
                 <div class="card">
                   <div class="card-head">
                     <h3>故事梗概</h3>
@@ -233,7 +242,7 @@
                     </div>
                   </div>
                   <div class="actions">
-                    <button id="pjSave" class="btn primary" type="button">保存设定（梗概/文风）</button>
+                    <button id="pjSave" class="btn primary" type="button">保存设定（画面风格 / 梗概 / 文风）</button>
                     <button id="pjExport" class="btn" type="button">导出设定 JSON</button>
                   </div>
                 </div>

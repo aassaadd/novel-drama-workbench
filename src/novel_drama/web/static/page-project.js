@@ -19,7 +19,6 @@
     ["pov", "视角", "style"],
     ["tense", "时态", "style"],
     ["prose_style", "文风", "style"],
-    ["visual_style", "视觉风格", "style"],
   ];
 
   /* 两个分区各自的表单容器，顺序与页面上的卡片一致 */
@@ -154,6 +153,9 @@
     Object.entries(SECTION_INPUTS).forEach(([section, id]) => {
       el(id).innerHTML = groups[section].join("");
     });
+    /* 画面风格单独一张卡片（图片 / 视频统一），放在设定库最前面 */
+    const visual = (bible.style || {}).visual_style ?? "";
+    el("pjVisualFields").innerHTML = fieldHtml("visual_style", "画面风格", visual);
     /* 禁止写法是 style 里的数组字段，单独渲染成逗号分隔输入框 */
     const forbidden = ((bible.style || {}).forbidden || []).join("，");
     el("pjForbidden").value = forbidden;
