@@ -1149,6 +1149,68 @@ def _bible_digest(bible: dict) -> dict:
     }
 
 
+def _project_context(
+    work: dict,
+    bible: dict,
+    characters: list[dict] | None = None,
+    worlds: list[dict] | None = None,
+) -> str:
+    """把项目基础信息拼成提示词上下文，保证生成内容不脱离小说设定。
+
+    参数:
+        work: 作品信息（title/author/genre）。
+        bible: 设定库（premise/style/world）。
+        characters: 已有角色表，用于避免重名并呼应既有关系。
+        worlds: 世界库条目，用于交代时代、规则与关键地点。
+
+    返回:
+        多行上下文文本；一条信息都没有时返回空串。
+    """
+    premise = bible.get("premise") or {}
+    style = bible.get("style") or {}
+    world = bible.get("world") or {}
+    lines: list[str] = []
+
+    title = work.get("title") or "未命名"
+    genres = "、".join(str(item) for item in (work.get("genre") or []) if item)
+    lines.append(f"作品：{title}" + (f"（题材：{genres}）" if genres else ""))
+    if premise.get("logline"):
+        lines.append(f"一句话故事：{premise['logline']}")
+    if premise.get("theme"):
+        lines.append(f"主题：{premise['theme']}")
+    if premise.get("core_conflict"):
+        lines.append(f"核心冲突：{premise['core_conflict']}")
+    if premise.get("ending_intent"):
+        lines.append(f"结局意图：{premise['ending_intent']}")
+    if premise.get("target_audience"):
+        lines.append(f"目标读者：{premise['target_audience']}")
+    if style.get("tone"):
+        lines.append(f"叙事基调：{style['tone']}")
+    if style.get("prose_style"):
+        lines.append(f"文笔风格：{str(style['prose_style'])[:200]}")
+    if world.get("era"):
+        lines.append(f"时代背景：{world['era']}")
+    if world.get("rules"):
+        lines.append("世界规则：" + "；".join(str(item) for item in world["rules"][:6]))
+    if world.get("factions"):
+        lines.append("主要势力：" + "、".join(str(item) for item in world["factions"][:6]))
+    location_names = [str(item.get("name")) for item in (world.get("locations") or []) if item.get("name")][:6]
+    if location_names:
+        lines.append("关键地点：" + "、".join(location_names))
+    for item in (worlds or [])[:3]:
+        summary = str(item.get("summary") or "").strip()[:200]
+        parts = [f"世界「{item.get('name') or '未命名'}」"]
+        if item.get("era"):
+            parts.append(f"时代 {item['era']}")
+        if summary:
+            parts.append(summary)
+        lines.append("；".join(parts))
+    names = [str(item.get("name")) for item in (characters or []) if item.get("name") and item.get("role") != "narrator"]
+    if names:
+        lines.append("已有角色（不要重名，可呼应既有关系）：" + "、".join(names[:20]))
+    return "\n".join([line for line in lines if line.strip()])
+
+
 def _worlds_digest(worlds: list[dict], ids: list[str]) -> str | None:
     """把选中世界条目拼成章节上下文文本（委托 writing/worlds.worlds_digest）。
 
@@ -1362,6 +1424,9 @@ def generate_characters(store: ProjectStore, config: AppConfig, count: int | Non
     bible = settings_store.load_or_none() or {}
     project = store.load_project()
     work = project.get("work") or {}
+    existing_characters = store.load_characters()["characters"]
+    world_store = WorldStore(store.root)
+    worlds = world_store.list_worlds() if world_store.exists() else []
     adapter = build_writing_adapter(config, bible)
     brief_text = str(brief or "").strip()
 
@@ -1370,10 +1435,13 @@ def generate_characters(store: ProjectStore, config: AppConfig, count: int | Non
         ask += f"本次共生成 {count} 个角色。"
     if brief_text:
         ask += f"补充要求：{brief_text}。"
+    # 无论需求怎么写，都先把作品梗概/文风/世界/已有角色交给模型，避免脱离设定
+    context = _project_context(work, bible, existing_characters, worlds)
+    prompt = f"{context}\n\n任务：{ask}" if context else ask
     req = TextGenRequest(
         task="character",
-        system="你是中文小说的人物编辑，只输出一个 JSON 对象（键为 characters），不要解释。",
-        messages=[Message("user", ask)],
+        system="你是中文小说的人物编辑，人物必须与给定的作品设定一致，只按工具参数输出，不要解释。",
+        messages=[Message("user", prompt)],
         stream=False,
         temperature=0.8,
         metadata={
@@ -1574,16 +1642,23 @@ def generate_section(
         return {"section": "world", "fields": entry, "target_id": target_id}
 
     characters = store.load_characters()["characters"]
+    world_store = WorldStore(store.root)
+    worlds = world_store.list_worlds() if world_store.exists() else []
     existing_char = next((item for item in characters if item.get("id") == target_id), None) if target_id else None
     if target_id and existing_char is None:
         raise ValueError(f"角色不存在: {target_id}")
     ask = "生成一个完整人物设定，字段：name/role/gender/age_range/personality/background/appearance_prompt/negative_prompt/state.relationship_notes；personality 写 3-5 个短标签，每个不超过 20 字。"
+    if existing_char:
+        ask += f"这是对已有角色「{existing_char.get('name')}」的改写，保持与现有设定的连贯。"
     if brief_text:
         ask += f"补充要求：{brief_text}。"
+    # 单人物同样注入项目设定，避免脱离小说背景
+    context = _project_context(work, bible, characters, worlds)
+    prompt = f"{context}\n\n任务：{ask}" if context else ask
     req = TextGenRequest(
         task="character",
-        system="你是中文小说的人物编辑，只输出一个 JSON 对象，不要解释。",
-        messages=[Message("user", f"为《{work.get('title') or '未命名'}》{ask}")],
+        system="你是中文小说的人物编辑，人物必须与给定的作品设定一致，只按工具参数输出，不要解释。",
+        messages=[Message("user", prompt)],
         stream=False,
         temperature=0.8,
         metadata={
