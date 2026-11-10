@@ -8,6 +8,11 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG_PATH = REPO_ROOT / "config" / "config.yaml"
+# 页面「设置」写出的覆盖层：与手写的 config.yaml 分开存，避免页面保存时抹掉注释
+DEFAULT_UI_CONFIG_PATH = REPO_ROOT / "config" / "config.ui.yaml"
+
+# 模型下载镜像链：国内优先，国外降级（音频与 ComfyUI 模型下载共用）
+_DEFAULT_DOWNLOAD_MIRRORS = ["https://hf-mirror.com", "https://huggingface.co"]
 
 # 无配置文件时的最小默认值，保证 doctor / init 可用
 _FALLBACK = {
@@ -40,8 +45,11 @@ _FALLBACK = {
         "job_timeout_ms": 1800000,
         "status_timeout_ms": 10000,
         "templates_dir": "config/comfy",
-        "templates": {"image": "qwen_image_2.1_3stage", "video_t2v": "minimax_h3_5s", "video_i2v": "ltx_2.3_i2v"},
+        # 空字符串表示自动探测（由 media.comfy_models 扫描 ComfyUI 日志与常见安装路径）
+        "models_dir": "",
+        "templates": {"image": "qwen_image_accel", "video_t2v": "minimax_h3_accel_t2v", "video_i2v": "minimax_h3_accel"},
     },
+    "models": {"download_mirrors": list(_DEFAULT_DOWNLOAD_MIRRORS)},
     "gpu": {"lock_path": "/Volumes/other/gpu.lock", "max_concurrent": 1, "poll_interval_s": 2},
     "tts": {
         "segmentation": {
@@ -101,6 +109,9 @@ class AppConfig:
     path: Path | None = None
     project_root: Path | None = None
     warnings: list[str] = field(default_factory=list)
+    # 页面覆盖层（config/config.ui.yaml）：只记录被页面改过的键，用于前端标「来源」
+    ui_values: dict = field(default_factory=dict)
+    ui_path: Path | None = None
 
     def get(self, dotted: str, default=None):
         """按 `a.b.c` 读取配置项。
@@ -124,12 +135,46 @@ class AppConfig:
         """适配器装配表。"""
         return self.raw.get("adapters", {})
 
+    @property
+    def models_dir(self) -> Path | None:
+        """ComfyUI 模型根目录（`comfyui.models_dir`）。
 
-def load_config(path: str | Path | None = None) -> AppConfig:
+        参数:
+            无。
+
+        返回:
+            绝对化后的 Path；配置为空时返回 None，由 comfy_models 自动探测。
+        """
+        value = self.get("comfyui.models_dir")
+        if not value or not str(value).strip():
+            return None
+        path = Path(str(value).strip()).expanduser()
+        return path if path.is_absolute() else (REPO_ROOT / path)
+
+    @property
+    def download_mirrors(self) -> list[str]:
+        """模型下载镜像链（`models.download_mirrors`）。
+
+        参数:
+            无。
+
+        返回:
+            镜像地址列表；配置缺失或为空时返回内置默认（国内优先、国外降级）。
+        """
+        value = self.get("models.download_mirrors")
+        if isinstance(value, list):
+            mirrors = [str(item).strip().rstrip("/") for item in value if str(item).strip()]
+            if mirrors:
+                return mirrors
+        return list(_DEFAULT_DOWNLOAD_MIRRORS)
+
+
+def load_config(path: str | Path | None = None, ui_path: str | Path | None = None) -> AppConfig:
     """加载本机配置。
 
     参数:
         path: 配置文件路径；默认 `config/config.yaml`，不存在时用内置默认值。
+        ui_path: 页面覆盖层路径；默认 `config/config.ui.yaml`，不存在则跳过。
 
     返回:
         AppConfig。缺少 PyYAML 时记录 warning 并使用默认值。
@@ -149,6 +194,38 @@ def load_config(path: str | Path | None = None) -> AppConfig:
     else:
         warnings.append(f"未找到配置文件 {config_path}，使用内置默认配置")
 
-    merged = _deep_merge(_FALLBACK, raw if isinstance(raw, dict) else {})
+    ui_values = _read_yaml(Path(ui_path).expanduser() if ui_path else DEFAULT_UI_CONFIG_PATH, warnings)
+
+    # 三层：内置默认 < 手写 config.yaml < 页面覆盖层
+    merged = _deep_merge(_deep_merge(_FALLBACK, raw if isinstance(raw, dict) else {}), ui_values)
     project_root = os.environ.get("NDW_PROJECT") or merged.get("project_root")
-    return AppConfig(raw=merged, path=config_path if config_path.exists() else None, project_root=Path(project_root).expanduser() if project_root else None, warnings=warnings)
+    return AppConfig(
+        raw=merged,
+        path=config_path if config_path.exists() else None,
+        project_root=Path(project_root).expanduser() if project_root else None,
+        warnings=warnings,
+        ui_values=ui_values,
+        ui_path=(Path(ui_path).expanduser() if ui_path else DEFAULT_UI_CONFIG_PATH),
+    )
+
+
+def _read_yaml(path: Path, warnings: list[str]) -> dict:
+    """读取 YAML 文件；不存在或为空返回空字典。
+
+    参数:
+        path: 文件路径。
+        warnings: 解析告警收集列表（就地追加）。
+
+    返回:
+        解析出的字典；文件缺失、内容为空或解析失败时返回 {}。
+    """
+    if not path.exists():
+        return {}
+    try:
+        import yaml
+
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except Exception as exc:  # 页面覆盖层写坏了也不能拖垮 CLI 启动
+        warnings.append(f"页面覆盖层解析失败，已忽略 {path}: {exc}")
+        return {}
+    return data if isinstance(data, dict) else {}

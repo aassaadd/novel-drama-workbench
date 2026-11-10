@@ -19,8 +19,11 @@ from pathlib import Path
 #: 默认模型根目录（外置盘，绝不落系统盘）
 DEFAULT_MODELS_ROOT = "/Volumes/other/models/ndw"
 
-#: 下载统一走镜像（直连 HF 在这台机器上不可达）
-HF_MIRROR = "https://hf-mirror.com"
+#: 默认镜像链：国内镜像优先，直连官方源作为降级
+DEFAULT_MIRRORS = ("https://hf-mirror.com", "https://huggingface.co")
+
+#: 默认镜像（保留旧引用，等于镜像链第一项）
+HF_MIRROR = DEFAULT_MIRRORS[0]
 
 #: 单项超过这个体积必须先报体积、等人工确认（字节）
 BIG_MODEL_BYTES = 15 * 1024**3
@@ -188,6 +191,26 @@ CATALOG: list[dict] = [
 def _now() -> str:
     """当前本地时间（用于暂存目录命名）。"""
     return datetime.now().strftime("%Y%m%dT%H%M%S")
+
+
+def download_mirrors(config) -> list[str]:
+    """返回本次下载要尝试的镜像链。
+
+    优先读配置 `models.download_mirrors`（过滤空串），没有配置或配置为空时
+    回落到 `DEFAULT_MIRRORS`。
+
+    参数:
+        config: AppConfig（可为 None，此时直接用默认镜像链）。
+
+    返回:
+        镜像地址列表，按尝试顺序排列。
+    """
+    raw = config.get("models.download_mirrors") if config is not None else None
+    if isinstance(raw, (list, tuple)):
+        mirrors = [str(item).strip() for item in raw if str(item).strip()]
+        if mirrors:
+            return mirrors
+    return list(DEFAULT_MIRRORS)
 
 
 def models_root(config) -> Path:
@@ -537,27 +560,50 @@ def _same_volume(a: Path, b: Path) -> bool:
         return False
 
 
-def _hub_api():
-    """返回指向镜像的 HfApi（只走 hf-mirror，不走直连）。
+def _hub_api(mirror: str):
+    """返回指向指定镜像的 HfApi（不读全局缓存、不走直连）。
+
+    参数:
+        mirror: 镜像地址（如 `https://hf-mirror.com`）。
 
     返回:
         `huggingface_hub.HfApi` 实例。
     """
-    os.environ["HF_ENDPOINT"] = HF_MIRROR
+    os.environ["HF_ENDPOINT"] = mirror
     from huggingface_hub import HfApi
 
-    return HfApi(endpoint=HF_MIRROR)
+    return HfApi(endpoint=mirror)
 
 
-def remote_size(key: str) -> dict:
-    """查询清单项在镜像上的体积（下载前必须先报体积）。
+def _attempts_digest(attempts: list[dict]) -> str:
+    """把各镜像的失败原因拼成一句话（用于 error 汇总）。
+
+    参数:
+        attempts: 每个镜像的尝试记录，元素含 `mirror` / `ok` / `error`。
+
+    返回:
+        形如 `https://a: 超时；https://b: 404` 的摘要。
+    """
+    parts = []
+    for item in attempts:
+        reason = item.get("error") or "未知原因"
+        parts.append(f"{item.get('mirror')}：{reason}")
+    return "；".join(parts) or "无可用镜像"
+
+
+def remote_size(key: str, mirrors: list[str] | None = None) -> dict:
+    """查询清单项在镜像链上的体积（下载前必须先报体积）。
+
+    逐个镜像调用 `HfApi(endpoint=镜像).model_info(...)`，第一个成功即返回，
+    并记录实际使用的镜像与每个镜像的尝试结果。
 
     参数:
         key: 目录键。
+        mirrors: 镜像链；None 或空列表时用 `DEFAULT_MIRRORS`。
 
     返回:
-        `{"ok","repo","total_bytes","unknown","files":[{"name","bytes"}]}`；
-        仓库不存在或网络失败时 `ok=False` 并带 `error`。
+        `{"ok","repo","mirror_used","attempts","total_bytes","unknown","files"}`；
+        全部镜像失败时 `ok=False`，`error` 汇总每个源的原因，`attempts` 记录逐源结果。
 
     异常:
         ValueError: 目录键不在清单里。
@@ -566,23 +612,43 @@ def remote_size(key: str) -> dict:
     if entry is None:
         raise ValueError(f"未知模型目录键：{key}。用 `ndw models list` 查看可选键")
     repo = entry.get("hf_repo")
-    try:
-        info = _hub_api().model_info(repo, files_metadata=True)
-    except Exception as exc:
-        return {"ok": False, "repo": repo, "error": f"无法获取仓库信息：{exc}"}
-    files = []
-    total = 0
-    unknown = False
-    for sibling in getattr(info, "siblings", None) or []:
-        size = getattr(sibling, "size", None)
-        name = getattr(sibling, "rfilename", "")
-        if size is None:
-            unknown = True
+    chain = list(mirrors) if mirrors else list(DEFAULT_MIRRORS)
+    attempts: list[dict] = []
+    for mirror in chain:
+        try:
+            info = _hub_api(mirror).model_info(repo, files_metadata=True)
+        except Exception as exc:
+            attempts.append({"mirror": mirror, "ok": False, "error": str(exc)})
             continue
-        total += int(size)
-        files.append({"name": name, "bytes": int(size)})
-    files.sort(key=lambda item: item["bytes"], reverse=True)
-    return {"ok": True, "repo": repo, "total_bytes": total, "unknown": unknown, "files": files}
+        attempts.append({"mirror": mirror, "ok": True, "error": None})
+        files = []
+        total = 0
+        unknown = False
+        for sibling in getattr(info, "siblings", None) or []:
+            size = getattr(sibling, "size", None)
+            name = getattr(sibling, "rfilename", "")
+            if size is None:
+                unknown = True
+                continue
+            total += int(size)
+            files.append({"name": name, "bytes": int(size)})
+        files.sort(key=lambda item: item["bytes"], reverse=True)
+        return {
+            "ok": True,
+            "repo": repo,
+            "mirror_used": mirror,
+            "attempts": attempts,
+            "total_bytes": total,
+            "unknown": unknown,
+            "files": files,
+        }
+    return {
+        "ok": False,
+        "repo": repo,
+        "mirror_used": None,
+        "attempts": attempts,
+        "error": f"无法获取仓库信息（{_attempts_digest(attempts)}）",
+    }
 
 
 def install(
@@ -591,11 +657,13 @@ def install(
     yes: bool = False,
     accept_license: bool = False,
     dry_run: bool = False,
+    mirrors: list[str] | None = None,
 ) -> dict:
-    """下载一个模型到模型根目录（先落暂存，校验通过再 mv）。
+    """下载一个模型到模型根目录（按镜像链逐个尝试，先落暂存，校验通过再 mv）。
 
     流程：查清单 → 目标已就位则直接返回 → 许可门禁 → 报体积（>15GB 需确认）
-    → 下载到 `<models_root>/.staging-<key>` → 校验必需文件 → `rename` 到目标 → 再校验一次。
+    → 按镜像链下载到 `<models_root>/.staging-<key>`（每个镜像前设置 `HF_ENDPOINT`，
+    失败则清空本次残留再试下一个）→ 校验必需文件 → `rename` 到目标 → 再校验一次。
 
     参数:
         config: AppConfig。
@@ -603,11 +671,14 @@ def install(
         yes: 已确认体积（超过 15GB 或体积未知时必须为 True）。
         accept_license: 已确认非商用/需授权许可。
         dry_run: 只报体积与许可门禁，不下载。
+        mirrors: 覆盖默认镜像链；None 或空列表时读配置 `models.download_mirrors`。
 
     返回:
-        `{"status": ..., ...}`；status 取值：
+        `{"status": ..., "mirrors": [...], ...}`；status 取值：
         `unknown_key` / `retired` / `already` / `target_incomplete` / `need_license` /
         `need_confirm` / `plan`（dry-run）/ `incomplete` / `error` / `installed`。
+        网络探测阶段的结果带 `mirror_used` 与 `attempts`（逐镜像探测记录）；
+        进入下载后 `attempts` 为逐镜像下载记录。
     """
     entry = catalog_entry(key)
     if entry is None:
@@ -615,27 +686,50 @@ def install(
     if entry["license_gate"] == GATE_RETIRED:
         return {"status": "retired", "key": key, "message": f"{entry['display_name']} 已退役，不再提供下载"}
 
+    chain = list(mirrors) if mirrors else download_mirrors(config)
     root = models_root(config)
     target = root / key
     if target.exists() and any(target.iterdir()):
         missing = required_missing(target)
         if missing:
-            return {"status": "target_incomplete", "key": key, "path": str(target), "missing": missing}
-        return {"status": "already", "key": key, "path": str(target), "bytes": dir_size(target)}
+            return {
+                "status": "target_incomplete",
+                "key": key,
+                "path": str(target),
+                "missing": missing,
+                "mirrors": chain,
+            }
+        return {
+            "status": "already",
+            "key": key,
+            "path": str(target),
+            "bytes": dir_size(target),
+            "mirrors": chain,
+        }
 
     info = {"display_name": entry["display_name"], "key": key, "license": entry["license"],
             "commercial_use": entry["commercial_use"], "license_gate": entry["license_gate"],
-            "note": entry.get("note")}
+            "note": entry.get("note"), "mirrors": chain}
     if entry["license_gate"] in (GATE_BLOCK, GATE_APPROVAL) and not accept_license:
         return {"status": "need_license", **info}
 
-    size = remote_size(key)
+    size = remote_size(key, mirrors=chain)
     if not size.get("ok"):
-        return {"status": "error", "key": key, "repo": entry.get("hf_repo"), "error": size.get("error")}
+        return {
+            "status": "error",
+            "key": key,
+            "repo": entry.get("hf_repo"),
+            "error": size.get("error"),
+            "mirror_used": size.get("mirror_used"),
+            "attempts": size.get("attempts") or [],
+            "mirrors": chain,
+        }
     over_limit = size["total_bytes"] > BIG_MODEL_BYTES or size["unknown"]
     plan = {
         **info,
         "repo": size["repo"],
+        "mirror_used": size.get("mirror_used"),
+        "attempts": size.get("attempts") or [],
         "total_bytes": size["total_bytes"],
         "unknown": size["unknown"],
         "files": size["files"][:5],
@@ -651,13 +745,38 @@ def install(
     staging = root / f".staging-{key.replace('/', '_')}"
     root.mkdir(parents=True, exist_ok=True)
     staging.mkdir(parents=True, exist_ok=True)
-    try:
-        os.environ["HF_ENDPOINT"] = HF_MIRROR
-        from huggingface_hub import snapshot_download
 
-        snapshot_download(repo_id=size["repo"], local_dir=str(staging))
-    except Exception as exc:
-        return {"status": "error", "key": key, "repo": size["repo"], "error": f"下载失败：{exc}", "staging": str(staging)}
+    # 探测成功的镜像排到最前，其余镜像按原顺序作为降级
+    mirror_used = size.get("mirror_used")
+    order = ([mirror_used] + [item for item in chain if item != mirror_used]
+             if mirror_used else list(chain))
+    from huggingface_hub import snapshot_download
+
+    download_attempts: list[dict] = []
+    used = None
+    for mirror in order:
+        os.environ["HF_ENDPOINT"] = mirror
+        try:
+            snapshot_download(repo_id=size["repo"], local_dir=str(staging))
+        except Exception as exc:
+            download_attempts.append({"mirror": mirror, "ok": False, "error": str(exc)})
+            # 清掉本次残留，避免下一个镜像续传时拿到半截/不匹配文件
+            _clear_staging(staging)
+            continue
+        download_attempts.append({"mirror": mirror, "ok": True, "error": None})
+        used = mirror
+        break
+    if used is None:
+        return {
+            "status": "error",
+            "key": key,
+            "repo": size["repo"],
+            "error": f"下载失败（{_attempts_digest(download_attempts)}）",
+            "mirror_used": None,
+            "attempts": download_attempts,
+            "mirrors": chain,
+            "staging": str(staging),
+        }
 
     hub_cache = staging / ".cache"
     if hub_cache.exists():
@@ -666,7 +785,16 @@ def install(
     # 按实际下载内容逐文件记账，verify 才能准确报出缺哪个文件
     manifest = write_manifest(staging, key, size["repo"])
     if not manifest["files"]:
-        return {"status": "error", "key": key, "repo": size["repo"], "error": "下载后目录为空", "staging": str(staging)}
+        return {
+            "status": "error",
+            "key": key,
+            "repo": size["repo"],
+            "error": "下载后目录为空",
+            "mirror_used": used,
+            "attempts": download_attempts,
+            "mirrors": chain,
+            "staging": str(staging),
+        }
     missing = required_missing(staging)
     if missing:
         return {
@@ -675,6 +803,9 @@ def install(
             "staging": str(staging),
             "missing": missing,
             "bytes": dir_size(staging),
+            "mirror_used": used,
+            "attempts": download_attempts,
+            "mirrors": chain,
             "message": f"下载内容不完整，缺少 {', '.join(missing)}；暂存目录保留以便重试",
         }
 
@@ -682,8 +813,42 @@ def install(
     result = verify(config, keys=[key])
     item = (result.get("items") or [{}])[0]
     if not item.get("complete"):
-        return {"status": "incomplete", "key": key, "path": str(target), "missing": item.get("missing")}
-    return {"status": "installed", "key": key, "path": str(target), "bytes": dir_size(target), "repo": size["repo"]}
+        return {
+            "status": "incomplete",
+            "key": key,
+            "path": str(target),
+            "missing": item.get("missing"),
+            "mirror_used": used,
+            "attempts": download_attempts,
+            "mirrors": chain,
+        }
+    return {
+        "status": "installed",
+        "key": key,
+        "path": str(target),
+        "bytes": dir_size(target),
+        "repo": size["repo"],
+        "mirror_used": used,
+        "attempts": download_attempts,
+        "mirrors": chain,
+    }
+
+
+def _clear_staging(staging: Path) -> None:
+    """清空暂存目录中本次下载的残留文件（保留 `.ndw-model.json`）。
+
+    参数:
+        staging: 暂存目录。
+    """
+    if not staging.exists():
+        return
+    for child in staging.iterdir():
+        if child.name == MANIFEST_NAME:
+            continue
+        if child.is_dir():
+            shutil.rmtree(child, ignore_errors=True)
+        else:
+            child.unlink(missing_ok=True)
 
 
 def _replace_empty_dir(staging: Path, target: Path) -> None:

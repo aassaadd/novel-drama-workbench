@@ -7,7 +7,7 @@
 
 window.Pages = window.Pages || {};
 
-const VIEWS = ["project", "outline", "chapter", "script", "voice", "media", "export"];
+const VIEWS = ["project", "outline", "chapter", "script", "voice", "media", "export", "settings"];
 
 /* 当前 hash 对应的视图名；未知或空 hash 回落到台词校对页（保持原有入口行为）。 */
 function currentView() {
@@ -15,7 +15,10 @@ function currentView() {
   return VIEWS.includes(raw) ? raw : "voice";
 }
 
-/* 切换视图：显隐 section、点亮页签、调用页面 activate。 */
+/* 切换视图：显隐 section、点亮页签、调用页面 activate，并广播 view 事件。
+ * 参数：name 视图名（VIEWS 之一）。
+ * 返回：无。
+ */
 function showView(name) {
   VIEWS.forEach((view) => {
     const section = document.getElementById(`view-${view}`);
@@ -26,6 +29,8 @@ function showView(name) {
   });
   const page = window.Pages[name];
   if (page && page.activate) page.activate();
+  // 右栏 Inspector 等订阅者据此切换形态（配音视图 = 编辑表单，其余 = 读取型）
+  if (window.NW && window.NW.emit) window.NW.emit("view", name);
 }
 
 window.Router = {
@@ -64,4 +69,102 @@ function humanSize(bytes) {
 function msText(ms) {
   if (ms === null || ms === undefined) return "—";
   return `${(Number(ms) / 1000).toFixed(1)}s`;
+}
+
+/* 与 esc 等价的别名：台词校对页历史上用 escapeHtml，其余页面用 esc，统一实现只留一份。 */
+function escapeHtml(text) {
+  return esc(text);
+}
+
+/* 台词类型的中文名（对白 / 旁白 / 独白）。
+ * 参数：kind 行类型。
+ * 返回：中文字符串；未知类型原样返回。
+ */
+function kindLabel(kind) {
+  return { dialogue: "对白", narration: "旁白", inner_monologue: "独白" }[kind] || kind || "";
+}
+
+/* 数值保留两位并把结尾的 0 去掉（情绪强度 / 语速用）。
+ * 参数：value 任意值。
+ * 返回：字符串；空值返回空串。
+ */
+function fmt(value) {
+  return value === null || value === undefined ? "" : Number(value).toFixed(2).replace(/0$/, "");
+}
+
+/* 行状态的中文名：状态值是 schema 枚举，界面只显示中文。 */
+const STATE_LABELS = {
+  pending: "待处理",
+  queued: "排队中",
+  running: "生成中",
+  ready: "已就绪",
+  failed: "失败",
+  stale: "已过期",
+  skipped: "已跳过",
+};
+
+/* 行状态徽标（台词校对页与右栏共用同一套 class）。
+ * 参数：name 状态名（pending / queued / running / ready / failed / stale / skipped）。
+ * 返回：HTML 字符串；未知状态原样显示。
+ */
+function stateBadge(name) {
+  const text = STATE_LABELS[name] || name || "";
+  return `<span class="state-badge s-${name}"><span class="dot"></span>${text}</span>`;
+}
+
+/* 轻提示：复用全站唯一的 #toast 节点。
+ * 参数：message 文本；ok 是否为成功样式（默认失败样式）。
+ * 返回：无。
+ */
+function toast(message, ok = false) {
+  const node = document.getElementById("toast");
+  if (!node) return;
+  node.textContent = message;
+  node.className = ok ? "toast ok" : "toast";
+  node.hidden = false;
+  clearTimeout(toast.timer);
+  toast.timer = setTimeout(() => { node.hidden = true; }, 4000);
+}
+
+/* 统一取数：把非 2xx 的 detail 翻译成人能读的文本，并带上接口给的退出码。
+ * 参数：url 请求地址；options fetch 选项。
+ * 返回：Promise<解析后的 JSON>；失败抛 Error（error.code = 接口退出码或 HTTP 状态）。
+ */
+async function api(url, options) {
+  const response = await fetch(url, options);
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const detail = data.detail;
+    let text;
+    if (typeof detail === "string") {
+      text = detail;
+    } else if (Array.isArray(detail)) {
+      // FastAPI 自身的参数校验错误（缺 chapter 之类）
+      text = detail.map((item) => `${(item.loc || []).slice(1).join(".")}: ${item.msg}`).join("；");
+    } else if (detail && detail.message) {
+      text = detail.message;
+    } else {
+      text = `HTTP ${response.status}`;
+    }
+    const error = new Error(text);
+    error.code = detail && detail.code !== undefined ? detail.code : response.status;
+    throw error;
+  }
+  return data;
+}
+
+/* 查询串构造（与 buildQuery 同实现，保留旧名给各页面复用）。 */
+function qs(params) {
+  return buildQuery(params);
+}
+
+/* 工程内相对路径 → 只读文件接口 URL。媒体预览、右栏播放器、底部时间线共用这一套。
+ * 参数：rel 工程内相对路径（如 assets/sfx/xxx.wav）；project 工程根目录，缺省取当前工程。
+ * 返回：URL 字符串；工程或路径缺失时返回空串（调用方据此隐藏播放器，不伪造 URL）。
+ */
+function uiFileUrl(rel, project) {
+  const root = project || ((window.NW && NW.state && NW.state.path) || "");
+  const path = String(rel || "");
+  if (!root || !path) return "";
+  return `/api/ui/file?${new URLSearchParams({ path, project: root }).toString()}`;
 }

@@ -7,292 +7,499 @@
   <link rel="stylesheet" href="/static/styles.css" />
 </head>
 <body>
-  <header class="topbar">
-    <span class="brand">小说有声剧工作台</span>
-    <nav class="tabs" id="tabs">
-      <a href="#/project" data-view="project">项目</a>
-      <a href="#/outline" data-view="outline">大纲</a>
-      <a href="#/chapter" data-view="chapter">章节</a>
-      <a href="#/script" data-view="script">导演标注</a>
-      <a href="#/voice" data-view="voice">台词校对</a>
-      <a href="#/media" data-view="media">音效·配图·视频</a>
-      <a href="#/export" data-view="export">导出</a>
-    </nav>
-    <label class="field">
-      工程
-      <input id="projectPath" list="projectList" placeholder="~/novels/xxx" spellcheck="false" />
-      <datalist id="projectList"></datalist>
-    </label>
-    <button id="btnOpen" class="btn">打开</button>
-    <label class="field">
-      章节
-      <select id="chapterSelect"></select>
-    </label>
-    <button id="btnReload" class="btn">刷新</button>
-    <span id="hint" class="hint"></span>
-  </header>
-
-  <!-- ---------------- 台词校对（原有页面，行为不变） ---------------- -->
-  <section class="view" id="view-voice" hidden>
-    <section class="badges" id="badges"></section>
-
-    <main class="layout">
-      <div class="table-wrap">
-        <div class="table-inner">
-          <div class="thead" id="thead">
-            <span class="c-index">序号</span>
-            <span class="c-kind">类型</span>
-            <span class="c-speaker">说话人</span>
-            <span class="c-text">文本</span>
-            <span class="c-num">情绪</span>
-            <span class="c-num">强度</span>
-            <span class="c-num">语速</span>
-            <span class="c-state">状态</span>
-            <span class="c-num">时长</span>
-            <span class="c-num">前停</span>
-            <span class="c-num">后停</span>
-          </div>
-          <div class="viewport" id="viewport">
-            <div class="spacer" id="spacer">
-              <div class="rows" id="rows"></div>
+  <div class="app-shell">
+    <!-- ---------------- 顶栏 Row 1：左「品牌 + 工程切换」/ 中「章节上下文」/ 右「提示 + 刷新 + 主 CTA」 ---------------- -->
+    <header class="topbar">
+      <div class="topbar-left">
+        <span class="brand">小说有声剧工作台</span>
+        <!-- 工程切换器：路径这类技术细节收进 popover，交互写在 layout.js -->
+        <div class="project-switch">
+          <button id="projectSwitch" class="project-switch-btn" type="button" title="切换工程" aria-haspopup="true" aria-expanded="false">
+            <span id="projectName" class="project-name">选择工程</span>
+            <span class="caret" aria-hidden="true">▾</span>
+          </button>
+          <div id="projectMenu" class="project-menu" hidden>
+            <label class="field">
+              <span class="field-label">工程目录</span>
+              <input id="projectPath" list="projectList" placeholder="~/novels/xxx" spellcheck="false" />
+              <datalist id="projectList"></datalist>
+            </label>
+            <div class="menu-actions">
+              <button id="btnOpen" class="btn primary">打开工程</button>
+            </div>
+            <div class="menu-title">最近工程</div>
+            <div id="projectRecent" class="recent-list">
+              <span class="recent-empty">还没有最近工程</span>
+            </div>
+            <div class="menu-actions menu-actions-foot">
+              <button id="btnNewProject" class="btn" type="button">＋ 新建工程</button>
             </div>
           </div>
         </div>
-        <div class="empty" id="empty" hidden>还没有台词行：先在终端执行 <code>scene split</code> 与 <code>line split</code>。</div>
       </div>
 
-      <aside class="inspector" id="inspector">
-        <div class="inspector-head">
-          <span id="lineId">未选中行</span>
-          <span id="lineState" class="state-badge"></span>
+      <div class="topbar-mid">
+        <div class="chapter-context">
+          <span class="chapter-label">当前章节</span>
+          <select id="chapterSelect" class="ghost-select" title="切换章节"></select>
         </div>
-        <div class="inspector-body" id="form" hidden>
-          <label class="stack">文本
-            <textarea id="fText" rows="4"></textarea>
-          </label>
-          <div class="row2">
-            <label class="stack">类型
-              <select id="fKind">
-                <option value="dialogue">对白</option>
-                <option value="narration">旁白</option>
-                <option value="inner_monologue">独白</option>
-              </select>
-            </label>
-            <label class="stack">情绪
-              <select id="fEmotion"></select>
-            </label>
+      </div>
+
+      <div class="topbar-right">
+        <span id="hint" class="hint"></span>
+        <button id="btnReload" class="btn small icon-btn" title="刷新台词">⟳ 刷新</button>
+        <button id="btnSettings" class="btn small icon-btn" title="模型设置">⚙</button>
+        <button id="flowNext" class="btn primary flow-next">下一步</button>
+      </div>
+    </header>
+
+    <!-- ---------------- 流程条 Row 2：7 个阶段（layout.js 打 done/current/todo），「下一步」已搬到顶栏 ---------------- -->
+    <div id="flowbar" class="flowbar">
+      <div class="flow-steps">
+        <button class="stage" data-stage="project" data-state="todo">项目</button>
+        <span class="stage-link" aria-hidden="true"></span>
+        <button class="stage" data-stage="outline" data-state="todo">大纲</button>
+        <span class="stage-link" aria-hidden="true"></span>
+        <button class="stage" data-stage="chapter" data-state="todo">章节</button>
+        <span class="stage-link" aria-hidden="true"></span>
+        <button class="stage" data-stage="script" data-state="todo">标注</button>
+        <span class="stage-link" aria-hidden="true"></span>
+        <button class="stage" data-stage="voice" data-state="todo">配音</button>
+        <span class="stage-link" aria-hidden="true"></span>
+        <button class="stage" data-stage="media" data-state="todo">媒体</button>
+        <span class="stage-link" aria-hidden="true"></span>
+        <button class="stage" data-stage="export" data-state="todo">导出</button>
+      </div>
+      <span id="flowTip" class="flow-tip"></span>
+    </div>
+
+    <div class="app-main">
+      <!-- ---------------- 左栏：章节树（tree.js 填充） ---------------- -->
+      <aside id="treePanel" class="tree-panel" data-collapsed="false">
+        <div class="panel-head">
+          <span class="panel-title">章节树</span>
+          <button id="btnToggleTree" class="btn small" title="收起 / 展开左栏">«</button>
+        </div>
+        <div id="tree" class="tree"></div>
+      </aside>
+
+      <!-- ---------------- 中区：现有 7 个视图，id 与内部元素保持不变 ---------------- -->
+      <section id="centerPanel" class="center-panel">
+        <!-- ---------------- 台词校对（原有页面，行为不变） ---------------- -->
+        <section class="view" id="view-voice" hidden>
+          <section class="badges" id="badges"></section>
+
+          <main class="layout">
+            <div class="table-wrap">
+              <div class="table-inner">
+                <div class="thead" id="thead">
+                  <span class="c-index">序号</span>
+                  <span class="c-kind">类型</span>
+                  <span class="c-speaker">说话人</span>
+                  <span class="c-text">文本</span>
+                  <span class="c-num">情绪</span>
+                  <span class="c-num">强度</span>
+                  <span class="c-num">语速</span>
+                  <span class="c-state">状态</span>
+                  <span class="c-num">时长</span>
+                  <span class="c-num">前停</span>
+                  <span class="c-num">后停</span>
+                </div>
+                <div class="viewport" id="viewport">
+                  <div class="spacer" id="spacer">
+                    <div class="rows" id="rows"></div>
+                  </div>
+                </div>
+              </div>
+              <div class="empty" id="empty" hidden>还没有台词行：先在终端执行 <code>scene split</code> 与 <code>line split</code>。</div>
+            </div>
+
+            <aside class="inspector" id="inspector">
+              <div class="inspector-head">
+                <span id="lineId">未选中行</span>
+                <span id="lineState" class="state-badge"></span>
+              </div>
+              <div class="inspector-body" id="form" hidden>
+                <label class="stack">文本
+                  <textarea id="fText" rows="4"></textarea>
+                </label>
+                <div class="row2">
+                  <label class="stack">类型
+                    <select id="fKind">
+                      <option value="dialogue">对白</option>
+                      <option value="narration">旁白</option>
+                      <option value="inner_monologue">独白</option>
+                    </select>
+                  </label>
+                  <label class="stack">情绪
+                    <select id="fEmotion"></select>
+                  </label>
+                </div>
+                <div class="row2">
+                  <label class="stack">强度 <output id="oIntensity"></output>
+                    <input id="fIntensity" type="range" min="0" max="1" step="0.05" />
+                  </label>
+                  <label class="stack">语速
+                    <input id="fSpeed" type="number" min="0.5" max="2" step="0.05" />
+                  </label>
+                </div>
+                <div class="row2">
+                  <label class="stack">前停顿 ms
+                    <input id="fPauseBefore" type="number" min="0" max="5000" step="10" />
+                  </label>
+                  <label class="stack">后停顿 ms
+                    <input id="fPauseAfter" type="number" min="0" max="5000" step="10" />
+                  </label>
+                </div>
+                <label class="stack">交付说明
+                  <input id="fNote" placeholder="如：压着嗓子、别拖尾音" />
+                </label>
+                <div class="actions">
+                  <button id="btnSave" class="btn primary">保存</button>
+                  <button id="btnRevert" class="btn">回滚到上次生成</button>
+                </div>
+                <div class="diff">
+                  <div class="diff-title">当前参数 vs 上次生成</div>
+                  <div id="diffBody" class="diff-body">—</div>
+                </div>
+              </div>
+            </aside>
+          </main>
+
+          <footer class="runbar">
+            <span class="run-info" id="runInfo">本次将生成 — 行</span>
+            <div class="run-track"><div class="run-fill" id="runFill"></div></div>
+            <span class="run-progress" id="runProgress"></span>
+            <button id="btnStart" class="btn primary" disabled>开始生成</button>
+          </footer>
+        </section>
+
+        <!-- ---------------- 项目页：极简新建 + 创作向导（作品信息 → 世界 → 梗概 → 文风 → 人物） ---------------- -->
+        <section class="view page" id="view-project" hidden>
+          <div class="ws-head">
+            <h2>工程与创作向导</h2>
+            <div id="pjInfo" class="kv kv-inline">—</div>
           </div>
-          <div class="row2">
-            <label class="stack">强度 <output id="oIntensity"></output>
-              <input id="fIntensity" type="range" min="0" max="1" step="0.05" />
-            </label>
-            <label class="stack">语速
-              <input id="fSpeed" type="number" min="0.5" max="2" step="0.05" />
-            </label>
+
+          <div class="ws-project">
+            <div class="ws-col">
+              <!-- 作品信息：书名 / 作者 / 题材，保存即写回 project.json -->
+              <div class="card">
+                <h3>作品信息</h3>
+                <p class="muted">先定书名与题材，后面的世界、人物、梗概都从这里取材；作者与题材可在建完工程后补。</p>
+                <div class="form-grid">
+                  <label class="stack">书名
+                    <input id="pjWorkTitle" placeholder="书名" />
+                  </label>
+                  <label class="stack">作者
+                    <input id="pjWorkAuthor" placeholder="可选" />
+                  </label>
+                  <div class="stack">题材（逗号分隔）
+                    <span class="field-action">
+                      <input id="pjWorkGenres" placeholder="如：悬疑, 都市" />
+                      <button id="pjPolishGenre" class="btn small polish-btn" type="button" data-polish="work.genre">✨润色</button>
+                    </span>
+                  </div>
+                </div>
+                <div class="actions">
+                  <button id="pjWorkSave" class="btn primary" type="button">保存作品信息</button>
+                </div>
+              </div>
+
+              <!-- 设定库三分区：世界 / 梗概 / 文风，每区右上角「✨ 生成」只回填不落盘 -->
+              <div id="pjSettings" class="settings-sections">
+                <div class="card">
+                  <div class="card-head">
+                    <h3>世界设计</h3>
+                    <button id="pjGenWorld" class="btn small" type="button">✨ 生成</button>
+                  </div>
+                  <p class="muted">时代 + 硬规则 / 阵营 / 地点 / 术语，是章节生成的上下文底座。</p>
+                  <div id="pjWorldFields" class="form-grid"></div>
+                  <div id="pjWorldDraft" class="world-draft" hidden></div>
+                  <div class="actions">
+                    <button id="pjSaveWorld" class="btn primary" type="button" hidden>保存世界设定</button>
+                  </div>
+                </div>
+
+                <div class="card">
+                  <div class="card-head">
+                    <h3>故事梗概</h3>
+                    <button id="pjGenPremise" class="btn small" type="button">✨ 生成</button>
+                  </div>
+                  <p class="muted">一句话概要 → 主题 / 冲突 / 结局 / 读者 / 篇幅，按雪花写作法逐层收敛。</p>
+                  <div id="pjPremiseFields" class="form-grid"></div>
+                </div>
+
+                <div class="card">
+                  <div class="card-head">
+                    <h3>文风设定</h3>
+                    <button id="pjGenStyle" class="btn small" type="button">✨ 生成</button>
+                  </div>
+                  <div id="pjStyleFields" class="form-grid"></div>
+                  <div class="form-grid">
+                    <div class="stack">禁止写法（逗号分隔）
+                      <input id="pjForbidden" placeholder="如：血腥描写，网络流行语" spellcheck="false" />
+                    </div>
+                  </div>
+                  <div class="actions">
+                    <button id="pjSave" class="btn primary" type="button">保存设定（世界/梗概/文风）</button>
+                    <button id="pjExport" class="btn" type="button">导出设定 JSON</button>
+                  </div>
+                </div>
+              </div>
+
+              <!-- 人物：主角 / 配角的新增、就地编辑、删除，以及生成后的待保存列表 -->
+              <div class="card">
+                <div class="card-head">
+                  <h3>人物</h3>
+                  <button id="pjCharGenerate" class="btn small" type="button">✨ 生成人物</button>
+                </div>
+                <p class="muted">主角 1 人、主要配角 2–6 人；生成结果先进「待保存」，确认后一次性写入，不影响已有角色与音色绑定。</p>
+                <div id="pjCharList" class="char-list">—</div>
+                <div id="pjCharPending" class="char-list" hidden></div>
+                <div class="actions">
+                  <button id="pjCharAdd" class="btn" type="button">＋ 新增人物</button>
+                  <button id="pjCharSaveAll" class="btn primary" type="button" hidden>全部保存</button>
+                </div>
+              </div>
+            </div>
+
+            <div class="ws-col">
+              <div class="card">
+                <h3>世界设定</h3>
+                <div id="pjWorld" class="world-list"></div>
+                <div class="form-grid">
+                  <div class="stack">规则
+                    <span class="field-action">
+                      <input id="wRule" placeholder="如：夜里不能说出真名" />
+                      <button class="btn small polish-btn" type="button" data-polish="world.rule" data-polish-input="wRule">✨润色</button>
+                    </span>
+                  </div>
+                  <div class="stack">阵营
+                    <span class="field-action">
+                      <input id="wFaction" placeholder="如：守夜人" />
+                      <button class="btn small polish-btn" type="button" data-polish="world.faction" data-polish-input="wFaction">✨润色</button>
+                    </span>
+                  </div>
+                  <div class="stack">地点（名称|描述|氛围）
+                    <span class="field-action">
+                      <input id="wLocation" placeholder="钟楼|城北最高的塔|压抑" />
+                      <button class="btn small polish-btn" type="button" data-polish="world.location" data-polish-input="wLocation">✨润色</button>
+                    </span>
+                  </div>
+                  <div class="stack">词条（术语|释义）
+                    <span class="field-action">
+                      <input id="wGlossary" placeholder="回响|听见过去声音的能力" />
+                      <button class="btn small polish-btn" type="button" data-polish="world.glossary" data-polish-input="wGlossary">✨润色</button>
+                    </span>
+                  </div>
+                </div>
+                <div class="actions">
+                  <button id="pjWorldAdd" class="btn" type="button">加入世界设定</button>
+                </div>
+              </div>
+
+              <div class="card">
+                <h3>新建工程</h3>
+                <p class="muted">只需要目录与书名；作者、题材在建完后的「作品信息」里补。</p>
+                <div class="form-grid">
+                  <label class="stack">目录
+                    <input id="npDir" placeholder="~/novels/new-book" spellcheck="false" />
+                  </label>
+                  <label class="stack">书名
+                    <input id="npTitle" placeholder="书名" />
+                  </label>
+                </div>
+                <div class="actions">
+                  <button id="npCreate" class="btn primary" type="button">创建并打开</button>
+                </div>
+              </div>
+            </div>
           </div>
-          <div class="row2">
-            <label class="stack">前停顿 ms
-              <input id="fPauseBefore" type="number" min="0" max="5000" step="10" />
-            </label>
-            <label class="stack">后停顿 ms
-              <input id="fPauseAfter" type="number" min="0" max="5000" step="10" />
-            </label>
+        </section>
+
+        <!-- ---------------- 大纲：上「生成参数 + 按钮」，下「幕/章/节拍」可折叠卡片 ---------------- -->
+        <section class="view page" id="view-outline" hidden>
+          <div class="ws-head">
+            <h2>大纲设计</h2>
+            <span class="muted">生成结果写入设定库，再「落地成章节」才会建章节文件。离线写作实现是确定性的，同样参数可复现。</span>
           </div>
-          <label class="stack">交付说明
-            <input id="fNote" placeholder="如：压着嗓子、别拖尾音" />
-          </label>
+
+          <div class="card">
+            <div class="form-grid">
+              <label class="stack">幕数
+                <input id="olActs" type="number" min="1" max="12" value="3" />
+              </label>
+              <label class="stack">每幕章数
+                <input id="olChapters" type="number" min="1" max="12" value="3" />
+              </label>
+              <label class="stack">每章节拍
+                <input id="olBeats" type="number" min="1" max="12" value="3" />
+              </label>
+              <label class="stack">单章目标字数
+                <input id="olWords" type="number" min="200" max="8000" step="100" value="1200" />
+              </label>
+            </div>
+            <div class="actions">
+              <button id="olGenerate" class="btn primary">生成大纲</button>
+              <button id="olCheckBtn" class="btn" type="button">检查黄金三章</button>
+              <button id="olApply" class="btn">落地成章节</button>
+            </div>
+          </div>
+
+          <div id="olCheck" class="check-result" hidden></div>
+
+          <h3 class="section-title">幕 / 章 / 节拍</h3>
+          <div id="olBody" class="outline-body">还没有大纲。</div>
+        </section>
+
+        <!-- ---------------- 章节：正文占主区，动作收进工具条，场景/台词走紧凑列表 ---------------- -->
+        <section class="view page page-fill" id="view-chapter" hidden>
+          <div class="ws-head">
+            <h2>章节正文</h2>
+            <div id="chInfo" class="kv kv-inline">—</div>
+          </div>
+
+          <div class="toolbar">
+            <label class="field"><input id="chRegen" type="checkbox" /> 覆盖重写</label>
+            <button id="chGenerate" class="btn primary">生成正文</button>
+            <button id="chScenes" class="btn">切分场景</button>
+            <button id="chLines" class="btn">切分台词</button>
+            <button id="chPreview" class="btn">预览（不写盘）</button>
+            <span class="muted toolbar-tip">点右侧台词行可在正文里定位段落</span>
+          </div>
+
+          <div class="chapter-main">
+            <div class="chapter-doc">
+              <div id="chContent" class="doc-body">—</div>
+            </div>
+            <aside class="chapter-side">
+              <h3 class="section-title">场景 / 台词</h3>
+              <div id="chScenesBody" class="scene-list">—</div>
+            </aside>
+          </div>
+        </section>
+
+        <!-- ---------------- 导演标注：按镜头分段，行内高亮情绪 / 音效等标记 ---------------- -->
+        <section class="view page" id="view-script" hidden>
+          <div class="ws-head">
+            <h2>导演标注（有声剧脚本）</h2>
+            <div id="scInfo" class="kv kv-inline">—</div>
+          </div>
+          <div class="toolbar">
+            <button id="scSuggest" class="btn primary">生成标注建议</button>
+            <button id="scApply" class="btn">生成并应用（含音效/画面/视频位）</button>
+          </div>
+          <div id="scWarnings" class="warn-box" hidden></div>
+          <div id="scMarkup" class="markup">—</div>
+        </section>
+
+        <!-- ---------------- 音效·配图·视频（行可点选，详情进右栏） ---------------- -->
+        <section class="view page" id="view-media" hidden>
+          <div class="ws-head">
+            <h2>音效、配图与视频位</h2>
+            <label class="field"><input id="mdForce" type="checkbox" /> 已就绪项也重跑</label>
+          </div>
+          <p class="muted">条目由导演标注物化而来；「运行」调 ffmpeg / Pillow 真出文件，模型侧是离线占位实现。点某一行可在右栏看提示词与状态并内联试听。</p>
+          <div class="media-grid">
+            <div class="card">
+              <h3>音效（sfx）<button id="mdRunSfx" class="btn small">运行</button></h3>
+              <div id="mdSfx" class="media-table">—</div>
+            </div>
+            <div class="card">
+              <h3>配图（key image）<button id="mdRunImage" class="btn small">运行</button></h3>
+              <div id="mdImage" class="media-table">—</div>
+            </div>
+            <div class="card">
+              <h3>视频位（video）<button id="mdRunVideo" class="btn small">运行</button></h3>
+              <div id="mdVideo" class="media-table">—</div>
+            </div>
+          </div>
+        </section>
+
+        <!-- ---------------- 导出：横向步骤条 + 产物卡片 ---------------- -->
+        <section class="view page" id="view-export" hidden>
+          <div class="ws-head">
+            <h2>串成成品</h2>
+            <span class="muted">全链路由 <code>produce</code> 在后台执行，页面只轮询编排记录；也可只跑后半段（配音之后）。</span>
+          </div>
+
+          <div class="card">
+            <div class="form-grid">
+              <label class="stack">起始阶段
+                <select id="exFrom"></select>
+              </label>
+              <label class="stack">结束阶段
+                <select id="exTo"></select>
+              </label>
+            </div>
+            <div class="actions">
+              <label class="field"><input id="exForce" type="checkbox" /> 强制重跑</label>
+              <label class="field"><input id="exResume" type="checkbox" checked /> 跳过已成功阶段</label>
+              <label class="field"><input id="exKeepGoing" type="checkbox" /> 失败继续</label>
+              <button id="exStart" class="btn primary">开始编排</button>
+            </div>
+          </div>
+
+          <div id="exStatus" class="muted">尚未启动。</div>
+          <ol id="exStages" class="stepbar">—</ol>
+
+          <h3 class="section-title">产物</h3>
+          <div id="exFiles" class="artifact-grid">—</div>
           <div class="actions">
-            <button id="btnSave" class="btn primary">保存</button>
-            <button id="btnRevert" class="btn">回滚到上次生成</button>
+            <button id="exRefresh" class="btn">刷新产物</button>
           </div>
-          <div class="diff">
-            <div class="diff-title">当前参数 vs 上次生成</div>
-            <div id="diffBody" class="diff-body">—</div>
+        </section>
+
+        <!-- ---------------- 模型设置：写作 LLM / 音频 TTS / 图像视频 / 权重目录，内容由 page-settings.js 渲染 ---------------- -->
+        <section class="view page" id="view-settings" hidden>
+          <div class="ws-head">
+            <h2>模型设置</h2>
+            <span class="muted">这里改的是本机覆盖层，保存后写进 config/config.ui.yaml，config.yaml 保持原样。</span>
           </div>
+          <div id="setBody" class="settings-body"></div>
+        </section>
+      </section>
+
+      <!-- ---------------- 右栏：上下文 Inspector（inspector.js 渲染；voice 视图把 #inspector 搬进来） ---------------- -->
+      <aside id="inspectorPanel" class="inspector-panel" data-collapsed="true">
+        <div class="panel-head">
+          <span class="panel-title">上下文</span>
+          <button id="btnToggleInspector" class="btn small" title="展开 / 收起设置面板">«</button>
+        </div>
+        <div id="inspectorHost" class="inspector-host">
+          <div class="placeholder" id="insEmpty">左栏选章节、页面里点台词行或媒体条目，这里显示详情。</div>
         </div>
       </aside>
-    </main>
+    </div>
 
-    <footer class="runbar">
-      <span class="run-info" id="runInfo">本次将生成 — 行</span>
-      <div class="run-track"><div class="run-fill" id="runFill"></div></div>
-      <span class="run-progress" id="runProgress"></span>
-      <button id="btnStart" class="btn primary" disabled>开始生成</button>
-    </footer>
-  </section>
-
-  <!-- ---------------- 项目与设定库 ---------------- -->
-  <section class="view page" id="view-project" hidden>
-    <div class="panel">
-      <h2>工程</h2>
-      <div id="pjInfo" class="kv">—</div>
-      <h3>设定库</h3>
-      <p class="muted">这些字段是章节生成与导演标注的唯一输入，改完点保存即写盘（settings_revision +1）。</p>
-      <div id="pjSettings" class="form-grid"></div>
-      <div class="actions">
-        <button id="pjSave" class="btn primary">保存设定</button>
-        <button id="pjExport" class="btn">导出设定 JSON</button>
+    <!-- ---------------- 底部：当前上下文 + 时间线容器（高度可拖拽） ---------------- -->
+    <div id="bottomBar" class="bottom-bar" data-collapsed="true">
+      <div id="bottomSplitter" class="bottom-splitter" title="拖拽调整高度"></div>
+      <div class="panel-head">
+        <span class="panel-title">时间线</span>
+        <button id="btnToggleBottom" class="btn small" title="展开 / 收起底部栏">▴</button>
       </div>
-      <h3>世界设定</h3>
-      <div id="pjWorld" class="world-list"></div>
-      <div class="form-grid">
-        <label class="stack">规则
-          <input id="wRule" placeholder="如：夜里不能说出真名" />
-        </label>
-        <label class="stack">阵营
-          <input id="wFaction" placeholder="如：守夜人" />
-        </label>
-        <label class="stack">地点（名称|描述|氛围）
-          <input id="wLocation" placeholder="钟楼|城北最高的塔|压抑" />
-        </label>
-        <label class="stack">词条（术语|释义）
-          <input id="wGlossary" placeholder="回响|听见过去声音的能力" />
-        </label>
-      </div>
-      <div class="actions">
-        <button id="pjWorldAdd" class="btn">加入世界设定</button>
-      </div>
-      <h3>新建工程</h3>
-      <div class="form-grid">
-        <label class="stack">目录
-          <input id="npDir" placeholder="~/novels/new-book" spellcheck="false" />
-        </label>
-        <label class="stack">书名
-          <input id="npTitle" placeholder="书名" />
-        </label>
-        <label class="stack">作者
-          <input id="npAuthor" placeholder="可选" />
-        </label>
-        <label class="stack">题材
-          <input id="npGenre" placeholder="如：悬疑" />
-        </label>
-      </div>
-      <div class="actions">
-        <button id="npCreate" class="btn primary">创建并打开</button>
+      <div class="bottom-body">
+        <div id="bottomInfo" class="bottom-info"><span class="muted">当前上下文：先打开工程</span></div>
+        <div id="timeline" class="tl"><p class="muted">时间线：打开工程并选择章节后按台词行铺开。</p></div>
       </div>
     </div>
-  </section>
-
-  <!-- ---------------- 大纲 ---------------- -->
-  <section class="view page" id="view-outline" hidden>
-    <div class="panel">
-      <h2>大纲设计</h2>
-      <p class="muted">生成结果写入设定库，再「落地成章节」才会建章节文件。离线写作实现是确定性的，同样参数可复现。</p>
-      <div class="form-grid">
-        <label class="stack">幕数
-          <input id="olActs" type="number" min="1" max="12" value="3" />
-        </label>
-        <label class="stack">每幕章数
-          <input id="olChapters" type="number" min="1" max="12" value="3" />
-        </label>
-        <label class="stack">每章节拍
-          <input id="olBeats" type="number" min="1" max="12" value="3" />
-        </label>
-        <label class="stack">单章目标字数
-          <input id="olWords" type="number" min="200" max="8000" step="100" value="1200" />
-        </label>
-      </div>
-      <div class="actions">
-        <button id="olGenerate" class="btn primary">生成大纲</button>
-        <button id="olApply" class="btn">落地成章节</button>
-      </div>
-      <div id="olBody" class="outline-body">还没有大纲。</div>
-    </div>
-  </section>
-
-  <!-- ---------------- 章节 ---------------- -->
-  <section class="view page" id="view-chapter" hidden>
-    <div class="panel">
-      <h2>章节正文</h2>
-      <div id="chInfo" class="kv">—</div>
-      <div class="actions">
-        <label class="field"><input id="chRegen" type="checkbox" /> 覆盖重写</label>
-        <button id="chGenerate" class="btn primary">生成正文</button>
-        <button id="chScenes" class="btn">切分场景</button>
-        <button id="chLines" class="btn">切分台词</button>
-        <button id="chPreview" class="btn">预览（不写盘）</button>
-      </div>
-      <div id="chScenesBody" class="outline-body">—</div>
-      <h3>正文</h3>
-      <pre id="chContent" class="content-box">—</pre>
-    </div>
-  </section>
-
-  <!-- ---------------- 导演标注 ---------------- -->
-  <section class="view page" id="view-script" hidden>
-    <div class="panel">
-      <h2>导演标注（有声剧脚本）</h2>
-      <div id="scInfo" class="kv">—</div>
-      <div class="actions">
-        <button id="scSuggest" class="btn primary">生成标注建议</button>
-        <button id="scApply" class="btn">生成并应用（含音效/画面/视频位）</button>
-      </div>
-      <div id="scWarnings" class="warn-box" hidden></div>
-      <h3>标注文本</h3>
-      <pre id="scMarkup" class="content-box mono">—</pre>
-    </div>
-  </section>
-
-  <!-- ---------------- 音效·配图·视频 ---------------- -->
-  <section class="view page" id="view-media" hidden>
-    <div class="panel">
-      <h2>音效、配图与视频位</h2>
-      <p class="muted">条目由导演标注物化而来；「运行」调 ffmpeg / Pillow 真出文件，模型侧是离线占位实现。</p>
-      <label class="field"><input id="mdForce" type="checkbox" /> 已就绪项也重跑</label>
-      <div class="media-grid">
-        <div>
-          <h3>音效（sfx）<button id="mdRunSfx" class="btn small">运行</button></h3>
-          <div id="mdSfx" class="media-table">—</div>
-        </div>
-        <div>
-          <h3>配图（key image）<button id="mdRunImage" class="btn small">运行</button></h3>
-          <div id="mdImage" class="media-table">—</div>
-        </div>
-        <div>
-          <h3>视频位（video）<button id="mdRunVideo" class="btn small">运行</button></h3>
-          <div id="mdVideo" class="media-table">—</div>
-        </div>
-      </div>
-    </div>
-  </section>
-
-  <!-- ---------------- 导出 ---------------- -->
-  <section class="view page" id="view-export" hidden>
-    <div class="panel">
-      <h2>串成成品</h2>
-      <p class="muted">全链路由 <code>produce</code> 在后台执行，页面只轮询编排记录；也可只跑后半段（配音之后）。</p>
-      <div class="form-grid">
-        <label class="stack">起始阶段
-          <select id="exFrom"></select>
-        </label>
-        <label class="stack">结束阶段
-          <select id="exTo"></select>
-        </label>
-      </div>
-      <div class="actions">
-        <label class="field"><input id="exForce" type="checkbox" /> 强制重跑</label>
-        <label class="field"><input id="exResume" type="checkbox" checked /> 跳过已成功阶段</label>
-        <label class="field"><input id="exKeepGoing" type="checkbox" /> 失败继续</label>
-        <button id="exStart" class="btn primary">开始编排</button>
-      </div>
-      <div id="exStatus" class="muted">尚未启动。</div>
-      <div id="exStages" class="stage-table">—</div>
-      <h3>产物</h3>
-      <div id="exFiles" class="media-table">—</div>
-      <div class="actions">
-        <button id="exRefresh" class="btn">刷新产物</button>
-      </div>
-    </div>
-  </section>
+  </div>
 
   <div id="toast" class="toast" hidden></div>
   <script src="/static/core.js"></script>
+  <script src="/static/layout.js"></script>
+  <script src="/static/tree.js"></script>
   <script src="/static/page-project.js"></script>
   <script src="/static/page-outline.js"></script>
   <script src="/static/page-chapter.js"></script>
   <script src="/static/page-script.js"></script>
   <script src="/static/page-media.js"></script>
   <script src="/static/page-export.js"></script>
+  <script src="/static/page-settings.js"></script>
+  <script src="/static/inspector.js"></script>
   <script src="/static/app.js"></script>
+  <script src="/static/timeline.js"></script>
 </body>
 </html>

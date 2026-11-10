@@ -73,10 +73,17 @@ comfyui:
   job_timeout_ms: 1800000
   status_timeout_ms: 10000
   templates_dir: config/comfy
+  models_dir: ""                        # 空=自动探测（读 ComfyUI 启动日志的 extra search path 与常见安装路径）
   templates:
-    image: qwen_image_2.1_3stage
-    video_t2v: minimax_h3_5s
-    video_i2v: ltx_2.3_i2v
+    image: qwen_image_accel             # Qwen-Image Q4 + Lightning 4 步
+    video_t2v: minimax_h3_accel_t2v     # MiniMax-H3 文生视频（无首帧）
+    video_i2v: minimax_h3_accel         # MiniMax-H3 图生视频（首帧来自关键图）
+
+# 模型下载（音频 / ComfyUI 模型共用）
+models:
+  download_mirrors:                     # 国内优先，国外降级
+    - https://hf-mirror.com
+    - https://huggingface.co
 
 # 串行 GPU 队列：单卡，最大并发固定 1，与 ComfyUI 共用同一把锁
 gpu:

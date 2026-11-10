@@ -1,0 +1,36 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      // 以模块方式启动本地 Web 工作台（http://127.0.0.1:8766，避开已占用 8765）
+      "name": "Web 工作台 (serve :8766)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "novel_drama.cli",
+      "args": ["serve", "--port", "8766"],
+      "cwd": "${workspaceFolder}",
+      "python": "${workspaceFolder}/.venv/bin/python",
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}/src"
+      },
+      "console": "integratedTerminal",
+      "justMyCode": false
+    },
+    {
+      // 调试任意 CLI 子命令：把 args 换成要跑的命令即可，例如
+      // ["-p", "/Users/zhaohaochen/novels/changan", "doctor"]
+      "name": "CLI 调试（自定义 args）",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "novel_drama.cli",
+      "args": ["--help"],
+      "cwd": "${workspaceFolder}",
+      "python": "${workspaceFolder}/.venv/bin/python",
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}/src"
+      },
+      "console": "integratedTerminal",
+      "justMyCode": false
+    }
+  ]
+}

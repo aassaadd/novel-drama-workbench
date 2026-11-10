@@ -55,50 +55,8 @@ const run = {
 
 const $ = (id) => document.getElementById(id);
 
-function toast(message, ok = false) {
-  const el = $("toast");
-  el.textContent = message;
-  el.className = ok ? "toast ok" : "toast";
-  el.hidden = false;
-  clearTimeout(toast.timer);
-  toast.timer = setTimeout(() => { el.hidden = true; }, 4000);
-}
-
-async function api(url, options) {
-  const response = await fetch(url, options);
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    const detail = data.detail;
-    let text;
-    if (typeof detail === "string") {
-      text = detail;
-    } else if (Array.isArray(detail)) {
-      // FastAPI 自身的参数校验错误（缺 chapter 之类）
-      text = detail.map((item) => `${(item.loc || []).slice(1).join(".")}: ${item.msg}`).join("；");
-    } else if (detail && detail.message) {
-      text = detail.message;
-    } else {
-      text = `HTTP ${response.status}`;
-    }
-    const error = new Error(text);
-    error.code = detail && detail.code !== undefined ? detail.code : response.status;
-    throw error;
-  }
-  return data;
-}
-
-function qs(params) {
-  const search = new URLSearchParams();
-  Object.entries(params).forEach(([key, value]) => {
-    if (value !== undefined && value !== null && value !== "") search.set(key, value);
-  });
-  return search.toString();
-}
-
-function stateBadge(name) {
-  const color = `s-${name}`;
-  return `<span class="state-badge ${color}"><span class="dot"></span>${name}</span>`;
-}
+/* toast / api / qs / stateBadge / kindLabel / fmt / escapeHtml 已下沉到 core.js，
+ * 这里直接用全局同名函数，行为与原来逐字一致。 */
 
 function renderBadges() {
   const total = state.rows.length;
@@ -169,17 +127,7 @@ function renderTable() {
   layer.style.height = `${(end - start) * ROW_H}px`;
 }
 
-function kindLabel(kind) {
-  return { dialogue: "对白", narration: "旁白", inner_monologue: "独白" }[kind] || kind || "";
-}
-
-function fmt(value) {
-  return value === null || value === undefined ? "" : Number(value).toFixed(2).replace(/0$/, "");
-}
-
-function escapeHtml(text) {
-  return String(text).replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
-}
+/* kindLabel / fmt / escapeHtml 已下沉到 core.js（本页仍按同名全局函数调用）。 */
 
 function fillEmotions() {
   $("fEmotion").innerHTML = EMOTIONS.map(([value, label]) => `<option value="${value}">${label}</option>`).join("");
@@ -198,6 +146,19 @@ async function loadProjects() {
   $("projectPath").value = state.path;
 }
 
+/* 读章节列表。本地开发服务在并发请求下偶发串响应（拿到别的接口的 body），
+ * 不是数组就重试一次，避免整页被一次错响应带空。
+ * 参数：path 工程目录。
+ * 返回：Promise<章节数组>（两次都拿不到时返回空数组）。
+ */
+async function fetchChapters(path) {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const data = await api(`/api/ui/chapters?${qs({ path })}`);
+    if (Array.isArray(data)) return data;
+  }
+  return [];
+}
+
 async function openProject() {
   const path = $("projectPath").value.trim();
   if (!path) {
@@ -207,12 +168,15 @@ async function openProject() {
   state.path = path;
   localStorage.setItem("ndw.path", path);
   try {
-    const chapters = await api(`/api/ui/chapters?${qs({ path })}`);
+    const chapters = await fetchChapters(path);
     $("chapterSelect").innerHTML = chapters
       .map((item) => `<option value="${item.id}">${item.index}. ${escapeHtml(item.title)}</option>`)
       .join("");
     if (!chapters.length) {
       $("hint").textContent = "工程里还没有章节";
+      /* 新工程没有章节：必须清掉上一本的当前章节，否则时间轴会拿旧 chapter 去请求并报错 */
+      state.chapter = "";
+      if ($("chapterSelect")) $("chapterSelect").value = "";
       state.rows = [];
       state.counts = {};
       renderBadges();
@@ -221,6 +185,7 @@ async function openProject() {
       $("runProgress").textContent = "";
       $("btnStart").disabled = true;
       NW.notifyProject();
+      NW.notifyChapter();
       return;
     }
     const keep = chapters.some((item) => item.id === state.chapter);
@@ -232,6 +197,26 @@ async function openProject() {
   } catch (error) {
     toast(`打开工程失败：${error.message}`);
   }
+}
+
+/* 切章的唯一落点：顶栏下拉、左栏树、右栏动作都只发 `chapter` 事件到这里，
+ * 由它同步 #chapterSelect、清空当前选中行并重载，避免各处互相触发成环。
+ * 参数：chapterId 目标章节 ID。
+ * 返回：Promise，无。
+ */
+async function applyChapter(chapterId) {
+  if (!chapterId) return;
+  const select = $("chapterSelect");
+  if (!select || !Array.from(select.options).some((option) => option.value === chapterId)) return;
+  run.polling = false;
+  clearTimeout(run.timer);
+  state.chapter = chapterId;
+  state.selected = null;
+  if (select.value !== chapterId) select.value = chapterId; // 静默同步，不再派发 change
+  $("form").hidden = true;
+  $("lineId").textContent = "未选中行";
+  await loadChapter();
+  NW.notifyChapter();
 }
 
 async function loadChapter() {
@@ -275,7 +260,7 @@ async function selectLine(lineId, scrollIntoView = true) {
   $("lineId").textContent = `${row.line_id}  ·  ${state.scenes[row.scene_id] || row.scene_id}`;
   const badge = $("lineState");
   badge.className = `state-badge s-${row.state}`;
-  badge.innerHTML = `<span class="dot"></span>${row.state}`;
+  badge.innerHTML = `<span class="dot"></span>${STATE_LABELS[row.state] || row.state || ""}`;
   $("form").hidden = false;
   $("fText").value = row.text || "";
   $("fKind").value = row.kind || "dialogue";
@@ -296,6 +281,8 @@ async function selectLine(lineId, scrollIntoView = true) {
       }
     }
   }
+  // 选中行交给右栏 Inspector（voice 视图下右栏就是本该页的编辑表单）
+  NW.emit("line", row);
   await loadDiff(row);
 }
 
@@ -320,7 +307,7 @@ function renderDiff(data) {
     return;
   }
   if (!data.changes || !data.changes.length) {
-    body.innerHTML = `<div class="muted">与上次生成参数一致（${data.state}）</div>`;
+    body.innerHTML = `<div class="muted">与上次生成参数一致（${STATE_LABELS[data.state] || data.state}）</div>`;
     return;
   }
   body.innerHTML = data.changes.map((item) => `<div class="item">[${escapeHtml(item.group)}] ${escapeHtml(item.text)}</div>`).join("");
@@ -526,7 +513,7 @@ async function patchRow(lineId) {
     if (state.selected === lineId) {
       const badge = $("lineState");
       badge.className = `state-badge s-${fresh.state}`;
-      badge.innerHTML = `<span class="dot"></span>${fresh.state}`;
+      badge.innerHTML = `<span class="dot"></span>${STATE_LABELS[fresh.state] || fresh.state}`;
     }
   } catch (error) {
     // 单行回填失败不影响整轮轮询，下一次 poll 会再试
@@ -548,15 +535,9 @@ function bindEvents() {
     await loadLines();
     toast("已刷新", true);
   });
-  $("chapterSelect").addEventListener("change", async (event) => {
-    run.polling = false;
-    clearTimeout(run.timer);
-    state.chapter = event.target.value;
-    state.selected = null;
-    $("form").hidden = true;
-    $("lineId").textContent = "未选中行";
-    await loadChapter();
-    NW.notifyChapter();
+  $("chapterSelect").addEventListener("change", (event) => {
+    // 只发事件，真正的切章逻辑收敛在 applyChapter
+    NW.emit("chapter", event.target.value);
   });
   $("badges").addEventListener("click", (event) => {
     const badge = event.target.closest(".badge");
@@ -593,6 +574,7 @@ function bindEvents() {
  * 页面在 window.Pages 注册，由 core.js 的路由在激活时调用。 */
 const projectListeners = [];
 const chapterListeners = [];
+const busListeners = {}; // 通用事件总线：给左栏树 / 流程条 / 后续阶段订阅用
 window.NW = {
   state,
   api,
@@ -603,6 +585,8 @@ window.NW = {
   kindLabel,
   openProject,
   loadChapter,
+  /* 重新拉工程列表（新建工程后刷新顶栏候选，避免要刷新页面才出现） */
+  refreshProjects: loadProjects,
   onProject(fn) {
     projectListeners.push(fn);
   },
@@ -615,11 +599,39 @@ window.NW = {
   notifyChapter() {
     chapterListeners.forEach((fn) => fn());
   },
+  /* 订阅通用事件。
+   * 参数：name 事件名（如 chapter / scene）；fn 回调，收到 payload。
+   * 返回：无。
+   */
+  on(name, fn) {
+    if (!busListeners[name]) busListeners[name] = [];
+    busListeners[name].push(fn);
+  },
+  /* 派发通用事件。
+   * 参数：name 事件名；payload 负载。
+   * 返回：无。
+   */
+  emit(name, payload) {
+    (busListeners[name] || []).forEach((fn) => fn(payload));
+  },
 };
 
 async function boot() {
   fillEmotions();
   bindEvents();
+  // 章节切换只有一个入口：任何地方切章都只发 `chapter` 事件，由 applyChapter 统一落库到界面
+  NW.on("chapter", applyChapter);
+  // 右栏「在配音页校对」：切到配音视图并选中该行
+  NW.on("focusLine", async (lineId) => {
+    if (!lineId) return;
+    if (location.hash !== "#/voice") location.hash = "#/voice";
+    if (!state.rows.some((row) => row.line_id === lineId)) await loadLines();
+    await selectLine(lineId);
+  });
+  // 工程切换时同步顶栏输入框（左树 / 页面里新建或打开的工程都走 notifyProject）
+  NW.onProject(() => {
+    $("projectPath").value = state.path;
+  });
   if (window.Router) window.Router.init();
   await loadProjects();
   if (state.path) await openProject();

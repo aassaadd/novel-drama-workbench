@@ -222,8 +222,8 @@ class ComfyGateway(Protocol):
 
 **对接约定**：
 
-- 工作流模板由用户在 ComfyUI 侧维护，以 **API 格式 JSON** 导出后放入 `config/comfy/<template_id>.json`；工作台只用占位符替换参数，不生成节点。
-- 模板内用 `{{param_name}}` 占位（如 `{{prompt}}`、`{{width}}`、`{{seed}}`、`{{input_image}}`），替换失败即 `INVALID_INPUT`，禁止猜测节点 ID。
+- 工作流模板以 **API 格式 JSON** 放在 `config/comfy/<template_id>.json`，并在 `config/comfy/manifest.json` 登记；工程已内置三个加速模板，契约见 §10。
+- 模板内用 `{{param_name}}` 占位，只允许 `prompt / negative_prompt / width / height / seed / filename_prefix / input_image` 七个名字（见 §10.3），替换失败即 `INVALID_INPUT`，禁止猜测节点 ID。
 - 提交前必须 `health()`；连不上时报 `UNAVAILABLE` 并提示「检查 ComfyUI 是否启动、地址是否正确」。
 - 轮询间隔与超时来自 `settings.comfy`；状态查询必须用短超时（≤10s），避免 ComfyUI 无响应时长时间阻塞。
 - 产物取回后写入工程 `assets/`，文件名由编排层生成；ComfyUI 的 `output/` 目录不作为工程引用源。
@@ -386,3 +386,118 @@ src/novel_drama/
 | 换音效来源 | 新增实现（生成式/素材库），实现 `generate` 与可选 `search` |
 | 新 ComfyUI 工作流 | 放模板 JSON + 在 `settings.comfy.templates` 注册 ID，无需改代码 |
 | 新画面类型 | 扩展 `video_segment.mode` 与模板映射，时间轴按同一套锚点规则处理 |
+
+## 10. ComfyUI 模板契约
+
+### 10.1 来源与存放
+
+内置模板来自本机 ComfyUI 里已经调通的 UI 工作流，经 `ndw comfy import` 转成 API 格式后入库，不再依赖用户现场导出。
+
+| 路径 | 作用 | 是否入库 |
+| --- | --- | --- |
+| `config/comfy/manifest.json` | 模板登记表（3 个模板） | 是 |
+| `config/comfy/<template_id>.json` | 转换后的 API 格式工作流 | 是 |
+| `config/comfy/source/` | 最初从 ComfyUI 导出的 UI 工作流，仅作来源追溯 | 是 |
+| `config/comfy/models.json` | 模板依赖模型清单（体积、许可、引用关系） | 是 |
+| `config/comfy/models.local.json` | 本机反查到的线上地址缓存 | 否（`.gitignore`） |
+
+三个内置模板：`qwen_image_accel`（关键图）、`minimax_h3_accel`（i2v）、`minimax_h3_accel_t2v`（t2v，由 i2v 移除 `LoadImage` 与 `first_frame` 连线派生）。`media/comfy_media.py` 对模板与清单**只读**，任何时候都不改写 `config/comfy/`。
+
+### 10.2 UI → API 转换
+
+ComfyUI 保存的是画布格式（`nodes` + `links` + 坐标 + `widgets_values`），`/prompt` 要的是 `{"<节点ID>": {"class_type", "inputs"}}`。`media/comfy_workflow.py` 做一次性转换：
+
+1. 向运行中的 ComfyUI 请求 `/object_info/<class_type>`，按 `required` + `optional` 的声明顺序筛出控件型输入（`INT/FLOAT/STRING/BOOLEAN/COMBO/MULTISELECT`），建立「`widgets_values` 顺序 → 输入名」映射；
+2. UI 节点自带的 `inputs[].widget.name` 更接近前端实际渲染顺序，存在时优先；
+3. `control_after_generate`、`upload` 等前端附加值不进入 API；
+4. `links` 解析为 `[上游节点ID, 输出槽位]`；
+5. 跳过静音（`mode=2`）/ 旁路（`mode=4`）节点与 `MarkdownNote / Note / Reroute / PrimitiveNode` 等不可执行节点，只保留从输出节点可达的子图；
+6. 转换失败抛 `ComfyWorkflowError`；`ndw comfy import` 失败时不覆盖已有模板（显式 `--force` 才覆盖）。
+
+### 10.3 占位符白名单
+
+| 模板 | 允许的占位符 | 必需 |
+| --- | --- | --- |
+| `qwen_image_accel` | `prompt` / `negative_prompt` / `width` / `height` / `seed` / `filename_prefix` | 除 `negative_prompt` 外全必需 |
+| `minimax_h3_accel` | `prompt` / `width` / `height` / `seed` / `filename_prefix` / `input_image` | 全部必需 |
+| `minimax_h3_accel_t2v` | `prompt` / `width` / `height` / `seed` / `filename_prefix` | 全部必需 |
+
+- 白名单之外的名字一律拒绝；数值型占位符保持 `int`。
+- 填参后仍有 `{{...}}` 残留时直接 `INVALID_INPUT`，**不发出任何请求**。
+- 步数、CFG、采样器、调度器、模型、LoRA、帧率、帧数等全部固定在模板与 manifest 的 `fixed` 中，CLI 与页面都不提供修改入口。
+
+### 10.4 manifest.json 字段
+
+| 字段 | 说明 |
+| --- | --- |
+| `id` / `kind` | 模板 ID 与用途（`image` / `video`） |
+| `file` | 对应的 API 模板文件名 |
+| `source` / `derived_from` | 原始 UI 工作流来源；派生模板记录父模板 ID |
+| `display_name` | 页面展示名 |
+| `placeholders` / `required_placeholders` | 允许与必需的占位符 |
+| `bindings` | 占位符 → `{node, input}`，即写入哪个节点的哪个输入 |
+| `size_map` | 画幅比例 → `[宽, 高]`，是宽高的唯一来源 |
+| `fixed` | 只读固定参数：`steps / cfg / sampler / scheduler / shift / length / fps / width / height / model / lora` |
+| `models` | 依赖模型（相对 models 目录的路径），供扫描与下载使用 |
+
+内置画幅桶：图像 `1:1 1328×1328`、`9:16 928×1664`、`16:9 1664×928`、`3:4 1140×1472`、`4:3 1472×1140`；视频 `9:16 512×896`、`16:9 896×512`、`1:1 768×768`。
+
+### 10.5 模板回落与画幅解析
+
+- **模板回落**：指定模板 ID 为空或不存在时，按用途回落到内置 ID（`image → qwen_image_accel`、`video_i2v → minimax_h3_accel`、`video_t2v → minimax_h3_accel_t2v`），并在结果中返回中文 `warning`。
+- **画幅优先级**：条目 `aspect_ratio` > 工程 `settings.output.aspect_ratio` > `1:1`；再经模板 `size_map` 映射为宽高。
+- **视频画幅**：只支持 `9:16 / 16:9 / 1:1`，其它比例按浮点比例距离取最接近的一档，并返回降级说明。
+- 模板缺少 `size_map` 时直接 `INVALID_INPUT`，不猜测尺寸。
+
+### 10.6 seed 与产物命名
+
+- `seed = int(sha256("<条目ID>:<revision>")[:8], 16)`，同一 revision 可复现，不同 revision 自动变化；调用方不传 seed。
+- `filename_prefix = ndw/<条目ID>_r<revision>`，路径不安全字符替换为 `_`。
+- 最终产物按 `<条目ID>_r<revision>.<ext>` 落到 `assets/images` 或 `assets/video`；取回先写临时目录 `.ndw-tmp-<id>-r<rev>`，成功后再改名。
+- `providers.image/video=comfyui` 时，失败只写 `asset.status=failed` 与中文错误，**不回退离线占位图**；i2v 缺首帧才降级为 t2v 并记录原因。
+- 提交 → 轮询 → 取回整段包在 `orchestration/gpu_queue.py` 的 GPU 锁内，串行执行。
+
+## 11. 模型扫描与线上地址反查
+
+### 11.1 扫描顺序
+
+`media/comfy_models.resolve_models_dir` 依次尝试：
+
+1. 配置 `comfyui.models_dir`；
+2. ComfyUI 启动日志里的 `Adding extra search path <类别> <绝对路径>`（新日志优先），把 `models/vae` 之类的子目录归并为 models 根目录；
+3. 常见安装路径。
+
+都找不到时抛 `ValueError`，提示用户填 `comfyui.models_dir` 或确认 ComfyUI 启动日志。`scan()` 递归列出权重文件（跳过下载暂存目录 `.ndw-downloads/`），按模板依赖生成 `config/comfy/models.json`，记录 `key / bytes / present / templates / license / license_gate / commercial_use / note`，可选手工固定 `repo` + `hf_filename`；目录内其它权重也一并收录。
+
+### 11.2 反查链路
+
+`resolve()` 为每个本地模型按以下顺序找线上来源，任一步命中即停：
+
+| 顺序 | 来源 | 判定 |
+| --- | --- | --- |
+| 1 | `models.json` 手工固定 | 直接用 `repo` + `hf_filename` |
+| 2 | ComfyUI-Manager 缓存 | 按文件名精确索引，再用仓库 sibling 校验体积 |
+| 3 | 同目录 sidecar | `.metadata.json` / `.civitai.info` 里的 `repo` + `filename` 或内嵌 HF 直链 |
+| 4 | 可信仓库候选 | 逐个候选仓库做 sibling 精确匹配 |
+| 5 | HF 搜索 API | 按文件名主干搜候选仓库（最多 8 个），再精确匹配 sibling |
+
+匹配以文件名精确相等为准，本地体积已知时再比对体积；命中的下载直链按当前镜像端点拼 `/resolve/main/`。单个模型网络失败只写入该条 `error`，不影响其它模型。
+
+### 11.3 缓存、镜像链与落盘
+
+- **缓存**：结果写 `config/comfy/models.local.json` 的 `items[key]`（`repo / hf_filename / url / source / size / resolved_at / error`）；`resolve` 默认复用缓存，`--refresh` 才重新联网。该文件是用户级数据，不入库。
+- **镜像链**：默认 `["https://hf-mirror.com", "https://huggingface.co"]`，配置键 `models.download_mirrors`；音频模型（`tts/model_store.py`）与 ComfyUI 模型共用同一链，下载结果返回 `mirror_used` 与逐镜像 `attempts`。
+- **下载与断点**：HF 仓库走 `hf_hub_download`（带断点），普通直链用 HTTP `Range` 续传；先落 `.ndw-downloads/` 暂存，体积校验通过后**同卷 `os.replace` 原子改名**、跨卷 `shutil.move`，失败保留暂存目录便于重试。
+- **门禁**：模型声明需授权/禁止商用时必须 `accept_license`；体积超过 15GB 或未知时必须 `yes` 确认。
+
+## 12. Web 接口
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| `GET` | `/api/ui/models` | 两个目录（模型根、ComfyUI models）、镜像链，以及音频/图像/视频三组清单：本地状态、体积、许可、线上地址、解析失败原因 |
+| `POST` | `/api/ui/models/install` | 请求体 `{group, key, accept_license, yes}`，启动后台下载线程，立即返回 `{job_id}` |
+| `GET` | `/api/ui/models/install/{job_id}` | 下载任务状态与日志尾部（最多 40 行） |
+| `POST` | `/api/ui/models/resolve` | 重新反查线上地址 |
+| `POST` | `/api/ui/comfy/health` | ComfyUI 连通性与模板自检 |
+
+路由由 `web/models_api.py` 的 `register_models_routes` 注册。此外：`/api/config` 的 `editable` 新增 `comfyui.models_dir`（并返回 ComfyUI 健康状态、模板清单）；`/api/ui/media` 每行新增只读 `template / aspect_ratio / width / height`，页面不提供任何调参入口。

@@ -2,19 +2,42 @@
 
 逐条执行、逐条回写状态：单条失败不中断整批，失败信息写进 `asset.error`，
 供 `ndw media` 与 Web 页面直接展示。产物统一落 `assets/{sfx,images,video}`。
+
+生成路由（Task 7.1）：
+- `providers.image / providers.video = comfyui` 时走本机 ComfyUI 真实生成：
+  模板填参 → 提交 → 轮询 → 取回产物，整段在 GPU 锁内执行；
+- 其它 / 缺省走 `media/generate.py` 的离线占位逻辑（行为与本轮之前完全一致）；
+- ComfyUI 失败只写 `asset.status=failed` + 中文错误，**不静默回退离线占位图**。
 """
 
 from __future__ import annotations
 
+import shutil
+import time
 from pathlib import Path
 
+from ..adapters.base import AdapterError, ErrorCode
+from ..adapters.comfyui import LocalComfyGateway
 from ..config import AppConfig
 from ..models.ids import now_iso
+from ..orchestration.gpu_queue import GpuLock
 from ..store import ProjectStore
+from . import comfy_models
+from .comfy_media import (
+    build_prompt,
+    load_manifest,
+    resolve_aspect,
+    resolve_template,
+    seed_for,
+    templates_dir,
+)
 from .generate import probe_duration_ms, render_image, render_sfx, render_video
 
 # 每类媒体的产物目录与扩展名
 MEDIA_PATHS = {"sfx": ("assets/sfx", ".wav"), "image": ("assets/images", ".png"), "video": ("assets/video", ".mp4")}
+
+#: ComfyUI 产物类型 → 默认扩展名
+_FALLBACK_EXT = {"image": ".png", "video": ".mp4"}
 
 
 def _iter_items(chapter: dict, kind: str):
@@ -75,6 +98,577 @@ def _source_image(store: ProjectStore, chapter: dict, segment: dict) -> Path | N
     return None
 
 
+def _provider(config: AppConfig, kind: str) -> str:
+    """读取某类媒体的生成提供方。
+
+    参数:
+        config: 本机配置。
+        kind: image / video。
+
+    返回:
+        `comfyui` 或 `offline` 等配置值（缺省 offline）。
+    """
+    value = config.get(f"providers.{kind}")
+    text = str(value).strip() if value else ""
+    return text or "offline"
+
+
+def _comfy_gateway(config: AppConfig) -> LocalComfyGateway:
+    """按配置装配本机 ComfyUI 网关。
+
+    参数:
+        config: 本机配置。
+
+    返回:
+        LocalComfyGateway。
+    """
+    return LocalComfyGateway(config.get("comfyui", {}) or {}, templates_dir(config))
+
+
+def _next_revision(item: dict) -> int:
+    """计算本次生成使用的 revision（失败重试/重跑会 +1）。
+
+    参数:
+        item: 关键图或视频条目。
+
+    返回:
+        本次 revision（首次为条目原值）。
+    """
+    revision = int(item.get("revision") or 1)
+    asset = item.get("asset") or {}
+    if asset.get("status") in ("ready", "failed", "running", "queued") or asset.get("asset_id") or asset.get("job_id"):
+        revision += 1
+    return max(1, revision)
+
+
+def _existing_asset(store: ProjectStore, item: dict, kind: str) -> Path | None:
+    """判断条目是否已有可直接跳过的就绪产物。
+
+    参数:
+        store: 工程。
+        item: 媒体条目。
+        kind: image / video。
+
+    返回:
+        存在的产物路径；未就绪或文件缺失时返回 None。
+    """
+    asset = item.get("asset") or {}
+    if asset.get("status") != "ready":
+        return None
+    candidates: list[Path] = []
+    if asset.get("asset_id"):
+        candidates.append(store.root / str(asset["asset_id"]))
+    rel_dir, ext = MEDIA_PATHS[kind]
+    candidates.append(store.root / f"{rel_dir}/{item['id']}{ext}")
+    for path in candidates:
+        if path.exists():
+            return path
+    return None
+
+
+def _job_timeout_s(config: AppConfig, kind: str) -> float:
+    """读取单条任务的轮询总超时（秒）。
+
+    参数:
+        config: 本机配置。
+        kind: image / video。
+
+    返回:
+        超时秒数；优先 `comfyui.<kind>_job_timeout_seconds`，否则用 `comfyui.job_timeout_ms`。
+    """
+    key = "comfyui.video_job_timeout_seconds" if kind == "video" else "comfyui.image_job_timeout_seconds"
+    try:
+        value = config.get(key)
+        if value not in (None, ""):
+            return max(1.0, float(value))
+    except (TypeError, ValueError):
+        pass
+    try:
+        return max(1.0, float(config.get("comfyui.job_timeout_ms", 1800000)) / 1000)
+    except (TypeError, ValueError):
+        return 1800.0
+
+
+def _wait_for_job(gateway: LocalComfyGateway, config: AppConfig, prompt_id: str, timeout_s: float, kind: str) -> None:
+    """轮询任务直到 success；error/超时抛 AdapterError。
+
+    参数:
+        gateway: ComfyUI 网关。
+        config: 本机配置（读 `comfyui.poll_interval_ms`）。
+        prompt_id: ComfyUI 任务 ID。
+        timeout_s: 总超时秒数。
+        kind: image / video（只用于超时提示里的配置键名）。
+
+    异常:
+        AdapterError: 任务失败（UPSTREAM_ERROR）或超时（TIMEOUT）。
+    """
+    try:
+        interval = max(0.2, float(config.get("comfyui.poll_interval_ms", 1000)) / 1000)
+    except (TypeError, ValueError):
+        interval = 1.0
+    deadline = time.monotonic() + timeout_s
+    while True:
+        status = gateway.status(prompt_id)
+        if status.state == "success":
+            return
+        if status.state == "error":
+            raise AdapterError(
+                ErrorCode.UPSTREAM_ERROR,
+                status.message or "ComfyUI 执行失败（无详细节点信息）",
+                detail=status.error or {},
+            )
+        if status.state == "canceled":
+            raise AdapterError(ErrorCode.UPSTREAM_ERROR, "ComfyUI 任务已取消")
+        if time.monotonic() >= deadline:
+            raise AdapterError(
+                ErrorCode.TIMEOUT,
+                f"等待 ComfyUI 任务超时（{timeout_s:.0f}s）：{prompt_id}；可在配置里调大 "
+                f"comfyui.{kind}_job_timeout_seconds",
+                retryable=True,
+            )
+        time.sleep(interval)
+
+
+def _submit_and_fetch(
+    gateway: LocalComfyGateway,
+    config: AppConfig,
+    kind: str,
+    prompt: dict,
+    item_id: str,
+    revision: int,
+    out_dir: Path,
+) -> tuple[Path, str]:
+    """在 GPU 锁内完成「提交 → 轮询 → 取回」，返回最终产物路径与 prompt_id。
+
+    参数:
+        gateway: ComfyUI 网关。
+        config: 本机配置。
+        kind: image / video。
+        prompt: 已填参的 API 格式工作流。
+        item_id: 条目 ID。
+        revision: 条目版本号。
+        out_dir: 最终产物目录（`assets/images` 或 `assets/video`）。
+
+    返回:
+        `(产物路径, ComfyUI prompt_id)`。
+
+    异常:
+        AdapterError: 锁超时、任务失败、超时、产物缺失。
+    """
+    timeout_s = _job_timeout_s(config, kind)
+    lock = GpuLock(
+        config.get("gpu.lock_path", "/Volumes/other/gpu.lock"),
+        poll_interval_s=float(config.get("gpu.poll_interval_s", 2) or 2),
+        timeout_s=timeout_s,
+    )
+    temp_dir = out_dir / f".ndw-tmp-{item_id}-r{revision}"
+    with lock.hold(f"comfy-{item_id}-r{revision}"):
+        submitted = gateway.submit_prompt(prompt, client_id=f"ndw-{item_id}")
+        prompt_id = submitted.prompt_id
+        _wait_for_job(gateway, config, prompt_id, timeout_s, kind)
+        try:
+            artifacts = gateway.fetch(prompt_id, str(temp_dir))
+            artifact = next((item for item in artifacts if item.kind == kind), None)
+            if artifact is None or not artifact.local_path:
+                names = "、".join(item.filename for item in artifacts) or "无"
+                raise AdapterError(
+                    ErrorCode.UPSTREAM_ERROR,
+                    f"ComfyUI 未返回{('图片' if kind == 'image' else '视频')}产物（实际：{names}）",
+                )
+            ext = Path(artifact.filename).suffix.lower() or _FALLBACK_EXT[kind]
+            target = out_dir / f"{item_id}_r{revision}{ext}"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(artifact.local_path, target)
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+    return target, prompt_id
+
+
+def _check_models(config: AppConfig, entry: dict, template_id: str) -> None:
+    """检查模板依赖模型是否就位。
+
+    参数:
+        config: 本机配置。
+        entry: 清单登记。
+        template_id: 模板 ID（用于报错）。
+
+    异常:
+        AdapterError(INVALID_INPUT): 有模型文件缺失。
+    """
+    keys = [str(item) for item in (entry.get("models") or [])]
+    if not keys:
+        return
+    try:
+        missing = comfy_models.missing_for_template(config, keys)
+    except ValueError as exc:
+        raise AdapterError(ErrorCode.INVALID_INPUT, f"无法定位 ComfyUI 模型目录：{exc}") from exc
+    if missing:
+        raise AdapterError(
+            ErrorCode.INVALID_INPUT,
+            f"模板 {template_id} 缺少依赖模型文件：{', '.join(missing)}；可在设置页模型清单一键下载",
+        )
+
+
+def _generate_image(
+    store: ProjectStore,
+    config: AppConfig,
+    gateway: LocalComfyGateway,
+    item: dict,
+    revision: int,
+    settings: dict,
+    out_dir: Path,
+) -> dict:
+    """用 ComfyUI 生成一张关键图并回写条目与产物信息。
+
+    参数:
+        store: 工程。
+        config: 本机配置。
+        gateway: ComfyUI 网关。
+        item: 关键图条目。
+        revision: 本次版本号。
+        settings: 工程设置（画幅回落用）。
+        out_dir: 产物目录。
+
+    返回:
+        `{"path","asset_id","job_id","width","height","template_id","aspect","warning"}`。
+    """
+    template_id = item.get("workflow_template_id") or config.get("comfyui.templates.image")
+    aspect = resolve_aspect(item, settings, "image")
+    item["aspect_ratio"] = aspect["ratio"]
+    item["width"], item["height"] = aspect["width"], aspect["height"]
+    seed = int(item["seed"]) if item.get("seed") is not None else seed_for(item["id"], revision)
+    item["seed"] = seed
+
+    manifest = load_manifest(templates_dir(config))
+    resolved = resolve_template(str(template_id), "image", manifest)
+    _check_models(config, resolved["template"], resolved["template_id"])
+    payload = build_prompt(
+        config,
+        resolved["template_id"],
+        "image",
+        prompt=item.get("prompt") or "",
+        negative_prompt=item.get("negative_prompt") or "",
+        aspect_ratio=aspect["ratio"],
+        item_id=item["id"],
+        revision=revision,
+        seed=seed,
+    )
+    target, prompt_id = _submit_and_fetch(gateway, config, "image", payload["prompt"], item["id"], revision, out_dir)
+    return {
+        "path": target,
+        "asset_id": _rel(store, target),
+        "job_id": f"job_{prompt_id.replace('-', '')}",
+        "width": int(payload["width"]),
+        "height": int(payload["height"]),
+        "template_id": payload["template_id"],
+        "aspect": payload["aspect_ratio"],
+        "warning": payload["warning"],
+    }
+
+
+def _generate_video(
+    store: ProjectStore,
+    config: AppConfig,
+    gateway: LocalComfyGateway,
+    chapter: dict,
+    item: dict,
+    revision: int,
+    settings: dict,
+    out_dir: Path,
+) -> dict:
+    """用 ComfyUI 生成一条短视频；有首帧走 i2v，否则降级 t2v。
+
+    参数:
+        store: 工程。
+        config: 本机配置。
+        gateway: ComfyUI 网关。
+        chapter: 章节（查找首帧关键图）。
+        item: 视频条目。
+        revision: 本次版本号。
+        settings: 工程设置（画幅回落用）。
+        out_dir: 产物目录。
+
+    返回:
+        `{"path","asset_id","job_id","width","height","duration_s","template_id",
+        "aspect","source_mode","warning"}`。
+    """
+    source = _source_image(store, chapter, item)
+    source_mode = "i2v" if source else "t2v"
+    warnings: list[str] = []
+    if item.get("mode") == "i2v" and not source:
+        warnings.append("首帧关键图未就绪，已降级为文生视频（t2v）")
+
+    aspect = resolve_aspect(item, settings, "video")
+    item["aspect_ratio"] = aspect["ratio"]
+    item["width"], item["height"] = aspect["width"], aspect["height"]
+    seed = int(item["seed"]) if item.get("seed") is not None else seed_for(item["id"], revision)
+    item["seed"] = seed
+    if aspect.get("note"):
+        warnings.append(str(aspect["note"]))
+
+    manifest = load_manifest(templates_dir(config))
+    template_key = "comfyui.templates.video_i2v" if source else "comfyui.templates.video_t2v"
+    template_id = config.get(template_key)
+    resolved = resolve_template(str(template_id or ""), "video_i2v" if source else "video_t2v", manifest)
+    _check_models(config, resolved["template"], resolved["template_id"])
+
+    input_image = None
+    if source:
+        uploaded = gateway.upload_image(source, subfolder="ndw")
+        name = str(uploaded.get("name") or source.name)
+        subfolder = str(uploaded.get("subfolder") or "").strip("/")
+        input_image = f"{subfolder}/{name}" if subfolder and not name.startswith(f"{subfolder}/") else name
+
+    payload = build_prompt(
+        config,
+        resolved["template_id"],
+        "video_i2v" if source else "video_t2v",
+        prompt=item.get("prompt") or "",
+        negative_prompt=item.get("negative_prompt") or "",
+        aspect_ratio=aspect["ratio"],
+        item_id=item["id"],
+        revision=revision,
+        input_image=input_image,
+        seed=seed,
+    )
+    if payload["warning"]:
+        warnings.append(str(payload["warning"]))
+    target, prompt_id = _submit_and_fetch(gateway, config, "video", payload["prompt"], item["id"], revision, out_dir)
+    duration_ms = probe_duration_ms(target, config.get("ffmpeg.probe_binary", "ffprobe"))
+    return {
+        "path": target,
+        "asset_id": _rel(store, target),
+        "job_id": f"job_{prompt_id.replace('-', '')}",
+        "width": int(payload["width"]),
+        "height": int(payload["height"]),
+        "duration_s": round(duration_ms / 1000, 3) if duration_ms else 5.0,
+        "duration_ms": duration_ms or 5000,
+        "template_id": payload["template_id"],
+        "aspect": payload["aspect_ratio"],
+        "source_mode": source_mode,
+        "warning": "；".join(warnings) or None,
+    }
+
+
+def _run_comfy(
+    store: ProjectStore,
+    config: AppConfig,
+    chapter: dict,
+    kind: str,
+    force: bool,
+    limit: int | None,
+    stats: dict,
+) -> dict:
+    """用真实 ComfyUI 生成一章内的关键图或视频。
+
+    参数:
+        store: 工程。
+        config: 本机配置。
+        chapter: 章节 dict（执行后保存）。
+        kind: image / video。
+        force: 已就绪项是否重跑。
+        limit: 单次最多处理条数。
+        stats: 统计结构（就地填充）。
+
+    返回:
+        统计结构。
+    """
+    rel_dir, ext = MEDIA_PATHS[kind]
+    out_dir = store.root / rel_dir
+    settings = store.settings()
+    gateway = _comfy_gateway(config)
+    health = gateway.health()
+    processed = 0
+
+    for _scene, item in _iter_items(chapter, kind):
+        stats["total"] += 1
+        asset = item.setdefault("asset", {"status": "pending"})
+        if _existing_asset(store, item, kind) and not force:
+            stats["skipped"] += 1
+            continue
+        if limit is not None and processed >= limit:
+            stats["skipped"] += 1
+            continue
+        processed += 1
+        if not health.ok:
+            message = f"ComfyUI 不可用：{health.detail}"
+            asset.update({"status": "failed", "error": {"code": ErrorCode.UNAVAILABLE.value, "message": message}, "updated_at": now_iso()})
+            stats["failed"] += 1
+            stats["items"].append({"id": item["id"], "status": "failed", "path": None, "error": message})
+            continue
+
+        revision = _next_revision(item)
+        item["revision"] = revision
+        started = time.perf_counter()
+        try:
+            if kind == "image":
+                result = _generate_image(store, config, gateway, item, revision, settings, out_dir)
+                asset.update(
+                    {
+                        "status": "ready",
+                        "asset_id": result["asset_id"],
+                        "job_id": result["job_id"],
+                        "width": result["width"],
+                        "height": result["height"],
+                        "error": None,
+                        "updated_at": now_iso(),
+                    }
+                )
+            else:
+                result = _generate_video(store, config, gateway, chapter, item, revision, settings, out_dir)
+                asset.update(
+                    {
+                        "status": "ready",
+                        "asset_id": result["asset_id"],
+                        "job_id": result["job_id"],
+                        "actual_duration_ms": result["duration_ms"],
+                        "width": result["width"],
+                        "height": result["height"],
+                        "duration_s": result["duration_s"],
+                        "error": None,
+                        "updated_at": now_iso(),
+                    }
+                )
+            stats["ready"] += 1
+            stats["items"].append(
+                {
+                    "id": item["id"],
+                    "status": "ready",
+                    "path": result["asset_id"],
+                    "template_id": result["template_id"],
+                    "aspect_ratio": result["aspect"],
+                    "width": result["width"],
+                    "height": result["height"],
+                    "source_mode": result.get("source_mode"),
+                    "warning": result.get("warning"),
+                    "elapsed_ms": int((time.perf_counter() - started) * 1000),
+                    "error": None,
+                }
+            )
+        except AdapterError as exc:
+            asset.update(
+                {
+                    "status": "failed",
+                    "error": {"code": exc.code.value, "message": exc.message},
+                    "updated_at": now_iso(),
+                }
+            )
+            stats["failed"] += 1
+            stats["items"].append(
+                {
+                    "id": item["id"],
+                    "status": "failed",
+                    "path": None,
+                    "elapsed_ms": int((time.perf_counter() - started) * 1000),
+                    "error": exc.message,
+                }
+            )
+        except Exception as exc:  # 单条失败不影响整批，但必须落盘原因
+            message = f"生成异常：{exc}"
+            asset.update(
+                {
+                    "status": "failed",
+                    "error": {"code": "RENDER_FAILED", "message": message},
+                    "updated_at": now_iso(),
+                }
+            )
+            stats["failed"] += 1
+            stats["items"].append(
+                {
+                    "id": item["id"],
+                    "status": "failed",
+                    "path": None,
+                    "elapsed_ms": int((time.perf_counter() - started) * 1000),
+                    "error": message,
+                }
+            )
+
+    if processed:
+        chapter["revision"] = int(chapter.get("revision") or 1) + 1
+        chapter["updated_at"] = now_iso()
+        store.save_chapter(chapter)
+    return stats
+
+
+def plan_media(store: ProjectStore, config: AppConfig, chapter_id: str, kind: str) -> list[dict]:
+    """Dry-run：列出每条媒体将使用的模板、画幅、宽高与 seed，不提交。
+
+    参数:
+        store: 工程。
+        config: 本机配置。
+        chapter_id: 章节 ID。
+        kind: image / video。
+
+    返回:
+        每条 `{item_id, template_id, aspect_ratio, width, height, seed, source_mode, warning}`。
+
+    异常:
+        ValueError: kind 非法。
+    """
+    if kind not in ("image", "video"):
+        raise ValueError(f"plan_media 只支持 image/video，收到 {kind}")
+    chapter = store.load_chapter(chapter_id)
+    settings = store.settings()
+    provider = _provider(config, kind)
+    manifest = None
+    rows: list[dict] = []
+
+    if provider == "comfyui":
+        manifest = load_manifest(templates_dir(config))
+
+    for _scene, item in _iter_items(chapter, kind):
+        revision = _next_revision(item)
+        warnings: list[str] = []
+        if provider != "comfyui":
+            rel = item.get("aspect_ratio") or ((settings.get("output") or {}).get("aspect_ratio")) or "1:1"
+            rows.append(
+                {
+                    "item_id": item["id"],
+                    "template_id": item.get("workflow_template_id"),
+                    "aspect_ratio": rel,
+                    "width": item.get("width"),
+                    "height": item.get("height"),
+                    "seed": item.get("seed"),
+                    "source_mode": "offline",
+                    "warning": f"providers.{kind} 未设为 comfyui，将走离线占位渲染",
+                }
+            )
+            continue
+
+        if kind == "image":
+            template_id = item.get("workflow_template_id") or config.get("comfyui.templates.image")
+            resolved = resolve_template(str(template_id or ""), "image", manifest)
+            source_mode = "comfy"
+            aspect = resolve_aspect(item, settings, "image")
+        else:
+            source = _source_image(store, chapter, item)
+            source_mode = "i2v" if source else "t2v"
+            if item.get("mode") == "i2v" and not source:
+                warnings.append("首帧关键图未就绪，将降级为文生视频（t2v）")
+            key = "comfyui.templates.video_i2v" if source else "comfyui.templates.video_t2v"
+            resolved = resolve_template(str(config.get(key) or ""), "video_i2v" if source else "video_t2v", manifest)
+            aspect = resolve_aspect(item, settings, "video")
+
+        if resolved.get("warning"):
+            warnings.append(str(resolved["warning"]))
+        if aspect.get("note"):
+            warnings.append(str(aspect["note"]))
+        seed = int(item["seed"]) if item.get("seed") is not None else seed_for(item["id"], revision)
+        rows.append(
+            {
+                "item_id": item["id"],
+                "template_id": resolved["template_id"],
+                "aspect_ratio": aspect["ratio"],
+                "width": aspect["width"],
+                "height": aspect["height"],
+                "seed": seed,
+                "source_mode": source_mode,
+                "warning": "；".join(warnings) or None,
+            }
+        )
+    return rows
+
+
 def run_media(
     store: ProjectStore,
     config: AppConfig,
@@ -109,6 +703,9 @@ def run_media(
     sample_rate = int(config.get("output.sample_rate", 48000))
 
     stats = {"kind": kind, "total": 0, "ready": 0, "skipped": 0, "failed": 0, "items": [], "dry_run": dry_run}
+    if kind in ("image", "video") and not dry_run and _provider(config, kind) == "comfyui":
+        return _run_comfy(store, config, chapter, kind, force, limit, stats)
+
     processed = 0
     for scene, item in _iter_items(chapter, kind):
         stats["total"] += 1

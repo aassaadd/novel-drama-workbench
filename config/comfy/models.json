@@ -1,0 +1,155 @@
+{
+  "version": 1,
+  "models_dir": "/Volumes/other/ComfyUI-Shared/models",
+  "models": [
+    {
+      "key": "diffusion_models/qwen-image-Q4_K_S.gguf",
+      "kind": "diffusion",
+      "path": "diffusion_models/qwen-image-Q4_K_S.gguf",
+      "bytes": 12140608032,
+      "present": true,
+      "templates": [
+        "qwen_image_accel"
+      ],
+      "license": "Apache-2.0",
+      "license_gate": "none",
+      "commercial_use": true,
+      "note": "Qwen-Image 的 Q4_K_S GGUF 量化（city96 转换），首图模板的扩散模型",
+      "repo": null,
+      "hf_filename": null
+    },
+    {
+      "key": "text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors",
+      "kind": "text_encoder",
+      "path": "text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors",
+      "bytes": 9384670680,
+      "present": true,
+      "templates": [
+        "qwen_image_accel"
+      ],
+      "license": "Apache-2.0",
+      "license_gate": "none",
+      "commercial_use": true,
+      "note": "Qwen2.5-VL-7B 文本编码器（fp8 scaled），随 Qwen-Image 一起使用",
+      "repo": null,
+      "hf_filename": null
+    },
+    {
+      "key": "vae/qwen_image_vae.safetensors",
+      "kind": "vae",
+      "path": "vae/qwen_image_vae.safetensors",
+      "bytes": 253806246,
+      "present": true,
+      "templates": [
+        "qwen_image_accel"
+      ],
+      "license": "Apache-2.0",
+      "license_gate": "none",
+      "commercial_use": true,
+      "note": "Qwen-Image 的 VAE",
+      "repo": null,
+      "hf_filename": null
+    },
+    {
+      "key": "loras/Qwen-Image-Lightning-4steps-V2.0-bf16.safetensors",
+      "kind": "lora",
+      "path": "loras/Qwen-Image-Lightning-4steps-V2.0-bf16.safetensors",
+      "bytes": 849608296,
+      "present": true,
+      "templates": [
+        "qwen_image_accel"
+      ],
+      "license": "Apache-2.0",
+      "license_gate": "none",
+      "commercial_use": true,
+      "note": "Lightning 4 步加速 LoRA（bf16），模板里强度固定 1.0",
+      "repo": null,
+      "hf_filename": null
+    },
+    {
+      "key": "diffusion_models/MiniMax-H3-FL2VA-Pruned-Q4_K_M.gguf",
+      "kind": "diffusion",
+      "path": "diffusion_models/MiniMax-H3-FL2VA-Pruned-Q4_K_M.gguf",
+      "bytes": 11564180576,
+      "present": true,
+      "templates": [
+        "minimax_h3_accel",
+        "minimax_h3_accel_t2v"
+      ],
+      "license": "other",
+      "license_gate": "approval_required",
+      "commercial_use": false,
+      "note": "MiniMax-H3 FL2VA 剪枝版 Q4_K_M GGUF；仓库许可标记为 other（自定义），商用需确认授权",
+      "repo": null,
+      "hf_filename": null
+    },
+    {
+      "key": "loras/minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors",
+      "kind": "lora",
+      "path": "loras/minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors",
+      "bytes": 1956193000,
+      "present": true,
+      "templates": [
+        "minimax_h3_accel",
+        "minimax_h3_accel_t2v"
+      ],
+      "license": "other",
+      "license_gate": "approval_required",
+      "commercial_use": false,
+      "note": "H3 turbo 8 步 LoRA（ComfyUI bf16）；许可随 H3 仓库，商用需确认",
+      "repo": null,
+      "hf_filename": null
+    },
+    {
+      "key": "text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+      "kind": "text_encoder",
+      "path": "text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+      "bytes": 15687142551,
+      "present": true,
+      "templates": [
+        "minimax_h3_accel",
+        "minimax_h3_accel_t2v"
+      ],
+      "license": "other",
+      "license_gate": "approval_required",
+      "commercial_use": false,
+      "note": "H3 专用的 Qwen3-VL-32B 文本编码器（nvfp4 awq 量化）；许可随 H3 仓库",
+      "repo": null,
+      "hf_filename": null
+    },
+    {
+      "key": "vae/minimax_h3_video_vae_fp16.safetensors",
+      "kind": "vae",
+      "path": "vae/minimax_h3_video_vae_fp16.safetensors",
+      "bytes": 5207808496,
+      "present": true,
+      "templates": [
+        "minimax_h3_accel",
+        "minimax_h3_accel_t2v"
+      ],
+      "license": "other",
+      "license_gate": "approval_required",
+      "commercial_use": false,
+      "note": "H3 视频 VAE（fp16）；许可随 H3 仓库",
+      "repo": null,
+      "hf_filename": null
+    },
+    {
+      "key": "vae/minimax_h3_audio_vae_fp32.safetensors",
+      "kind": "vae",
+      "path": "vae/minimax_h3_audio_vae_fp32.safetensors",
+      "bytes": 605254808,
+      "present": true,
+      "templates": [
+        "minimax_h3_accel",
+        "minimax_h3_accel_t2v"
+      ],
+      "license": "other",
+      "license_gate": "approval_required",
+      "commercial_use": false,
+      "note": "H3 音频 VAE（fp32），视频模板里的音轨解码用；许可随 H3 仓库",
+      "repo": null,
+      "hf_filename": null
+    }
+  ]
+}

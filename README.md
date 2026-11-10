@@ -101,7 +101,9 @@ cp config/config.example.yaml config/config.yaml
 | `adapters` | `writing` | 固定 `omlx`；`tts`/`sfx` 在对接前保持 `placeholder` |
 | `omlx` | `protocol` / `endpoint` / `cli_path` | **待回填**：确认为 `http`、`openai_compatible` 或 `cli` 后再填 |
 | `comfyui` | `base_url` | 本机 ComfyUI 地址，默认 `http://127.0.0.1:8188` |
-| `comfyui` | `templates_dir` / `templates` | API 格式工作流模板目录与三类模板 ID |
+| `comfyui` | `templates_dir` / `templates` | 模板目录（默认 `config/comfy`）与三类模板 ID；**默认已切换为内置 ID**：`qwen_image_accel` / `minimax_h3_accel` / `minimax_h3_accel_t2v` |
+| `comfyui` | `models_dir` | ComfyUI 的 models 目录；留空时按 ComfyUI 启动日志的 `Adding extra search path` 与常见安装路径自动探测 |
+| `models` | `download_mirrors` | 模型下载镜像链，默认 `https://hf-mirror.com` → `https://huggingface.co`（国内优先、国外降级） |
 | `gpu` | `lock_path` | 与 ComfyUI 共用的锁文件，默认 `/Volumes/other/gpu.lock` |
 
 配置也可用 `NDW_PROJECT` 环境变量指定默认工程目录；命令行 `--project` 优先级最高。
@@ -168,10 +170,24 @@ $PY -m novel_drama.cli -p ~/novels/changan timeline table --chapter chp_xxx --ou
 $PY -m novel_drama.cli -p ~/novels/changan concat --chapter chp_xxx
 $PY -m novel_drama.cli -p ~/novels/changan export --chapter chp_xxx --format srt
 
-# 7. 图像/视频/混流：本轮只出 dry-run 计划并返回退出码 3（NOT_IMPLEMENTED）
+# 7. 图像/视频/混流：providers.image/video=comfyui 时真实出图/出片；--dry-run 只列模板、画幅与宽高
 $PY -m novel_drama.cli -p ~/novels/changan image run --chapter chp_xxx --dry-run
 $PY -m novel_drama.cli -p ~/novels/changan video run --chapter chp_xxx --dry-run
 $PY -m novel_drama.cli -p ~/novels/changan mux --chapter chp_xxx
+
+# 7.1 ComfyUI 模板与模型（不需要工程）
+$PY -m novel_drama.cli comfy list                 # 模板、必需占位符、固定参数、依赖模型
+$PY -m novel_drama.cli comfy health               # 连通性 + 模板校验 + 依赖模型
+$PY -m novel_drama.cli comfy scan                 # 扫描 models 目录并写回 config/comfy/models.json
+$PY -m novel_drama.cli comfy resolve              # 反查线上地址（加 --refresh 忽略缓存）
+$PY -m novel_drama.cli comfy models list
+$PY -m novel_drama.cli comfy models verify
+$PY -m novel_drama.cli comfy models install --key vae/qwen_image_vae.safetensors
+$PY -m novel_drama.cli comfy models install --key vae/qwen_image_vae.safetensors --dry-run
+$PY -m novel_drama.cli comfy models install --key vae/qwen_image_vae.safetensors --mirror https://hf-mirror.com
+$PY -m novel_drama.cli comfy import --id my_flow --kind image --workflow ./my_workflow.json
+$PY -m novel_drama.cli --json comfy scan          # --json 是全局参数，必须写在子命令前
+$PY -m novel_drama.cli models install --key cosyvoice3/8bit --mirror https://hf-mirror.com
 
 # 8. 自检与队列
 $PY -m novel_drama.cli -p ~/novels/changan doctor
@@ -215,6 +231,29 @@ PYTHONPATH=src .venv/bin/python tests/smoke_test.py   # 期望输出 SMOKE OK
 - 幂等键 `sha256(kind | target | input_revision | adapter | params_hash)`，重复入队复用既有任务；产物按 `<实体>_r<rev>.ext` 命名，输入未变则跳过。
 - 失败按 `retryable` 与最大尝试次数自动回队；进程退出时 `running` 任务标记为 `interrupted`，下次启动续跑。
 
+## 图像与视频（ComfyUI 模板）
+
+图像与视频仍由本机 ComfyUI 出片，但**工作流不再要求用户自己准备**：本机调好的工作流转成了工程内置模板，放在 `config/comfy/`，由 `manifest.json` 登记。
+
+| 模板 ID | 用途 | 固定模型 | 固定参数 | 画幅桶（宽×高） |
+| --- | --- | --- | --- | --- |
+| `qwen_image_accel` | 关键图 | `qwen-image-Q4_K_S.gguf` + `Qwen-Image-Lightning-4steps-V2.0-bf16.safetensors`（强度 1.0） | 4 步 / CFG 1.0 / euler / simple / shift 3.1 | 1:1 1328×1328、9:16 928×1664、16:9 1664×928、3:4 1140×1472、4:3 1472×1140 |
+| `minimax_h3_accel` | 短视频（图生视频） | `MiniMax-H3-FL2VA-Pruned-Q4_K_M.gguf` + `minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors` | 4 步 / res_multistep / simple / CFG 1.0 / 124 帧 / 24fps / mp4 h264 | 9:16 512×896、16:9 896×512、1:1 768×768 |
+| `minimax_h3_accel_t2v` | 短视频（文生视频） | 同上 | 同上 | 同上 |
+
+几条硬约定：
+
+- **模板来源**：`config/comfy/source/` 保留最初从 ComfyUI 导出的 UI 工作流（只作来源追溯）；实际使用的是转换后的 API 模板 `config/comfy/<id>.json`，两者都由 `manifest.json` 关联。
+- **参数不可调**：除 `prompt / negative_prompt / width / height / seed / filename_prefix / input_image` 外，步数、CFG、采样器、调度器、模型、LoRA、帧率、帧数全部固定在模板与 manifest 的 `fixed` 里，CLI 与页面都不提供修改入口。
+- **只随画幅调宽高**：宽高不是自由输入，由工程 `settings.output.aspect_ratio`（`1:1/3:4/4:3/9:16/16:9`，默认 `1:1`）或条目自身的 `aspect_ratio` 经模板 `size_map` 映射得到；视频只支持 `9:16/16:9/1:1`，其它画幅取最接近的一档并在结果里注明。
+- **占位符必须全部解析**：转换后仍有 `{{...}}` 残留时直接报 `INVALID_INPUT`，不会发请求。
+- **失败不回退占位图**：`providers.image/video=comfyui` 时走真实生成，失败只把条目写成 `asset.status=failed` 并保留中文错误，不会偷偷换成离线渲染图；i2v 缺首帧才降级为 t2v，并在结果里记录原因。
+- **串行占卡**：提交 → 轮询 → 取回整段在 GPU 锁内执行，与配音/写作共用同一把锁；产物按 `<条目ID>_r<revision>.<ext>` 落 `assets/`。
+- **模型清单**：`config/comfy/models.json` 记录 9 个依赖模型的体积、许可与被哪些模板引用；`config/comfy/models.local.json` 是本机反查到的线上地址缓存，**已在 `.gitignore` 中，不入库**。
+- **下载镜像链**：默认 `https://hf-mirror.com` → `https://huggingface.co`，可用 `models.download_mirrors` 改；下载先落暂存，体积校验通过后再原子改名就位。
+
+本机冒烟结论（ComfyUI 0.44.1）：关键图 `928×1664` 成功；i2v 与 t2v 均为 `512×896` / 124 帧 / 5.166s。
+
 ## 当前完成度
 
 | 模块 | 状态 | 说明 |
@@ -228,12 +267,12 @@ PYTHONPATH=src .venv/bin/python tests/smoke_test.py   # 期望输出 SMOKE OK
 | 时间轴 | 可用 | 语音/音效/图/视频轨排布，未合成时用估算时长并告警 |
 | 串行队列与锁 | 可用 | 持久化队列、跨进程 GPU 锁、幂等、失败重试、断点续跑 |
 | CLI | 可用 | 全链路可跑；`produce` 一次串起 15 个阶段并落 `.ndw/runs/<run_id>.json` |
-| Web 工作台 | 可用 | 7 个页签（项目/大纲/章节/导演标注/台词校对/音效·配图·视频/导出），写操作全部转调 CLI |
+| Web 工作台 | 可用 | 三栏布局：左「书→幕→章→场景」树（带流水线状态灯）+ 中区工作区 + 右「上下文」Inspector，底部为当前章节时间线与试听；顶部流程条给「下一步」。7 个 hash 路由（`#/project` `#/outline` `#/chapter` `#/script` `#/voice` `#/media` `#/export`）全部保留，写操作仍全部转调 CLI；媒体与产物经只读 `/api/ui/file` 就地预览 |
 | 写作适配 | 可用（模型为占位） | 离线实现确定性产文；`omlx` 协议未回填 |
 | TTS provider 层 | 可用 | 主力 IndexTTS 2.5（子进程调用独立 3.11 环境，8 维情绪向量 / emo_text / emo_audio_prompt 三通路互斥）；备用 CosyVoice3-0.5B(MLX)。均已实测出音；`offline_dub` 仅供无模型验收 |
 | 音效 | 可用（模型为占位） | 离线实现用 ffmpeg lavfi 合成 5 类环境/拟音/冲击/转场/和弦，真出 WAV |
-| 配图 | 可用（模型为占位） | 离线实现用 Pillow 渲染渐变 + 标题 + 提示词，真出 PNG（长边 ≤1536） |
-| 视频位 | 可用（模型为占位） | 离线实现用 ffmpeg 把静帧渲成 500–5000ms 片段，真出 MP4 |
+| 配图 | 可用 | 离线实现用 Pillow 渲染渐变 + 标题 + 提示词，真出 PNG；`providers.image=comfyui` 时走内置模板真实出图，失败不回退占位图 |
+| 视频位 | 可用 | 离线实现用 ffmpeg 把静帧渲成 500–5000ms 片段；`providers.video=comfyui` 时走内置模板出片（i2v 缺首帧自动降级 t2v） |
 | 混音 / 混流 / 导出 | 可用 | `mix --render` 分轨混音 + 响度规整；`mux --render` 逐段渲片 + concat + AAC 合流；`export --format bundle` 产出 MP4/MP3/SRT/manifest/bundle/README |
 
 ## 离线端到端验收（不接任何模型）
@@ -257,7 +296,7 @@ PYTHONPATH=src .venv/bin/python tests/smoke_test.py   # 期望输出 SMOKE OK
 
 ## 本轮已知限制
 
-- 写作、音效、配图、视频位四类**模型调用**仍是离线实现：接口、数据、状态、UI、失败处理都已按真实契约落地，换成真模型只需新增 adapter 并改 `providers.*`，上层不用动。
+- 写作、音效两类**模型调用**仍是离线实现；配图/视频位默认也走离线实现，把 `providers.image/video` 改为 `comfyui` 即切到内置模板真实生成，上层不用动。
 - `omlx` 写作协议未回填，`OmlxWritingAdapter` 仍抛 `NOT_IMPLEMENTED`；`offline_dub` 只是验收用占位配音 provider，真实链路默认仍是 IndexTTS 2.5。
 - 配音是逐行串行合成（IndexTTS 单进程），46 行约需 10 分钟；`produce` 支持断点续跑，重跑只补未完成阶段。
 - `line split` 会把叙述句也切成行，长章节的配音行数偏多（后续可按段落合并叙述行）。

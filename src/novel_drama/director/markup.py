@@ -23,6 +23,7 @@ from __future__ import annotations
 import hashlib
 import re
 
+from ..config import load_config
 from ..models import new_id
 from ..models.entities import EMOTIONS, NARRATOR_ID, UNKNOWN_SPEAKER_ID
 from ..models.ids import now_iso
@@ -37,6 +38,13 @@ ASPECT_SIZES = {
 TIMES = ("dawn", "morning", "day", "dusk", "night", "unknown")
 SFX_KINDS = ("ambience", "foley", "impact", "transition", "music_sting")
 CAMERA_MOVES = ("static", "slow_push_in", "pan_left", "pan_right", "handheld")
+
+# 内置模板 ID：工程与本机配置都取不到时的兜底（与 config.py 的 _FALLBACK 保持一致）
+_BUILTIN_TEMPLATES = {
+    "image": "qwen_image_accel",
+    "video_t2v": "minimax_h3_accel_t2v",
+    "video_i2v": "minimax_h3_accel",
+}
 
 _LINE_RE = re.compile(r"^(?P<head>[^：:]{0,80})[：:](?P<body>.+)$")
 
@@ -187,6 +195,30 @@ def _tts_from_line(line: dict | None) -> dict:
     return state
 
 
+def _template_ids(settings: dict) -> dict:
+    """解析图像/视频工作流模板 ID。
+
+    优先级：工程 settings.comfy.templates > 本机 config.yaml 的 comfyui.templates > 内置默认。
+
+    参数:
+        settings: 工程设置（project.settings）。
+
+    返回:
+        {"image", "video_t2v", "video_i2v"} 三项完整映射（值保证非空）。
+    """
+    project_templates = (settings.get("comfy") or {}).get("templates") or {}
+    local_templates: dict | None = None
+    resolved: dict[str, str] = {}
+    for key, fallback in _BUILTIN_TEMPLATES.items():
+        value = project_templates.get(key)
+        if not value:
+            if local_templates is None:
+                local_templates = load_config().get("comfyui.templates") or {}
+            value = local_templates.get(key)
+        resolved[key] = value or fallback
+    return resolved
+
+
 def parse_markup(markup: str, chapter: dict, characters: list[dict], settings: dict | None = None) -> dict:
     """把标注文本解析成导演脚本。
 
@@ -207,7 +239,8 @@ def parse_markup(markup: str, chapter: dict, characters: list[dict], settings: d
     blocks = _block_index(content)
     search_from = 0
     warnings: list[str] = []
-    template_image = ((settings.get("comfy") or {}).get("templates") or {}).get("image") or "qwen_image_2.1_3stage"
+    templates = _template_ids(settings)
+    template_image = templates["image"]
 
     # 已有台词行：按文本建索引，供自动挂接
     existing: dict[str, list[dict]] = {}
@@ -360,7 +393,7 @@ def parse_markup(markup: str, chapter: dict, characters: list[dict], settings: d
                         "camera_move": camera,
                         "prompt": " ".join(parts[3:]),
                         "audio_policy": "mute",
-                        "workflow_template_id": "ltx_2.3_i2v" if mode == "i2v" else "minimax_h3_5s",
+                        "workflow_template_id": templates["video_i2v"] if mode == "i2v" else templates["video_t2v"],
                         "anchor": shot["anchor"],
                         "status": "pending",
                         "candidates": [],

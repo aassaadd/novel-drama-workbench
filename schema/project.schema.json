@@ -75,9 +75,9 @@
         "endpoint": { "type": ["string", "null"], "format": "uri", "description": "实测 http://127.0.0.1:9000；旧工程可为 null" },
         "api_key": { "type": ["string", "null"], "description": "非空时按 Authorization: Bearer <key> 发送" },
         "cli_path": { "type": ["string", "null"], "description": "保留字段；omlx 实测为 HTTP，不使用" },
-        "model": { "type": "string", "maxLength": 200 },
+        "model": { "type": ["string", "null"], "maxLength": 200, "description": "null 表示继承本机 config.yaml 的模型" },
         "available_models": { "type": "array", "items": { "type": "string" }, "description": "实测快照，不做权重管理" },
-        "context_window": { "type": "integer", "minimum": 1024, "maximum": 1048576 },
+        "context_window": { "type": ["integer", "null"], "minimum": 1024, "maximum": 1048576, "description": "null 表示继承本机 config.yaml" },
         "memory_ceiling_gb": { "type": ["number", "null"], "description": "实测 29.48；仅用于告警与调度提示" },
         "idle_timeout_s": { "type": ["integer", "null"], "description": "null 表示不自动卸载，必须显式卸载" },
         "max_concurrency": { "type": "integer", "minimum": 1, "maximum": 64, "description": "服务端能力上限；工作台仍串行使用" },
@@ -215,6 +215,12 @@
         "channels": { "type": "integer", "enum": [1, 2] },
         "loudness_target_lufs": { "type": "number", "minimum": -40, "maximum": -5 },
         "video_max_ms": { "type": "integer", "enum": [5000] },
+        "aspect_ratio": {
+          "type": "string",
+          "enum": ["1:1", "3:4", "4:3", "9:16", "16:9"],
+          "default": "1:1",
+          "description": "v2：工程画幅；条目自带画幅时以条目为准，旧工程缺省按 1:1"
+        },
         "image_width": { "type": "integer", "minimum": 256, "maximum": 4096 },
         "image_height": { "type": "integer", "minimum": 256, "maximum": 4096 }
       }

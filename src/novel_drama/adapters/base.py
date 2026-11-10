@@ -324,7 +324,15 @@ class ComfyGateway(Protocol):
         ...
 
     def submit(self, template_id: str, params: dict, client_id: str) -> ComfySubmitResult:
-        """提交任务。"""
+        """按模板填参并提交任务。"""
+        ...
+
+    def submit_prompt(self, prompt: dict, client_id: str) -> ComfySubmitResult:
+        """提交已渲染的 API 格式工作流。"""
+        ...
+
+    def upload_image(self, path: str, subfolder: str = "ndw") -> dict:
+        """上传图片（i2v 首帧），返回 ComfyUI 的 name/subfolder/type。"""
         ...
 
     def status(self, prompt_id: str) -> ComfyJobStatus:

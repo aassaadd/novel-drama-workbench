@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 
 from ..models import entities
@@ -35,14 +36,15 @@ _SUBDIRS = (
 )
 
 # 新建工程时的默认全局设置（不含任何模型路径）
+# endpoint / model 留 None 表示「继承本机 config.yaml」，工程不需要重复记录模型信息
 _DEFAULT_SETTINGS = {
     "writing": {
         "adapter": "omlx",
         "protocol": None,
         "endpoint": None,
         "cli_path": None,
-        "model": "omlx-local",
-        "context_window": 32768,
+        "model": None,
+        "context_window": None,
         "stop": [],
         "temperature": 0.8,
         "stream": True,
@@ -55,13 +57,14 @@ _DEFAULT_SETTINGS = {
         "request_timeout_ms": 30000,
         "job_timeout_ms": 1800000,
         "status_timeout_ms": 10000,
-        "templates": {"image": "qwen_image_2.1_3stage", "video_t2v": "minimax_h3_5s", "video_i2v": "ltx_2.3_i2v"},
+        "templates": {"image": "qwen_image_accel", "video_t2v": "minimax_h3_accel_t2v", "video_i2v": "minimax_h3_accel"},
     },
     "output": {
         "sample_rate": 48000,
         "channels": 2,
         "loudness_target_lufs": -16,
         "video_max_ms": 5000,
+        "aspect_ratio": "1:1",
         "image_width": 1328,
         "image_height": 1328,
     },
@@ -376,17 +379,26 @@ class ProjectStore:
     # ---------- 工作区索引 ----------
 
     def register_workspace(self) -> None:
-        """把当前工程登记到 ~/.ndw/workspaces.json（工程列表页数据源）。"""
-        WORKSPACE_INDEX.parent.mkdir(parents=True, exist_ok=True)
-        data = {"projects": []}
-        if WORKSPACE_INDEX.exists():
-            try:
-                data = json.loads(WORKSPACE_INDEX.read_text(encoding="utf-8"))
-            except json.JSONDecodeError:
-                data = {"projects": []}
-        projects = [item for item in data.get("projects", []) if item.get("path") != str(self.root)]
-        projects.append({"path": str(self.root), "last_opened_at": now_iso()})
-        WORKSPACE_INDEX.write_text(json.dumps({"projects": projects}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        """把当前工程登记到 ~/.ndw/workspaces.json（工程列表页数据源）。
+
+        索引只是「最近工程」的便利数据，写失败（无权限 / 只读沙箱 / 磁盘异常）
+        不应让已经创建好的工程变成失败，因此这里吞掉 OSError 并留一行提示。
+        """
+        try:
+            WORKSPACE_INDEX.parent.mkdir(parents=True, exist_ok=True)
+            data = {"projects": []}
+            if WORKSPACE_INDEX.exists():
+                try:
+                    data = json.loads(WORKSPACE_INDEX.read_text(encoding="utf-8"))
+                except json.JSONDecodeError:
+                    data = {"projects": []}
+            projects = [item for item in data.get("projects", []) if item.get("path") != str(self.root)]
+            projects.append({"path": str(self.root), "last_opened_at": now_iso()})
+            WORKSPACE_INDEX.write_text(
+                json.dumps({"projects": projects}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+            )
+        except OSError as exc:
+            print(f"[WARN] 工程索引写入失败（不影响本工程）：{exc}", file=sys.stderr)
 
 
 def list_workspaces() -> list[dict]:

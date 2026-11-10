@@ -1,0 +1,256 @@
+{
+  "version": 1,
+  "comfyui_object_info": "http://127.0.0.1:8188",
+  "templates": [
+    {
+      "id": "qwen_image_accel",
+      "kind": "image",
+      "file": "qwen_image_accel.json",
+      "source": "source/qwen_image_q4_lightning4.json",
+      "display_name": "Qwen-Image 加速版（固定参数）",
+      "placeholders": [
+        "prompt",
+        "negative_prompt",
+        "width",
+        "height",
+        "seed",
+        "filename_prefix"
+      ],
+      "required_placeholders": [
+        "prompt",
+        "width",
+        "height",
+        "seed",
+        "filename_prefix"
+      ],
+      "bindings": {
+        "prompt": {
+          "node": "6",
+          "input": "text"
+        },
+        "negative_prompt": {
+          "node": "7",
+          "input": "text"
+        },
+        "width": {
+          "node": "8",
+          "input": "width"
+        },
+        "height": {
+          "node": "8",
+          "input": "height"
+        },
+        "seed": {
+          "node": "9",
+          "input": "seed"
+        },
+        "filename_prefix": {
+          "node": "11",
+          "input": "filename_prefix"
+        }
+      },
+      "size_map": {
+        "1:1": [
+          1328,
+          1328
+        ],
+        "9:16": [
+          928,
+          1664
+        ],
+        "16:9": [
+          1664,
+          928
+        ],
+        "3:4": [
+          1140,
+          1472
+        ],
+        "4:3": [
+          1472,
+          1140
+        ]
+      },
+      "fixed": {
+        "steps": 4,
+        "cfg": 1.0,
+        "sampler": "euler",
+        "scheduler": "simple",
+        "shift": 3.1,
+        "length": null,
+        "fps": null,
+        "width": 1328,
+        "height": 1328,
+        "model": "qwen-image-Q4_K_S.gguf",
+        "lora": "Qwen-Image-Lightning-4steps-V2.0-bf16.safetensors"
+      },
+      "models": [
+        "diffusion_models/qwen-image-Q4_K_S.gguf",
+        "text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors",
+        "vae/qwen_image_vae.safetensors",
+        "loras/Qwen-Image-Lightning-4steps-V2.0-bf16.safetensors"
+      ]
+    },
+    {
+      "id": "minimax_h3_accel",
+      "kind": "video",
+      "file": "minimax_h3_accel.json",
+      "source": "source/video_h3_fast_5s_10min.json",
+      "display_name": "MiniMax-H3 加速版 · 图生视频（固定参数）",
+      "placeholders": [
+        "prompt",
+        "width",
+        "height",
+        "seed",
+        "filename_prefix",
+        "input_image"
+      ],
+      "required_placeholders": [
+        "prompt",
+        "width",
+        "height",
+        "seed",
+        "filename_prefix",
+        "input_image"
+      ],
+      "bindings": {
+        "prompt": {
+          "node": "8",
+          "input": "prompt"
+        },
+        "width": {
+          "node": "8",
+          "input": "width"
+        },
+        "height": {
+          "node": "8",
+          "input": "height"
+        },
+        "seed": {
+          "node": "9",
+          "input": "noise_seed"
+        },
+        "filename_prefix": {
+          "node": "17",
+          "input": "filename_prefix"
+        },
+        "input_image": {
+          "node": "7",
+          "input": "image"
+        }
+      },
+      "size_map": {
+        "9:16": [
+          512,
+          896
+        ],
+        "16:9": [
+          896,
+          512
+        ],
+        "1:1": [
+          768,
+          768
+        ]
+      },
+      "fixed": {
+        "steps": 4,
+        "cfg": 1.0,
+        "sampler": "res_multistep",
+        "scheduler": "simple",
+        "shift": null,
+        "length": 124,
+        "fps": 24,
+        "width": 512,
+        "height": 896,
+        "model": "MiniMax-H3-FL2VA-Pruned-Q4_K_M.gguf",
+        "lora": "minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors"
+      },
+      "models": [
+        "diffusion_models/MiniMax-H3-FL2VA-Pruned-Q4_K_M.gguf",
+        "loras/minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors",
+        "text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+        "vae/minimax_h3_video_vae_fp16.safetensors",
+        "vae/minimax_h3_audio_vae_fp32.safetensors"
+      ]
+    },
+    {
+      "id": "minimax_h3_accel_t2v",
+      "kind": "video",
+      "file": "minimax_h3_accel_t2v.json",
+      "source": "source/video_h3_fast_5s_10min.json",
+      "derived_from": "minimax_h3_accel",
+      "display_name": "MiniMax-H3 加速版 · 文生视频（无首帧，固定参数）",
+      "placeholders": [
+        "prompt",
+        "width",
+        "height",
+        "seed",
+        "filename_prefix"
+      ],
+      "required_placeholders": [
+        "prompt",
+        "width",
+        "height",
+        "seed",
+        "filename_prefix"
+      ],
+      "bindings": {
+        "prompt": {
+          "node": "8",
+          "input": "prompt"
+        },
+        "width": {
+          "node": "8",
+          "input": "width"
+        },
+        "height": {
+          "node": "8",
+          "input": "height"
+        },
+        "seed": {
+          "node": "9",
+          "input": "noise_seed"
+        },
+        "filename_prefix": {
+          "node": "17",
+          "input": "filename_prefix"
+        }
+      },
+      "size_map": {
+        "9:16": [
+          512,
+          896
+        ],
+        "16:9": [
+          896,
+          512
+        ],
+        "1:1": [
+          768,
+          768
+        ]
+      },
+      "fixed": {
+        "steps": 4,
+        "cfg": 1.0,
+        "sampler": "res_multistep",
+        "scheduler": "simple",
+        "shift": null,
+        "length": 124,
+        "fps": 24,
+        "width": 512,
+        "height": 896,
+        "model": "MiniMax-H3-FL2VA-Pruned-Q4_K_M.gguf",
+        "lora": "minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors"
+      },
+      "models": [
+        "diffusion_models/MiniMax-H3-FL2VA-Pruned-Q4_K_M.gguf",
+        "loras/minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors",
+        "text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+        "vae/minimax_h3_video_vae_fp16.safetensors",
+        "vae/minimax_h3_audio_vae_fp32.safetensors"
+      ]
+    }
+  ]
+}

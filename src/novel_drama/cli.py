@@ -20,6 +20,13 @@ from .cli_chapter import (
     cmd_chapter_show,
     cmd_chapter_source,
 )
+from .cli_character import (
+    cmd_character_apply,
+    cmd_character_generate,
+    cmd_character_remove,
+    cmd_character_update,
+)
+from .cli_comfy import cmd_comfy
 from .cli_group import cmd_group_apply, cmd_group_diff, cmd_group_list
 from .cli_line import (
     cmd_line_diff,
@@ -31,12 +38,14 @@ from .cli_line import (
 )
 from .cli_media import cmd_bgm, cmd_concat, cmd_export, cmd_mux, cmd_timeline, cmd_tts_batch
 from .cli_models import cmd_models_import, cmd_models_install, cmd_models_list, cmd_models_verify
+from .cli_outline import cmd_outline_check
 from .cli_produce import cmd_produce, cmd_run_show
 from .cli_setting import cmd_setting
 from .cli_voice import cmd_script, cmd_voice
 from .cli_writing import cmd_chapter_generate, cmd_outline, cmd_script_suggest
 from .config import AppConfig, load_config
 from .media import load_cues, plan_mix, render_mix, run_media
+from .media.runner import plan_media
 from .media.timeline_builder import build_timeline, summarize_timeline
 from .models import entities
 from .models.ids import now_iso
@@ -205,6 +214,46 @@ def cmd_project_list(args, config: AppConfig) -> int:
             print("暂无工程，执行 ndw init <dir> --title 书名 新建")
         for item in workspaces:
             print(f"{item.get('title') or '(无标题)':<20} {item['path']}")
+    return EXIT_OK
+
+
+def cmd_project_set(args, config: AppConfig) -> int:
+    """修改作品元信息（书名 / 作者 / 类型标签）。
+
+    参数:
+        args: 已解析参数（title / author / genre / clear_genres）。
+        config: 本机配置。
+
+    返回:
+        进程退出码。
+
+    异常:
+        ValueError: 没有任何要修改的字段，或书名为空。
+    """
+    store = _resolve_store(args, config)
+    project = store.load_project()
+    work = project["work"]
+    changed = []
+    if getattr(args, "title", None) is not None:
+        title = args.title.strip()
+        if not title:
+            raise ValueError("书名不能为空")
+        work["title"] = title
+        changed.append(f"title={title}")
+    if getattr(args, "author", None) is not None:
+        work["author"] = args.author.strip()
+        changed.append(f"author={work['author']}")
+    if getattr(args, "clear_genres", False):
+        work["genre"] = []
+        changed.append("genre=[]")
+    elif getattr(args, "genre", None) is not None:
+        work["genre"] = [item.strip() for item in args.genre if item.strip()]
+        changed.append("genre=" + "、".join(work["genre"]))
+    if not changed:
+        raise ValueError("没有要修改的字段：至少给一个（--title / --author / --genre）")
+    store.save_project(project)
+    payload = {"title": work.get("title"), "author": work.get("author") or "", "genres": work.get("genre") or []}
+    _emit(args, "已更新作品信息：" + "、".join(changed), payload)
     return EXIT_OK
 
 
@@ -553,6 +602,18 @@ def cmd_media(args, config: AppConfig) -> int:
         return EXIT_OK
 
     adapter = config.adapters.get("comfyui", "local") if kind != "sfx" else config.adapters.get("sfx", "placeholder")
+    if getattr(args, "dry_run", False) and kind in ("image", "video"):
+        rows = plan_media(store, config, args.chapter, kind)
+        lines = [f"[plan] {kind} 共 {len(rows)} 条（dry-run，未提交任何任务）"]
+        for row in rows:
+            size = f"{row['width']}×{row['height']}" if row.get("width") and row.get("height") else "-"
+            lines.append(
+                f"  {row['item_id']}  模板={row['template_id'] or '-'}  画幅={row['aspect_ratio']}  "
+                f"尺寸={size}  seed={row['seed']}  模式={row['source_mode']}"
+                + (f"  提示：{row['warning']}" if row.get("warning") else "")
+            )
+        _emit(args, "\n".join(lines), {"kind": kind, "dry_run": True, "items": rows})
+        return EXIT_OK
     if getattr(args, "dry_run", False):
         plan = run_media(store, config, chapter, kind, limit=getattr(args, "limit", None), dry_run=True)
         _emit(args, f"[plan] {kind} 共 {plan['total']} 条，已就绪 {plan['skipped']} 条，待生成 {plan['total'] - plan['skipped']} 条（adapter={adapter}）", plan)
@@ -573,7 +634,19 @@ def cmd_media(args, config: AppConfig) -> int:
         if item["status"] == "failed":
             lines.append(f"  ! {item['id']}: {item['error']}")
         elif item.get("path"):
-            lines.append(f"  - {item['id']} → {item['path']}")
+            elapsed = item.get("elapsed_ms")
+            detail = (
+                f"  模板={item['template_id']}  画幅={item['aspect_ratio']}  {item['width']}×{item['height']}"
+                if item.get("template_id")
+                else ""
+            )
+            if item.get("source_mode"):
+                detail += f"  模式={item['source_mode']}"
+            if elapsed is not None:
+                detail += f"  耗时 {elapsed / 1000:.1f}s"
+            if item.get("warning"):
+                detail += f"  提示：{item['warning']}"
+            lines.append(f"  - {item['id']} → {item['path']}{detail}")
     _emit(args, "\n".join(lines), result)
     return EXIT_FAILED if result["failed"] else EXIT_OK
 
@@ -610,26 +683,7 @@ def cmd_mix(args, config: AppConfig) -> int:
     return EXIT_OK
 
 
-# ---------------- comfy / queue ----------------
-
-
-def cmd_comfy(args, config: AppConfig) -> int:
-    """ComfyUI 健康检查与模板检查。"""
-    adapters = _build_adapters(config, None)
-    if args.action == "health":
-        status = adapters.comfy.health()
-        _emit(args, f"{'OK' if status.ok else 'WARN'} {status.detail}", {"ok": status.ok, "detail": status.detail})
-        return EXIT_OK if status.ok else EXIT_NOT_IMPLEMENTED
-    templates = adapters.comfy.list_templates()
-    if getattr(args, "json", False):
-        _emit(args, payload=[template.__dict__ for template in templates])
-        return EXIT_OK
-    if not templates:
-        print("config/comfy 下暂无模板（放置 <template_id>.json 后重试）")
-    for template in templates:
-        flag = "OK" if template.valid else "WARN"
-        print(f"[{flag}] {template.template_id}  占位符={','.join(template.placeholders) or '无'}  {template.error or ''}")
-    return EXIT_OK
+# ---------------- queue ----------------
 
 
 def cmd_queue(args, config: AppConfig) -> int:
@@ -783,6 +837,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_sub = p.add_subparsers(dest="action", required=True)
     p_sub.add_parser("info").set_defaults(func=cmd_project_info)
     p_sub.add_parser("list").set_defaults(func=cmd_project_list)
+    q = p_sub.add_parser("set", help="修改作品元信息（书名/作者/类型）")
+    q.add_argument("--title")
+    q.add_argument("--author")
+    q.add_argument("--genre", action="append", help="类型标签，可重复；给出即整体替换")
+    q.add_argument("--clear-genres", dest="clear_genres", action="store_true", help="清空类型标签")
+    q.set_defaults(func=cmd_project_set)
 
     p = sub.add_parser("chapter", help="章节")
     p_sub = p.add_subparsers(dest="action", required=True)
@@ -858,6 +918,22 @@ def build_parser() -> argparse.ArgumentParser:
     q = p_sub.add_parser("export", help="导出为 JSON")
     q.add_argument("--out")
     q.set_defaults(func=cmd_setting)
+    q = p_sub.add_parser("generate", help="AI 生成世界 / 梗概 / 文风")
+    q.add_argument("--step", required=True, choices=["world", "premise", "style"])
+    q.add_argument("--overwrite", action="store_true", help="用生成值整体替换已有内容")
+    q.add_argument("--dry-run", action="store_true", help="只预览，不落盘")
+    q.set_defaults(func=cmd_setting)
+    q = p_sub.add_parser("polish", help="AI 润色单个字段")
+    q.add_argument("--field", required=True, help="如 theme / world.rule / character.background")
+    q.add_argument("--text", help="待润色文本；缺省读取当前值")
+    q.add_argument("--apply", action="store_true", help="把润色结果写回")
+    q.add_argument("--character", help="character.* 字段所属角色 ID")
+    q.add_argument("--context", help="附加上下文，帮助模型理解")
+    q.set_defaults(func=cmd_setting)
+    q = p_sub.add_parser("apply", help="从 JSON 合并写入指定分区")
+    q.add_argument("--section", required=True, choices=["world", "premise", "style"])
+    q.add_argument("--file", required=True, help="JSON 文件路径，- 表示从 stdin 读取")
+    q.set_defaults(func=cmd_setting)
 
     p = sub.add_parser("outline", help="大纲（幕/章/节拍）")
     p_sub = p.add_subparsers(dest="action", required=True)
@@ -867,11 +943,13 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--chapters-per-act", dest="chapters_per_act", type=int, default=3)
     q.add_argument("--beats-per-chapter", dest="beats_per_chapter", type=int, default=3)
     q.add_argument("--words", type=int, default=1200, help="单章目标字数")
+    q.add_argument("--binding", choices=["auto", "none"], default="auto", help="auto=生成后把节拍绑定到已有人物")
     q.add_argument("--dry-run", action="store_true")
     q.set_defaults(func=cmd_outline)
     q = p_sub.add_parser("apply", help="把大纲落地成章节文件")
     q.add_argument("--dry-run", action="store_true")
     q.set_defaults(func=cmd_outline)
+    p_sub.add_parser("check", help="黄金三章检查（不阻断）").set_defaults(func=cmd_outline_check)
 
     p = sub.add_parser("character", help="角色与音色")
     p_sub = p.add_subparsers(dest="action", required=True)
@@ -888,6 +966,28 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--adapter", default="placeholder")
     q.add_argument("--speed", type=float, default=1.0)
     q.set_defaults(func=cmd_character_bind_voice)
+    q = p_sub.add_parser("generate", help="AI 生成主角与主要配角")
+    q.add_argument("--count", type=int, help="人物总数（含主角），缺省 1 主角 + 2–6 配角")
+    q.add_argument("--dry-run", action="store_true", help="只预览，不写 characters.json")
+    q.set_defaults(func=cmd_character_generate)
+    q = p_sub.add_parser("apply", help="从 JSON 批量追加人物")
+    q.add_argument("--file", required=True, help="JSON 文件路径，- 表示从 stdin 读取")
+    q.set_defaults(func=cmd_character_apply)
+    q = p_sub.add_parser("update", help="按 ID 更新角色字段")
+    q.add_argument("--id", required=True)
+    q.add_argument("--name")
+    q.add_argument("--role", choices=["protagonist", "antagonist", "supporting", "minor"])
+    q.add_argument("--gender", choices=["male", "female", "other", "unknown"])
+    q.add_argument("--age-range", dest="age_range")
+    q.add_argument("--personality", help="性格标签，逗号/顿号分隔")
+    q.add_argument("--background")
+    q.add_argument("--aliases", help="别名，逗号/顿号分隔")
+    q.add_argument("--situation", help="当前处境")
+    q.add_argument("--relationship", action="append", help="`目标ID=备注`，可重复")
+    q.set_defaults(func=cmd_character_update)
+    q = p_sub.add_parser("remove", help="按 ID 删除角色（旁白不可删）")
+    q.add_argument("--id", required=True)
+    q.set_defaults(func=cmd_character_remove)
 
     p = sub.add_parser("voice", help="音色库（角色 → 多变体）")
     p_sub = p.add_subparsers(dest="action", required=True)
@@ -1185,10 +1285,46 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--out-dir", dest="out_dir", help="输出目录，默认 <工程>/exports")
     p.set_defaults(func=cmd_export)
 
-    p = sub.add_parser("comfy", help="ComfyUI")
+    p = sub.add_parser("comfy", help="ComfyUI 模板 / 健康检查 / 模型 / 导入")
     p_sub = p.add_subparsers(dest="action", required=True)
-    p_sub.add_parser("health").set_defaults(func=cmd_comfy)
-    p_sub.add_parser("templates").set_defaults(func=cmd_comfy)
+    for name in ("list", "templates"):
+        q = p_sub.add_parser(name, help="列出模板、必需占位符、固定参数与依赖模型")
+        q.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+        q.set_defaults(func=cmd_comfy)
+    q = p_sub.add_parser("health", help="连通性 + 模板校验 + 依赖模型")
+    q.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    q.set_defaults(func=cmd_comfy)
+    q = p_sub.add_parser("scan", help="扫描模型目录并写回 models.json")
+    q.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    q.set_defaults(func=cmd_comfy)
+    q = p_sub.add_parser("resolve", help="反查模型下载地址")
+    q.add_argument("--refresh", action="store_true", help="忽略缓存重新解析")
+    q.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    q.set_defaults(func=cmd_comfy)
+    q = p_sub.add_parser("import", help="导入 UI/API 工作流为模板")
+    q.add_argument("--id", required=True, help="模板 ID（写入 <id>.json）")
+    q.add_argument("--kind", required=True, choices=["image", "video"])
+    q.add_argument("--workflow", help="ComfyUI UI 格式工作流 JSON（自动转 API 格式）")
+    q.add_argument("--file", help="ComfyUI API 格式工作流 JSON")
+    q.add_argument("--force", action="store_true", help="覆盖已存在的模板文件")
+    q.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    q.set_defaults(func=cmd_comfy)
+    q = p_sub.add_parser("models", help="模型清单 / 校验 / 下载")
+    q_sub = q.add_subparsers(dest="models_action", required=True)
+    r = q_sub.add_parser("list", help="列出模板依赖模型的就位情况")
+    r.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    r.set_defaults(func=cmd_comfy)
+    r = q_sub.add_parser("verify", help="核对模型是否就位且体积一致")
+    r.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    r.set_defaults(func=cmd_comfy)
+    r = q_sub.add_parser("install", help="下载单个模型文件")
+    r.add_argument("--key", required=True, help="相对 models 目录的下载键")
+    r.add_argument("--yes", action="store_true", help="已确认体积")
+    r.add_argument("--accept-license", action="store_true", dest="accept_license", help="已确认许可限制")
+    r.add_argument("--dry-run", action="store_true", dest="dry_run", help="只输出下载计划")
+    r.add_argument("--mirror", action="append", help="镜像地址（可多次给出，按顺序尝试）")
+    r.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    r.set_defaults(func=cmd_comfy)
 
     p = sub.add_parser("queue", help="串行队列")
     p_sub = p.add_subparsers(dest="action", required=True)
@@ -1229,6 +1365,11 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--yes", action="store_true", help="确认体积（超过 15G 或体积未知时必填）")
     q.add_argument("--accept-license", action="store_true", help="确认非商用/需授权许可")
     q.add_argument("--dry-run", action="store_true", help="只报体积与许可，不下载")
+    q.add_argument(
+        "--mirror",
+        action="append",
+        help="覆盖默认镜像链，可重复（默认先 https://hf-mirror.com，再 https://huggingface.co）",
+    )
     q.set_defaults(func=cmd_models_install)
     q = p_sub.add_parser("import", help="把已有权重目录纳入模型根目录")
     q.add_argument("--from", dest="src", required=True, help="源目录")
@@ -1288,6 +1429,9 @@ def main(argv: list[str] | None = None) -> int:
     except PreconditionError as exc:
         print(f"[PRECONDITION] {exc}", file=sys.stderr)
         return EXIT_PRECONDITION
+    except FileExistsError as exc:
+        print(f"[EXISTS] {exc}", file=sys.stderr)
+        return EXIT_REJECTED
     except (FileNotFoundError, KeyError) as exc:
         print(f"[NOT_FOUND] {exc}", file=sys.stderr)
         return EXIT_PRECONDITION

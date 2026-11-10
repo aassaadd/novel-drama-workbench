@@ -9,6 +9,8 @@ venv/
 
 # 本机配置（含密钥，绝不入库）
 config/config.yaml
+# ComfyUI 模型线上地址解析缓存（用户级，不入库）
+config/comfy/models.local.json
 
 # 工程媒体与中间产物（工程目录通常不放在仓库内，这里兜底）
 **/assets/voice/
@@ -28,3 +30,4 @@ var/tts/compare/
 
 # macOS
 .DS_Store
+.trae

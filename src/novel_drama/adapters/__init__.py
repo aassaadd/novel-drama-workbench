@@ -54,7 +54,17 @@ def build_adapters(config: AppConfig, project_settings: dict | None = None) -> A
     if writing_name != "omlx":
         raise AdapterError(ErrorCode.INVALID_INPUT, f"未知写作适配器: {writing_name}（当前仅支持 omlx）")
     omlx_settings = dict(config.get("omlx", {}) or {})
-    omlx_settings.update(project_settings.get("writing") or {})
+    # 工程设置里为 null / 空串 / 空列表表示「未定制」，必须继承本机配置；
+    # 否则新建工程的 endpoint=None 会把 config 里的地址覆盖成空串，写作直接不可用。
+    project_writing = {
+        key: value
+        for key, value in (project_settings.get("writing") or {}).items()
+        if value not in (None, "", [])
+    }
+    # omlx-local 是早期默认占位模型名，服务端并不存在，视为未定制
+    if project_writing.get("model") == "omlx-local":
+        project_writing.pop("model")
+    omlx_settings.update(project_writing)
     writing = OmlxWritingAdapter(omlx_settings)
 
     # 默认走真实 provider：只有显式写 placeholder 才会落到占位实现，避免静默降级

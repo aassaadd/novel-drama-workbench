@@ -53,6 +53,7 @@
         "job_id": { "type": ["string", "null"], "pattern": "^job_[0-9A-Za-z]{6,32}$" },
         "width": { "type": ["integer", "null"] },
         "height": { "type": ["integer", "null"] },
+        "updated_at": { "type": ["string", "null"] },
         "error": { "type": ["object", "null"], "additionalProperties": true }
       }
     }

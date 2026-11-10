@@ -68,6 +68,7 @@ def generate_outline(
     beats_per_chapter: int = 3,
     chapter_words: int = DEFAULT_CHAPTER_WORDS,
     dry_run: bool = False,
+    binding: str = "auto",
 ) -> dict:
     """生成幕/章/节拍大纲并写入设定库。
 
@@ -79,9 +80,11 @@ def generate_outline(
         beats_per_chapter: 每章节拍数。
         chapter_words: 单章目标字数（用于分配节拍字数）。
         dry_run: 只生成不落盘。
+        binding: auto=把节拍绑定到已有人物；none=不改动角色引用。
 
     返回:
-        {"acts": [...], "chapters": N, "beats": M, "provider": name, "settings_revision": r}。
+        {"acts": [...], "chapters": N, "beats": M, "provider": name, "settings_revision": r,
+        "golden_three": {"passed", "issues"}}。
 
     异常:
         AdapterError: 模型输出不是合法大纲 JSON。
@@ -156,6 +159,9 @@ def generate_outline(
         built_acts.append(act)
 
     bible.setdefault("outline", {})["acts"] = built_acts
+    if binding == "auto":
+        bind_outline_characters(store, bible)
+    golden = check_golden_three(bible)
     if not dry_run:
         bible = settings_store.save(bible)
     return {
@@ -164,6 +170,8 @@ def generate_outline(
         "beats": beat_count,
         "provider": getattr(result, "model", "") or "offline-writing",
         "settings_revision": bible.get("settings_revision"),
+        "binding": binding,
+        "golden_three": golden,
         "dry_run": dry_run,
     }
 
@@ -385,3 +393,649 @@ def suggest_script(store: ProjectStore, config: AppConfig, chapter_id: str, dry_
         "dry_run": dry_run,
     }
     return summary
+
+
+# ---------------- AI 生书：设定 / 人物 / 润色 ----------------
+
+#: 设定生成步骤
+SETTING_STEPS = ("world", "premise", "style")
+#: 梗概分区字段（与 setting-bible.schema.json 对齐）
+PREMISE_FIELDS = ("logline", "theme", "core_conflict", "ending_intent", "target_audience", "target_length")
+#: 文风分区字段
+STYLE_FIELDS = ("tone", "pov", "tense", "prose_style", "forbidden", "visual_style")
+#: 世界分区字段
+WORLD_FIELDS = ("era", "rules", "factions", "locations", "glossary")
+#: 标量字段长度上限（来自 schema）
+SCALAR_LIMITS = {
+    "logline": 500,
+    "theme": 500,
+    "core_conflict": 1000,
+    "ending_intent": 1000,
+    "target_audience": 200,
+    "era": 200,
+    "tone": 300,
+    "prose_style": 1000,
+    "visual_style": 500,
+}
+#: 枚举取值
+POV_OPTIONS = ("first", "third_limited", "third_omniscient", "second")
+TENSE_OPTIONS = ("past", "present")
+LENGTH_OPTIONS = ("short", "novella", "novel", "series")
+ROLE_OPTIONS = ("protagonist", "antagonist", "supporting", "minor")
+GENDER_OPTIONS = ("male", "female", "other", "unknown")
+#: 单字段润色白名单
+POLISH_FIELDS = (
+    "logline",
+    "theme",
+    "core_conflict",
+    "ending_intent",
+    "target_audience",
+    "era",
+    "tone",
+    "prose_style",
+    "visual_style",
+    "world.rule",
+    "world.faction",
+    "world.location",
+    "world.glossary",
+    "character.background",
+    "character.personality",
+    "work.genre",
+)
+#: 黄金三章检查用的冲突语义关键词
+CONFLICT_KEYWORDS = ("冲突", "对抗", "矛盾", "争执", "对峙", "摊牌", "威胁", "追杀", "决裂", "争夺", "冲突升级")
+
+
+def _extract_json_object(text: str) -> dict:
+    """从模型输出中提取第一个 `{` 到最后一个 `}` 之间的 JSON 对象。
+
+    参数:
+        text: 模型原始输出（允许被 ```json 代码块包裹）。
+
+    返回:
+        解析后的 dict。
+
+    异常:
+        ValueError: 没有 JSON 对象或解析失败。
+    """
+    raw = (text or "").strip()
+    if not raw:
+        raise ValueError("LLM 返回内容为空")
+    start, end = raw.find("{"), raw.rfind("}")
+    if start < 0 or end <= start:
+        raise ValueError("LLM 返回内容不是合法 JSON")
+    payload = json.loads(raw[start : end + 1])
+    if not isinstance(payload, dict):
+        raise ValueError("LLM 返回内容不是合法 JSON")
+    return payload
+
+
+def _generate_json(adapter, req: TextGenRequest) -> dict:
+    """调用适配器并解析 JSON；解析失败自动重试一次。
+
+    参数:
+        adapter: 写作适配器。
+        req: 文本生成请求。
+
+    返回:
+        解析后的 dict。
+
+    异常:
+        ValueError: 连续两次都不是合法 JSON。
+    """
+    for _ in range(2):
+        result = adapter.generate(req)
+        try:
+            return _extract_json_object(result.text)
+        except ValueError:
+            continue
+    raise ValueError("LLM 返回内容不是合法 JSON")
+
+
+def _check_text(value, limit: int, label: str, required: bool = False) -> str:
+    """校验并清洗字符串字段。
+
+    参数:
+        value: 原始值。
+        limit: 最大长度（schema 上限）。
+        label: 字段中文名，用于错误提示。
+        required: 是否允许为空。
+
+    返回:
+        去空白后的字符串。
+
+    异常:
+        ValueError: 必填为空或超长。
+    """
+    text = str(value or "").strip()
+    if required and not text:
+        raise ValueError(f"{label}不能为空")
+    if len(text) > limit:
+        raise ValueError(f"{label}超过 {limit} 字上限（当前 {len(text)} 字）")
+    return text
+
+
+def _check_choice(value, options: tuple[str, ...], label: str) -> str:
+    """校验枚举字段。
+
+    参数:
+        value: 原始值。
+        options: 允许的取值。
+        label: 字段中文名。
+
+    返回:
+        去空白后的枚举值。
+
+    异常:
+        ValueError: 取值不在枚举内。
+    """
+    text = str(value or "").strip()
+    if text not in options:
+        raise ValueError(f"{label}取值非法: {text or '(空)'}（可选 {'/'.join(options)}）")
+    return text
+
+
+def _clean_str_list(rows, item_limit: int, label: str) -> list[str]:
+    """清洗字符串数组（允许单个字符串自动成组）。
+
+    参数:
+        rows: 原始数组或字符串。
+        item_limit: 单项最大长度。
+        label: 字段中文名。
+
+    返回:
+        去空后的字符串列表。
+
+    异常:
+        ValueError: 类型错误或单项超长。
+    """
+    if rows is None:
+        return []
+    if isinstance(rows, str):
+        rows = [rows]
+    if not isinstance(rows, list):
+        raise ValueError(f"{label}必须是字符串数组")
+    result = []
+    for index, item in enumerate(rows):
+        text = _check_text(item, item_limit, f"{label}第 {index + 1} 项")
+        if text:
+            result.append(text)
+    return result
+
+
+def _clean_locations(rows) -> list[dict]:
+    """清洗世界地点数组。
+
+    参数:
+        rows: 原始地点数组。
+
+    返回:
+        [{name, description, atmosphere}]。
+
+    异常:
+        ValueError: 结构或长度不合法。
+    """
+    if rows is None:
+        return []
+    if not isinstance(rows, list):
+        raise ValueError("locations 必须是数组")
+    result = []
+    for index, item in enumerate(rows):
+        if not isinstance(item, dict):
+            raise ValueError(f"locations 第 {index + 1} 项必须是对象")
+        result.append(
+            {
+                "name": _check_text(item.get("name"), 120, f"locations 第 {index + 1} 项名称", required=True),
+                "description": _check_text(item.get("description"), 1000, f"locations 第 {index + 1} 项描述"),
+                "atmosphere": _check_text(item.get("atmosphere"), 300, f"locations 第 {index + 1} 项氛围"),
+            }
+        )
+    return result
+
+
+def _clean_glossary(rows) -> list[dict]:
+    """清洗世界观词条数组。
+
+    参数:
+        rows: 原始词条数组。
+
+    返回:
+        [{term, meaning, aliases}]。
+
+    异常:
+        ValueError: 结构或长度不合法。
+    """
+    if rows is None:
+        return []
+    if not isinstance(rows, list):
+        raise ValueError("glossary 必须是数组")
+    result = []
+    for index, item in enumerate(rows):
+        if not isinstance(item, dict):
+            raise ValueError(f"glossary 第 {index + 1} 项必须是对象")
+        entry = {
+            "term": _check_text(item.get("term"), 120, f"glossary 第 {index + 1} 项术语", required=True),
+            "meaning": _check_text(item.get("meaning"), 1000, f"glossary 第 {index + 1} 项释义", required=True),
+        }
+        aliases = _clean_str_list(item.get("aliases"), 120, f"glossary 第 {index + 1} 项别名")
+        if aliases:
+            entry["aliases"] = aliases
+        result.append(entry)
+    return result
+
+
+def _clean_setting_fields(step: str, payload: dict) -> dict:
+    """按步骤清洗并校验生成字段。
+
+    参数:
+        step: world / premise / style。
+        payload: 模型返回的 JSON 对象。
+
+    返回:
+        只包含该步骤允许字段的清洗结果。
+
+    异常:
+        ValueError: 字段类型、枚举或长度不合法。
+    """
+    if step == "premise":
+        if "logline" not in payload:
+            raise ValueError("logline 不能为空")
+        fields = {"logline": _check_text(payload.get("logline"), 500, "logline", required=True)}
+        for key in ("theme", "core_conflict", "ending_intent", "target_audience"):
+            if key in payload:
+                fields[key] = _check_text(payload.get(key), SCALAR_LIMITS[key], key)
+        if "target_length" in payload:
+            fields["target_length"] = _check_choice(payload.get("target_length"), LENGTH_OPTIONS, "target_length")
+        return fields
+
+    if step == "style":
+        if "tone" not in payload:
+            raise ValueError("tone 不能为空")
+        fields = {"tone": _check_text(payload.get("tone"), 300, "tone", required=True)}
+        if "pov" in payload:
+            fields["pov"] = _check_choice(payload.get("pov"), POV_OPTIONS, "pov")
+        if "tense" in payload:
+            fields["tense"] = _check_choice(payload.get("tense"), TENSE_OPTIONS, "tense")
+        if "prose_style" in payload:
+            fields["prose_style"] = _check_text(payload.get("prose_style"), 1000, "prose_style")
+        if "forbidden" in payload:
+            fields["forbidden"] = _clean_str_list(payload.get("forbidden"), 200, "forbidden")
+        if "visual_style" in payload:
+            fields["visual_style"] = _check_text(payload.get("visual_style"), 500, "visual_style")
+        return fields
+
+    fields = {"era": _check_text(payload.get("era"), 200, "era", required=True)}
+    if "rules" in payload:
+        fields["rules"] = _clean_str_list(payload.get("rules"), 500, "rules")
+    if "factions" in payload:
+        fields["factions"] = _clean_str_list(payload.get("factions"), 200, "factions")
+    if "locations" in payload:
+        fields["locations"] = _clean_locations(payload.get("locations"))
+    if "glossary" in payload:
+        fields["glossary"] = _clean_glossary(payload.get("glossary"))
+    return fields
+
+
+def _bible_digest(bible: dict) -> dict:
+    """整理已有设定摘要，供提示词与增量生成使用。
+
+    参数:
+        bible: 设定库 dict（可为空）。
+
+    返回:
+        {logline, theme, era, tone, rules, factions, locations, glossary}。
+    """
+    premise = bible.get("premise") or {}
+    world = bible.get("world") or {}
+    style = bible.get("style") or {}
+    return {
+        "logline": premise.get("logline"),
+        "theme": premise.get("theme"),
+        "core_conflict": premise.get("core_conflict"),
+        "target_length": premise.get("target_length"),
+        "era": world.get("era"),
+        "tone": style.get("tone"),
+        "pov": style.get("pov"),
+        "rules": (world.get("rules") or [])[:8],
+        "factions": (world.get("factions") or [])[:8],
+        "locations": [item.get("name") for item in (world.get("locations") or []) if item.get("name")][:8],
+        "glossary": [item.get("term") for item in (world.get("glossary") or []) if item.get("term")][:8],
+    }
+
+
+def _is_meaningful(current, baseline, key: str = "") -> bool:
+    """判断已有值是否算「用户真实内容」（骨架占位值视为空）。
+
+    只有 logline / era / tone 这类骨架占位字段会与默认值比较，
+    其余字段只要非空就保留（避免未经用户确认被生成结果覆盖）。
+
+    参数:
+        current: 设定库里的当前值。
+        baseline: 设定库骨架里的默认值。
+        key: 字段名。
+
+    返回:
+        True 表示应当保留，不被生成结果覆盖。
+    """
+    if current is None:
+        return False
+    if isinstance(current, list):
+        return len(current) > 0
+    if isinstance(current, dict):
+        return bool(current)
+    text = str(current).strip()
+    if not text:
+        return False
+    if key in ("logline", "era", "tone"):
+        if "待填写" in text:
+            return False
+        if baseline is not None and text == str(baseline).strip():
+            return False
+    return True
+
+
+def generate_settings(store: ProjectStore, config: AppConfig, step: str, overwrite: bool = False) -> dict:
+    """生成世界 / 梗概 / 文风设定（只返回结果，不写盘）。
+
+    参数:
+        store: 工程。
+        config: 本机配置。
+        step: world|premise|style。
+        overwrite: True 时用生成值整体替换该分区；False 时保留已有非空值并记入 skipped。
+
+    返回:
+        {"step", "fields", "skipped"}。
+
+    异常:
+        ValueError: step 非法、模型输出不是合法 JSON 或字段校验失败。
+    """
+    if step not in SETTING_STEPS:
+        raise ValueError(f"未知设定步骤: {step}（可选 world / premise / style）")
+    settings_store = SettingsStore(store.root)
+    bible = settings_store.load_or_none() or {}
+    project = store.load_project()
+    work = project.get("work") or {}
+    skeleton = settings_store.build_skeleton(work)
+    adapter = build_writing_adapter(config, bible)
+
+    label = {"world": "世界设定", "premise": "故事梗概", "style": "文风设定"}[step]
+    allowed = {"world": WORLD_FIELDS, "premise": PREMISE_FIELDS, "style": STYLE_FIELDS}[step]
+    target_length = (bible.get("premise") or {}).get("target_length") or (skeleton.get("premise") or {}).get("target_length")
+    req = TextGenRequest(
+        task="setting",
+        system="你是中文小说的设定编辑，只输出一个 JSON 对象，不要解释，不要输出 JSON 以外的内容。",
+        messages=[Message("user", f"为《{work.get('title') or '未命名'}》生成{label}，字段：{', '.join(allowed)}。")],
+        stream=False,
+        temperature=0.7,
+        metadata={
+            "step": step,
+            "work": {"title": work.get("title"), "author": work.get("author"), "genre": work.get("genre") or []},
+            "existing": _bible_digest(bible),
+            "target_length": target_length,
+            "seed": work.get("id"),
+        },
+    )
+    payload = _generate_json(adapter, req)
+    if isinstance(payload.get(step), dict):
+        payload = payload[step]
+    fields = _clean_setting_fields(step, payload)
+
+    existing_section = bible.get(step) or {}
+    baseline_section = skeleton.get(step) or {}
+    final: dict = {}
+    skipped: list[str] = []
+    for key, value in fields.items():
+        current = existing_section.get(key)
+        if not overwrite and _is_meaningful(current, baseline_section.get(key), key):
+            final[key] = current
+            skipped.append(key)
+        else:
+            final[key] = value
+    return {"step": step, "fields": final, "skipped": skipped}
+
+
+def generate_characters(store: ProjectStore, config: AppConfig, count: int | None = None) -> dict:
+    """生成主角与主要配角（只返回结果，不写盘）。
+
+    参数:
+        store: 工程。
+        config: 本机配置。
+        count: 期望人物总数（含主角），缺省交给模型按 1 主角 + 2–6 配角产出。
+
+    返回:
+        {"characters": [{name, role, gender, age_range, personality, background, relationships}]}。
+
+    异常:
+        ValueError: 模型输出不是合法 JSON，或缺少主角 / 配角数量越界 / 重名。
+    """
+    settings_store = SettingsStore(store.root)
+    bible = settings_store.load_or_none() or {}
+    project = store.load_project()
+    work = project.get("work") or {}
+    adapter = build_writing_adapter(config, bible)
+
+    req = TextGenRequest(
+        task="character",
+        system="你是中文小说的人物编辑，只输出一个 JSON 对象（键为 characters），不要解释。",
+        messages=[Message("user", f"为《{work.get('title') or '未命名'}》生成 1 名主角与 2–6 名主要配角。")],
+        stream=False,
+        temperature=0.8,
+        metadata={
+            "work": {"title": work.get("title"), "author": work.get("author"), "genre": work.get("genre") or []},
+            "premise": bible.get("premise") or {},
+            "world": _bible_digest(bible),
+            "count": count,
+            "seed": work.get("id"),
+        },
+    )
+    payload = _generate_json(adapter, req)
+    rows = payload.get("characters")
+    if not isinstance(rows, list) or not rows:
+        raise ValueError("LLM 返回的人物列表为空")
+
+    characters: list[dict] = []
+    seen: set[str] = set()
+    for index, row in enumerate(rows):
+        if not isinstance(row, dict):
+            raise ValueError(f"第 {index + 1} 个人物必须是对象")
+        name = _check_text(row.get("name"), 60, f"第 {index + 1} 个人物姓名", required=True)
+        if name in seen:
+            raise ValueError(f"人物姓名重复: {name}")
+        seen.add(name)
+        role = str(row.get("role") or "supporting").strip()
+        if role not in ROLE_OPTIONS:
+            raise ValueError(f"人物 {name} 的 role 非法: {role}（可选 {'/'.join(ROLE_OPTIONS)}）")
+        gender = str(row.get("gender") or "unknown").strip()
+        if gender not in GENDER_OPTIONS:
+            gender = "unknown"
+        relationships = row.get("relationships") or {}
+        if not isinstance(relationships, dict):
+            relationships = {}
+        characters.append(
+            {
+                "name": name,
+                "role": role,
+                "gender": gender,
+                "age_range": _check_text(row.get("age_range"), 40, f"人物 {name} 的年龄区间") or None,
+                "personality": _clean_str_list(row.get("personality"), 40, f"人物 {name} 的性格"),
+                "background": _check_text(row.get("background"), 2000, f"人物 {name} 的背景"),
+                "relationships": {
+                    _check_text(key, 60, f"人物 {name} 的关系对象", required=True): _check_text(note, 500, f"人物 {name} 的关系备注")
+                    for key, note in relationships.items()
+                },
+            }
+        )
+
+    if not any(item["role"] == "protagonist" for item in characters):
+        raise ValueError("人物里至少需要 1 个 protagonist（主角）")
+    supporting = [item for item in characters if item["role"] in ("antagonist", "supporting", "minor")]
+    if not 2 <= len(supporting) <= 6:
+        raise ValueError(f"配角数量必须为 2–6 人（当前 {len(supporting)} 人）")
+    return {"characters": characters}
+
+
+def polish_field(
+    store: ProjectStore,
+    config: AppConfig,
+    field: str,
+    text: str,
+    context: str | None = None,
+) -> dict:
+    """润色单个可填写字段（只返回文本，不写盘）。
+
+    参数:
+        store: 工程。
+        config: 本机配置。
+        field: 白名单内的字段名（见 POLISH_FIELDS）。
+        text: 待润色文本。
+        context: 可选上下文（如所属人物、章节摘要）。
+
+    返回:
+        {"field", "text"}。
+
+    异常:
+        ValueError: 字段不在白名单，或没有可润色的内容。
+    """
+    key = (field or "").strip()
+    if key not in POLISH_FIELDS:
+        raise ValueError(f"不支持的润色字段: {key or '(空)'}（可选 {'、'.join(POLISH_FIELDS)}）")
+    source = (text or "").strip()
+    if not source:
+        raise ValueError("没有可润色的内容")
+
+    bible = SettingsStore(store.root).load_or_none() or {}
+    work = store.load_project().get("work") or {}
+    adapter = build_writing_adapter(config, bible)
+    req = TextGenRequest(
+        task="polish",
+        system="你是中文小说编辑，只润色给定字段，保持原意与信息量，只输出 JSON（键为 text）。",
+        messages=[Message("user", f"润色字段 {key}：{source}")],
+        stream=False,
+        temperature=0.6,
+        metadata={
+            "field": key,
+            "text": source,
+            "context": context or "",
+            "work": {"title": work.get("title"), "genre": work.get("genre") or []},
+            "seed": work.get("id"),
+        },
+    )
+    result = adapter.generate(req)
+    polished = (result.text or "").strip()
+    try:
+        payload = _extract_json_object(polished)
+        candidate = str(payload.get("text") or "").strip()
+        if candidate:
+            polished = candidate
+    except ValueError:
+        # 模型直接返回纯文本时按原文使用，不强求 JSON
+        pass
+    if not polished:
+        raise ValueError("LLM 返回内容不是合法 JSON")
+    limit = SCALAR_LIMITS.get(key)
+    if limit and len(polished) > limit:
+        polished = polished[:limit]
+    return {"field": key, "text": polished}
+
+
+def bind_outline_characters(store: ProjectStore, bible: dict) -> dict:
+    """把大纲章节与节拍绑定到已有人物（就地修改 bible）。
+
+    参数:
+        store: 工程（读取 characters.json）。
+        bible: 设定库 dict。
+
+    返回:
+        {"chapters": 绑定章节数, "beats": 绑定节拍数}。
+    """
+    characters = [item for item in store.load_characters()["characters"] if item.get("role") != "narrator"]
+    if not characters:
+        return {"chapters": 0, "beats": 0}
+    ids = [item["id"] for item in characters]
+    protagonist = next((item for item in characters if item.get("role") == "protagonist"), characters[0])
+    fallback = [item["id"] for item in characters if item["id"] != protagonist["id"]]
+
+    chapters_bound = 0
+    beats_bound = 0
+    for act in (bible.get("outline") or {}).get("acts") or []:
+        for chapter in act.get("chapters") or []:
+            if chapter.get("pov_character_id") not in ids:
+                chapter["pov_character_id"] = protagonist["id"]
+            chapters_bound += 1
+            for index, beat in enumerate(chapter.get("beats") or []):
+                valid = [cid for cid in (beat.get("character_ids") or []) if cid in ids]
+                if not valid:
+                    valid = [protagonist["id"]]
+                    if fallback:
+                        valid.append(fallback[index % len(fallback)])
+                beat["character_ids"] = valid
+                beats_bound += 1
+    return {"chapters": chapters_bound, "beats": beats_bound}
+
+
+def _outline_chapters(bible: dict) -> list[dict]:
+    """按序号展开设定库里的全部大纲章节。
+
+    参数:
+        bible: 设定库 dict。
+
+    返回:
+        大纲章节列表（按 index 升序）。
+    """
+    rows: list[dict] = []
+    for act in (bible.get("outline") or {}).get("acts") or []:
+        rows.extend(act.get("chapters") or [])
+    return sorted(rows, key=lambda item: int(item.get("index") or 0))
+
+
+def check_golden_three(bible: dict) -> dict:
+    """检查前三章是否满足「黄金三章」约束（不阻断落盘）。
+
+    规则:
+        第 1 章首个节拍摘要非空（钩子）；
+        第 2 章节拍 ≥ 2，或章节摘要含冲突/对抗语义；
+        第 3 章存在 turning_point=true 的节拍。
+
+    参数:
+        bible: 设定库 dict。
+
+    返回:
+        {"passed": bool, "issues": [{"chapter", "problem", "hint"}]}。
+    """
+    chapters = _outline_chapters(bible)[:3]
+    issues: list[dict] = []
+
+    if not chapters:
+        issues.append({"chapter": 1, "problem": "设定库还没有大纲", "hint": "先执行 ndw outline generate 生成幕/章/节拍"})
+        return {"passed": False, "issues": issues}
+
+    first = chapters[0]
+    first_beats = first.get("beats") or []
+    if not (first_beats and str((first_beats[0] or {}).get("summary") or "").strip()):
+        issues.append(
+            {"chapter": 1, "problem": "第 1 章缺少开篇钩子", "hint": "在第 1 章首拍写清悬念/冲突/能力亮相，前 300 字抓住读者"}
+        )
+
+    if len(chapters) < 2:
+        issues.append({"chapter": 2, "problem": "缺少第 2 章", "hint": "第 2 章需要确立核心矛盾与对抗关系"})
+    else:
+        second = chapters[1]
+        second_beats = second.get("beats") or []
+        summary = str(second.get("summary") or "")
+        has_conflict = len(second_beats) >= 2 or any(word in summary for word in CONFLICT_KEYWORDS)
+        if not has_conflict:
+            issues.append(
+                {"chapter": 2, "problem": "第 2 章没有确立核心矛盾", "hint": "把冲突写进章节摘要，或拆成至少 2 个节拍呈现对抗"}
+            )
+
+    if len(chapters) < 3:
+        issues.append({"chapter": 3, "problem": "缺少第 3 章", "hint": "第 3 章需要出现第一次小高潮，让读者确认「这本书能看」"})
+    else:
+        third = chapters[2]
+        turned = any(bool((beat or {}).get("turning_point")) for beat in (third.get("beats") or []))
+        if not turned:
+            issues.append(
+                {"chapter": 3, "problem": "第 3 章缺少第一次小高潮", "hint": "把第 3 章某个节拍标记为 turning_point=true，形成阶段性反转"}
+            )
+
+    return {"passed": not issues, "issues": issues}

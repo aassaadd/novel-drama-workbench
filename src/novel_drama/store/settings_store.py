@@ -8,6 +8,8 @@
 from __future__ import annotations
 
 import json
+import os
+import uuid
 from pathlib import Path
 
 from ..models.ids import new_id, now_iso
@@ -139,13 +141,16 @@ class SettingsStore:
     def _write(self, bible: dict) -> None:
         """原子写入设定库文件。
 
+        临时文件名带 pid + 随机后缀：新建工程后页面会并发拉取设定库，
+        固定的 `.json.tmp` 会让后到的写线程在 replace 时找不到源文件。
+
         参数:
             bible: 设定库 dict。
         """
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_suffix(".json.tmp")
+        tmp = self.path.with_name(f"{self.path.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
         tmp.write_text(json.dumps(bible, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        tmp.replace(self.path)
+        os.replace(tmp, self.path)
 
     # ---------- 大纲工具 ----------
 

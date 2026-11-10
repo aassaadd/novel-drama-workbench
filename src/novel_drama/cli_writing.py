@@ -63,13 +63,21 @@ def cmd_outline(args, config: AppConfig) -> int:
             beats_per_chapter=args.beats_per_chapter,
             chapter_words=args.words,
             dry_run=args.dry_run,
+            binding=getattr(args, "binding", "auto"),
         )
         head = f"[dry-run] " if args.dry_run else ""
+        golden = result.get("golden_three") or {"passed": True, "issues": []}
+        hints = ""
+        if not golden["passed"]:
+            hints = "\n黄金三章提示（不阻断）：\n" + "\n".join(
+                f"  第 {issue['chapter']} 章：{issue['problem']}——{issue['hint']}" for issue in golden["issues"]
+            )
         _emit(
             args,
             f"{head}大纲已生成：{result['acts'].__len__()} 幕 / {result['chapters']} 章 / {result['beats']} 个节拍"
-            f"（provider={result['provider']}，settings_revision={result['settings_revision']}）\n"
-            + _fmt_outline(result["acts"]),
+            f"（provider={result['provider']}，settings_revision={result['settings_revision']}，binding={result.get('binding')}）\n"
+            + _fmt_outline(result["acts"])
+            + hints,
             result,
         )
         return EXIT_OK

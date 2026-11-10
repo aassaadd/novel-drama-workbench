@@ -54,6 +54,73 @@ EMOTION_CYCLE = ("neutral", "tender", "sad", "angry", "surprise", "fear", "joy")
 # 镜头时间候选
 TIME_CYCLE = ("night", "day", "dusk", "morning")
 
+# ---------- 设定生成素材（确定性抽取，保证离线可复现） ----------
+WORLD_ERAS = (
+    "近未来的沿海都会，常年被雾与潮声包裹",
+    "民国末年的南方港城，报刊与帮会同时兴盛",
+    "架空的北境边城，冬季长达八个月",
+    "当代内陆小城，旧工业区正在被拆到一半",
+)
+WORLD_RULES = (
+    "所有超自然现象都必须在午夜到凌晨三点之间发生",
+    "谎言一旦被说出口，就会在说话人掌心留下痕迹",
+    "进入旧城区必须交出一段真实记忆作为通行凭证",
+    "身份文书由行会统一签发，伪造者终身不得入城",
+    "任何契约都不能在雨中签署，否则条款会失效",
+    "梦境中的死亡会真实反映为身体上的旧伤",
+    "只有持灯人能在停电夜看清街巷的真实走向",
+)
+WORLD_FACTIONS = ("旧城行会", "守夜人小队", "衡平法庭", "北境运输联会", "灰市中间人")
+WORLD_LOCATIONS = (
+    ("雾港码头", "终年不散的雾里堆满无人认领的货箱，铁轨一直铺到水边。", "潮湿、空旷，远处有汽笛与铁链声"),
+    ("旧档案楼", "六层砖楼，电梯常年停运，顶层被封条封住。", "安静、粉尘味重，翻纸声格外清楚"),
+    ("长明街市", "夜里才开张的集市，摊主大多不肯报真名。", "人声细碎，灯光偏暖，偶有短促的争执"),
+    ("北堤灯塔", "废弃多年，灯室里的镜片仍被人擦拭得很干净。", "海风灌入，金属结构轻微共振"),
+    ("城南旧宅", "院墙很高，门牌被磨得看不清数字。", "压抑、回音明显，雨后更冷"),
+)
+WORLD_GLOSSARY = (
+    ("持灯人", "在停电夜维持街巷秩序的人，行会不承认其存在。"),
+    ("静默期", "每晚零点到三点，所有公开通信被迫中断的时段。"),
+    ("旧案", "十年前未结的一批卷宗，涉及当年的整条运输线。"),
+    ("凭证", "进入旧城区所需的记忆碎片，一旦交出无法取回。"),
+    ("回声", "超自然现象残留的声音痕迹，只在原地可听。"),
+    ("封条", "由衡平法庭签发的封存标记，撕开即视为违约。"),
+)
+TONE_POOL = ("冷峻克制", "绵密阴郁", "平静表面下暗流涌动", "疏离而克制，偶尔锋利")
+PROSE_POOL = (
+    "短句为主，少用形容词，靠动作与留白推进情绪",
+    "长短句交替，对话密集，避免大段心理独白",
+    "叙述冷静，细节具体，关键处刻意省略",
+)
+VISUAL_POOL = ("低饱和冷调，潮湿质感，浅景深", "灰蓝主色，硬光与长阴影", "暖黄灯光与冷色夜雨的对比")
+FORBIDDEN_POOL = ("不要使用网络流行语", "不要出现作者旁白式议论", "不要用感叹号堆砌情绪", "不要写露骨暴力细节")
+THEME_POOL = ("人在被规则驯服之后，还能不能为自己做一次选择", "真相的代价由谁来承担", "记忆与身份哪一个更接近真实")
+ENDING_POOL = ("主角赢下真相，却失去唯一想守住的人", "主角放弃翻案，把证据留给后来者", "主角与对手达成交易，旧秩序被撬开一道缝")
+
+# ---------- 人物生成素材 ----------
+CHARACTER_NAME_POOL = (
+    "沈砚",
+    "林见夏",
+    "顾长风",
+    "苏晚",
+    "程砚秋",
+    "陆知微",
+    "白翎",
+    "韩照",
+    "温叙",
+    "叶阑",
+    "许听澜",
+    "周慎",
+)
+PERSONALITY_POOL = ("克制", "多疑", "护短", "执拗", "沉默", "敏锐", "体面", "记仇", "心软", "谨慎", "寡言", "刚硬")
+AGE_RANGE_POOL = ("24-30", "28-35", "32-40", "38-45", "45-55")
+FUNCTION_NOTES = ("对手：目标与主角相冲，但共享同一条底线", "盟友：愿意替主角承担风险，却隐瞒了一件事", "导师：知道旧案全貌，只在关键处给半句提示", "情感线：与主角互相试探，谁都不肯先低头")
+POLISH_TAILS = (
+    "这句话背后压着一段没人愿意提起的旧事。",
+    "他把它说得很轻，像是在试探对方的分寸。",
+    "语气停了一拍，留下一点不容追问的空白。",
+)
+
 
 class OfflineWritingAdapter:
     """离线写作适配器：实现 `WritingAdapter` 协议。"""
@@ -90,10 +157,18 @@ class OfflineWritingAdapter:
             text = self._script(meta)
         elif task == "image_prompt":
             text = self._image_prompt(meta)
+        elif task == "setting":
+            text = self._setting(meta)
+        elif task == "character":
+            text = self._character(meta)
+        elif task == "polish":
+            text = self._polish(meta)
         elif task == "freeform":
             text = self._freeform(req)
         else:
-            raise ValueError(f"离线写作不支持的 task={task!r}（可选 outline/chapter/script/image_prompt/freeform）")
+            raise ValueError(
+                f"离线写作不支持的 task={task!r}（可选 outline/chapter/script/image_prompt/setting/character/polish/freeform）"
+            )
         return TextGenResult(
             text=text,
             finish_reason="stop",
@@ -132,7 +207,7 @@ class OfflineWritingAdapter:
         返回:
             [{"id": "offline-writing", ...}]。
         """
-        return [{"id": "offline-writing", "kind": "offline", "tasks": ["outline", "chapter", "script", "image_prompt"]}]
+        return [{"id": "offline-writing", "kind": "offline", "tasks": ["outline", "chapter", "script", "image_prompt", "setting", "character", "polish"]}]
 
     def unload(self, model: str | None = None) -> dict:
         """无模型可卸载。
@@ -404,6 +479,141 @@ class OfflineWritingAdapter:
             parts.append(style)
         parts.append("电影感，浅景深")
         return "，".join(parts)
+
+    # ---------- 设定 / 人物 / 润色 ----------
+
+    def _setting(self, meta: dict) -> str:
+        """按 step 生成世界 / 梗概 / 文风的结构化 JSON。
+
+        参数:
+            meta: {step, work:{title,author,genre}, existing, target_length, seed}。
+
+        返回:
+            JSON 字符串（世界步骤为平铺的 world 字段，梗概/文风同理）。
+        """
+        step = str(meta.get("step") or "").strip()
+        work = meta.get("work") or {}
+        title = str(work.get("title") or "未命名").strip() or "未命名"
+        genres = [str(item).strip() for item in (work.get("genre") or []) if str(item).strip()]
+        rng = self._rng(meta, f"setting:{step}")
+        genre_text = "、".join(genres) or "悬疑"
+
+        if step == "premise":
+            target_length = meta.get("target_length")
+            if target_length not in ("short", "novella", "novel", "series"):
+                target_length = "novella"
+            fields = {
+                "logline": f"《{title}》里，一个习惯替别人收拾残局的人，被迫重查一桩被所有人默认已经结案的旧事，最后要在真相与仅剩的牵挂之间做一次不可逆的选择。",
+                "theme": rng.choice(THEME_POOL),
+                "core_conflict": f"主角想查清旧案，体制与旧关系网却需要这桩案子永远封存；越接近真相，他越要付出身边的人作代价。",
+                "ending_intent": rng.choice(ENDING_POOL),
+                "target_audience": f"偏好{genre_text}与人物弧光的成年读者",
+                "target_length": target_length,
+            }
+            return json.dumps(fields, ensure_ascii=False, indent=2)
+
+        if step == "style":
+            fields = {
+                "tone": rng.choice(TONE_POOL),
+                "pov": "third_limited",
+                "tense": "past",
+                "prose_style": rng.choice(PROSE_POOL),
+                "forbidden": list(rng.sample(FORBIDDEN_POOL, 2)),
+                "visual_style": rng.choice(VISUAL_POOL),
+            }
+            return json.dumps(fields, ensure_ascii=False, indent=2)
+
+        if step == "world":
+            rules = list(rng.sample(WORLD_RULES, 4))
+            factions = list(rng.sample(WORLD_FACTIONS, 3))
+            locations = [
+                {"name": name, "description": desc, "atmosphere": mood}
+                for name, desc, mood in rng.sample(WORLD_LOCATIONS, 3)
+            ]
+            glossary = [{"term": term, "meaning": meaning} for term, meaning in rng.sample(WORLD_GLOSSARY, 4)]
+            fields = {
+                "era": f"{rng.choice(WORLD_ERAS)}（{genre_text}基调）",
+                "rules": rules,
+                "factions": factions,
+                "locations": locations,
+                "glossary": glossary,
+            }
+            return json.dumps(fields, ensure_ascii=False, indent=2)
+
+        raise ValueError(f"离线写作不支持的设定步骤: {step!r}（可选 world/premise/style）")
+
+    def _character(self, meta: dict) -> str:
+        """生成 1 名主角 + 2–6 名配角的人物 JSON。
+
+        参数:
+            meta: {work, premise, world, count, seed}。
+
+        返回:
+            JSON 字符串（`{"characters": [...]}`）。
+        """
+        rng = self._rng(meta, "character")
+        try:
+            total = int(meta.get("count") or 4)
+        except (TypeError, ValueError):
+            total = 4
+        total = max(3, min(7, total))
+        names = list(rng.sample(CHARACTER_NAME_POOL, total))
+        roles = ["protagonist", "antagonist"] + ["supporting"] * (total - 2)
+
+        characters = []
+        for index, (name, role) in enumerate(zip(names, roles)):
+            personality = list(rng.sample(PERSONALITY_POOL, 3))
+            gender = ("male", "female", "other")[index % 3]
+            age_range = AGE_RANGE_POOL[index % len(AGE_RANGE_POOL)]
+            if role == "protagonist":
+                background = (
+                    "旧案发生时是唯一的目击者，成年后进入体制内做善后工作；"
+                    "目标是把当年被掩埋的事实拼回原样，动机是替一个人兑现迟到的承诺，"
+                    "缺陷是不肯求助、习惯独自承担，秘密是他也动过销毁一份证据的念头；"
+                    "弧光从「只信证据」走向「愿意为活人让步」。"
+                )
+            else:
+                background = (
+                    f"{FUNCTION_NOTES[(index - 1) % len(FUNCTION_NOTES)]}；"
+                    f"与主角的旧案有直接牵连，立场随剧情推进发生偏移。"
+                )
+            relationships = {}
+            for other in names:
+                if other == name:
+                    continue
+                relationships[other] = f"{name}与{other}之间有一笔没结清的旧账"
+            characters.append(
+                {
+                    "name": name,
+                    "role": role,
+                    "gender": gender,
+                    "age_range": age_range,
+                    "personality": personality,
+                    "background": background,
+                    "relationships": relationships,
+                }
+            )
+        return json.dumps({"characters": characters}, ensure_ascii=False, indent=2)
+
+    def _polish(self, meta: dict) -> str:
+        """确定性润色单字段文本。
+
+        参数:
+            meta: {field, text, context}。
+
+        返回:
+            JSON 字符串（`{"text": "..."}`）。
+        """
+        field = str(meta.get("field") or "").strip()
+        source = " ".join(str(meta.get("text") or "").split())
+        rng = self._rng(meta, f"polish:{field}")
+        if not source:
+            return json.dumps({"text": ""}, ensure_ascii=False)
+        if len(source) < 24:
+            source = source.rstrip("，,。；; ") + "，" + rng.choice(POLISH_TAILS)
+        if source[-1] not in "。！？…":
+            source += "。"
+        return json.dumps({"text": source}, ensure_ascii=False)
 
     # ---------- 自由文本 ----------
 

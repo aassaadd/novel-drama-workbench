@@ -12,12 +12,37 @@ import subprocess
 import sys
 from pathlib import Path
 
+from fastapi import HTTPException
+
 from .. import __version__
+from ..config import DEFAULT_UI_CONFIG_PATH, load_config
+from ..media import comfy_media
 from ..models.ids import now_iso
 from ..store import ProjectStore, list_workspaces
 from .actions import fail_body, run
+from .models_api import register_models_routes
 
 STATIC_DIR = Path(__file__).with_name("static")
+
+#: 「设置」页允许改写的配置键（点号路径）；其余键一律拒绝，避免页面改坏配置
+CONFIG_EDITABLE = (
+    "omlx.endpoint",
+    "omlx.model",
+    "omlx.api_key",
+    "omlx.temperature",
+    "omlx.max_tokens",
+    "tts.default_provider_id",
+    "tts.provider_order",
+    "comfyui.base_url",
+    "comfyui.models_dir",
+    "comfyui.templates.image",
+    "comfyui.templates.video_t2v",
+    "comfyui.templates.video_i2v",
+    "paths.models_root",
+)
+
+#: 缺失标记：区分「键不存在」与「值为 None」
+_MISSING = object()
 
 #: 设定库可在界面上编辑的标量字段（与 `setting set` 的参数一一对应）
 SETTING_SCALARS = (
@@ -34,6 +59,239 @@ SETTING_SCALARS = (
     "prose_style",
     "visual_style",
 )
+
+
+def _dig(data: dict, dotted: str):
+    """按点号路径取值。
+
+    参数:
+        data: 配置字典。
+        dotted: 点号路径，如 `omlx.model`。
+
+    返回:
+        取到的值；路径不存在时返回 `_MISSING`。
+    """
+    node = data
+    for part in dotted.split("."):
+        if not isinstance(node, dict) or part not in node:
+            return _MISSING
+        node = node[part]
+    return node
+
+
+def _put_dotted(data: dict, dotted: str, value) -> None:
+    """按点号路径写入，中间层不存在时自动补空字典。
+
+    参数:
+        data: 目标字典（就地修改）。
+        dotted: 点号路径。
+        value: 要写入的值。
+
+    返回:
+        无。
+    """
+    parts = dotted.split(".")
+    node = data
+    for part in parts[:-1]:
+        nxt = node.get(part)
+        if not isinstance(nxt, dict):
+            nxt = {}
+            node[part] = nxt
+        node = nxt
+    node[parts[-1]] = value
+
+
+def _del_dotted(data: dict, dotted: str) -> None:
+    """按点号路径删除，并顺手清掉因此变空的父级字典。
+
+    参数:
+        data: 目标字典（就地修改）。
+        dotted: 点号路径。
+
+    返回:
+        无。
+    """
+    parts = dotted.split(".")
+    stack: list[tuple[dict, str]] = []
+    node = data
+    for part in parts[:-1]:
+        if not isinstance(node, dict) or part not in node:
+            return
+        stack.append((node, part))
+        node = node[part]
+    if isinstance(node, dict):
+        node.pop(parts[-1], None)
+    for parent, key in reversed(stack):
+        if isinstance(parent.get(key), dict) and not parent[key]:
+            parent.pop(key)
+
+
+def _validate_config_patch(values: dict) -> dict:
+    """校验页面提交的配置改动。
+
+    参数:
+        values: `{点号路径: 新值}`；值为 None / "" / [] 表示删除该覆盖项。
+
+    返回:
+        校验通过后的值字典（类型已归一）。
+
+    异常:
+        ValueError: 出现白名单外的键或类型/取值不合法。
+    """
+    unknown = [key for key in values if key not in CONFIG_EDITABLE]
+    if unknown:
+        raise ValueError(f"不支持在页面修改：{'、'.join(unknown)}")
+
+    cleaned: dict = {}
+    for key, raw in values.items():
+        if raw is None or raw == "" or raw == []:
+            cleaned[key] = None
+            continue
+        if key in ("omlx.endpoint", "comfyui.base_url"):
+            text = str(raw).strip()
+            if not text.startswith(("http://", "https://")):
+                raise ValueError(f"{key} 必须是 http:// 或 https:// 开头的地址")
+            cleaned[key] = text
+        elif key == "omlx.temperature":
+            number = float(raw)
+            if not 0 <= number <= 2:
+                raise ValueError("temperature 必须在 0~2 之间")
+            cleaned[key] = number
+        elif key == "omlx.max_tokens":
+            number = int(raw)
+            if number < 1:
+                raise ValueError("max_tokens 必须大于 0")
+            cleaned[key] = number
+        elif key == "tts.provider_order":
+            if not isinstance(raw, list) or not all(isinstance(item, str) for item in raw):
+                raise ValueError("provider_order 必须是字符串数组")
+            cleaned[key] = [item.strip() for item in raw if item.strip()]
+        elif key in ("omlx.api_key", "omlx.model", "tts.default_provider_id", "comfyui.templates.image", "comfyui.templates.video_t2v", "comfyui.templates.video_i2v", "paths.models_root", "comfyui.models_dir"):
+            cleaned[key] = str(raw).strip()
+        else:  # pragma: no cover - 白名单已覆盖全部键
+            cleaned[key] = raw
+    return cleaned
+
+
+def _templates_manifest(cfg) -> list[dict]:
+    """读取 ComfyUI 模板清单，整理成设置页需要的只读结构。
+
+    参数:
+        cfg: AppConfig（读 `comfyui.templates_dir`）。
+
+    返回:
+        `[{id, kind, display_name, fixed, size_map, models, placeholders}]`；
+        清单缺失或损坏时返回空列表（页面据此只保留「未识别」选项）。
+    """
+    try:
+        manifest = comfy_media.load_manifest(comfy_media.templates_dir(cfg))
+    except Exception:  # 清单缺失不能让设置页整体读取失败
+        return []
+    rows: list[dict] = []
+    for entry in comfy_media.manifest_entries(manifest):
+        template_id = str(entry.get("id") or entry.get("template_id") or "")
+        if not template_id:
+            continue
+        rows.append(
+            {
+                "id": template_id,
+                "kind": entry.get("kind"),
+                "display_name": entry.get("display_name") or template_id,
+                "fixed": entry.get("fixed") or {},
+                "size_map": entry.get("size_map") or {},
+                "models": list(entry.get("models") or []),
+                "placeholders": list(entry.get("placeholders") or entry.get("required_placeholders") or []),
+            }
+        )
+    return rows
+
+
+def _config_payload(cfg) -> dict:
+    """把生效配置整理成「设置」页需要的结构。
+
+    参数:
+        cfg: AppConfig。
+
+    返回:
+        {writing, tts, image, paths, editable, overrides}。
+    """
+    omlx = cfg.get("omlx", {}) or {}
+    tts = cfg.get("tts", {}) or {}
+    comfy = cfg.get("comfyui", {}) or {}
+    api_key = omlx.get("api_key") or ""
+
+    providers = [
+        {
+            "provider_id": item.get("provider_id"),
+            "display_name": item.get("display_name"),
+            "enabled": bool(item.get("enabled")),
+            "backend": item.get("backend"),
+            "weights_path": item.get("weights_path"),
+            "quality_tier": (item.get("capabilities") or {}).get("quality_tier"),
+            "commercial_use": (item.get("capabilities") or {}).get("commercial_use"),
+        }
+        for item in (tts.get("providers") or [])
+    ]
+
+    overrides = {
+        key: _dig(cfg.ui_values or {}, key) for key in CONFIG_EDITABLE if _dig(cfg.ui_values or {}, key) is not _MISSING
+    }
+
+    return {
+        "writing": {
+            "endpoint": omlx.get("endpoint"),
+            "model": omlx.get("model"),
+            "has_api_key": bool(api_key),
+            "api_key_hint": f"已配置（{len(api_key)} 位）" if api_key else "未配置",
+            "temperature": omlx.get("temperature"),
+            "max_tokens": omlx.get("max_tokens"),
+            "available_models": omlx.get("available_models") or [],
+            "context_window": omlx.get("context_window"),
+        },
+        "tts": {
+            "default_provider_id": tts.get("default_provider_id"),
+            "provider_order": tts.get("provider_order") or [],
+            "providers": providers,
+        },
+        "image": {
+            "base_url": comfy.get("base_url"),
+            "templates_dir": comfy.get("templates_dir"),
+            "templates_dir_exists": (Path(comfy.get("templates_dir") or "")).is_dir() if comfy.get("templates_dir") else False,
+            "models_dir": comfy.get("models_dir"),
+            "models_dir_exists": (Path(comfy.get("models_dir") or "")).is_dir() if comfy.get("models_dir") else False,
+            "templates": comfy.get("templates") or {},
+            "templates_manifest": _templates_manifest(cfg),
+        },
+        "paths": {
+            "models_root": cfg.get("paths.models_root"),
+            "models_root_exists": (Path(cfg.get("paths.models_root") or "")).is_dir() if cfg.get("paths.models_root") else False,
+        },
+        "editable": list(CONFIG_EDITABLE),
+        "overrides": overrides,
+        "ui_path": str(cfg.ui_path) if cfg.ui_path else None,
+    }
+
+
+def _project_dir(raw) -> Path:
+    """解析并校验前端传来的工程目录。
+
+    参数:
+        raw: 前端传来的路径字符串。
+
+    返回:
+        规范化后的绝对路径。
+
+    异常:
+        HTTPException 400: 路径为空。
+        HTTPException 404: 目录里没有 project.json，不是工程目录。
+    """
+    text = str(raw or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail={"code": 2, "message": "缺少工程路径"})
+    root = Path(text).expanduser().resolve()
+    if not (root / "project.json").is_file():
+        raise HTTPException(status_code=404, detail={"code": 4, "message": f"不是工程目录（缺少 project.json）：{root}"})
+    return root
 
 
 def create_app(project_root: str | None = None, config_path: str | None = None):
@@ -81,10 +339,132 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         """健康检查。"""
         return {"ok": True, "version": __version__}
 
+    @app.get("/api/config")
+    def read_config() -> dict:
+        """「设置」页回填：当前生效的写作 / TTS / 图像视频配置（api_key 只给掩码提示）。"""
+        return _config_payload(load_config(config_path))
+
+    @app.post("/api/config")
+    def write_config(payload: dict) -> dict:
+        """「设置」页保存：把白名单内的改动写进覆盖层 config/config.ui.yaml。
+
+        参数:
+            payload: `{"values": {点号路径: 新值}}`；值为 None / "" / [] 表示删除该覆盖项。
+
+        返回:
+            写入后重新计算出的生效配置（结构同 GET /api/config）。
+
+        异常:
+            HTTPException 400: 出现白名单外的键，或类型/取值不合法。
+        """
+        raw_values = (payload or {}).get("values") or {}
+        if not isinstance(raw_values, dict):
+            raise HTTPException(status_code=400, detail={"code": 2, "message": "values 必须是对象"})
+        try:
+            values = _validate_config_patch(raw_values)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"code": 2, "message": str(exc)}) from exc
+
+        # 目录类配置在保存时先创建，创建失败直接拦下，避免写入不可用路径
+        for key in ("paths.models_root", "comfyui.models_dir"):
+            target_dir = values.get(key)
+            if not target_dir:
+                continue
+            try:
+                Path(str(target_dir)).expanduser().mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                raise HTTPException(
+                    status_code=400,
+                    detail={"code": 2, "message": f"{key} 目录不可用（无法创建或不可写）：{exc}"},
+                ) from exc
+
+        try:
+            import yaml
+        except ImportError as exc:  # pragma: no cover
+            raise HTTPException(status_code=500, detail={"code": 3, "message": "缺少 PyYAML，无法写入配置"}) from exc
+
+        target = DEFAULT_UI_CONFIG_PATH
+        current = {}
+        if target.exists():
+            try:
+                current = yaml.safe_load(target.read_text(encoding="utf-8")) or {}
+            except Exception:  # 覆盖层写坏了就以空层重建，原文件已备份
+                current = {}
+            if not isinstance(current, dict):
+                current = {}
+            target.with_suffix(".yaml.bak").write_text(target.read_text(encoding="utf-8"), encoding="utf-8")
+
+        for key, value in values.items():
+            if value is None:
+                _del_dotted(current, key)
+            else:
+                _put_dotted(current, key, value)
+
+        target.parent.mkdir(parents=True, exist_ok=True)
+        header = (
+            "# 由 Web「设置」页写入，只覆盖 config.yaml 里的同名键。\n"
+            "# 删掉本文件（或删掉某个键）即回落到 config.yaml 的取值。\n"
+        )
+        if current:
+            target.write_text(header + yaml.safe_dump(current, allow_unicode=True, sort_keys=False), encoding="utf-8")
+        elif target.exists():
+            target.unlink()
+
+        return _config_payload(load_config(config_path))
+
     @app.get("/api/projects")
     def projects() -> list[dict]:
         """列出本机工程。"""
         return list_workspaces()
+
+    @app.post("/api/project/reveal")
+    def reveal_project(body: dict) -> dict:
+        """在访达里打开工程目录。
+
+        参数:
+            body: `{"path": 工程目录}`。
+
+        返回:
+            `{"ok": true, "path": 绝对路径}`。
+
+        异常:
+            HTTPException 404: 目录不是工程（没有 project.json）。
+            HTTPException 500: 调用 open 失败（非 macOS 或系统拒绝）。
+        """
+        root = _project_dir(body.get("path"))
+        if sys.platform != "darwin":
+            raise HTTPException(status_code=500, detail={"code": 3, "message": "当前系统不支持用访达打开"})
+        result = subprocess.run(["open", str(root)], capture_output=True, text=True)
+        if result.returncode != 0:
+            raise HTTPException(status_code=500, detail={"code": 3, "message": f"打开失败：{result.stderr.strip() or result.returncode}"})
+        return {"ok": True, "path": str(root)}
+
+    @app.post("/api/project/delete")
+    def delete_project(body: dict) -> dict:
+        """把整个工程目录移入废纸篓（可从废纸篓恢复，不做 rm -rf）。
+
+        参数:
+            body: `{"path": 工程目录, "confirm": true}`，confirm 必须是布尔 true。
+
+        返回:
+            `{"ok": true, "path": 原路径}`。
+
+        异常:
+            HTTPException 400: 没有显式确认。
+            HTTPException 404: 目录不是工程（没有 project.json）。
+            HTTPException 500: 非 macOS，或 osascript 调用失败。
+        """
+        root = _project_dir(body.get("path"))
+        if body.get("confirm") is not True:
+            raise HTTPException(status_code=400, detail={"code": 2, "message": "删除工程需要显式确认"})
+        if sys.platform != "darwin":
+            raise HTTPException(status_code=500, detail={"code": 3, "message": "当前系统不支持移入废纸篓"})
+        # 走 Finder 删除才会进废纸篓；直接 unlink 无法恢复
+        script = f'tell application "Finder" to delete POSIX file "{root}"'
+        result = subprocess.run(["osascript", "-e", script], capture_output=True, text=True)
+        if result.returncode != 0:
+            raise HTTPException(status_code=500, detail={"code": 3, "message": f"移入废纸篓失败：{result.stderr.strip() or result.returncode}"})
+        return {"ok": True, "path": str(root)}
 
     @app.get("/api/project/info")
     def project_info(path: str | None = Query(default=None)) -> dict:
@@ -397,14 +777,69 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
 
     @app.get("/api/ui/media")
     def ui_media(path: str = Query(...), chapter: str = Query(...)) -> dict:
-        """章节内三类媒体条目（从场景内嵌数据汇总，状态以 asset 为准）。"""
-        chapter_data = _store(path).load_chapter(chapter)
+        """章节内三类媒体条目（从场景内嵌数据汇总，状态以 asset 为准）。
+
+        图像/视频额外补只读的模板与画幅字段；单项解析失败只留空值，不让接口 500。
+        """
+        store = _store(path)
+        chapter_data = store.load_chapter(chapter)
+        config = load_config(config_path)
+        project_settings = store.settings()
+        try:
+            manifest = comfy_media.load_manifest(comfy_media.templates_dir(config))
+        except Exception:  # 清单缺失只影响展示，不影响其它字段
+            manifest = {}
+
+        def _template_for(item: dict, kind: str) -> str:
+            """解析单个条目实际使用的模板显示名。
+
+            参数:
+                item: 关键图或视频条目。
+                kind: image / video。
+
+            返回:
+                模板显示名（缺省回落到模板 ID）；解析失败返回空串。
+            """
+            try:
+                if kind == "video":
+                    i2v = item.get("mode") == "i2v"
+                    template_kind = "video_i2v" if i2v else "video_t2v"
+                    setting_key = "comfyui.templates.video_i2v" if i2v else "comfyui.templates.video_t2v"
+                else:
+                    template_kind = "image"
+                    setting_key = "comfyui.templates.image"
+                resolved = comfy_media.resolve_template(item.get("workflow_template_id") or config.get(setting_key), template_kind, manifest)
+                entry = resolved.get("template") or {}
+                return str(entry.get("display_name") or resolved.get("template_id") or "")
+            except Exception:
+                return ""
+
+        def _aspect_for(item: dict, kind: str) -> dict:
+            """解析单个条目的画幅与宽高。
+
+            参数:
+                item: 关键图或视频条目。
+                kind: image / video。
+
+            返回:
+                `{"ratio","width","height"}`；解析失败时各字段为 None。
+            """
+            try:
+                return comfy_media.resolve_aspect(item, project_settings, kind)
+            except Exception:
+                return {"ratio": None, "width": None, "height": None}
+
         rows = {"sfx": [], "image": [], "video": []}
         keys = {"sfx": "sfx_events", "image": "key_images", "video": "video_segments"}
         for scene in chapter_data.get("scenes") or []:
             for kind, key in keys.items():
                 for item in scene.get(key) or []:
                     asset = item.get("asset") or {}
+                    template = ""
+                    aspect = {"ratio": None, "width": None, "height": None}
+                    if kind in ("image", "video"):
+                        template = _template_for(item, kind)
+                        aspect = _aspect_for(item, kind)
                     rows[kind].append(
                         {
                             "id": item.get("id"),
@@ -417,6 +852,10 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
                             "status": asset.get("status") or item.get("status") or "pending",
                             "asset_id": asset.get("asset_id"),
                             "error": asset.get("error"),
+                            "template": template or None,
+                            "aspect_ratio": aspect.get("ratio"),
+                            "width": aspect.get("width"),
+                            "height": aspect.get("height"),
                         }
                     )
         return rows
@@ -523,16 +962,287 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         payload["root"] = str(ProjectStore(body["dir"]).root)
         return payload
 
+    @app.get("/api/ui/file")
+    def ui_file(path: str = Query(...), project: str = Query(...)):
+        """只读返回工程内单个文件，供页面内联预览图片 / 音频 / 视频。
+
+        参数:
+            path: 相对工程根目录的文件路径（如 `assets/voice/lines/xxx.wav`）。
+            project: 工程根目录，用于把相对路径钉死在工程内。
+
+        返回:
+            FileResponse；路径越界或文件不存在时返回 403 / 404。
+        """
+        from fastapi.responses import FileResponse
+
+        root = _store(project).root.resolve()
+        target = (root / path).resolve()
+        if target != root and root not in target.parents:
+            raise HTTPException(status_code=403, detail={"code": 2, "message": "路径越界"})
+        if not target.is_file():
+            raise HTTPException(status_code=404, detail={"code": 3, "message": "文件不存在", "path": path})
+        return FileResponse(target)
+
+    # ---------------- AI 生书创作向导（设定 / 人物 / 大纲检查）----------------
+
+    def _temp_json(payload: dict) -> str:
+        """把 JSON 负载写入临时文件，供 CLI 的 `--file` 参数使用。
+
+        参数:
+            payload: 待写入的 JSON 对象。
+
+        返回:
+            临时文件的绝对路径（调用方负责删除）。
+        """
+        import json as _json
+        import tempfile
+
+        handle = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8")
+        with handle:
+            _json.dump(payload, handle, ensure_ascii=False)
+        return handle.name
+
+    @app.get("/api/ui/project/work")
+    def ui_project_work(path: str = Query(...)) -> dict:
+        """作品元信息（书名 / 作者 / 类型），供创作向导回填。"""
+        _store(path)
+        payload = _respond(_cli("--project", path, "--json", "project", "info"))
+        work = (payload or {}).get("work") or {}
+        return {"title": work.get("title") or "", "author": work.get("author") or "", "genres": work.get("genre") or []}
+
+    @app.post("/api/ui/project/work")
+    def ui_project_work_set(body: dict) -> dict:
+        """写回作品元信息（`project set`）。
+
+        参数:
+            body: `{path, title?, author?, genres?[]}`；genres 为空数组表示清空。
+
+        异常:
+            HTTPException 400: 没有任何要修改的字段，或 genres 不是数组。
+        """
+        path = body.get("path")
+        _store(path)
+        argv = ["--project", path, "--json", "project", "set"]
+        if body.get("title") is not None:
+            argv += ["--title", str(body["title"])]
+        if body.get("author") is not None:
+            argv += ["--author", str(body["author"])]
+        genres = body.get("genres")
+        if genres is not None:
+            if not isinstance(genres, list):
+                raise HTTPException(status_code=400, detail={"code": 2, "message": "genres 必须是数组"})
+            if genres:
+                for genre in genres:
+                    if str(genre).strip():
+                        argv += ["--genre", str(genre).strip()]
+            else:
+                argv.append("--clear-genres")
+        if len(argv) == 5:
+            raise HTTPException(status_code=400, detail={"code": 2, "message": "没有要修改的字段"})
+        return _respond(_cli(*argv))
+
+    @app.post("/api/ui/setting/generate")
+    def ui_setting_generate(body: dict) -> dict:
+        """预览 AI 生成的设定（`setting generate --dry-run`，不落盘）。
+
+        参数:
+            body: `{path, step: world|premise|style, overwrite?}`。
+
+        异常:
+            HTTPException 400: step 缺失或非法。
+        """
+        path = body.get("path")
+        _store(path)
+        step = str(body.get("step") or "").strip()
+        if step not in ("world", "premise", "style"):
+            raise HTTPException(status_code=400, detail={"code": 2, "message": "step 必须是 world / premise / style"})
+        argv = ["--project", path, "--json", "setting", "generate", "--step", step, "--dry-run"]
+        if body.get("overwrite"):
+            argv.append("--overwrite")
+        return _respond(_cli(*argv))
+
+    @app.post("/api/ui/setting/apply")
+    def ui_setting_apply(body: dict) -> dict:
+        """把前端确认后的字段合并写入设定库分区（`setting apply --file`）。
+
+        参数:
+            body: `{path, section: world|premise|style, fields: {...}}`。
+
+        异常:
+            HTTPException 400: section / fields 不合法。
+        """
+        path = body.get("path")
+        _store(path)
+        section = str(body.get("section") or "").strip()
+        if section not in ("world", "premise", "style"):
+            raise HTTPException(status_code=400, detail={"code": 2, "message": "section 必须是 world / premise / style"})
+        fields = body.get("fields")
+        if not isinstance(fields, dict) or not fields:
+            raise HTTPException(status_code=400, detail={"code": 2, "message": "fields 必须是非空对象"})
+        tmp = _temp_json({"fields": fields})
+        try:
+            return _respond(_cli("--project", path, "--json", "setting", "apply", "--section", section, "--file", tmp))
+        finally:
+            Path(tmp).unlink(missing_ok=True)
+
+    @app.post("/api/ui/setting/polish")
+    def ui_setting_polish(body: dict) -> dict:
+        """润色单个字段（`setting polish`，不写盘）。
+
+        参数:
+            body: `{path, field, text?, context?, character?}`；text 缺省读取当前值。
+
+        异常:
+            HTTPException 400: field 缺失或不受支持。
+        """
+        path = body.get("path")
+        _store(path)
+        field = str(body.get("field") or "").strip()
+        if not field:
+            raise HTTPException(status_code=400, detail={"code": 2, "message": "缺少 field 参数"})
+        argv = ["--project", path, "--json", "setting", "polish", "--field", field]
+        if body.get("text") is not None:
+            argv += ["--text", str(body["text"])]
+        if body.get("context"):
+            argv += ["--context", str(body["context"])]
+        if body.get("character"):
+            argv += ["--character", str(body["character"])]
+        return _respond(_cli(*argv))
+
+    @app.get("/api/ui/characters")
+    def ui_characters(path: str = Query(...)) -> dict:
+        """人物表（`character list --json`）。"""
+        _store(path)
+        payload = _respond(_cli("--project", path, "--json", "character", "list"))
+        return {"characters": payload or []}
+
+    @app.post("/api/ui/characters")
+    def ui_characters_add(body: dict) -> dict:
+        """批量追加人物（`character apply --file`）。
+
+        参数:
+            body: `{path, characters: [...]}`。
+
+        异常:
+            HTTPException 400: characters 不是非空数组。
+        """
+        path = body.get("path")
+        _store(path)
+        rows = body.get("characters")
+        if not isinstance(rows, list) or not rows:
+            raise HTTPException(status_code=400, detail={"code": 2, "message": "characters 必须是非空数组"})
+        tmp = _temp_json({"characters": rows})
+        try:
+            return _respond(_cli("--project", path, "--json", "character", "apply", "--file", tmp))
+        finally:
+            Path(tmp).unlink(missing_ok=True)
+
+    @app.post("/api/ui/characters/generate")
+    def ui_characters_generate(body: dict) -> dict:
+        """生成主角与主要配角（`character generate --dry-run`，预览不落盘）。
+
+        参数:
+            body: `{path, count?}`；count 为期望生成的总人数。
+
+        返回:
+            `{characters: [...], applied: false}`，由前端回填后用户确认再 POST 追加。
+        """
+        path = body.get("path")
+        _store(path)
+        argv = ["--project", path, "--json", "character", "generate", "--dry-run"]
+        if body.get("count") is not None:
+            argv += ["--count", str(body["count"])]
+        return _respond(_cli(*argv))
+
+    @app.patch("/api/ui/characters")
+    def ui_characters_update(body: dict) -> dict:
+        """按 ID 更新人物字段（`character update`）。
+
+        参数:
+            body: `{path, id, name?, role?, gender?, age_range?, personality?, background?,
+            aliases?, situation?, relationships?}`。
+
+        异常:
+            HTTPException 400: 缺少 id。
+        """
+        path = body.get("path")
+        _store(path)
+        character_id = body.get("id") or body.get("character")
+        if not character_id:
+            raise HTTPException(status_code=400, detail={"code": 2, "message": "缺少 id 参数"})
+        argv = ["--project", path, "--json", "character", "update", "--id", str(character_id)]
+        for key, flag in (
+            ("name", "--name"),
+            ("role", "--role"),
+            ("gender", "--gender"),
+            ("age_range", "--age-range"),
+            ("personality", "--personality"),
+            ("background", "--background"),
+            ("aliases", "--aliases"),
+            ("situation", "--situation"),
+        ):
+            value = body.get(key)
+            if value is None:
+                continue
+            if isinstance(value, list):
+                value = ",".join(str(item) for item in value)
+            argv += [flag, str(value)]
+        relationships = body.get("relationships") or {}
+        if isinstance(relationships, dict):
+            relationships = [f"{key}={value}" for key, value in relationships.items()]
+        for item in relationships:
+            argv += ["--relationship", str(item)]
+        return _respond(_cli(*argv))
+
+    @app.post("/api/ui/characters/delete")
+    def ui_characters_delete(body: dict) -> dict:
+        """按 ID 删除人物（`character remove`，旁白会被拒绝）。
+
+        参数:
+            body: `{path, id}`。
+
+        异常:
+            HTTPException 400: 缺少 id。
+        """
+        path = body.get("path")
+        _store(path)
+        character_id = body.get("id") or body.get("character")
+        if not character_id:
+            raise HTTPException(status_code=400, detail={"code": 2, "message": "缺少 id 参数"})
+        return _respond(_cli("--project", path, "--json", "character", "remove", "--id", str(character_id)))
+
+    @app.get("/api/ui/outline/check")
+    def ui_outline_check(path: str = Query(...)) -> dict:
+        """黄金三章检查（`outline check --json`），不阻断流程。"""
+        _store(path)
+        return _respond(_cli("--project", path, "--json", "outline", "check"))
+
+    # 模型清单 / 下载 / ComfyUI 自检（独立模块，避免本文件继续膨胀）
+    register_models_routes(app, config_path)
+
     if STATIC_DIR.exists():
         from fastapi.responses import FileResponse
         from fastapi.staticfiles import StaticFiles
 
-        app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+        class NoCacheStaticFiles(StaticFiles):
+            """静态资源禁用强缓存。
+
+            本地工作台改完前端只需刷新页面即可生效，避免浏览器按启发式缓存
+            继续使用旧 JS，导致改了代码但界面没变化。
+            """
+
+            def file_response(self, *args, **kwargs):
+                """在原始静态响应上补一条 no-cache。"""
+                response = super().file_response(*args, **kwargs)
+                response.headers["Cache-Control"] = "no-cache"
+                return response
+
+        app.mount("/static", NoCacheStaticFiles(directory=STATIC_DIR), name="static")
 
         @app.get("/")
         def index() -> FileResponse:
             """台词校对页。"""
-            return FileResponse(STATIC_DIR / "index.html")
+            return FileResponse(STATIC_DIR / "index.html", headers={"Cache-Control": "no-cache"})
 
     return app
 

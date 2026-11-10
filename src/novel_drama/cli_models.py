@@ -92,10 +92,11 @@ def cmd_models_verify(args, config: AppConfig) -> int:
 
 
 def cmd_models_install(args, config: AppConfig) -> int:
-    """从 hf-mirror 下载模型：先报体积/许可，再落暂存校验后 mv 就位。
+    """按镜像链下载模型：先报体积/许可，再落暂存校验后 mv 就位。
 
     参数:
-        args: 已解析参数（`--key`、`--yes`、`--accept-license`、`--dry-run`、`--json`）。
+        args: 已解析参数（`--key`、`--yes`、`--accept-license`、`--dry-run`、
+            `--mirror`（可重复）、`--json`）。
         config: 本机配置。
 
     返回:
@@ -104,12 +105,14 @@ def cmd_models_install(args, config: AppConfig) -> int:
     key = getattr(args, "key", None)
     if not key:
         raise PreconditionError("缺少参数：ndw models install --key <目录键>（如 cosyvoice3/8bit）")
+    mirrors = [str(item).strip() for item in (getattr(args, "mirror", None) or []) if str(item).strip()]
     result = model_store.install(
         config,
         key,
         yes=bool(getattr(args, "yes", False)),
         accept_license=bool(getattr(args, "accept_license", False)),
         dry_run=bool(getattr(args, "dry_run", False)),
+        mirrors=mirrors or None,
     )
     status = result["status"]
     if getattr(args, "json", False):
@@ -154,7 +157,8 @@ def _print_install(result: dict) -> None:
         return
     if status in ("plan", "need_confirm", "installed", "incomplete", "error"):
         if result.get("repo"):
-            print(f"仓库 {result['repo']}（镜像 {model_store.HF_MIRROR}）")
+            mirror = result.get("mirror_used") or "未确定"
+            print(f"仓库 {result['repo']}（镜像 {mirror}）")
         if result.get("total_bytes") is not None:
             total = _human_size(result["total_bytes"])
             extra = "，含未知体积文件" if result.get("unknown") else ""
@@ -175,6 +179,22 @@ def _print_install(result: dict) -> None:
             print(f"  暂存目录保留，可重跑续传：{result['staging']}")
     elif status == "error":
         print(f"下载失败：{result.get('error')}")
+        _print_attempts(result)
+
+
+def _print_attempts(result: dict) -> None:
+    """打印镜像链的逐源尝试结果（每源一行，失败的带上原因）。
+
+    参数:
+        result: `model_store.install` 的返回值（含 `attempts`）。
+    """
+    attempts = result.get("attempts") or []
+    if not attempts:
+        return
+    print("镜像尝试：")
+    for item in attempts:
+        state = "成功" if item.get("ok") else (item.get("error") or "失败")
+        print(f"  {item.get('mirror')} → {state}")
 
 
 def cmd_models_import(args, config: AppConfig) -> int:
