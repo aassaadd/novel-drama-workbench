@@ -30,6 +30,15 @@
         "appearance_prompt": { "type": "string", "maxLength": 2000 },
         "negative_prompt": { "type": "string", "maxLength": 1000 },
         "portrait_asset": { "type": ["string", "null"] },
+        "image_assets": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "角色图像素材：特写与三视图，均为相对路径；为空表示未生成",
+          "properties": {
+            "closeup": { "type": ["string", "null"] },
+            "turnaround": { "type": ["string", "null"] }
+          }
+        },
         "state": {
           "type": ["object", "null"],
           "additionalProperties": false,

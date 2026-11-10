@@ -11,6 +11,7 @@ from pathlib import Path
 
 from .cli_common import PreconditionError, _emit, _resolve_store
 from .config import AppConfig
+from .media.art import render_character_sheet
 from .models import entities
 from .models.ids import now_iso
 from .writing import generate_characters
@@ -40,7 +41,8 @@ def append_characters(store, rows: list[dict]) -> dict:
 
     参数:
         store: 工程。
-        rows: [{name, role, gender, age_range, personality, background, relationships}]。
+        rows: [{name, role, gender, age_range, personality, background, appearance_prompt,
+        negative_prompt, relationships（或 state.relationship_notes）}]。
 
     返回:
         {"characters": 新建人物列表, "skipped": 重名被跳过的人物名列表}。
@@ -75,7 +77,12 @@ def append_characters(store, rows: list[dict]) -> dict:
         character["age_range"] = str(row.get("age_range") or "").strip() or None
         character["personality"] = [str(item).strip() for item in (row.get("personality") or []) if str(item).strip()]
         character["background"] = str(row.get("background") or "").strip()
+        character["appearance_prompt"] = str(row.get("appearance_prompt") or "").strip()
+        character["negative_prompt"] = str(row.get("negative_prompt") or "").strip()
         relationships = row.get("relationships") or {}
+        state = row.get("state") if isinstance(row.get("state"), dict) else {}
+        if not relationships and isinstance(state.get("relationship_notes"), dict):
+            relationships = state["relationship_notes"]
         character["state"] = {"situation": None, "relationship_notes": None, "knowledge": None, "as_of_chapter_id": None}
         table["characters"].append(character)
         existing.add(name)
@@ -133,7 +140,12 @@ def cmd_character_generate(args, config: AppConfig) -> int:
         进程退出码。
     """
     store = _resolve_store(args, config)
-    result = generate_characters(store, config, count=getattr(args, "count", None))
+    result = generate_characters(
+        store,
+        config,
+        count=getattr(args, "count", None),
+        brief=getattr(args, "brief", None),
+    )
     if getattr(args, "dry_run", False):
         _emit(args, f"[dry-run] 已生成 {len(result['characters'])} 个人物", {**result, "applied": False})
         return 0
@@ -212,6 +224,12 @@ def cmd_character_update(args, config: AppConfig) -> int:
     if getattr(args, "aliases", None) is not None:
         target["aliases"] = _split_items(args.aliases)
         changed.append("aliases")
+    if getattr(args, "appearance_prompt", None) is not None:
+        target["appearance_prompt"] = args.appearance_prompt.strip()
+        changed.append("appearance_prompt")
+    if getattr(args, "negative_prompt", None) is not None:
+        target["negative_prompt"] = args.negative_prompt.strip()
+        changed.append("negative_prompt")
 
     state = target.get("state") or {}
     state_changed = False
@@ -266,4 +284,27 @@ def cmd_character_remove(args, config: AppConfig) -> int:
         raise PreconditionError(f"角色不存在: {args.id}")
     store.save_characters(table)
     _emit(args, f"已删除角色 {args.id}", {"removed": args.id, "characters": len(table["characters"])})
+    return 0
+
+
+def cmd_character_image(args, config: AppConfig) -> int:
+    """生成角色特写 / 三视图并写回 image_assets。
+
+    参数:
+        args: 已解析参数（id / kind / force / json）。
+        config: 本机配置。
+
+    返回:
+        进程退出码。
+
+    异常:
+        PreconditionError: 角色不存在。
+    """
+    store = _resolve_store(args, config)
+    table = store.load_characters()
+    if not any(item.get("id") == args.id for item in table["characters"]):
+        raise PreconditionError(f"角色不存在: {args.id}")
+    result = render_character_sheet(store, config, args.id, args.kind, force=bool(getattr(args, "force", False)))
+    state = "已生成" if result.get("created") else "已存在，复用"
+    _emit(args, f"角色设定图{state}: {result.get('image_asset')}", result)
     return 0

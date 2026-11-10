@@ -1648,4 +1648,295 @@ table.grid td.wrap { word-break: break-word; }
 .check-chapter { color: var(--accent); flex: none; }
 .check-hint { color: var(--muted); }
 
+/* ---------------- 通用模态编辑器（modal.js）：单例遮罩 + 大输入框 + 字数条 ---------------- */
+
+.modal-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--sp-5);
+  overflow: auto;
+  background: rgba(0, 0, 0, .55);
+}
+
+.modal-editor {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  width: min(920px, 100%);
+  padding: var(--sp-4);
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, .5);
+}
+
+.modal-title { margin: 0; font-size: var(--fs-lg); }
+
+.modal-input {
+  width: 100%;
+  height: 70vh;
+  min-height: 240px;
+  padding: var(--sp-3);
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  font: var(--fs-md)/var(--lh-loose) -apple-system, "PingFang SC", "Helvetica Neue", Arial, sans-serif;
+  resize: vertical;
+}
+
+.modal-input:focus { outline: none; border-color: var(--accent); }
+
+.modal-hint { margin: 0; color: var(--muted); font-size: var(--fs-xs); }
+
+.modal-foot { display: flex; align-items: center; gap: var(--sp-2); }
+
+.modal-count { margin-left: auto; color: var(--muted); font-size: var(--fs-xs); }
+
+/* ---------------- 世界页：条目卡片 / 封面 / 就地编辑 ---------------- */
+
+.world-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+  gap: var(--sp-3);
+}
+
+/* 列表为空时让 #worldsEmpty 独占空态，不占网格高度 */
+.world-list:empty { display: none; }
+
+.world-card {
+  display: grid;
+  grid-template-columns: 140px minmax(0, 1fr);
+  gap: var(--sp-3);
+  min-width: 0;
+  padding: var(--sp-3);
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+/* 编辑态：封面与正文改为上下排列，表单可占满整宽 */
+.world-card.is-editing { grid-template-columns: minmax(0, 1fr); }
+.world-card.is-editing .world-cover { max-height: 180px; }
+
+.world-cover {
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  object-fit: cover;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+.world-cover.is-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+  font-size: var(--fs-xs);
+}
+
+.world-body { display: flex; flex-direction: column; gap: var(--sp-2); min-width: 0; }
+
+.world-head { display: flex; align-items: baseline; gap: var(--sp-2); flex-wrap: wrap; }
+.world-name { font-size: var(--fs-md); font-weight: 600; }
+.world-meta { font-size: var(--fs-xs); }
+.world-actions { margin-left: auto; display: flex; gap: var(--sp-1); flex-wrap: wrap; }
+.world-summary { margin: 0; font-size: var(--fs-xs); line-height: var(--lh-loose); word-break: break-word; }
+
+.world-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-1) var(--sp-3);
+  font-size: var(--fs-xs);
+}
+
+/* 就地编辑表单：与正文同宽，顶部一条分隔线 */
+.world-edit {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding-top: var(--sp-2);
+  border-top: 1px solid var(--line);
+}
+
+.world-edit .actions { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; }
+
+/* 删除被拒：列出引用该世界的章节 */
+.world-conflict {
+  padding: var(--sp-2);
+  border: 1px solid var(--stale);
+  border-radius: 6px;
+  color: var(--stale);
+  font-size: var(--fs-xs);
+  line-height: var(--lh-loose);
+}
+
+.world-conflict ul { margin: var(--sp-1) 0 0; padding-left: var(--sp-4); }
+
+/* 放大编辑按钮：与润色按钮同尺寸，不挤压输入框 */
+.field-action .amplify-btn {
+  flex: none;
+  white-space: nowrap;
+  padding: 0 var(--sp-2);
+}
+
+/* ---------------- 区块生成预览浮层（field-tools.js） ---------------- */
+
+.gen-preview {
+  width: min(880px, 100%);
+  max-height: 86vh;
+  overflow: auto;
+}
+
+.gen-preview .modal-hint { word-break: break-word; }
+
+.gen-fields { display: flex; flex-direction: column; gap: var(--sp-3); }
+
+.gen-field { display: flex; flex-direction: column; gap: var(--sp-1); }
+
+.gen-field-head { display: flex; align-items: center; gap: var(--sp-2); }
+.gen-field-label { font-size: var(--fs-sm); }
+.gen-field-count { margin-left: auto; color: var(--muted); font-size: var(--fs-xs); }
+
+.gen-input {
+  width: 100%;
+  min-height: 64px;
+  padding: var(--sp-2);
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font-family: inherit;
+  font-size: var(--fs-sm);
+  line-height: var(--lh-base);
+  resize: vertical;
+}
+
+.gen-input:focus { outline: none; border-color: var(--accent); }
+
+/* 生成世界的候选勾选列表 */
+.gen-check-list { display: flex; flex-direction: column; gap: var(--sp-2); }
+
+.gen-check {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-2);
+  padding: var(--sp-2);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+.gen-check input { flex: none; margin-top: 2px; }
+
+.gen-check-body { display: flex; flex-direction: column; gap: var(--sp-1); min-width: 0; }
+.gen-check-head { display: flex; align-items: baseline; gap: var(--sp-2); flex-wrap: wrap; }
+.gen-check-name { font-weight: 600; }
+.gen-check p { margin: 0; font-size: var(--fs-xs); line-height: var(--lh-loose); word-break: break-word; }
+.gen-check .muted { font-size: var(--fs-xs); }
+
+/* ---------------- 人物卡图像槽（page-characters.js）：脸部特写 / 三视图 ---------------- */
+
+.char-assets {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: var(--sp-2);
+  margin-top: var(--sp-1);
+}
+
+.char-asset { display: flex; flex-direction: column; gap: var(--sp-1); min-width: 0; }
+
+.char-asset-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  font-size: var(--fs-xs);
+  color: var(--muted);
+}
+
+.char-asset-img {
+  width: 100%;
+  aspect-ratio: 3 / 4;
+  object-fit: cover;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+.char-asset-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-1);
+  min-height: 120px;
+  padding: var(--sp-2);
+  text-align: center;
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  background: var(--bg);
+  border: 1px dashed var(--line);
+  border-radius: 6px;
+}
+
+.char-asset-empty .muted { font-size: var(--fs-xs); line-height: var(--lh-base); }
+
+/* ---------------- 大纲章节绑定（page-outline.js）：世界 chips / POV / 缺绑定提示 ---------------- */
+
+.outline-bind {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  margin-top: var(--sp-2);
+  padding: var(--sp-2);
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.outline-bind-head { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; }
+
+.outline-bind-title { font-size: var(--fs-xs); font-weight: 600; color: var(--muted); }
+
+.outline-bind-head .btn { margin-left: auto; }
+
+.bind-line { display: flex; align-items: flex-start; gap: var(--sp-2); flex-wrap: wrap; font-size: var(--fs-xs); }
+
+.bind-chips { display: flex; flex-wrap: wrap; gap: var(--sp-1); }
+
+.bind-chip {
+  padding: 0 var(--sp-2);
+  font-size: var(--fs-xs);
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+}
+
+.bind-none { color: var(--stale); font-size: var(--fs-xs); }
+
+.bind-warn {
+  padding: var(--sp-1) var(--sp-2);
+  font-size: var(--fs-xs);
+  color: var(--stale);
+  border: 1px dashed var(--stale);
+  border-radius: 6px;
+}
+
+.bind-panel { width: min(720px, 100%); max-height: 86vh; overflow: auto; }
+
+.bind-section-title { font-size: var(--fs-sm); color: var(--muted); }
+
+.bind-world-list { max-height: 45vh; overflow: auto; }
+
+.bind-pov select { width: 100%; }
+
+
+
 

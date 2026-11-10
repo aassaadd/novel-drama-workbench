@@ -12,12 +12,14 @@ from .voice_store import (
     variant_ref,
     voice_binding_summary,
 )
+from .world_store import WorldStore
 
 __all__ = [
     "ProjectStore",
     "QueueStore",
     "SchemaValidationError",
     "SettingsStore",
+    "WorldStore",
     "find_variant",
     "find_voice",
     "list_workspaces",

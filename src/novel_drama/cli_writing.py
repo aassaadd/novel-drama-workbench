@@ -8,11 +8,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from .cli_common import EXIT_OK, PreconditionError, _emit, _resolve_store
+from .cli_common import EXIT_OK, PreconditionError, TaskFailedError, _emit, _resolve_store
 from .config import AppConfig
 from .store import validate
 from .store.settings_store import SettingsStore
-from .writing import apply_outline, generate_chapter, generate_outline, suggest_script
+from .writing import apply_outline, generate_chapter, generate_outline, suggest_script, validate_chapter_binding
 
 
 def _fmt_outline(acts: list[dict]) -> str:
@@ -106,8 +106,15 @@ def cmd_chapter_generate(args, config: AppConfig) -> int:
 
     返回:
         退出码。
+
+    异常:
+        TaskFailedError: 章节世界/角色绑定不完整。
     """
     store = _resolve_store(args, config)
+    try:
+        validate_chapter_binding(store, args.chapter)
+    except ValueError as exc:
+        raise TaskFailedError(str(exc)) from exc
     result = generate_chapter(store, config, args.chapter, regen=args.regen, dry_run=args.dry_run)
     head = "[dry-run] " if args.dry_run else ""
     text = f"{head}章节 {result['chapter_id']} 正文生成完成：{result['words']} 字（provider={result['provider']}）"

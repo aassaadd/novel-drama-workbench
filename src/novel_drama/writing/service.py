@@ -16,6 +16,9 @@ from ..models import entities
 from ..models.ids import new_id, now_iso
 from ..store import ProjectStore
 from ..store.settings_store import SettingsStore
+from ..store.world_store import WorldStore
+from .worlds import build_art_prompt as _build_art_prompt
+from .worlds import clean_world_entry, worlds_digest
 
 # 默认每章目标字数
 DEFAULT_CHAPTER_WORDS = 1200
@@ -283,6 +286,25 @@ def generate_chapter(store: ProjectStore, config: AppConfig, chapter_id: str, re
         chapter_words = DEFAULT_CHAPTER_WORDS
     adapter = build_writing_adapter(config, bible)
 
+    entry = settings_store.find_outline_chapter(bible, chapter_id)
+    world_ids = list((entry or {}).get("world_ids") or [])
+    world_store = WorldStore(store.root)
+    world_context = _worlds_digest(world_store.find_many(world_ids) if (world_ids and world_store.exists()) else [], world_ids)
+    if world_context is None:
+        # 未绑定世界时回退设定库摘要，保持旧章节的上下文口味
+        world_context = _bible_digest(bible)
+
+    character_payload = _characters_payload(characters)
+    if entry:
+        # 角色上下文只取本章 POV 与节拍涉及的角色；找不到时保留全量角色
+        focus = {cid for cid in [entry.get("pov_character_id")] if cid}
+        for beat in beats:
+            focus.update(cid for cid in (beat.get("character_ids") or []) if cid)
+        focus.discard(entities.NARRATOR_ID)
+        focused = [item for item in character_payload if item["id"] in focus]
+        if focused:
+            character_payload = focused
+
     req = TextGenRequest(
         task="chapter",
         system="你是中文小说作者，按节拍写正文；对白用中文引号，不要写标题。",
@@ -290,9 +312,12 @@ def generate_chapter(store: ProjectStore, config: AppConfig, chapter_id: str, re
         stream=False,
         metadata={
             "title": chapter.get("title"),
-            "summary": (settings_store.find_outline_chapter(bible, chapter_id) or {}).get("summary") or chapter.get("outline"),
+            "summary": (entry or {}).get("summary") or chapter.get("outline"),
             "beats": beats,
-            "characters": _characters_payload(characters),
+            "characters": character_payload,
+            "world": world_context,
+            "world_ids": world_ids,
+            "pov_character_id": (entry or {}).get("pov_character_id") or chapter.get("pov_character_id"),
             "pov": (bible.get("style") or {}).get("pov"),
             "tone": (bible.get("style") or {}).get("tone"),
             "target_words": chapter_words,
@@ -416,6 +441,12 @@ SCALAR_LIMITS = {
     "tone": 300,
     "prose_style": 1000,
     "visual_style": 500,
+    "world.name": 120,
+    "world.era": 200,
+    "world.summary": 2000,
+    "world.visual_style": 500,
+    "character.appearance_prompt": 2000,
+    "character.negative_prompt": 1000,
 }
 #: 枚举取值
 POV_OPTIONS = ("first", "third_limited", "third_omniscient", "second")
@@ -434,12 +465,18 @@ POLISH_FIELDS = (
     "tone",
     "prose_style",
     "visual_style",
+    "world.name",
+    "world.era",
+    "world.summary",
+    "world.visual_style",
     "world.rule",
     "world.faction",
     "world.location",
     "world.glossary",
     "character.background",
     "character.personality",
+    "character.appearance_prompt",
+    "character.negative_prompt",
     "work.genre",
 )
 #: 黄金三章检查用的冲突语义关键词
@@ -703,6 +740,19 @@ def _bible_digest(bible: dict) -> dict:
     }
 
 
+def _worlds_digest(worlds: list[dict], ids: list[str]) -> str | None:
+    """把选中世界条目拼成章节上下文文本（委托 writing/worlds.worlds_digest）。
+
+    参数:
+        worlds: 世界条目列表。
+        ids: 本章要注入的世界 ID 列表。
+
+    返回:
+        多行上下文文本；ids 为空或一个都没命中时返回 None。
+    """
+    return worlds_digest(worlds, ids)
+
+
 def _is_meaningful(current, baseline, key: str = "") -> bool:
     """判断已有值是否算「用户真实内容」（骨架占位值视为空）。
 
@@ -734,7 +784,90 @@ def _is_meaningful(current, baseline, key: str = "") -> bool:
     return True
 
 
-def generate_settings(store: ProjectStore, config: AppConfig, step: str, overwrite: bool = False) -> dict:
+def generate_worlds(
+    store: ProjectStore,
+    config: AppConfig,
+    count: int | None = None,
+    overwrite: bool = False,
+    brief: str | None = None,
+) -> dict:
+    """一次生成 1..6 条世界条目（只返回预览，不落盘）。
+
+    参数:
+        store: 工程。
+        config: 本机配置。
+        count: 期望世界条数（1..6）；为空时由适配器决定。
+        overwrite: True 表示调用方打算覆盖已有世界；本函数仍只预览，仅在返回值里标记。
+        brief: 用户补充要求（拼进提示词与请求元信息）。
+
+    返回:
+        {"step": "worlds", "worlds": [...], "count", "brief", "overwrite", "provider"}；
+        worlds 为清洗后通过 world schema 的完整条目（可直接交给 WorldStore.add）。
+
+    异常:
+        ValueError: count 越界、模型输出不是合法 JSON 或世界字段不合法。
+    """
+    if count is not None:
+        try:
+            wanted = int(count)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"世界数量必须是 1..6 的整数：{count}") from exc
+        if wanted < 1 or wanted > 6:
+            raise ValueError(f"世界数量必须在 1..6 之间：{wanted}")
+    else:
+        wanted = None
+
+    settings_store = SettingsStore(store.root)
+    bible = settings_store.load_or_none() or {}
+    project = store.load_project()
+    work = project.get("work") or {}
+    adapter = build_writing_adapter(config, bible)
+    brief_text = str(brief or "").strip()
+
+    world_store = WorldStore(store.root)
+    existing = [{"name": item.get("name"), "era": item.get("era")} for item in (world_store.list_worlds() if world_store.exists() else [])]
+    ask = "生成世界设定列表，每条包含 name/era/summary/rules/factions/locations/glossary/visual_style。"
+    if wanted:
+        ask += f"共 {wanted} 条世界。"
+    if brief_text:
+        ask += f"补充要求：{brief_text}。"
+    req = TextGenRequest(
+        task="setting",
+        system="你是中文小说的世界观编辑，只输出一个 JSON 对象（键为 worlds），不要解释。",
+        messages=[Message("user", f"为《{work.get('title') or '未命名'}》{ask}")],
+        stream=False,
+        temperature=0.7,
+        metadata={
+            "step": "worlds",
+            "work": {"title": work.get("title"), "author": work.get("author"), "genre": work.get("genre") or []},
+            "existing": _bible_digest(bible),
+            "existing_worlds": existing,
+            "count": wanted,
+            "brief": brief_text,
+            "overwrite": bool(overwrite),
+            "seed": work.get("id"),
+        },
+    )
+    payload = _generate_json(adapter, req)
+    rows = payload.get("worlds")
+    if isinstance(rows, dict):
+        rows = [rows]
+    if not isinstance(rows, list) or not rows:
+        raise ValueError("LLM 返回的世界列表为空")
+    if wanted:
+        rows = rows[:wanted]
+    worlds = [clean_world_entry(row) for row in rows]
+    return {
+        "step": "worlds",
+        "worlds": worlds,
+        "count": len(worlds),
+        "brief": brief_text or None,
+        "overwrite": bool(overwrite),
+        "provider": str(config.get("providers.writing") or "offline"),
+    }
+
+
+def generate_settings(store: ProjectStore, config: AppConfig, step: str, overwrite: bool = False, brief: str | None = None) -> dict:
     """生成世界 / 梗概 / 文风设定（只返回结果，不写盘）。
 
     参数:
@@ -742,6 +875,7 @@ def generate_settings(store: ProjectStore, config: AppConfig, step: str, overwri
         config: 本机配置。
         step: world|premise|style。
         overwrite: True 时用生成值整体替换该分区；False 时保留已有非空值并记入 skipped。
+        brief: 可选的用户补充要求（拼进提示词与请求元信息）。
 
     返回:
         {"step", "fields", "skipped"}。
@@ -761,10 +895,14 @@ def generate_settings(store: ProjectStore, config: AppConfig, step: str, overwri
     label = {"world": "世界设定", "premise": "故事梗概", "style": "文风设定"}[step]
     allowed = {"world": WORLD_FIELDS, "premise": PREMISE_FIELDS, "style": STYLE_FIELDS}[step]
     target_length = (bible.get("premise") or {}).get("target_length") or (skeleton.get("premise") or {}).get("target_length")
+    brief_text = str(brief or "").strip()
+    ask = f"为《{work.get('title') or '未命名'}》生成{label}，字段：{', '.join(allowed)}。"
+    if brief_text:
+        ask += f"补充要求：{brief_text}。"
     req = TextGenRequest(
         task="setting",
         system="你是中文小说的设定编辑，只输出一个 JSON 对象，不要解释，不要输出 JSON 以外的内容。",
-        messages=[Message("user", f"为《{work.get('title') or '未命名'}》生成{label}，字段：{', '.join(allowed)}。")],
+        messages=[Message("user", ask)],
         stream=False,
         temperature=0.7,
         metadata={
@@ -772,6 +910,7 @@ def generate_settings(store: ProjectStore, config: AppConfig, step: str, overwri
             "work": {"title": work.get("title"), "author": work.get("author"), "genre": work.get("genre") or []},
             "existing": _bible_digest(bible),
             "target_length": target_length,
+            "brief": brief_text,
             "seed": work.get("id"),
         },
     )
@@ -794,16 +933,18 @@ def generate_settings(store: ProjectStore, config: AppConfig, step: str, overwri
     return {"step": step, "fields": final, "skipped": skipped}
 
 
-def generate_characters(store: ProjectStore, config: AppConfig, count: int | None = None) -> dict:
+def generate_characters(store: ProjectStore, config: AppConfig, count: int | None = None, brief: str | None = None) -> dict:
     """生成主角与主要配角（只返回结果，不写盘）。
 
     参数:
         store: 工程。
         config: 本机配置。
         count: 期望人物总数（含主角），缺省交给模型按 1 主角 + 2–6 配角产出。
+        brief: 用户补充要求（拼进提示词，离线实现会写进人物小传/性格）。
 
     返回:
-        {"characters": [{name, role, gender, age_range, personality, background, relationships}]}。
+        {"characters": [{name, role, gender, age_range, personality, background,
+        appearance_prompt, negative_prompt, relationships}]}。
 
     异常:
         ValueError: 模型输出不是合法 JSON，或缺少主角 / 配角数量越界 / 重名。
@@ -813,11 +954,15 @@ def generate_characters(store: ProjectStore, config: AppConfig, count: int | Non
     project = store.load_project()
     work = project.get("work") or {}
     adapter = build_writing_adapter(config, bible)
+    brief_text = str(brief or "").strip()
 
+    ask = f"为《{work.get('title') or '未命名'}》生成 1 名主角与 2–6 名主要配角。"
+    if brief_text:
+        ask += f"补充要求：{brief_text}。"
     req = TextGenRequest(
         task="character",
         system="你是中文小说的人物编辑，只输出一个 JSON 对象（键为 characters），不要解释。",
-        messages=[Message("user", f"为《{work.get('title') or '未命名'}》生成 1 名主角与 2–6 名主要配角。")],
+        messages=[Message("user", ask)],
         stream=False,
         temperature=0.8,
         metadata={
@@ -825,6 +970,7 @@ def generate_characters(store: ProjectStore, config: AppConfig, count: int | Non
             "premise": bible.get("premise") or {},
             "world": _bible_digest(bible),
             "count": count,
+            "brief": brief_text,
             "seed": work.get("id"),
         },
     )
@@ -859,6 +1005,8 @@ def generate_characters(store: ProjectStore, config: AppConfig, count: int | Non
                 "age_range": _check_text(row.get("age_range"), 40, f"人物 {name} 的年龄区间") or None,
                 "personality": _clean_str_list(row.get("personality"), 40, f"人物 {name} 的性格"),
                 "background": _check_text(row.get("background"), 2000, f"人物 {name} 的背景"),
+                "appearance_prompt": _check_text(row.get("appearance_prompt"), 2000, f"人物 {name} 的外貌提示词"),
+                "negative_prompt": _check_text(row.get("negative_prompt"), 1000, f"人物 {name} 的负向提示词"),
                 "relationships": {
                     _check_text(key, 60, f"人物 {name} 的关系对象", required=True): _check_text(note, 500, f"人物 {name} 的关系备注")
                     for key, note in relationships.items()
@@ -872,6 +1020,193 @@ def generate_characters(store: ProjectStore, config: AppConfig, count: int | Non
     if not 2 <= len(supporting) <= 6:
         raise ValueError(f"配角数量必须为 2–6 人（当前 {len(supporting)} 人）")
     return {"characters": characters}
+
+
+def _clean_character_entry(row: dict) -> dict:
+    """清洗单个完整人物（含配图提示词与关系备注）。
+
+    参数:
+        row: 模型返回的人物对象。
+
+    返回:
+        {name, role, gender, age_range, personality, background, appearance_prompt,
+        negative_prompt, state.relationship_notes}。
+
+    异常:
+        ValueError: 类型或字段长度不合法。
+    """
+    if not isinstance(row, dict):
+        raise ValueError("人物必须是 JSON 对象")
+    name = _check_text(row.get("name"), 60, "人物姓名", required=True)
+    role = str(row.get("role") or "supporting").strip()
+    if role not in ROLE_OPTIONS:
+        role = "supporting"
+    gender = str(row.get("gender") or "unknown").strip()
+    if gender not in GENDER_OPTIONS:
+        gender = "unknown"
+    state = row.get("state") if isinstance(row.get("state"), dict) else {}
+    notes = state.get("relationship_notes")
+    if not isinstance(notes, dict):
+        notes = row.get("relationships") if isinstance(row.get("relationships"), dict) else {}
+    return {
+        "name": name,
+        "role": role,
+        "gender": gender,
+        "age_range": _check_text(row.get("age_range"), 40, f"人物 {name} 的年龄区间") or None,
+        "personality": _clean_str_list(row.get("personality"), 40, f"人物 {name} 的性格"),
+        "background": _check_text(row.get("background"), 2000, f"人物 {name} 的背景"),
+        "appearance_prompt": _check_text(row.get("appearance_prompt"), 2000, f"人物 {name} 的外貌提示词"),
+        "negative_prompt": _check_text(row.get("negative_prompt"), 1000, f"人物 {name} 的负向提示词"),
+        "state": {
+            "relationship_notes": {
+                _check_text(key, 60, f"人物 {name} 的关系对象", required=True): _check_text(note, 500, f"人物 {name} 的关系备注")
+                for key, note in notes.items()
+            }
+        },
+    }
+
+
+def _section_fields(section: str, generated: dict, bible: dict) -> dict:
+    """补齐一次生成区块的全部字段（生成值优先，回退已有值/空值）。
+
+    参数:
+        section: premise / style。
+        generated: generate_settings 返回的字段。
+        bible: 当前设定库。
+
+    返回:
+        该区块全部字段的 dict。
+    """
+    allowed = PREMISE_FIELDS if section == "premise" else STYLE_FIELDS
+    existing = bible.get(section) or {}
+    fields: dict = {}
+    for key in allowed:
+        value = generated.get(key)
+        if value is None:
+            value = existing.get(key)
+        if value is None:
+            if key == "forbidden":
+                value = []
+            elif key == "target_length":
+                value = "novella"
+            else:
+                value = ""
+        fields[key] = value
+    return fields
+
+
+def generate_section(
+    store: ProjectStore,
+    config: AppConfig,
+    section: str,
+    brief: str | None = None,
+    target_id: str | None = None,
+) -> dict:
+    """一次生成一个区块的全部字段（梗概 / 文风 / 单条世界 / 单个人物）。
+
+    参数:
+        store: 工程。
+        config: 本机配置。
+        section: premise|style|world|character。
+        brief: 用户补充要求。
+        target_id: world 用世界 ID、character 用角色 ID；命中时作为改写上下文。
+
+    返回:
+        {"section", "fields", "target_id"?}；world/character 的 fields 为完整条目。
+
+    异常:
+        ValueError: section 非法、目标条目不存在或模型输出不合法。
+    """
+    key = str(section or "").strip()
+    if key not in ("premise", "style", "world", "character"):
+        raise ValueError(f"不支持的生成区块: {section}")
+
+    settings_store = SettingsStore(store.root)
+    bible = settings_store.load_or_none() or {}
+    if key in ("premise", "style"):
+        result = generate_settings(store, config, key, brief=brief)
+        return {
+            "section": key,
+            "fields": _section_fields(key, result.get("fields") or {}, bible),
+            "skipped": result.get("skipped") or [],
+        }
+
+    project = store.load_project()
+    work = project.get("work") or {}
+    adapter = build_writing_adapter(config, bible)
+    brief_text = str(brief or "").strip()
+    work_payload = {"title": work.get("title"), "author": work.get("author"), "genre": work.get("genre") or []}
+
+    if key == "world":
+        world_store = WorldStore(store.root)
+        world_store.ensure()
+        existing = world_store.get(target_id) if target_id else None
+        if target_id and existing is None:
+            raise ValueError(f"世界条目不存在: {target_id}")
+        ask = "生成一条完整世界设定，字段：name/era/summary/rules/factions/locations/glossary/visual_style。"
+        if brief_text:
+            ask += f"补充要求：{brief_text}。"
+        req = TextGenRequest(
+            task="setting",
+            system="你是中文小说的世界观编辑，只输出一个 JSON 对象，不要解释。",
+            messages=[Message("user", f"为《{work.get('title') or '未命名'}》{ask}")],
+            stream=False,
+            temperature=0.7,
+            metadata={
+                "step": "world",
+                "work": work_payload,
+                "existing": _bible_digest(bible),
+                "existing_world": existing,
+                "worlds": [{"name": item.get("name"), "era": item.get("era")} for item in world_store.list_worlds()],
+                "brief": brief_text,
+                "seed": work.get("id"),
+            },
+        )
+        payload = _generate_json(adapter, req)
+        if isinstance(payload.get("world"), dict):
+            payload = payload["world"]
+        entry = clean_world_entry(payload)
+        if existing:
+            entry["id"] = existing.get("id") or entry["id"]
+            entry["created_at"] = existing.get("created_at") or entry["created_at"]
+            entry["cover_asset"] = existing.get("cover_asset")
+        return {"section": "world", "fields": entry, "target_id": target_id}
+
+    characters = store.load_characters()["characters"]
+    existing_char = next((item for item in characters if item.get("id") == target_id), None) if target_id else None
+    if target_id and existing_char is None:
+        raise ValueError(f"角色不存在: {target_id}")
+    ask = "生成一个完整人物设定，字段：name/role/gender/age_range/personality/background/appearance_prompt/negative_prompt/state.relationship_notes。"
+    if brief_text:
+        ask += f"补充要求：{brief_text}。"
+    req = TextGenRequest(
+        task="character",
+        system="你是中文小说的人物编辑，只输出一个 JSON 对象，不要解释。",
+        messages=[Message("user", f"为《{work.get('title') or '未命名'}》{ask}")],
+        stream=False,
+        temperature=0.8,
+        metadata={
+            "mode": "single",
+            "work": work_payload,
+            "premise": bible.get("premise") or {},
+            "world": _bible_digest(bible),
+            "characters": _characters_payload(characters),
+            "existing_character": existing_char,
+            "brief": brief_text,
+            "seed": work.get("id"),
+        },
+    )
+    payload = _generate_json(adapter, req)
+    raw = payload.get("character")
+    if not isinstance(raw, dict):
+        rows = payload.get("characters")
+        raw = rows[0] if isinstance(rows, list) and rows else None
+    if not isinstance(raw, dict):
+        raise ValueError("LLM 返回的人物不是合法 JSON 对象")
+    entry = _clean_character_entry(raw)
+    if existing_char:
+        entry["id"] = existing_char.get("id") or entry.get("id")
+    return {"section": "character", "fields": entry, "target_id": target_id}
 
 
 def polish_field(
@@ -897,6 +1232,11 @@ def polish_field(
         ValueError: 字段不在白名单，或没有可润色的内容。
     """
     key = (field or "").strip()
+    # 兼容前端按区块传参的 `premise.*` / `style.*` 前缀写法，归一化后再查白名单
+    for prefix in ("premise.", "style."):
+        if key.startswith(prefix):
+            key = key[len(prefix):]
+            break
     if key not in POLISH_FIELDS:
         raise ValueError(f"不支持的润色字段: {key or '(空)'}（可选 {'、'.join(POLISH_FIELDS)}）")
     source = (text or "").strip()
@@ -938,39 +1278,144 @@ def polish_field(
     return {"field": key, "text": polished}
 
 
-def bind_outline_characters(store: ProjectStore, bible: dict) -> dict:
-    """把大纲章节与节拍绑定到已有人物（就地修改 bible）。
+def bind_outline_context(bible: dict, worlds: list[dict], characters: list[dict]) -> dict:
+    """把大纲章节与节拍绑定到世界条目与角色（就地修改 bible）。
 
     参数:
-        store: 工程（读取 characters.json）。
         bible: 设定库 dict。
+        worlds: 世界条目列表；为空时把每章 world_ids 写成空数组。
+        characters: 角色表（含旁白，内部会过滤）。
 
     返回:
-        {"chapters": 绑定章节数, "beats": 绑定节拍数}。
+        {"chapters": 绑定章节数, "beats": 绑定节拍数, "worlds": 可用世界数}。
     """
-    characters = [item for item in store.load_characters()["characters"] if item.get("role") != "narrator"]
-    if not characters:
-        return {"chapters": 0, "beats": 0}
-    ids = [item["id"] for item in characters]
-    protagonist = next((item for item in characters if item.get("role") == "protagonist"), characters[0])
-    fallback = [item["id"] for item in characters if item["id"] != protagonist["id"]]
+    cast = [item for item in characters or [] if item.get("id") and item.get("role") != "narrator" and item.get("id") != entities.NARRATOR_ID]
+    cast_ids = {item["id"] for item in cast}
+    protagonist = next((item for item in cast if item.get("role") == "protagonist"), cast[0] if cast else None)
+    order = ([protagonist] + [item for item in cast if item is not protagonist]) if protagonist else []
+    world_ids = [item["id"] for item in worlds or [] if item.get("id")]
 
     chapters_bound = 0
     beats_bound = 0
+    index = 0
     for act in (bible.get("outline") or {}).get("acts") or []:
         for chapter in act.get("chapters") or []:
-            if chapter.get("pov_character_id") not in ids:
-                chapter["pov_character_id"] = protagonist["id"]
+            if world_ids:
+                chapter["world_ids"] = [world_ids[index % len(world_ids)]]
+            else:
+                chapter["world_ids"] = []
+            existing_pov = chapter.get("pov_character_id")
+            if existing_pov in cast_ids:
+                pov = existing_pov
+            elif order:
+                pov = order[index % len(order)]["id"]
+            else:
+                pov = None
+            chapter["pov_character_id"] = pov
             chapters_bound += 1
-            for index, beat in enumerate(chapter.get("beats") or []):
-                valid = [cid for cid in (beat.get("character_ids") or []) if cid in ids]
-                if not valid:
-                    valid = [protagonist["id"]]
-                    if fallback:
-                        valid.append(fallback[index % len(fallback)])
+            for beat in chapter.get("beats") or []:
+                valid = [cid for cid in (beat.get("character_ids") or []) if cid in cast_ids]
+                if not valid and pov:
+                    valid = [pov]
                 beat["character_ids"] = valid
                 beats_bound += 1
-    return {"chapters": chapters_bound, "beats": beats_bound}
+            index += 1
+    return {"chapters": chapters_bound, "beats": beats_bound, "worlds": len(world_ids)}
+
+
+def bind_outline_characters(store: ProjectStore, bible: dict) -> dict:
+    """把大纲章节与节拍绑定到已有世界与人物（兼容旧函数名）。
+
+    读取工程内的世界列表后交给 `bind_outline_context`，每章按幕轮转绑定 1 个世界；
+    工程里还没有世界条目时，每章 `world_ids` 写成空数组。
+
+    参数:
+        store: 工程（读取 worlds.json 与 characters.json）。
+        bible: 设定库 dict。
+
+    返回:
+        {"chapters": 绑定章节数, "beats": 绑定节拍数, "worlds": 可用世界数}。
+    """
+    world_store = WorldStore(store.root)
+    worlds = world_store.list_worlds() if world_store.exists() else []
+    return bind_outline_context(bible, worlds, store.load_characters()["characters"])
+
+
+def validate_chapter_binding(store: ProjectStore, chapter_id: str) -> dict:
+    """校验章节是否已绑定可用的世界与角色。
+
+    参数:
+        store: 工程。
+        chapter_id: 章节 ID。
+
+    返回:
+        {"chapter_id", "source", "world_ids", "pov_character_id", "character_ids"}。
+
+    异常:
+        ValueError: 缺少世界绑定或缺少非旁白角色，提示文案带操作指引。
+    """
+    settings_store = SettingsStore(store.root)
+    bible = settings_store.ensure()
+    characters = [
+        item
+        for item in store.load_characters()["characters"]
+        if item.get("id") and item.get("role") != "narrator" and item.get("id") != entities.NARRATOR_ID
+    ]
+    cast_ids = {item["id"] for item in characters}
+    entry = settings_store.find_outline_chapter(bible, chapter_id)
+
+    if entry:
+        world_ids = list(entry.get("world_ids") or [])
+        world_store = WorldStore(store.root)
+        known = {item.get("id") for item in (world_store.list_worlds() if world_store.exists() else [])}
+        if not world_ids:
+            raise ValueError("本章还没有绑定世界：请先在世界页生成并绑定世界")
+        missing = [world_id for world_id in world_ids if world_id not in known]
+        if missing:
+            raise ValueError(f"本章绑定的世界条目不存在：{'、'.join(missing)}；请先在世界页生成并绑定世界")
+        beat_ids = {cid for beat in (entry.get("beats") or []) for cid in (beat.get("character_ids") or [])}
+        linked = {cid for cid in {entry.get("pov_character_id"), *beat_ids} if cid and cid != entities.NARRATOR_ID}
+        valid = linked & cast_ids
+        if not valid:
+            raise ValueError("本章还没有绑定角色：请先在人物页生成主要人物并在大纲页绑定")
+        return {
+            "chapter_id": chapter_id,
+            "source": "outline",
+            "world_ids": world_ids,
+            "pov_character_id": entry.get("pov_character_id"),
+            "character_ids": sorted(valid),
+        }
+
+    if not cast_ids:
+        raise ValueError("本章还没有角色：请先在人物页生成主要人物并在大纲页绑定")
+    chapter = store.load_chapter(chapter_id)
+    pov = chapter.get("pov_character_id")
+    return {
+        "chapter_id": chapter_id,
+        "source": "bible",
+        "world_ids": [],
+        "pov_character_id": pov if pov in cast_ids else None,
+        "character_ids": sorted(cast_ids),
+    }
+
+
+def build_art_prompt(kind: str, entity: dict, style: dict | None = None, width: int | None = None, height: int | None = None) -> dict:
+    """拼一条设定图提示词（委托 writing/worlds.build_art_prompt）。
+
+    参数:
+        kind: world|closeup|turnaround。
+        entity: 世界条目或角色条目。
+        style: 文风分区（读取 visual_style，可选 width/height）。
+        width: 输出宽度；为空时取 style.width 或 1024。
+        height: 输出高度；为空时取 style.height 或 1024。
+
+    返回:
+        {"prompt", "negative_prompt", "width", "height"}。
+
+    异常:
+        ValueError: kind 非法。
+    """
+    return _build_art_prompt(kind, entity, style, width=width, height=height)
 
 
 def _outline_chapters(bible: dict) -> list[dict]:

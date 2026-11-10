@@ -108,7 +108,13 @@
         "title": { "type": "string", "maxLength": 200 },
         "summary": { "type": "string", "maxLength": 2000 },
         "beats": { "type": "array", "items": { "$ref": "#/$defs/beat" } },
-        "pov_character_id": { "type": ["string", "null"], "pattern": "^chr_[0-9A-Za-z]{6,32}$" }
+        "pov_character_id": { "type": ["string", "null"], "pattern": "^chr_[0-9A-Za-z]{6,32}$" },
+        "world_ids": {
+          "type": "array",
+          "items": { "type": "string", "pattern": "^wld_[0-9A-Za-z]{6,32}$" },
+          "default": [],
+          "description": "本章涉及的世界条目 ID（worlds.json）；空数组表示沿用主世界"
+        }
       }
     },
     "beat": {

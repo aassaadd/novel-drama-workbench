@@ -497,6 +497,7 @@ class OfflineWritingAdapter:
         genres = [str(item).strip() for item in (work.get("genre") or []) if str(item).strip()]
         rng = self._rng(meta, f"setting:{step}")
         genre_text = "、".join(genres) or "悬疑"
+        brief = str(meta.get("brief") or "").strip()
 
         if step == "premise":
             target_length = meta.get("target_length")
@@ -523,6 +524,40 @@ class OfflineWritingAdapter:
             }
             return json.dumps(fields, ensure_ascii=False, indent=2)
 
+        if step == "worlds":
+            try:
+                total = int(meta.get("count") or 2)
+            except (TypeError, ValueError):
+                total = 2
+            total = max(1, min(6, total))
+            worlds = []
+            for index in range(total):
+                rules = list(rng.sample(WORLD_RULES, 4))
+                factions = list(rng.sample(WORLD_FACTIONS, 3))
+                locations = [
+                    {"name": name, "description": desc, "atmosphere": mood}
+                    for name, desc, mood in rng.sample(WORLD_LOCATIONS, 3)
+                ]
+                glossary = [{"term": term, "meaning": meaning} for term, meaning in rng.sample(WORLD_GLOSSARY, 4)]
+                tag = (brief or title)[:30]
+                worlds.append(
+                    {
+                        "name": f"{tag}·世界{index + 1}",
+                        "era": (f"{brief}：{rng.choice(WORLD_ERAS)}（{genre_text}基调）" if brief else f"{rng.choice(WORLD_ERAS)}（{genre_text}基调）")[:200],
+                        "summary": (
+                            f"{brief}。这是第 {index + 1} 个世界的舞台设定，核心矛盾围绕「{title}」的主线展开。"
+                            if brief
+                            else f"《{title}》的第 {index + 1} 个世界：旧秩序与主线真相相互牵制，人物在规则缝隙里推进。"
+                        )[:2000],
+                        "rules": rules,
+                        "factions": factions,
+                        "locations": locations,
+                        "glossary": glossary,
+                        "visual_style": rng.choice(VISUAL_POOL),
+                    }
+                )
+            return json.dumps({"worlds": worlds}, ensure_ascii=False, indent=2)
+
         if step == "world":
             rules = list(rng.sample(WORLD_RULES, 4))
             factions = list(rng.sample(WORLD_FACTIONS, 3))
@@ -532,26 +567,67 @@ class OfflineWritingAdapter:
             ]
             glossary = [{"term": term, "meaning": meaning} for term, meaning in rng.sample(WORLD_GLOSSARY, 4)]
             fields = {
-                "era": f"{rng.choice(WORLD_ERAS)}（{genre_text}基调）",
+                # name / summary / visual_style 供 generate_section 使用，设定库路径会按字段白名单过滤
+                "name": (brief or f"{title}·主世界")[:120],
+                "era": (f"{brief}：{rng.choice(WORLD_ERAS)}（{genre_text}基调）" if brief else f"{rng.choice(WORLD_ERAS)}（{genre_text}基调）")[:200],
+                "summary": (
+                    f"{brief}。核心舞台与主线冲突都在这个世界里展开。"
+                    if brief
+                    else f"《{title}》的主世界：旧秩序与主线真相相互牵制。"
+                )[:2000],
                 "rules": rules,
                 "factions": factions,
                 "locations": locations,
                 "glossary": glossary,
+                "visual_style": rng.choice(VISUAL_POOL),
             }
             return json.dumps(fields, ensure_ascii=False, indent=2)
 
-        raise ValueError(f"离线写作不支持的设定步骤: {step!r}（可选 world/premise/style）")
+        raise ValueError(f"离线写作不支持的设定步骤: {step!r}（可选 world/worlds/premise/style）")
 
     def _character(self, meta: dict) -> str:
         """生成 1 名主角 + 2–6 名配角的人物 JSON。
 
         参数:
-            meta: {work, premise, world, count, seed}。
+            meta: {work, premise, world, count, brief, mode, seed}；mode="single" 时只产出 1 个完整人物。
 
         返回:
-            JSON 字符串（`{"characters": [...]}`）。
+            JSON 字符串（`{"characters": [...]}`）；single 模式的人物额外含 appearance_prompt / negative_prompt / state。
         """
         rng = self._rng(meta, "character")
+        brief = str(meta.get("brief") or "").strip()
+        if meta.get("mode") == "single":
+            name = rng.choice(CHARACTER_NAME_POOL)
+            personality = list(rng.sample(PERSONALITY_POOL, 3))
+            if brief:
+                personality = [brief[:40]] + personality[:2]
+            age_range = rng.choice(AGE_RANGE_POOL)
+            background = (
+                (f"{brief}；" if brief else "")
+                + "旧案发生时是唯一的目击者，成年后进入体制内做善后工作；"
+                "目标是把当年被掩埋的事实拼回原样，缺陷是不肯求助、习惯独自承担，"
+                "弧光从「只信证据」走向「愿意为活人让步」。"
+            )
+            appearance = ((brief + "，") if brief else "") + f"{age_range}，五官清晰，服装质感明确，光线柔和"
+            return json.dumps(
+                {
+                    "characters": [
+                        {
+                            "name": name,
+                            "role": "protagonist",
+                            "gender": ("male", "female", "other")[rng.randint(0, 2)],
+                            "age_range": age_range,
+                            "personality": personality,
+                            "background": background,
+                            "appearance_prompt": appearance,
+                            "negative_prompt": "低质, 多余手指, 水印, 文字",
+                            "state": {"relationship_notes": {}},
+                        }
+                    ]
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
         try:
             total = int(meta.get("count") or 4)
         except (TypeError, ValueError):
@@ -567,11 +643,14 @@ class OfflineWritingAdapter:
             age_range = AGE_RANGE_POOL[index % len(AGE_RANGE_POOL)]
             if role == "protagonist":
                 background = (
-                    "旧案发生时是唯一的目击者，成年后进入体制内做善后工作；"
+                    (f"{brief}；" if brief else "")
+                    + "旧案发生时是唯一的目击者，成年后进入体制内做善后工作；"
                     "目标是把当年被掩埋的事实拼回原样，动机是替一个人兑现迟到的承诺，"
                     "缺陷是不肯求助、习惯独自承担，秘密是他也动过销毁一份证据的念头；"
                     "弧光从「只信证据」走向「愿意为活人让步」。"
                 )
+                if brief:
+                    personality = [brief[:40]] + personality[:2]
             else:
                 background = (
                     f"{FUNCTION_NOTES[(index - 1) % len(FUNCTION_NOTES)]}；"
@@ -582,6 +661,13 @@ class OfflineWritingAdapter:
                 if other == name:
                     continue
                 relationships[other] = f"{name}与{other}之间有一笔没结清的旧账"
+            if role == "protagonist":
+                appearance = ((brief + "，") if brief else "") + f"{age_range}，五官清晰，服装质感明确，光线柔和"
+            else:
+                appearance = (
+                    ((brief + "，") if brief else "")
+                    + f"{age_range}，{gender}，{role} 定位，五官清晰，服装质感明确，光线柔和"
+                )
             characters.append(
                 {
                     "name": name,
@@ -591,6 +677,8 @@ class OfflineWritingAdapter:
                     "personality": personality,
                     "background": background,
                     "relationships": relationships,
+                    "appearance_prompt": appearance,
+                    "negative_prompt": "低质, 多余手指, 水印, 文字",
                 }
             )
         return json.dumps({"characters": characters}, ensure_ascii=False, indent=2)

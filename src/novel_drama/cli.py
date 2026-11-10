@@ -12,7 +12,7 @@ from pathlib import Path
 
 from . import __version__
 from .adapters import AdapterError, ErrorCode, build_adapters
-from .cli_common import EXIT_FAILED, EXIT_NOT_IMPLEMENTED, EXIT_OK, EXIT_PRECONDITION, EXIT_REJECTED, EXIT_SCHEMA, EXIT_USAGE, PreconditionError, _emit, _resolve_store, _tts_service
+from .cli_common import EXIT_FAILED, EXIT_NOT_IMPLEMENTED, EXIT_OK, EXIT_PRECONDITION, EXIT_REJECTED, EXIT_SCHEMA, EXIT_USAGE, PreconditionError, TaskFailedError, _emit, _resolve_store, _tts_service
 from .cli_chapter import (
     cmd_chapter_add,
     cmd_chapter_import,
@@ -23,6 +23,7 @@ from .cli_chapter import (
 from .cli_character import (
     cmd_character_apply,
     cmd_character_generate,
+    cmd_character_image,
     cmd_character_remove,
     cmd_character_update,
 )
@@ -38,10 +39,17 @@ from .cli_line import (
 )
 from .cli_media import cmd_bgm, cmd_concat, cmd_export, cmd_mux, cmd_timeline, cmd_tts_batch
 from .cli_models import cmd_models_import, cmd_models_install, cmd_models_list, cmd_models_verify
-from .cli_outline import cmd_outline_check
+from .cli_outline import cmd_outline_bind, cmd_outline_check
 from .cli_produce import cmd_produce, cmd_run_show
 from .cli_setting import cmd_setting
 from .cli_voice import cmd_script, cmd_voice
+from .cli_world import (
+    cmd_world_apply,
+    cmd_world_generate,
+    cmd_world_image,
+    cmd_world_list,
+    cmd_world_remove,
+)
 from .cli_writing import cmd_chapter_generate, cmd_outline, cmd_script_suggest
 from .config import AppConfig, load_config
 from .media import load_cues, plan_mix, render_mix, run_media
@@ -276,11 +284,20 @@ def cmd_character_add(args, config: AppConfig) -> int:
 
 
 def cmd_character_list(args, config: AppConfig) -> int:
-    """列出角色与音色绑定状态。"""
+    """列出角色与音色绑定状态（JSON 里补齐 image_assets 字段）。
+
+    参数:
+        args: 已解析参数（json）。
+        config: 本机配置。
+
+    返回:
+        进程退出码。
+    """
     store = _resolve_store(args, config)
     characters = store.load_characters()["characters"]
     if getattr(args, "json", False):
-        _emit(args, payload=characters)
+        rows = [{**item, "image_assets": item.get("image_assets")} for item in characters]
+        _emit(args, payload=rows)
         return EXIT_OK
     for item in characters:
         voice = (item.get("voice_binding") or {}).get("voice_id") or "未绑定音色"
@@ -918,9 +935,12 @@ def build_parser() -> argparse.ArgumentParser:
     q = p_sub.add_parser("export", help="导出为 JSON")
     q.add_argument("--out")
     q.set_defaults(func=cmd_setting)
-    q = p_sub.add_parser("generate", help="AI 生成世界 / 梗概 / 文风")
-    q.add_argument("--step", required=True, choices=["world", "premise", "style"])
-    q.add_argument("--overwrite", action="store_true", help="用生成值整体替换已有内容")
+    q = p_sub.add_parser("generate", help="AI 生成世界 / 梗概 / 文风（或按区块生成）")
+    q.add_argument("--step", choices=["world", "premise", "style"], help="兼容旧用法：整体生成某个分区")
+    q.add_argument("--section", choices=["premise", "style", "world", "character"], help="按区块生成（world/character 返回完整条目）")
+    q.add_argument("--brief", help="补充要求，如「外星世界，双恒星」")
+    q.add_argument("--target-id", dest="target_id", help="world / character 区块的改写目标 ID")
+    q.add_argument("--overwrite", action="store_true", help="用生成值整体替换已有内容（仅 --step 生效）")
     q.add_argument("--dry-run", action="store_true", help="只预览，不落盘")
     q.set_defaults(func=cmd_setting)
     q = p_sub.add_parser("polish", help="AI 润色单个字段")
@@ -950,6 +970,31 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--dry-run", action="store_true")
     q.set_defaults(func=cmd_outline)
     p_sub.add_parser("check", help="黄金三章检查（不阻断）").set_defaults(func=cmd_outline_check)
+    q = p_sub.add_parser("bind", help="更新章节的世界 / POV 绑定")
+    q.add_argument("--chapter", required=True)
+    q.add_argument("--worlds", help="世界 ID，逗号分隔；传空串表示清空")
+    q.add_argument("--pov", help="POV 角色 ID；传空串表示清空")
+    q.set_defaults(func=cmd_outline_bind)
+
+    p = sub.add_parser("world", help="世界条目（多世界 / 封面图）")
+    p_sub = p.add_subparsers(dest="action", required=True)
+    p_sub.add_parser("list", help="列出世界条目").set_defaults(func=cmd_world_list)
+    q = p_sub.add_parser("generate", help="AI 生成世界条目（默认追加落盘）")
+    q.add_argument("--count", type=int, help="世界条数（1..6）")
+    q.add_argument("--brief", help="补充要求，如「外星世界，双恒星」")
+    q.add_argument("--overwrite", action="store_true", help="用生成结果替换全部世界条目")
+    q.add_argument("--dry-run", action="store_true", help="只预览，不落盘")
+    q.set_defaults(func=cmd_world_generate)
+    q = p_sub.add_parser("apply", help="从 JSON 导入世界条目（带 id 且存在则更新）")
+    q.add_argument("--file", required=True, help="JSON 文件路径，- 表示从 stdin 读取")
+    q.set_defaults(func=cmd_world_apply)
+    q = p_sub.add_parser("remove", help="按 ID 删除世界条目（被章节引用时拒绝）")
+    q.add_argument("--id", required=True)
+    q.set_defaults(func=cmd_world_remove)
+    q = p_sub.add_parser("image", help="生成世界封面并写回 cover_asset")
+    q.add_argument("--id", required=True)
+    q.add_argument("--force", action="store_true", help="强制重绘")
+    q.set_defaults(func=cmd_world_image)
 
     p = sub.add_parser("character", help="角色与音色")
     p_sub = p.add_subparsers(dest="action", required=True)
@@ -968,8 +1013,14 @@ def build_parser() -> argparse.ArgumentParser:
     q.set_defaults(func=cmd_character_bind_voice)
     q = p_sub.add_parser("generate", help="AI 生成主角与主要配角")
     q.add_argument("--count", type=int, help="人物总数（含主角），缺省 1 主角 + 2–6 配角")
+    q.add_argument("--brief", help="补充要求，如「全部为女性角色」")
     q.add_argument("--dry-run", action="store_true", help="只预览，不写 characters.json")
     q.set_defaults(func=cmd_character_generate)
+    q = p_sub.add_parser("image", help="生成角色特写 / 三视图并写回 image_assets")
+    q.add_argument("--id", required=True)
+    q.add_argument("--kind", required=True, choices=["closeup", "turnaround"])
+    q.add_argument("--force", action="store_true", help="强制重绘")
+    q.set_defaults(func=cmd_character_image)
     q = p_sub.add_parser("apply", help="从 JSON 批量追加人物")
     q.add_argument("--file", required=True, help="JSON 文件路径，- 表示从 stdin 读取")
     q.set_defaults(func=cmd_character_apply)
@@ -982,6 +1033,8 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--personality", help="性格标签，逗号/顿号分隔")
     q.add_argument("--background")
     q.add_argument("--aliases", help="别名，逗号/顿号分隔")
+    q.add_argument("--appearance-prompt", dest="appearance_prompt", help="角色外貌提示词（配图用，空串表示清空）")
+    q.add_argument("--negative-prompt", dest="negative_prompt", help="角色负向提示词（配图用，空串表示清空）")
     q.add_argument("--situation", help="当前处境")
     q.add_argument("--relationship", action="append", help="`目标ID=备注`，可重复")
     q.set_defaults(func=cmd_character_update)
@@ -1426,6 +1479,9 @@ def main(argv: list[str] | None = None) -> int:
     except SchemaValidationError as exc:
         print(f"[SCHEMA] {exc}", file=sys.stderr)
         return EXIT_SCHEMA
+    except TaskFailedError as exc:
+        print(f"[FAILED] {exc}", file=sys.stderr)
+        return EXIT_FAILED
     except PreconditionError as exc:
         print(f"[PRECONDITION] {exc}", file=sys.stderr)
         return EXIT_PRECONDITION

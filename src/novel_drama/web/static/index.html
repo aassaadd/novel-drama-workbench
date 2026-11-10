@@ -53,10 +53,14 @@
       </div>
     </header>
 
-    <!-- ---------------- 流程条 Row 2：7 个阶段（layout.js 打 done/current/todo），「下一步」已搬到顶栏 ---------------- -->
+    <!-- ---------------- 流程条 Row 2：9 个阶段（layout.js 打 done/current/todo），「下一步」已搬到顶栏 ---------------- -->
     <div id="flowbar" class="flowbar">
       <div class="flow-steps">
         <button class="stage" data-stage="project" data-state="todo">项目</button>
+        <span class="stage-link" aria-hidden="true"></span>
+        <button class="stage" data-stage="worlds" data-state="todo">世界</button>
+        <span class="stage-link" aria-hidden="true"></span>
+        <button class="stage" data-stage="characters" data-state="todo">人物</button>
         <span class="stage-link" aria-hidden="true"></span>
         <button class="stage" data-stage="outline" data-state="todo">大纲</button>
         <span class="stage-link" aria-hidden="true"></span>
@@ -83,7 +87,7 @@
         <div id="tree" class="tree"></div>
       </aside>
 
-      <!-- ---------------- 中区：现有 7 个视图，id 与内部元素保持不变 ---------------- -->
+      <!-- ---------------- 中区：各视图（既有页面 id 与内部元素保持不变） ---------------- -->
       <section id="centerPanel" class="center-panel">
         <!-- ---------------- 台词校对（原有页面，行为不变） ---------------- -->
         <section class="view" id="view-voice" hidden>
@@ -174,7 +178,7 @@
           </footer>
         </section>
 
-        <!-- ---------------- 项目页：极简新建 + 创作向导（作品信息 → 世界 → 梗概 → 文风 → 人物） ---------------- -->
+        <!-- ---------------- 项目页：极简新建 + 创作向导（作品信息 → 梗概 → 文风） ---------------- -->
         <section class="view page" id="view-project" hidden>
           <div class="ws-head">
             <h2>工程与创作向导</h2>
@@ -186,7 +190,7 @@
               <!-- 作品信息：书名 / 作者 / 题材，保存即写回 project.json -->
               <div class="card">
                 <h3>作品信息</h3>
-                <p class="muted">先定书名与题材，后面的世界、人物、梗概都从这里取材；作者与题材可在建完工程后补。</p>
+                <p class="muted">先定书名与题材，后面的梗概、文风都从这里取材；作者与题材可在建完工程后补。</p>
                 <div class="form-grid">
                   <label class="stack">书名
                     <input id="pjWorkTitle" placeholder="书名" />
@@ -206,25 +210,12 @@
                 </div>
               </div>
 
-              <!-- 设定库三分区：世界 / 梗概 / 文风，每区右上角「✨ 生成」只回填不落盘 -->
+              <!-- 设定库两分区：梗概 / 文风，每区右上角「✨ 按需求生成」只回填不落盘 -->
               <div id="pjSettings" class="settings-sections">
                 <div class="card">
                   <div class="card-head">
-                    <h3>世界设计</h3>
-                    <button id="pjGenWorld" class="btn small" type="button">✨ 生成</button>
-                  </div>
-                  <p class="muted">时代 + 硬规则 / 阵营 / 地点 / 术语，是章节生成的上下文底座。</p>
-                  <div id="pjWorldFields" class="form-grid"></div>
-                  <div id="pjWorldDraft" class="world-draft" hidden></div>
-                  <div class="actions">
-                    <button id="pjSaveWorld" class="btn primary" type="button" hidden>保存世界设定</button>
-                  </div>
-                </div>
-
-                <div class="card">
-                  <div class="card-head">
                     <h3>故事梗概</h3>
-                    <button id="pjGenPremise" class="btn small" type="button">✨ 生成</button>
+                    <button id="pjGenPremise" class="btn small" type="button">✨ 按需求生成</button>
                   </div>
                   <p class="muted">一句话概要 → 主题 / 冲突 / 结局 / 读者 / 篇幅，按雪花写作法逐层收敛。</p>
                   <div id="pjPremiseFields" class="form-grid"></div>
@@ -233,7 +224,7 @@
                 <div class="card">
                   <div class="card-head">
                     <h3>文风设定</h3>
-                    <button id="pjGenStyle" class="btn small" type="button">✨ 生成</button>
+                    <button id="pjGenStyle" class="btn small" type="button">✨ 按需求生成</button>
                   </div>
                   <div id="pjStyleFields" class="form-grid"></div>
                   <div class="form-grid">
@@ -242,63 +233,14 @@
                     </div>
                   </div>
                   <div class="actions">
-                    <button id="pjSave" class="btn primary" type="button">保存设定（世界/梗概/文风）</button>
+                    <button id="pjSave" class="btn primary" type="button">保存设定（梗概/文风）</button>
                     <button id="pjExport" class="btn" type="button">导出设定 JSON</button>
                   </div>
-                </div>
-              </div>
-
-              <!-- 人物：主角 / 配角的新增、就地编辑、删除，以及生成后的待保存列表 -->
-              <div class="card">
-                <div class="card-head">
-                  <h3>人物</h3>
-                  <button id="pjCharGenerate" class="btn small" type="button">✨ 生成人物</button>
-                </div>
-                <p class="muted">主角 1 人、主要配角 2–6 人；生成结果先进「待保存」，确认后一次性写入，不影响已有角色与音色绑定。</p>
-                <div id="pjCharList" class="char-list">—</div>
-                <div id="pjCharPending" class="char-list" hidden></div>
-                <div class="actions">
-                  <button id="pjCharAdd" class="btn" type="button">＋ 新增人物</button>
-                  <button id="pjCharSaveAll" class="btn primary" type="button" hidden>全部保存</button>
                 </div>
               </div>
             </div>
 
             <div class="ws-col">
-              <div class="card">
-                <h3>世界设定</h3>
-                <div id="pjWorld" class="world-list"></div>
-                <div class="form-grid">
-                  <div class="stack">规则
-                    <span class="field-action">
-                      <input id="wRule" placeholder="如：夜里不能说出真名" />
-                      <button class="btn small polish-btn" type="button" data-polish="world.rule" data-polish-input="wRule">✨润色</button>
-                    </span>
-                  </div>
-                  <div class="stack">阵营
-                    <span class="field-action">
-                      <input id="wFaction" placeholder="如：守夜人" />
-                      <button class="btn small polish-btn" type="button" data-polish="world.faction" data-polish-input="wFaction">✨润色</button>
-                    </span>
-                  </div>
-                  <div class="stack">地点（名称|描述|氛围）
-                    <span class="field-action">
-                      <input id="wLocation" placeholder="钟楼|城北最高的塔|压抑" />
-                      <button class="btn small polish-btn" type="button" data-polish="world.location" data-polish-input="wLocation">✨润色</button>
-                    </span>
-                  </div>
-                  <div class="stack">词条（术语|释义）
-                    <span class="field-action">
-                      <input id="wGlossary" placeholder="回响|听见过去声音的能力" />
-                      <button class="btn small polish-btn" type="button" data-polish="world.glossary" data-polish-input="wGlossary">✨润色</button>
-                    </span>
-                  </div>
-                </div>
-                <div class="actions">
-                  <button id="pjWorldAdd" class="btn" type="button">加入世界设定</button>
-                </div>
-              </div>
-
               <div class="card">
                 <h3>新建工程</h3>
                 <p class="muted">只需要目录与书名；作者、题材在建完后的「作品信息」里补。</p>
@@ -315,6 +257,42 @@
                 </div>
               </div>
             </div>
+          </div>
+        </section>
+
+        <!-- ---------------- 世界：世界观条目列表（本任务只搭骨架，业务逻辑后续任务接） ---------------- -->
+        <section class="view page" id="view-worlds" hidden>
+          <div class="ws-head">
+            <h2>世界设计</h2>
+            <span class="muted">时代、硬规则、阵营、地点与术语，是章节生成的上下文底座。</span>
+          </div>
+
+          <div class="card">
+            <div class="card-head">
+              <h3>世界条目</h3>
+              <button id="worldsAdd" class="btn small" type="button">＋ 新增世界</button>
+              <button id="worldsGenerate" class="btn small" type="button">✨ 生成世界</button>
+            </div>
+            <div id="worldsList" class="world-list"></div>
+            <p id="worldsEmpty" class="muted">还没有世界设定：先打开工程，再点「生成世界」，或到项目页手工录入。</p>
+          </div>
+        </section>
+
+        <!-- ---------------- 人物：角色档案列表（本任务只搭骨架，业务逻辑后续任务接） ---------------- -->
+        <section class="view page" id="view-characters" hidden>
+          <div class="ws-head">
+            <h2>人物设计</h2>
+            <span class="muted">主角、配角与反派档案；人物与音色绑定后，配音和标注都按这里取名。</span>
+          </div>
+
+          <div class="card">
+            <div class="card-head">
+              <h3>人物列表</h3>
+              <button id="charactersAdd" class="btn small" type="button">＋ 新增人物</button>
+              <button id="charactersGenerate" class="btn small" type="button">✨ 生成人物</button>
+            </div>
+            <div id="charactersList" class="char-list"></div>
+            <p id="charactersEmpty" class="muted">还没有人物：先打开工程，再点「生成人物」或手工新增。</p>
           </div>
         </section>
 
@@ -489,10 +467,14 @@
 
   <div id="toast" class="toast" hidden></div>
   <script src="/static/core.js"></script>
+  <script src="/static/modal.js"></script>
+  <script src="/static/field-tools.js"></script>
   <script src="/static/layout.js"></script>
   <script src="/static/tree.js"></script>
   <script src="/static/page-project.js"></script>
   <script src="/static/page-outline.js"></script>
+  <script src="/static/page-worlds.js"></script>
+  <script src="/static/page-characters.js"></script>
   <script src="/static/page-chapter.js"></script>
   <script src="/static/page-script.js"></script>
   <script src="/static/page-media.js"></script>

@@ -38,6 +38,7 @@ const state = {
   scenes: {},
   ready: true,        // 配音链是否可开工（模型就位 + provider 可用）
   readyReason: "",
+  flowData: { worlds: 0, characters: 0 },  // 流程条「世界 / 人物」完成数，后续任务填数，缺省按 0
 };
 
 /* 生成会话：只记本次点「开始」之后的队列状态，避免旧任务混进进度。 */

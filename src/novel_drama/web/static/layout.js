@@ -12,9 +12,11 @@
 (function () {
   // 待确认删除的工程路径：非空时该行渲染成「移入废纸篓？」确认条
   let pendingDelete = "";
-  const STAGE_ORDER = ["project", "outline", "chapter", "script", "voice", "media", "export"];
+  const STAGE_ORDER = ["project", "worlds", "characters", "outline", "chapter", "script", "voice", "media", "export"];
   const STAGE_LABEL = {
     project: "项目",
+    worlds: "世界",
+    characters: "人物",
     outline: "大纲",
     chapter: "章节",
     script: "标注",
@@ -181,7 +183,7 @@
   }
 
   /* 当前 hash 是否停在「设置」页。
-   * 设置页不属于 7 个流程阶段，流程条据此跳过三态重算，避免把某个阶段误标成 current。
+   * 设置页不属于 9 个流程阶段，流程条据此跳过三态重算，避免把某个阶段误标成 current。
    * 参数：无。
    * 返回：布尔值。
    */
@@ -189,13 +191,17 @@
     return (location.hash || "").replace(/^#\/?/, "").trim() === "settings";
   }
 
-  /* 从 tree.js 的快照推导 7 个阶段是否完成。
+  /* 推导 9 个阶段是否完成。
    * 参数：无。
    * 返回：{ 阶段名: 布尔值 }；数据缺失时对应阶段按未完成处理。
+   * 说明：设置库相关的 worlds / characters 读 NW.state.flowData（后续任务填数），字段缺失按 0 处理。
    */
   function stageDone() {
     const snap = window.NWTree && window.NWTree.snapshot ? window.NWTree.snapshot() : null;
     const state = (window.NW && window.NW.state) || {};
+    const flow = state.flowData || {};
+    const worlds = Number(flow.worlds) || 0;
+    const characters = Number(flow.characters) || 0;
     const chapterId = state.chapter || "";
     const chapter = snap ? (snap.chapters || []).find((item) => item.id === chapterId) : null;
     const stats = (snap && snap.stats && snap.stats[chapterId]) || {};
@@ -205,6 +211,8 @@
 
     return {
       project: Boolean(state.path),
+      worlds: worlds >= 1,
+      characters: characters >= 1,
       outline: Boolean(snap && (snap.acts || []).length),
       chapter: Boolean(chapter && Number(chapter.word_count) > 0),
       script: Boolean(stats.script),
@@ -614,5 +622,5 @@
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init);
   else init();
 
-  window.NWLayout = { init, renderFlow, stageDone, currentStage, setInspectorCollapsed, renderBottom };
+  window.NWLayout = { init, renderFlow, refreshFlow: renderFlow, stageDone, currentStage, setInspectorCollapsed, renderBottom };
 })();

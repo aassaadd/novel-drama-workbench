@@ -20,6 +20,10 @@ class PreconditionError(RuntimeError):
     """前置条件不满足（未建工程、未拆场景、未绑音色等）。"""
 
 
+class TaskFailedError(RuntimeError):
+    """任务校验失败（章节绑定不完整、引用的条目不存在等），映射退出码 5。"""
+
+
 def _emit(args, text: str = "", payload=None) -> None:
     """按 `--json` 输出结构化结果或普通文本。
 

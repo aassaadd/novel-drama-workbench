@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -1002,6 +1003,50 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
             _json.dump(payload, handle, ensure_ascii=False)
         return handle.name
 
+    def _business_error(result):
+        """把新接口的 CLI 失败结果转成中文说明 + 分级状态码。
+
+        参数:
+            result: `actions.CliResult`。
+
+        返回:
+            带 detail 的 HTTPException（409 引用冲突 / 404 不存在 / 422 校验失败）。
+
+        异常:
+            无。
+        """
+        body = fail_body(result)
+        payload = result.payload if isinstance(result.payload, dict) else {}
+        raw_message = str(payload.get("message") or body.get("message") or "")
+        message = re.sub(r"^\[[A-Z_]+\]\s*", "", raw_message)
+        body = {**body, "message": message}
+        if result.code == 1:
+            detail = dict(body)
+            if payload.get("chapters"):
+                detail["chapters"] = payload["chapters"]
+            return HTTPException(status_code=409, detail=detail)
+        if result.code == 4 and "不存在" in message:
+            return HTTPException(status_code=404, detail=body)
+        if result.code in (5, 6):
+            return HTTPException(status_code=422, detail=body)
+        return HTTPException(status_code=result.status, detail=body)
+
+    def _respond_business(result):
+        """成功返回 JSON 负载，失败按业务语义映射状态码。
+
+        参数:
+            result: `actions.CliResult`。
+
+        返回:
+            CLI 的 JSON 负载。
+
+        异常:
+            HTTPException: 退出码非 0。
+        """
+        if result.code != 0:
+            raise _business_error(result)
+        return result.payload if result.payload is not None else {"text": result.text}
+
     @app.get("/api/ui/project/work")
     def ui_project_work(path: str = Query(...)) -> dict:
         """作品元信息（书名 / 作者 / 类型），供创作向导回填。"""
@@ -1046,13 +1091,27 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         """预览 AI 生成的设定（`setting generate --dry-run`，不落盘）。
 
         参数:
-            body: `{path, step: world|premise|style, overwrite?}`。
+            body: `{path, section?, brief?, target_id?, step?, overwrite?}`；
+            section 缺省时保持旧的 step 行为。
 
         异常:
-            HTTPException 400: step 缺失或非法。
+            HTTPException 400: section / step 缺失或非法。
         """
         path = body.get("path")
         _store(path)
+        section = str(body.get("section") or "").strip()
+        if section:
+            if section not in ("premise", "style", "world", "character"):
+                raise HTTPException(
+                    status_code=400,
+                    detail={"code": 2, "message": "section 必须是 premise / style / world / character"},
+                )
+            argv = ["--project", path, "--json", "setting", "generate", "--section", section, "--dry-run"]
+            if body.get("brief"):
+                argv += ["--brief", str(body["brief"])]
+            if body.get("target_id"):
+                argv += ["--target-id", str(body["target_id"])]
+            return _respond_business(_cli(*argv))
         step = str(body.get("step") or "").strip()
         if step not in ("world", "premise", "style"):
             raise HTTPException(status_code=400, detail={"code": 2, "message": "step 必须是 world / premise / style"})
@@ -1142,7 +1201,7 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         """生成主角与主要配角（`character generate --dry-run`，预览不落盘）。
 
         参数:
-            body: `{path, count?}`；count 为期望生成的总人数。
+            body: `{path, count?, brief?}`；count 为期望生成的总人数，brief 为补充要求。
 
         返回:
             `{characters: [...], applied: false}`，由前端回填后用户确认再 POST 追加。
@@ -1150,9 +1209,37 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         path = body.get("path")
         _store(path)
         argv = ["--project", path, "--json", "character", "generate", "--dry-run"]
+        if body.get("brief"):
+            argv += ["--brief", str(body["brief"])]
         if body.get("count") is not None:
             argv += ["--count", str(body["count"])]
         return _respond(_cli(*argv))
+
+    @app.post("/api/ui/characters/image")
+    def ui_characters_image(body: dict) -> dict:
+        """生成角色特写 / 三视图（`character image`）。
+
+        参数:
+            body: `{path, id, kind: closeup|turnaround, force?}`。
+
+        返回:
+            `{character_id, kind, image_asset, created}`。
+
+        异常:
+            HTTPException 400: 缺少 id 或 kind 非法。
+        """
+        path = body.get("path")
+        _store(path)
+        character_id = body.get("id") or body.get("character")
+        if not character_id:
+            raise HTTPException(status_code=400, detail={"code": 2, "message": "缺少 id 参数"})
+        kind = str(body.get("kind") or "").strip()
+        if kind not in ("closeup", "turnaround"):
+            raise HTTPException(status_code=400, detail={"code": 2, "message": "kind 必须是 closeup / turnaround"})
+        argv = ["--project", path, "--json", "character", "image", "--id", str(character_id), "--kind", kind]
+        if body.get("force"):
+            argv.append("--force")
+        return _respond_business(_cli(*argv))
 
     @app.patch("/api/ui/characters")
     def ui_characters_update(body: dict) -> dict:
@@ -1160,7 +1247,7 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
 
         参数:
             body: `{path, id, name?, role?, gender?, age_range?, personality?, background?,
-            aliases?, situation?, relationships?}`。
+            aliases?, appearance_prompt?, negative_prompt?, situation?, relationships?}`。
 
         异常:
             HTTPException 400: 缺少 id。
@@ -1179,6 +1266,8 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
             ("personality", "--personality"),
             ("background", "--background"),
             ("aliases", "--aliases"),
+            ("appearance_prompt", "--appearance-prompt"),
+            ("negative_prompt", "--negative-prompt"),
             ("situation", "--situation"),
         ):
             value = body.get(key)
@@ -1216,6 +1305,135 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         """黄金三章检查（`outline check --json`），不阻断流程。"""
         _store(path)
         return _respond(_cli("--project", path, "--json", "outline", "check"))
+
+    @app.post("/api/ui/outline/bind")
+    def ui_outline_bind(body: dict) -> dict:
+        """更新章节的世界 / POV 绑定（`outline bind`）。
+
+        参数:
+            body: `{path, chapter, world_ids?: [...], pov_character_id?}`。
+
+        异常:
+            HTTPException 400: 缺少 chapter。
+            HTTPException 422: 世界或角色 ID 不存在。
+        """
+        path = body.get("path")
+        _store(path)
+        chapter = body.get("chapter")
+        if not chapter:
+            raise HTTPException(status_code=400, detail={"code": 2, "message": "缺少 chapter 参数"})
+        argv = ["--project", path, "--json", "outline", "bind", "--chapter", str(chapter)]
+        if body.get("world_ids") is not None:
+            world_ids = body["world_ids"]
+            if isinstance(world_ids, list):
+                world_ids = ",".join(str(item) for item in world_ids)
+            argv += ["--worlds", str(world_ids)]
+        if body.get("pov_character_id") is not None:
+            argv += ["--pov", str(body["pov_character_id"])]
+        return _respond_business(_cli(*argv))
+
+    # ---------------- 世界条目（多世界 / 封面图）----------------
+
+    @app.get("/api/ui/worlds")
+    def ui_worlds(path: str = Query(...)) -> dict:
+        """世界条目列表与人物数量（`world list` / `character list`）。
+
+        参数:
+            path: 工程目录。
+
+        返回:
+            `{worlds, count, characters}`；characters 供前端流程条展示人物数量。
+        """
+        _store(path)
+        payload = _respond_business(_cli("--project", path, "--json", "world", "list")) or {}
+        characters = _respond_business(_cli("--project", path, "--json", "character", "list")) or []
+        return {
+            "worlds": payload.get("worlds") or [],
+            "count": payload.get("count") or 0,
+            "characters": len(characters) if isinstance(characters, list) else 0,
+        }
+
+    @app.post("/api/ui/worlds")
+    def ui_worlds_apply(body: dict) -> dict:
+        """写入世界条目（`world apply --file`，带 id 且存在则更新）。
+
+        参数:
+            body: `{path, world?: {...}, worlds?: [...]}`。
+
+        异常:
+            HTTPException 400: 既没有 world 也没有 worlds。
+        """
+        path = body.get("path")
+        _store(path)
+        payload: dict = {}
+        if isinstance(body.get("world"), dict):
+            payload["world"] = body["world"]
+        if isinstance(body.get("worlds"), list):
+            payload["worlds"] = body["worlds"]
+        if not payload:
+            raise HTTPException(status_code=400, detail={"code": 2, "message": "world 或 worlds 至少给一个"})
+        tmp = _temp_json(payload)
+        try:
+            return _respond_business(_cli("--project", path, "--json", "world", "apply", "--file", tmp))
+        finally:
+            Path(tmp).unlink(missing_ok=True)
+
+    @app.post("/api/ui/worlds/delete")
+    def ui_worlds_delete(body: dict) -> dict:
+        """删除世界条目（`world remove`）；被引用时返回 409 与引用章节列表。
+
+        参数:
+            body: `{path, id}`。
+
+        异常:
+            HTTPException 400: 缺少 id。
+            HTTPException 409: 仍被大纲章节引用。
+        """
+        path = body.get("path")
+        _store(path)
+        world_id = body.get("id")
+        if not world_id:
+            raise HTTPException(status_code=400, detail={"code": 2, "message": "缺少 id 参数"})
+        return _respond_business(_cli("--project", path, "--json", "world", "remove", "--id", str(world_id)))
+
+    @app.post("/api/ui/worlds/generate")
+    def ui_worlds_generate(body: dict) -> dict:
+        """预览 AI 生成的世界条目（`world generate --dry-run`，不落盘）。
+
+        参数:
+            body: `{path, brief?, count?}`。
+
+        返回:
+            `{worlds, count, saved: false}`。
+        """
+        path = body.get("path")
+        _store(path)
+        argv = ["--project", path, "--json", "world", "generate", "--dry-run"]
+        if body.get("brief"):
+            argv += ["--brief", str(body["brief"])]
+        if body.get("count") is not None:
+            argv += ["--count", str(body["count"])]
+        return _respond_business(_cli(*argv))
+
+    @app.post("/api/ui/worlds/image")
+    def ui_worlds_image(body: dict) -> dict:
+        """生成世界封面（`world image`）。
+
+        参数:
+            body: `{path, id, force?}`。
+
+        异常:
+            HTTPException 400: 缺少 id。
+        """
+        path = body.get("path")
+        _store(path)
+        world_id = body.get("id")
+        if not world_id:
+            raise HTTPException(status_code=400, detail={"code": 2, "message": "缺少 id 参数"})
+        argv = ["--project", path, "--json", "world", "image", "--id", str(world_id)]
+        if body.get("force"):
+            argv.append("--force")
+        return _respond_business(_cli(*argv))
 
     # 模型清单 / 下载 / ComfyUI 自检（独立模块，避免本文件继续膨胀）
     register_models_routes(app, config_path)

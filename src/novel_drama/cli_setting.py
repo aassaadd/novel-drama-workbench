@@ -15,7 +15,7 @@ from .cli_common import PreconditionError, _emit, _resolve_store
 from .config import AppConfig
 from .models.ids import new_id
 from .store.settings_store import SettingsStore
-from .writing import generate_settings, polish_field
+from .writing import generate_section, generate_settings, polish_field
 
 # `setting set` 支持标量字段：解析参数名 → (设定库路径, 字段名)
 SCALAR_FIELDS = {
@@ -390,8 +390,30 @@ def cmd_setting(args, config: AppConfig) -> int:
         return 0
 
     if action == "generate":
-        step = args.step
-        result = generate_settings(store, config, step, overwrite=bool(getattr(args, "overwrite", False)))
+        section = str(getattr(args, "section", None) or "").strip()
+        if section:
+            result = generate_section(
+                store,
+                config,
+                section,
+                brief=getattr(args, "brief", None),
+                target_id=getattr(args, "target_id", None),
+            )
+            fields = result["fields"] or {}
+            head = "[dry-run] " if getattr(args, "dry_run", False) else ""
+            _emit(args, f"{head}已生成 {section} 区块：{len(fields)} 个字段", {"section": result["section"], "fields": fields})
+            return 0
+
+        step = getattr(args, "step", None)
+        if not step:
+            raise ValueError("需要指定 --section（premise/style/world/character）或 --step（world/premise/style）")
+        result = generate_settings(
+            store,
+            config,
+            step,
+            overwrite=bool(getattr(args, "overwrite", False)),
+            brief=getattr(args, "brief", None),
+        )
         label = {"world": "世界设定", "premise": "故事梗概", "style": "文风"}[step]
         applied = False
         revision = (settings.load_or_none() or {}).get("settings_revision")

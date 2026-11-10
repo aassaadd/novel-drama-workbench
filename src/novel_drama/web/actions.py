@@ -12,7 +12,12 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import threading
 from typing import NamedTuple
+
+#: CLI 执行串行锁。CLI 用全局 stdout/stderr 重定向捕获输出，
+#: FastAPI 同步接口跑在线程池里，并发调用会互相抢缓冲导致输出丢失（表现为空负载）。
+_RUN_LOCK = threading.Lock()
 
 #: CLI 退出码 → HTTP 状态码
 EXIT_TO_STATUS: dict[int, int] = {
@@ -64,8 +69,9 @@ def run(*argv: str) -> CliResult:
     from ..cli import main
 
     out, err = io.StringIO(), io.StringIO()
-    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-        code = main([str(item) for item in argv if item is not None])
+    with _RUN_LOCK:
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = main([str(item) for item in argv if item is not None])
     text = out.getvalue().strip()
     payload = None
     if text.startswith(("{", "[")):

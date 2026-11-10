@@ -7,7 +7,7 @@
 
 window.Pages = window.Pages || {};
 
-const VIEWS = ["project", "outline", "chapter", "script", "voice", "media", "export", "settings"];
+const VIEWS = ["project", "worlds", "characters", "outline", "chapter", "script", "voice", "media", "export", "settings"];
 
 /* 当前 hash 对应的视图名；未知或空 hash 回落到台词校对页（保持原有入口行为）。 */
 function currentView() {
