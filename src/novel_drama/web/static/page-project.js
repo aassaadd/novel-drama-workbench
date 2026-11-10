@@ -362,8 +362,16 @@
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ path: NW.state.path, field, text }),
       });
-      if (result.text) input.value = result.text;
-      NW.toast("润色完成（未保存）", true);
+      const polished = String(result.text || "").trim();
+      if (!polished) {
+        NW.toast("润色没有返回内容，稍后重试");
+      } else if (polished === text) {
+        // 短词（如题材「都市」）模型常原样返回，明确说明避免误以为按钮没生效
+        NW.toast("润色结果与原文相同，可补充细节后重试");
+      } else {
+        input.value = polished;
+        NW.toast("润色完成（未保存）", true);
+      }
     } catch (error) {
       NW.toast(`润色失败：${error.message}`);
     } finally {
