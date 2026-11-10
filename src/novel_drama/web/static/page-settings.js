@@ -17,6 +17,7 @@
   let data = null; // 最近一次 GET /api/config 的结果
   let pending = {}; // 点了「恢复」的键：保存时一律按 null 提交
   let health = null; // POST /api/ui/comfy/health 的结果
+  let llm = null; // POST /api/ui/llm/status 的结果（写作模型可用清单与上限）
   let models = null; // GET /api/ui/models 的结果
   let modelsError = ""; // 模型清单读取失败原因
   let jobs = {}; // "group:key" → 下载任务 {job_id, status, logs, result}
@@ -124,16 +125,93 @@
     return `<div class="settings-hint">${esc(health.message || "ComfyUI 连通正常")}${esc(latency)}</div>`;
   }
 
-  /* 渲染写作模型卡片（接口地址 / 模型 / API Key / 采样参数）。
+  /* 写作模型连接状态徽标：连接中 / 可用 / 模型不在列表 / 连不上。
+   * 参数：无。
+   * 返回：HTML 字符串。
+   */
+  function llmBadge() {
+    if (!llm) return '<span class="state-badge s-pending"><span class="dot"></span>检查中…</span>';
+    if (llm.ok) {
+      const count = (llm.models || []).length;
+      return `<span class="state-badge s-ready"><span class="dot"></span>已连接 · ${count} 个模型</span>`;
+    }
+    if (llm.connected) return '<span class="state-badge s-stale"><span class="dot"></span>模型不可用</span>';
+    return '<span class="state-badge s-failed"><span class="dot"></span>未连接</span>';
+  }
+
+  /* 写作模型检测失败时的红色说明（可用时为空）。
+   * 参数：无。
+   * 返回：HTML 字符串。
+   */
+  function llmWarnHtml() {
+    if (!llm || llm.ok || !llm.message) return "";
+    return `<div class="settings-warn">${esc(llm.message)}</div>`;
+  }
+
+  /* 写作模型检测成功时的灰色说明（消息 + 耗时）。
+   * 参数：无。
+   * 返回：HTML 字符串。
+   */
+  function llmDetailHtml() {
+    if (!llm || !llm.ok) return "";
+    const latency = llm.latency_ms ? ` · 耗时 ${llm.latency_ms}ms` : "";
+    return `<div class="settings-hint">${esc(llm.message || "写作模型连通正常")}${esc(latency)}</div>`;
+  }
+
+  /* 本地接口返回的可用模型，用作模型下拉的选项。
+   * 参数：current 当前生效的模型名（检测列表里没有时补在最前面，避免选中项丢失）。
+   * 返回：HTML 字符串（option）。
+   */
+  function llmModelOptionsHtml(current) {
+    const ids = ((llm && llm.models) || []).map((item) => item.id).filter(Boolean);
+    const selected = String(current || "").trim();
+    const values = ids.slice();
+    if (selected && !values.includes(selected)) values.unshift(selected);
+    if (!values.length) return '<option value="">（未获取到模型，点检测重试）</option>';
+    const head = selected ? "" : '<option value="">（请选择模型）</option>';
+    return (
+      head +
+      values
+        .map((id) => `<option value="${esc(id)}"${id === selected ? " selected" : ""}>${esc(id)}</option>`)
+        .join("")
+    );
+  }
+
+  /* 按模型 id 在检测结果里找上限信息。
+   * 参数：modelId 模型名。
+   * 返回：模型条目或 null。
+   */
+  function llmModelEntry(modelId) {
+    const rows = (llm && llm.models) || [];
+    return rows.find((item) => item.id === modelId) || null;
+  }
+
+  /* 输入/输出上限只读区：优先用该模型自己的上限，其次用当前配置值。
+   * 参数：writing 配置段（页面未渲染完成时用于回落）。
+   * 返回：HTML 字符串。
+   */
+  function llmLimitsHtml(writing) {
+    const input = el("setLlmModel");
+    const current = String((input ? input.value : writing.model) || "").trim();
+    const entry = llmModelEntry(current);
+    const context = (entry && entry.context_length) || (llm && llm.context_window) || writing.context_window;
+    const output = (entry && entry.max_output_tokens) || (llm && llm.max_output_tokens) || writing.max_tokens;
+    return `${readRow("输入上限（上下文窗口）", context ? `${context} tokens` : "—")}${readRow("输出上限（max_tokens）", output ? `${output} tokens` : "—")}`;
+  }
+
+  /* 渲染写作模型卡片（接口地址 / 模型 / API Key / 采样参数 / 上限）。
    * 参数：writing GET 返回的 writing 段。
    * 返回：HTML 字符串。
    */
   function renderWriting(writing) {
-    const models = (writing.available_models || [])
-      .map((item) => `<option value="${esc(item)}"></option>`)
-      .join("");
     return `<section class="settings-card">
       <h3>写作模型（LLM）</h3>
+      <div class="health-slot">
+        <button class="btn small" type="button" id="setLlmCheck">检测连接</button>
+        <span id="setLlmBadge">${llmBadge()}</span>
+      </div>
+      <div id="setLlmWarn">${llmWarnHtml()}</div>
+      <div id="setLlmDetail">${llmDetailHtml()}</div>
       <div class="settings-grid">
         ${fieldBlock(
           "omlx.endpoint",
@@ -142,9 +220,9 @@
         )}
         ${fieldBlock(
           "omlx.model",
-          "模型",
-          `<input data-key="omlx.model" list="setModelList" value="${esc(writing.model || "")}" placeholder="如 Qwen3.8-27B-oQ4e-mtp" spellcheck="false" />
-          <datalist id="setModelList">${models}</datalist>`
+          "可用模型",
+          `<select data-key="omlx.model" id="setLlmModel">${llmModelOptionsHtml(writing.model)}</select>`,
+          "下拉项来自本地接口 /v1/models，点「检测连接」刷新。"
         )}
         ${fieldBlock(
           "omlx.api_key",
@@ -163,7 +241,7 @@
           `<input data-key="omlx.max_tokens" type="number" min="1" value="${esc(writing.max_tokens ?? "")}" />`
         )}
       </div>
-      <div class="kv settings-readonly">${readRow("上下文窗口", writing.context_window ?? "—")}</div>
+      <div class="kv settings-readonly" id="setLlmLimits">${llmLimitsHtml(writing)}</div>
     </section>`;
   }
 
@@ -674,6 +752,92 @@
     }
   }
 
+  /* 检测写作模型：拿本地接口的可用模型与上下文上限。
+   * 参数：withForm 是否带表单里未保存的地址 / 模型 / key（手动检测时用）。
+   * 返回：Promise，无。
+   */
+  async function loadLlm(withForm) {
+    const payload = {};
+    if (withForm) {
+      const endpoint = document.querySelector('#setBody [data-key="omlx.endpoint"]');
+      const model = document.querySelector('#setBody [data-key="omlx.model"]');
+      const apiKey = document.querySelector('#setBody [data-key="omlx.api_key"]');
+      if (endpoint) payload.endpoint = String(endpoint.value || "").trim();
+      if (model) payload.model = String(model.value || "").trim();
+      if (apiKey) payload.api_key = String(apiKey.value || "").trim();
+    }
+    try {
+      llm = await NW.api("/api/ui/llm/status", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+    } catch (error) {
+      llm = { ok: false, connected: false, models: [], message: `检测失败：${error.message}` };
+    }
+  }
+
+  /* 把检测结果刷到写作模型卡片（徽标 / 说明 / 候选模型 / 上限），不重渲染整页。
+   * 参数：无。
+   * 返回：无。
+   */
+  function renderLlm() {
+    const badge = el("setLlmBadge");
+    if (badge) badge.innerHTML = llmBadge();
+    const warn = el("setLlmWarn");
+    if (warn) warn.innerHTML = llmWarnHtml();
+    const detail = el("setLlmDetail");
+    if (detail) detail.innerHTML = llmDetailHtml();
+    const list = el("setLlmModel");
+    if (list) {
+      // 保留页面上的当前选择（可能还没保存），再按最新检测结果重建选项
+      const current = list.value || (llm && llm.model) || "";
+      list.innerHTML = llmModelOptionsHtml(current);
+    }
+    refreshLlmLimits();
+  }
+
+  /* 只刷新输入/输出上限只读区（模型改动或检测完成时用）。
+   * 参数：无。
+   * 返回：无。
+   */
+  function refreshLlmLimits() {
+    const limits = el("setLlmLimits");
+    if (limits && data && data.writing) limits.innerHTML = llmLimitsHtml(data.writing);
+  }
+
+  /* 手动检测写作模型：带表单当前值，检测期间禁用按钮。
+   * 参数：无。
+   * 返回：Promise，无。
+   */
+  async function testLlm() {
+    const button = el("setLlmCheck");
+    const badge = el("setLlmBadge");
+    if (button) {
+      button.disabled = true;
+      button.textContent = "检测中…";
+    }
+    if (badge) badge.innerHTML = '<span class="state-badge s-pending"><span class="dot"></span>检测中…</span>';
+    try {
+      await loadLlm(true);
+    } finally {
+      if (button) {
+        button.disabled = false;
+        button.textContent = "检测连接";
+      }
+      renderLlm();
+    }
+  }
+
+  /* 保存后重新检测（地址 / 模型可能刚改），只刷新状态区。
+   * 参数：无。
+   * 返回：Promise，无。
+   */
+  async function refreshLlm() {
+    await loadLlm(false);
+    renderLlm();
+  }
+
   /* 拉取模型清单（只读接口，失败时记录原因供卡片显示）。
    * 参数：无。
    * 返回：Promise，无。
@@ -707,11 +871,12 @@
     el("setBody").innerHTML = '<p class="muted">读取配置中…</p>';
     pending = {};
     health = null;
+    llm = null;
     models = null;
     modelsError = "";
     try {
       data = await NW.api("/api/config");
-      await Promise.all([loadHealth(), loadModels()]);
+      await Promise.all([loadHealth(), loadLlm(false), loadModels()]);
       render();
     } catch (error) {
       el("setBody").innerHTML = `<div class="error-box">读取配置失败：${esc(error.message)}</div>`;
@@ -775,8 +940,8 @@
       pending = {};
       render();
       NW.toast("已保存", true);
-      // 目录 / 地址可能刚改过：顺带刷新连接状态与模型清单
-      Promise.all([refreshHealth(), refreshModels()]);
+      // 目录 / 地址可能刚改过：顺带刷新连接状态、写作模型与模型清单
+      Promise.all([refreshHealth(), refreshLlm(), refreshModels()]);
     } catch (error) {
       NW.toast(`保存失败：${error.message}`);
     } finally {
@@ -1008,6 +1173,7 @@
       return;
     }
     if (event.target.closest("#setHealthCheck")) testHealth();
+    else if (event.target.closest("#setLlmCheck")) testLlm();
     else if (event.target.closest("#setSave")) save();
     else if (event.target.closest("#setReset")) load();
   }
@@ -1019,6 +1185,8 @@
   function onChange(event) {
     const key = event.target && event.target.dataset ? event.target.dataset.key || "" : "";
     if (key.startsWith("comfyui.templates.")) refreshTemplateInfo();
+    // 切到另一个模型时，上限区跟着该模型的检测结果变
+    if (event.target && event.target.id === "setLlmModel") refreshLlmLimits();
   }
 
   /* 首次激活时绑定事件，避免重复绑定。 */

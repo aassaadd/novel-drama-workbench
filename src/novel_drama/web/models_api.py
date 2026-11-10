@@ -14,13 +14,16 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 import uuid
 from datetime import datetime
 from pathlib import Path
 
 from fastapi import HTTPException
 
+from ..adapters.base import AdapterError
 from ..adapters.comfyui import LocalComfyGateway
+from ..adapters.writing import OmlxWritingAdapter
 from ..config import load_config
 from ..media import comfy_media, comfy_models
 from ..tts import model_store
@@ -672,5 +675,84 @@ def register_models_routes(app, config_path: str | None = None) -> None:
             "models_dir": models_dir,
             "base_url": gateway.base_url,
             "latency_ms": status.latency_ms,
+            "message": message,
+        }
+
+    @app.post("/api/ui/llm/status")
+    def ui_llm_status(body: dict | None = None) -> dict:
+        """检测写作 LLM（OpenAI 兼容服务）并返回可用模型与上下文上限。
+
+        参数:
+            body: 可选 `{endpoint, api_key, model}`；传了就先按表单值探测，
+                未保存的新地址 / 新模型也能直接检测，缺省回落到已保存配置。
+
+        返回:
+            `{ok, connected, endpoint, model, model_found, models, context_window,
+            max_output_tokens, latency_ms, message}`；
+            `ok` 表示「连得上且所选模型存在」，连不上时 `connected=false`，HTTP 仍为 200，
+            由页面显示红色状态；`models[].context_length` 来自 `/v1/models` 的
+            `max_model_len`，服务端没给输出上限时用配置里的 `omlx.max_tokens`。
+        """
+        config = load_config(config_path)
+        settings = dict(config.get("omlx", {}) or {})
+        override = body or {}
+        for key in ("endpoint", "api_key", "model"):
+            value = str(override.get(key) or "").strip()
+            if value:
+                settings[key] = value
+        model = str(settings.get("model") or "").strip()
+        adapter = OmlxWritingAdapter(settings)
+
+        started = time.monotonic()
+        try:
+            rows = adapter.list_models(timeout_s=5)
+        except AdapterError as exc:
+            return {
+                "ok": False,
+                "connected": False,
+                "endpoint": adapter.endpoint,
+                "model": model,
+                "model_found": False,
+                "models": [],
+                "context_window": settings.get("context_window"),
+                "max_output_tokens": settings.get("max_tokens"),
+                "latency_ms": None,
+                "message": exc.message,
+            }
+        latency = int((time.monotonic() - started) * 1000)
+
+        models: list[dict] = []
+        selected: dict | None = None
+        for item in rows:
+            model_id = str(item.get("id") or "")
+            if not model_id:
+                continue
+            entry = {
+                "id": model_id,
+                "owned_by": item.get("owned_by"),
+                # 不同服务叫法不同：omlx 给 max_model_len，其它兼容服务可能给 context_length
+                "context_length": item.get("max_model_len") or item.get("context_length"),
+                "max_output_tokens": item.get("max_output_tokens") or item.get("max_completion_tokens"),
+            }
+            models.append(entry)
+            if model_id == model:
+                selected = entry
+        ids = [item["id"] for item in models]
+        if selected:
+            message = f"omlx 可达，模型 {model} 存在（共 {len(ids)} 个）"
+        elif model:
+            message = f"服务可达，但模型 {model} 不在列表中：可用 {'、'.join(ids)}" if ids else "服务可达，但模型列表为空"
+        else:
+            message = f"服务可达，请选择模型：可用 {'、'.join(ids)}" if ids else "服务可达，但模型列表为空"
+        return {
+            "ok": selected is not None,
+            "connected": True,
+            "endpoint": adapter.endpoint,
+            "model": model,
+            "model_found": selected is not None,
+            "models": models,
+            "context_window": (selected or {}).get("context_length") or settings.get("context_window"),
+            "max_output_tokens": (selected or {}).get("max_output_tokens") or settings.get("max_tokens"),
+            "latency_ms": latency,
             "message": message,
         }

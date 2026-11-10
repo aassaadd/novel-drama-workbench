@@ -206,14 +206,25 @@ class OmlxWritingAdapter:
             attempt += 1
             time.sleep(min(2.0 * attempt, 5.0))
 
-    def list_models(self) -> list[dict]:
+    def list_models(self, timeout_s: float | None = None) -> list[dict]:
         """获取服务端模型列表（GET /v1/models）。
+
+        参数:
+            timeout_s: 可选，覆盖默认超时（设置页自检时用较短超时）。
 
         返回:
             模型 dict 列表（含 id、max_model_len 等）。
+
+        异常:
+            AdapterError(INVALID_INPUT): 未配置地址。
         """
-        self._require_ready()
-        data = self._request_json("GET", "/v1/models")
+        # 列表接口不依赖 model，未选模型时也允许拉取（设置页「检测」要先看到可选项）
+        if not self.endpoint:
+            raise AdapterError(
+                ErrorCode.INVALID_INPUT,
+                "omlx 未配置地址：请在 config/config.yaml 的 omlx.endpoint 填写（例如 http://127.0.0.1:9000）",
+            )
+        data = self._request_json("GET", "/v1/models", timeout_s=timeout_s)
         models = data.get("data") if isinstance(data, dict) else None
         return models if isinstance(models, list) else []
 
@@ -250,7 +261,7 @@ class OmlxWritingAdapter:
             return HealthStatus(ok=False, detail="omlx 未配置 endpoint：请在 config/config.yaml 的 omlx.endpoint 填写（例如 http://127.0.0.1:9000）")
         started = time.monotonic()
         try:
-            models = self.list_models() if timeout_s is None else self._list_models_with_timeout(timeout_s)
+            models = self.list_models() if timeout_s is None else self.list_models(timeout_s)
         except AdapterError as exc:
             return HealthStatus(ok=False, detail=exc.message, extra={"code": exc.code.value})
         latency = int((time.monotonic() - started) * 1000)
@@ -277,19 +288,6 @@ class OmlxWritingAdapter:
                 }
             )
         return HealthStatus(ok=True, detail=f"omlx 可达，模型 {self.model} 存在（共 {len(ids)} 个）", latency_ms=latency, extra=extra)
-
-    def _list_models_with_timeout(self, timeout_s: float) -> list[dict]:
-        """用指定超时获取模型列表。
-
-        参数:
-            timeout_s: 超时秒数。
-
-        返回:
-            模型 dict 列表。
-        """
-        data = self._request_json("GET", "/v1/models", timeout_s=timeout_s)
-        models = data.get("data") if isinstance(data, dict) else None
-        return models if isinstance(models, list) else []
 
     def _build_payload(self, req: TextGenRequest, stream: bool) -> dict:
         """把统一请求映射为 OpenAI 兼容请求体。
