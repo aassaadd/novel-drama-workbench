@@ -172,6 +172,9 @@ def main() -> int:
         "回响|能听见过去声音的异常现象",
     )
 
+    log("角色")
+    run_json("character", "add", "--name", "沈砚", "--role", "protagonist", "--alias", "沈队")
+
     log("大纲")
     outline = run_json("outline", "generate", "--acts", "1", "--chapters-per-act", "1", "--beats-per-chapter", "2", "--words", "600")
     log(f"生成 {outline['chapters']} 章 / {outline['beats']} 个节拍（provider={outline['provider']}）")

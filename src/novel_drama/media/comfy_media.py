@@ -33,6 +33,7 @@ _UNSAFE_PATH_RE = re.compile(r"[^A-Za-z0-9._-]")
 #: 各用途的内置模板（manifest 里的模板 ID 不存在时回落到这里）
 _BUILTIN_TEMPLATES = {
     "image": ["qwen_image_accel"],
+    "image_ref": ["qwen_image21_ref_accel"],
     "video": ["minimax_h3_accel", "minimax_h3_accel_t2v"],
     "video_i2v": ["minimax_h3_accel"],
     "video_t2v": ["minimax_h3_accel_t2v"],
@@ -44,6 +45,7 @@ VIDEO_RATIOS = ("9:16", "16:9", "1:1")
 #: 模板缺少清单登记时，按类型要求的必需占位符
 _DEFAULT_REQUIRED = {
     "image": ["prompt", "width", "height", "seed", "filename_prefix"],
+    "image_ref": ["prompt", "width", "height", "seed", "filename_prefix", "input_image"],
     "video": ["prompt", "width", "height", "seed", "filename_prefix"],
     "video_i2v": ["prompt", "width", "height", "seed", "filename_prefix", "input_image"],
     "video_t2v": ["prompt", "width", "height", "seed", "filename_prefix"],
@@ -153,7 +155,7 @@ def builtin_template_ids(kind: str) -> list[str]:
     """
     ids = _BUILTIN_TEMPLATES.get(str(kind))
     if not ids:
-        raise AdapterError(ErrorCode.INVALID_INPUT, f"未知模板用途：{kind}（可选 image/video/video_i2v/video_t2v）")
+        raise AdapterError(ErrorCode.INVALID_INPUT, f"未知模板用途：{kind}（可选 image/image_ref/video/video_i2v/video_t2v）")
     return list(ids)
 
 

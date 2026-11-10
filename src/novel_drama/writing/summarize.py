@@ -131,8 +131,10 @@ def _build_request(context: dict, chapter: dict, excerpt: str) -> TextGenRequest
     instruction = "\n".join(
         [
             "请根据下面这章正文，反向总结章节标题、摘要、大纲与节拍。",
-            f"作品：《{work.get('title') or '未命名'}》；类型：{'、'.join(work.get('genre') or []) or '未设定'}；"
-            f"一句话简介：{work.get('logline') or '未设定'}",
+            (
+                f"作品：《{work.get('title') or '未命名'}》；类型：{'、'.join(work.get('genre') or []) or '未设定'}；"
+                f"一句话简介：{work.get('logline') or '未设定'}"
+            ),
             f"文风：{_style_digest(style)}",
             f"主要角色：{_character_digest(context['characters'])}",
             f"当前章节标题：{chapter.get('title') or ''}",
@@ -147,8 +149,10 @@ def _build_request(context: dict, chapter: dict, excerpt: str) -> TextGenRequest
             f"1. title 为字符串，1–{TITLE_LIMIT} 字；",
             f"2. synopsis 为字符串，不超过 {SYNOPSIS_LIMIT} 字，概括本章发生了什么；",
             f"3. outline 为字符串，不超过 {OUTLINE_LIMIT} 字，可用换行分条；",
-            f"4. beats 为 1–{BEATS_MAX} 条数组，每条含字符串 summary（不超过 {BEAT_SUMMARY_LIMIT} 字）"
-            "与布尔 turning_point；",
+            (
+                f"4. beats 为 1–{BEATS_MAX} 条数组，每条含字符串 summary（不超过 {BEAT_SUMMARY_LIMIT} 字）"
+                "与布尔 turning_point；"
+            ),
             "5. 人物、地点、术语必须沿用上面的既有名称，不要新造专有名词；",
             f"6. {OUTPUT_RULE}。",
         ]
@@ -267,13 +271,14 @@ def _beats_equal(old_beats: list[dict], new_beats: list[dict]) -> bool:
     return True
 
 
-def _diff_fields(chapter: dict, old_beats: list[dict], preview: dict) -> list[str]:
+def _diff_fields(chapter: dict, old_beats: list[dict], preview: dict, has_entry: bool) -> list[str]:
     """列出将被变更的字段。
 
     参数:
         chapter: 当前章节。
         old_beats: 设定库现有节拍（没有大纲条目时为空）。
         preview: 校验后的总结结果。
+        has_entry: 设定库是否存在本章大纲条目。
 
     返回:
         字段名列表，顺序固定为 title / synopsis / outline / beats。
@@ -285,7 +290,7 @@ def _diff_fields(chapter: dict, old_beats: list[dict], preview: dict) -> list[st
         changes.append("synopsis")
     if preview["outline"] != (chapter.get("outline") or "").strip():
         changes.append("outline")
-    if old_beats and not _beats_equal(old_beats, preview["beats"]):
+    if has_entry and not _beats_equal(old_beats, preview["beats"]):
         changes.append("beats")
     return changes
 
@@ -378,7 +383,7 @@ def summarize_chapter(
     except ValueError as exc:
         raise AdapterError(ErrorCode.UPSTREAM_ERROR, f"模型返回内容不是合法 JSON，未写盘：{exc}", retryable=True) from exc
 
-    changes = _diff_fields(chapter, old_beats, preview)
+    changes = _diff_fields(chapter, old_beats, preview, entry is not None)
     replaced_beats = min(len(old_beats), len(preview["beats"])) if "beats" in changes else 0
 
     if not apply:

@@ -124,6 +124,14 @@ $PY -m novel_drama.cli -p ~/novels/changan chapter import ./book.md
 $PY -m novel_drama.cli -p ~/novels/changan chapter import ./book.md --on-duplicate replace            # 覆盖正文
 $PY -m novel_drama.cli -p ~/novels/changan chapter import ./book.md --on-duplicate replace --force-replace  # 已有台词行/音频也覆盖
 
+# 2.1 正文：生成 / 手工保存 / 按提示词改写 / 按正文重总结大纲
+$PY -m novel_drama.cli -p ~/novels/changan chapter generate --chapter chp_xxx
+$PY -m novel_drama.cli -p ~/novels/changan chapter save --chapter chp_xxx --file ./ch1.md
+$PY -m novel_drama.cli -p ~/novels/changan chapter edit --chapter chp_xxx --instruction "把对峙写得更克制，删掉解释性旁白"   # 默认预览
+$PY -m novel_drama.cli -p ~/novels/changan chapter edit --chapter chp_xxx --instruction "压缩成两句" --range 120:260 --apply
+$PY -m novel_drama.cli -p ~/novels/changan chapter summarize --chapter chp_xxx          # 预览：按正文重总结标题/摘要/大纲
+$PY -m novel_drama.cli -p ~/novels/changan chapter summarize --chapter chp_xxx --apply  # 落盘并同步设定库节拍
+
 # 3. 角色与音色
 $PY -m novel_drama.cli -p ~/novels/changan character add --name 沈砚 --role protagonist --alias 沈队
 $PY -m novel_drama.cli -p ~/novels/changan voice add --name 沈砚 --preset Serena --provider cosyvoice3_mlx
@@ -261,7 +269,8 @@ PYTHONPATH=src .venv/bin/python tests/smoke_test.py   # 期望输出 SMOKE OK
 | 工程数据层 | 可用 | 建工程、章节/角色读写、原子落盘、schema 校验 |
 | 设定库 | 可用 | `settings/bible.json`：premise / world / outline / style / continuity，`setting show|set|world|validate|import|export`；每次写入 `settings_revision +1` |
 | 大纲设计 | 可用 | `outline generate`（模型调用，缺省离线实现）→ `outline apply` 落地成章节 |
-| 章节生成 | 可用 | `chapter generate` 按设定库 + 节拍产出正文，字数可配，重复执行需 `--regen` |
+| 章节生成 | 可用 | `chapter generate` 按设定库 + 节拍产出正文，字数可配，重复执行需 `--regen`；上下文含故事圣经、绑定世界、角色卡、前 3 章摘要、前文摘录，按预算裁剪 |
+| 章节编辑与反向总结 | 可用 | `chapter save` 手工保存正文（有下游产物时状态置 `stale`）；`chapter edit` 按提示词整章/选区改写，默认预览、`--apply` 落盘并记 `continuations`；`chapter summarize` 从正文反向总结标题/摘要/大纲/节拍并同步设定库 |
 | 文本切分 | 可用 | 规则版场景切分（空行/转场词/字数上限）、台词切分（引号/旁白/内心独白）、说话人别名匹配 |
 | 导演标注 | 可用 | `script suggest [--apply]` 产出镜头/旁白/情绪/音效/画面/视频位标注，并物化成场景内媒体条目 |
 | 时间轴 | 可用 | 语音/音效/图/视频轨排布，未合成时用估算时长并告警 |

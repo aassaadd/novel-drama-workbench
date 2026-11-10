@@ -21,7 +21,7 @@ from ..media.timeline_builder import build_timeline, summarize_timeline
 from ..models.ids import new_id, now_iso
 from ..store import ProjectStore, validate
 from ..store.settings_store import SettingsStore
-from ..writing import apply_outline, generate_chapter, generate_outline, suggest_script
+from ..writing import apply_outline, generate_chapter, generate_outline, suggest_script, summarize_chapter
 
 # 阶段顺序（也是依赖顺序）
 STAGES = (
@@ -160,14 +160,32 @@ def _stage_outline(ctx: dict) -> tuple[list[dict], str]:
     return [_artifact("json", store.root / "settings" / "bible.json")], f"{note}，落地新建 {len(applied['created'])} 章"
 
 
-def _stage_chapter(ctx: dict) -> list[dict]:
-    """确保章节有正文，没有则生成。"""
+def _stage_chapter(ctx: dict) -> tuple[list[dict], str]:
+    """确保章节有正文，没有则生成，生成成功后自动反向总结大纲与目录。
+
+    参数:
+        ctx: 编排上下文，含 store / config / chapter_id / force。
+
+    返回:
+        (阶段产物列表, 阶段说明)；反向总结的告警追加在说明末尾，不影响阶段成功状态。
+    """
     store = ctx["store"]
     chapter = store.load_chapter(ctx["chapter_id"])
     if (chapter.get("content") or "").strip() and not ctx["force"]:
         return [], f"沿用已有正文 {chapter.get('word_count') or 0} 字"
     result = generate_chapter(store, ctx["config"], ctx["chapter_id"], regen=True)
-    return [_artifact("json", store.chapter_path(ctx["chapter_id"]))], f"生成正文 {result['words']} 字"
+    note = f"生成正文 {result['words']} 字"
+    # 正文已落盘，以正文为准反写章节标题/摘要/大纲与设定库节拍；失败只告警，不阻断后续阶段
+    try:
+        summary = summarize_chapter(store, ctx["config"], chapter["id"], apply=True)
+        changed = summary.get("changed_fields") or []
+        note += f"，已同步大纲与目录（{'、'.join(changed)}）" if changed else "，大纲与目录无变化"
+        warnings = list(summary.get("warnings") or [])
+    except Exception as exc:  # 任意异常都不应让整体编排失败
+        warnings = [f"反向总结失败：{type(exc).__name__}: {exc}"]
+    if warnings:
+        note += "；告警：" + "；".join(warnings)
+    return [_artifact("json", store.chapter_path(ctx["chapter_id"]))], note
 
 
 def _stage_scenes(ctx: dict) -> list[dict]:

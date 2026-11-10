@@ -292,10 +292,14 @@ def cmd_chapter_summarize(args, config: AppConfig) -> int:
     result = summarize_chapter(store, config, args.chapter, apply=args.apply)
     if args.apply:
         lines = [
-            f"章节 {result['chapter_id']} 重总结已应用："
-            f"{result['old_title']} → {result['new_title']}",
-            f"变更字段：{', '.join(result['changed_fields']) or '（无）'}"
-            f"；替换旧节拍 {result['replaced_beats']} 条",
+            (
+                f"章节 {result['chapter_id']} 重总结已应用："
+                f"{result['old_title']} → {result['new_title']}"
+            ),
+            (
+                f"变更字段：{', '.join(result['changed_fields']) or '（无）'}"
+                f"；替换旧节拍 {result['replaced_beats']} 条"
+            ),
         ]
         lines.extend(f"  ! {item}" for item in result["warnings"])
     else:

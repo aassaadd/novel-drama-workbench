@@ -92,6 +92,103 @@
       ]
     },
     {
+      "id": "qwen_image21_ref_accel",
+      "kind": "image_ref",
+      "file": "qwen_image21_ref_accel.json",
+      "source": "user/default/workflows/image_qwen_image_edit_gguf.json",
+      "display_name": "Qwen-Image 2.1 加速版 · 参考图一致（固定参数）",
+      "placeholders": [
+        "prompt",
+        "negative_prompt",
+        "width",
+        "height",
+        "seed",
+        "filename_prefix",
+        "input_image"
+      ],
+      "required_placeholders": [
+        "prompt",
+        "width",
+        "height",
+        "seed",
+        "filename_prefix",
+        "input_image"
+      ],
+      "bindings": {
+        "prompt": {
+          "node": "6",
+          "input": "prompt"
+        },
+        "negative_prompt": {
+          "node": "6",
+          "input": "negative_prompt"
+        },
+        "width": {
+          "node": "7",
+          "input": "width"
+        },
+        "height": {
+          "node": "7",
+          "input": "height"
+        },
+        "seed": {
+          "node": "8",
+          "input": "seed"
+        },
+        "filename_prefix": {
+          "node": "10",
+          "input": "filename_prefix"
+        },
+        "input_image": {
+          "node": "5",
+          "input": "image"
+        }
+      },
+      "size_map": {
+        "1:1": [
+          1328,
+          1328
+        ],
+        "3:4": [
+          1140,
+          1472
+        ],
+        "4:3": [
+          1472,
+          1140
+        ],
+        "9:16": [
+          928,
+          1664
+        ],
+        "16:9": [
+          1664,
+          928
+        ],
+        "3:1": [
+          1536,
+          512
+        ]
+      },
+      "fixed": {
+        "steps": 8,
+        "cfg": 1.0,
+        "sampler": "euler",
+        "scheduler": "simple",
+        "shift": 3.1,
+        "resolution": 1024,
+        "length": null,
+        "fps": null,
+        "model": "qwen-image-2.1-turbo-Q8_0.gguf",
+        "lora": null
+      },
+      "models": [
+        "diffusion_models/qwen-image-2.1-turbo-Q8_0.gguf",
+        "text_encoders/qwen3vl_8b_int8_convrot.safetensors",
+        "vae/qwen_image_2.1_vae_bf16.safetensors"
+      ]
+    },
+    {
       "id": "minimax_h3_accel",
       "kind": "video",
       "file": "minimax_h3_accel.json",

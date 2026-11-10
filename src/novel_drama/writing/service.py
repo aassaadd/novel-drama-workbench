@@ -203,7 +203,7 @@ def apply_outline(store: ProjectStore, dry_run: bool = False) -> dict:
 
     project = store.load_project()
     work_id = project["work"]["id"]
-    existing = {item["id"]: item for item in store.list_chapters()}
+    existing_ids = {item["id"] for item in store.list_chapters()}
     created: list[str] = []
     updated: list[str] = []
 
@@ -211,8 +211,7 @@ def apply_outline(store: ProjectStore, dry_run: bool = False) -> dict:
         outline_text = "\n".join(
             f"{index}. {beat.get('summary')}" for index, beat in enumerate(entry.get("beats") or [], start=1)
         ) or (entry.get("summary") or "")
-        chapter = existing.get(entry["id"])
-        if chapter is None:
+        if entry["id"] not in existing_ids:
             if dry_run:
                 created.append(f"{entry.get('index')} {entry.get('title')}（待创建）")
                 continue
@@ -220,8 +219,10 @@ def apply_outline(store: ProjectStore, dry_run: bool = False) -> dict:
             chapter["id"] = entry["id"]
             store.save_chapter(chapter)
             created.append(chapter["id"])
-            existing[chapter["id"]] = chapter
+            existing_ids.add(chapter["id"])
         else:
+            # 列表接口只返回轻量元信息，写回前必须读完整章节，否则会丢掉 work_id 等必填字段
+            chapter = store.load_chapter(entry["id"])
             changed = False
             for key, value in (("title", entry.get("title")), ("outline", outline_text)):
                 if value and chapter.get(key) != value:
@@ -1439,7 +1440,7 @@ def validate_chapter_binding(store: ProjectStore, chapter_id: str) -> dict:
         {"chapter_id", "source", "world_ids", "pov_character_id", "character_ids"}。
 
     异常:
-        ValueError: 缺少世界绑定或缺少非旁白角色，提示文案带操作指引。
+        ValueError: 绑定的世界条目不存在，或缺少非旁白角色，提示文案带操作指引。
     """
     settings_store = SettingsStore(store.root)
     bible = settings_store.ensure()
@@ -1452,14 +1453,14 @@ def validate_chapter_binding(store: ProjectStore, chapter_id: str) -> dict:
     entry = settings_store.find_outline_chapter(bible, chapter_id)
 
     if entry:
+        # 世界是可选项：未绑定时回退设定库摘要继续生成；一旦绑定，引用的条目必须存在
         world_ids = list(entry.get("world_ids") or [])
-        world_store = WorldStore(store.root)
-        known = {item.get("id") for item in (world_store.list_worlds() if world_store.exists() else [])}
-        if not world_ids:
-            raise ValueError("本章还没有绑定世界：请先在世界页生成并绑定世界")
-        missing = [world_id for world_id in world_ids if world_id not in known]
-        if missing:
-            raise ValueError(f"本章绑定的世界条目不存在：{'、'.join(missing)}；请先在世界页生成并绑定世界")
+        if world_ids:
+            world_store = WorldStore(store.root)
+            known = {item.get("id") for item in (world_store.list_worlds() if world_store.exists() else [])}
+            missing = [world_id for world_id in world_ids if world_id not in known]
+            if missing:
+                raise ValueError(f"本章绑定的世界条目不存在：{'、'.join(missing)}；请先在世界页生成并绑定世界")
         beat_ids = {cid for beat in (entry.get("beats") or []) for cid in (beat.get("character_ids") or [])}
         linked = {cid for cid in {entry.get("pov_character_id"), *beat_ids} if cid and cid != entities.NARRATOR_ID}
         valid = linked & cast_ids

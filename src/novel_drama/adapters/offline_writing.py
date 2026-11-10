@@ -352,9 +352,8 @@ class OfflineWritingAdapter:
         if not paragraphs:
             paragraphs = [content or "（正文为空）"]
         current_title = str(meta.get("title") or "").strip()
-        rng = self._rng(meta, "summarize")
 
-        title = self._summarize_title(paragraphs[0], current_title, rng)
+        title = self._summarize_title(paragraphs[0], current_title)
         synopsis = self._summarize_synopsis(paragraphs)
         old_beats = [item for item in (meta.get("beats") or []) if isinstance(item, dict)]
         count = max(1, min(8, len(old_beats) or min(3, len(paragraphs))))
@@ -367,26 +366,18 @@ class OfflineWritingAdapter:
         )
 
     @staticmethod
-    def _summarize_title(first_paragraph: str, current_title: str, rng: random.Random) -> str:
-        """从首段摘出标题候选；与现有标题相同时改用标题池。
+    def _summarize_title(first_paragraph: str, current_title: str) -> str:
+        """从首段摘出标题候选，取不到时保留现有标题。
 
         参数:
             first_paragraph: 正文首段。
             current_title: 当前章节标题。
-            rng: 确定性随机源。
 
         返回:
             不超过 20 字的标题。
         """
         candidate = OfflineWritingAdapter._clip_sentence(first_paragraph, 20)
-        if candidate and candidate != current_title:
-            return candidate
-        base = rng.randrange(len(CHAPTER_TITLES))
-        for offset in range(len(CHAPTER_TITLES)):
-            option = CHAPTER_TITLES[(base + offset) % len(CHAPTER_TITLES)]
-            if option != current_title:
-                return option
-        return current_title or "正文重述"
+        return candidate or current_title or "正文重述"
 
     @staticmethod
     def _summarize_synopsis(paragraphs: list[str]) -> str:

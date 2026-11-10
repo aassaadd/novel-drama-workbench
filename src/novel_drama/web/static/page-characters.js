@@ -19,10 +19,12 @@
   const EMPTY_TEXT = "还没有人物：先打开工程，再点「✨ 生成人物」或「＋ 新增人物」。";
   const NO_PROJECT_TEXT = "先打开工程：在上方「工程目录」里选择或新建一个工程。";
 
-  /* 图像槽位：key 与 character.image_assets 一致 */
+  /* 图像槽位：key 与 character.image_assets 一致。
+   * fullbody 是母图：头像与三视图都以它为参考图生成，保证同一张脸、同一套风格。 */
   const IMAGE_SLOTS = [
-    { kind: "closeup", label: "脸部特写", hint: "按外貌提示词生成半身特写" },
-    { kind: "turnaround", label: "三视图", hint: "正面 / 侧面 / 背面全身设定" },
+    { kind: "fullbody", label: "全身像（母图）", hint: "先出全身像，头像与三视图都参考它" },
+    { kind: "closeup", label: "头像", hint: "以全身像为参考生成，保证同一张脸" },
+    { kind: "turnaround", label: "三视图", hint: "以全身像为参考，正面 / 侧面 / 背面" },
   ];
 
   let bound = false;
@@ -414,14 +416,23 @@
    */
   async function generateImage(button, id, kind) {
     if (!NW.state.path || !id) return;
-    setLoading(button, true, "生成中…");
+    // 编辑态点生成时先把表单存盘，避免「填了外貌却提示缺少外貌」
+    if (editingId === id) {
+      const card = button.closest(".char-card");
+      const saveBtn = card ? card.querySelector('[data-char-act="save"]') : null;
+      if (saveBtn) await saveCharacter(saveBtn);
+      if (editingId === id) return;
+    }
+    const hasImage = button.dataset.has === "1";
+    const label = { fullbody: "全身像（母图）", closeup: "头像", turnaround: "三视图" }[kind] || "设定图";
+    setLoading(button, true, kind === "fullbody" ? "生成中…" : "先出母图再生成…");
     try {
       await NW.api("/api/ui/characters/image", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path: NW.state.path, id, kind, force: button.dataset.has === "1" }),
+        body: JSON.stringify({ path: NW.state.path, id, kind, force: hasImage }),
       });
-      NW.toast(`${kind === "closeup" ? "脸部特写" : "三视图"}已生成`, true);
+      NW.toast(`${label}已生成`, true);
       await load();
     } catch (error) {
       NW.toast(`生成角色设定图失败：${error.message}`);

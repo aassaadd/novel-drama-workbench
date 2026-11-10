@@ -50,7 +50,14 @@ from .cli_world import (
     cmd_world_list,
     cmd_world_remove,
 )
-from .cli_writing import cmd_chapter_edit, cmd_chapter_generate, cmd_chapter_save, cmd_chapter_summarize, cmd_outline, cmd_script_suggest
+from .cli_writing import (
+    cmd_chapter_edit,
+    cmd_chapter_generate,
+    cmd_chapter_save,
+    cmd_chapter_summarize,
+    cmd_outline,
+    cmd_script_suggest,
+)
 from .config import AppConfig, load_config
 from .media import load_cues, plan_mix, render_mix, run_media
 from .media.runner import plan_media
@@ -1035,9 +1042,9 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--brief", help="补充要求，如「全部为女性角色」")
     q.add_argument("--dry-run", action="store_true", help="只预览，不写 characters.json")
     q.set_defaults(func=cmd_character_generate)
-    q = p_sub.add_parser("image", help="生成角色特写 / 三视图并写回 image_assets")
+    q = p_sub.add_parser("image", help="生成角色全身像（母图）/ 头像 / 三视图并写回 image_assets")
     q.add_argument("--id", required=True)
-    q.add_argument("--kind", required=True, choices=["closeup", "turnaround"])
+    q.add_argument("--kind", required=True, choices=["fullbody", "closeup", "turnaround"])
     q.add_argument("--force", action="store_true", help="强制重绘")
     q.set_defaults(func=cmd_character_image)
     q = p_sub.add_parser("apply", help="从 JSON 批量追加人物")

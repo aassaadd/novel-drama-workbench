@@ -1547,6 +1547,21 @@ table.grid td.wrap { word-break: break-word; }
 
 .manual-box .btn { margin-top: var(--sp-1); }
 
+/* 「全部配置」分组：组标题 + 复用设置网格，视觉上从主卡片里分层 */
+.settings-advanced-group + .settings-advanced-group {
+  margin-top: var(--sp-3);
+  padding-top: var(--sp-2);
+  border-top: 1px solid var(--line);
+}
+
+.settings-check {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+}
+
+.settings-check input { width: auto; }
+
 /* ---------- 工程 popover：新建工程入口 ---------- */
 .menu-actions-foot {
   margin-top: var(--sp-2);

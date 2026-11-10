@@ -318,7 +318,7 @@
     const manifest = (data && data.image && data.image.templates_manifest) || [];
     const templates = (data && data.image && data.image.templates) || {};
     const pick = (key) => {
-      const kind = key.includes("video") ? "video" : "image";
+      const kind = key.includes("video") ? "video" : key.includes("image_ref") ? "image_ref" : "image";
       const current = fromData ? String(templates[key.split(".").pop()] || "") : selectedTemplate(key);
       if (current) return current;
       // 配置为空时下拉会自动选中第一条，这里同步显示第一条，避免只读区与下拉不一致
@@ -326,7 +326,8 @@
       return first ? first.id : "";
     };
     return [
-      ["图片模板", "image", "comfyui.templates.image"],
+      ["图片模板（母图）", "image", "comfyui.templates.image"],
+      ["参考图模板（头像 / 三视图）", "image_ref", "comfyui.templates.image_ref"],
       ["文生视频模板", "video", "comfyui.templates.video_t2v"],
       ["图生视频模板", "video", "comfyui.templates.video_i2v"],
     ]
@@ -367,7 +368,8 @@
           "地址",
           `<input data-key="comfyui.base_url" value="${esc(image.base_url || "")}" placeholder="http://127.0.0.1:8188" spellcheck="false" />`
         )}
-        ${templateSelect("comfyui.templates.image", "图片模板", "image", templates.image || "", manifest)}
+        ${templateSelect("comfyui.templates.image", "图片模板（母图）", "image", templates.image || "", manifest)}
+        ${templateSelect("comfyui.templates.image_ref", "参考图模板（头像 / 三视图）", "image_ref", templates.image_ref || "", manifest)}
         ${templateSelect("comfyui.templates.video_t2v", "文生视频模板", "video", templates.video_t2v || "", manifest)}
         ${templateSelect("comfyui.templates.video_i2v", "图生视频模板", "video", templates.video_i2v || "", manifest)}
       </div>
@@ -502,12 +504,63 @@
     </section>`;
   }
 
-  /* 渲染整页：四张卡片 + 底部保存栏。数据来自最近一次 GET / POST 的响应。 */
+  /* 渲染「全部配置」卡片：把 config.yaml 的其余标量项生成统一表单。
+   * 参数：无（数据取自 data.advanced）。
+   * 返回：HTML 字符串。
+   */
+  function renderAdvanced() {
+    const groups = (data && data.advanced) || [];
+    if (!groups.length) return "";
+    const blocks = groups
+      .map((group) => {
+        const fields = (group.fields || []).map((field) => advancedField(field)).join("");
+        return `<div class="settings-advanced-group">
+          <h4 class="settings-subtitle">${esc(group.group)}</h4>
+          <div class="settings-grid">${fields}</div>
+        </div>`;
+      })
+      .join("");
+    return `<section class="settings-card" id="setAdvancedCard">
+      <h3>全部配置</h3>
+      <div class="settings-hint">config.yaml 的可调项都在这里；留空表示沿用 config.yaml 原值，保存写入页面覆盖文件。TTS provider 的能力矩阵（tts.providers）属于模型能力清单，仍在 config.yaml 维护。</div>
+      ${blocks}
+    </section>`;
+  }
+
+  /* 生成单个配置项的控件：布尔用勾选框、枚举用下拉、列表用逗号分隔输入、数字用 number。
+   * 参数：field 后端返回的 {key,label,type,options,value}。
+   * 返回：HTML 字符串。
+   */
+  function advancedField(field) {
+    const key = esc(field.key);
+    const type = String(field.type || "str");
+    let input;
+    if (type === "bool") {
+      input = `<label class="settings-check"><input type="checkbox" data-key="${key}" data-type="bool" ${field.value ? "checked" : ""} /></label>`;
+    } else if (type === "select") {
+      const options = (field.options || [])
+        .map((option) => `<option value="${esc(option)}" ${String(field.value) === String(option) ? "selected" : ""}>${esc(option)}</option>`)
+        .join("");
+      input = `<select data-key="${key}" data-type="select">${options}</select>`;
+    } else if (type === "strlist") {
+      const value = Array.isArray(field.value) ? field.value.join(", ") : String(field.value || "");
+      input = `<input data-key="${key}" data-type="strlist" value="${esc(value)}" placeholder="多个值用逗号分隔" spellcheck="false" />`;
+    } else {
+      const inputType = type === "password" ? "password" : type === "int" || type === "float" ? "number" : "text";
+      const step = type === "float" ? ' step="0.1"' : type === "int" ? ' step="1"' : "";
+      const value = field.value === null || field.value === undefined ? "" : field.value;
+      input = `<input type="${inputType}" data-key="${key}" data-type="${type}" value="${esc(value)}"${step} spellcheck="false" />`;
+    }
+    const hint = type === "strlist" ? "多个值用逗号分隔" : "";
+    return fieldBlock(field.key, field.label, input, hint);
+  }
+
+  /* 渲染整页：四张卡片 + 全部配置 + 底部保存栏。数据来自最近一次 GET / POST 的响应。 */
   function render() {
     const writing = data.writing || {};
     const tts = data.tts || {};
     const image = data.image || {};
-    el("setBody").innerHTML = `${renderWriting(writing)}${renderTts(tts)}${renderImage(image)}${renderModels()}
+    el("setBody").innerHTML = `${renderWriting(writing)}${renderTts(tts)}${renderImage(image)}${renderModels()}${renderAdvanced()}
       <div class="settings-foot">
         <div class="settings-actions">
           <button id="setSave" class="btn primary">保存</button>
@@ -525,10 +578,14 @@
    * 返回：归一化后的字符串（多值字段用逗号连接）。
    */
   function normalized(node) {
+    const type = node.dataset.type || "";
+    if (type === "bool" || (node.type === "checkbox" && !type)) {
+      return node.checked ? "true" : "false";
+    }
     const raw = String(node.value || "").trim();
-    if (node.dataset.key === "tts.provider_order") {
+    if (node.dataset.key === "tts.provider_order" || type === "strlist") {
       return raw
-        .split(/[,，]/)
+        .split(/[,，\n]/)
         .map((item) => item.trim())
         .filter(Boolean)
         .join(",");
@@ -676,16 +733,21 @@
       // 没改过的字段不提交，避免把 config.yaml 的取值复制进覆盖层
       if (normalized(node) === (node.dataset.init ?? "")) return;
       const raw = String(node.value || "").trim();
+      const type = node.dataset.type || "";
+      if (type === "bool") {
+        values[key] = Boolean(node.checked);
+        return;
+      }
       if (key === "omlx.api_key") {
         // 留空 = 不改
         if (raw) values[key] = raw;
         return;
       }
-      if (key === "tts.provider_order") {
-        values[key] = raw ? raw.split(/[,，]/).map((item) => item.trim()).filter(Boolean) : null;
+      if (key === "tts.provider_order" || type === "strlist") {
+        values[key] = raw ? raw.split(/[,，\n]/).map((item) => item.trim()).filter(Boolean) : null;
         return;
       }
-      if (key === "omlx.temperature" || key === "omlx.max_tokens") {
+      if (type === "int" || type === "float" || key === "omlx.temperature" || key === "omlx.max_tokens") {
         values[key] = raw === "" ? null : Number(raw);
         return;
       }
@@ -730,7 +792,10 @@
     if (!key) return;
     pending[key] = true;
     const input = document.querySelector(`#setBody [data-key="${key}"]`);
-    if (input && input.tagName !== "SELECT") input.value = "";
+    if (input) {
+      if (input.type === "checkbox") input.checked = false;
+      else if (input.tagName !== "SELECT") input.value = "";
+    }
     const holder = input ? input.closest(".settings-field") : null;
     if (holder) {
       const badge = holder.querySelector(".override-badge");

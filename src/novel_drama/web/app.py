@@ -16,9 +16,9 @@ from pathlib import Path
 from fastapi import HTTPException
 
 from .. import __version__
+from ..adapters.base import AdapterError
 from ..config import DEFAULT_UI_CONFIG_PATH, load_config
 from ..media import comfy_media
-from ..adapters.base import AdapterError
 from ..models.ids import now_iso
 from ..store import ProjectStore, list_workspaces
 from ..writing.editing import edit_chapter, save_chapter_content
@@ -29,7 +29,115 @@ from .models_api import register_models_routes
 STATIC_DIR = Path(__file__).with_name("static")
 
 #: 「设置」页允许改写的配置键（点号路径）；其余键一律拒绝，避免页面改坏配置
-CONFIG_EDITABLE = (
+#: 设置页「全部配置」分组：分组名 → (键, 中文标签, 类型, 选项, 最小值, 最大值)
+#: 已有专属控件的键（写作地址/模型、模板选择、两个目录等）不在这里重复列出，避免同键两个控件。
+CONFIG_FIELD_GROUPS = (
+    (
+        "运行与路径",
+        (
+            ("project_root", "默认工程目录", "path", None, None, None),
+            ("tts.hf_home", "HF 缓存目录", "path", None, None, None),
+            ("gpu.lock_path", "GPU 锁文件", "path", None, None, None),
+            ("ffmpeg.binary", "ffmpeg 可执行文件", "str", None, None, None),
+            ("ffmpeg.probe_binary", "ffprobe 可执行文件", "str", None, None, None),
+        ),
+    ),
+    (
+        "适配器与提供方",
+        (
+            ("adapters.writing", "写作适配器", "select", ("omlx",), None, None),
+            ("adapters.tts", "TTS 适配器", "select", ("auto",), None, None),
+            ("adapters.sfx", "音效适配器", "select", ("placeholder",), None, None),
+            ("adapters.comfyui", "ComfyUI 适配器", "select", ("local",), None, None),
+            ("providers.image", "图像 provider", "select", ("comfyui", "offline"), None, None),
+            ("providers.video", "视频 provider", "select", ("comfyui", "offline"), None, None),
+            ("models.download_mirrors", "模型下载镜像链", "strlist", None, None, None),
+        ),
+    ),
+    (
+        "写作（omlx）",
+        (
+            ("omlx.protocol", "接口协议", "select", ("openai_compatible",), None, None),
+            ("omlx.available_models", "可选模型列表", "strlist", None, None, None),
+            ("omlx.context_window", "上下文窗口", "int", None, 1, None),
+            ("omlx.memory_ceiling_gb", "内存上限（GB）", "float", None, 1, None),
+            ("omlx.idle_timeout_s", "空闲卸载（秒）", "int", None, 1, None),
+            ("omlx.max_concurrency", "服务端并发", "int", None, 1, None),
+            ("omlx.request_timeout_s", "请求超时（秒）", "int", None, 1, None),
+            ("omlx.connect_timeout_s", "连接超时（秒）", "int", None, 1, None),
+            ("omlx.max_retries", "最大重试次数", "int", None, 0, None),
+            ("omlx.stop", "停止词", "strlist", None, None, None),
+            ("omlx.enable_thinking", "启用 thinking", "bool", None, None, None),
+            ("omlx.unload.enabled", "文本任务后卸载", "bool", None, None, None),
+            ("omlx.unload.path", "卸载接口路径", "str", None, None, None),
+            ("omlx.unload.policy", "卸载策略", "select", ("after_text_task", "never"), None, None),
+        ),
+    ),
+    (
+        "配音（TTS）",
+        (
+            ("tts.comparison_keep", "对比保留候选数", "int", None, 0, None),
+            ("tts.segmentation.max_chars", "单块最大字数", "int", None, 1, None),
+            ("tts.segmentation.chunk_silence_ms", "块间静音（毫秒）", "int", None, 0, None),
+            ("tts.segmentation.edge_trim_ms", "首尾裁剪（毫秒）", "int", None, 0, None),
+            ("tts.segmentation.edge_trim_max_ms", "首尾最大裁剪（毫秒）", "int", None, 0, None),
+            ("tts.segmentation.silence_threshold_dbfs", "静音阈值（dBFS）", "float", None, -120, 0),
+            ("tts.segmentation.keep_min_ms", "最短保留（毫秒）", "int", None, 0, None),
+            ("tts.segmentation.hard_split_ratio", "硬切比例", "float", None, 0, 1),
+            ("tts.segmentation.trim_single_chunk", "单块也裁剪", "bool", None, None, None),
+            ("tts.alignment.enabled", "启用时长对齐", "bool", None, None, None),
+            ("tts.alignment.max_error_ms", "允许误差（毫秒）", "int", None, 0, None),
+            ("tts.alignment.max_speed_change", "最大变速比例", "float", None, 0, 1),
+            ("tts.alignment.on_exceed", "超差处理", "select", ("regenerate", "provider_switch", "accept"), None, None),
+            ("tts.alignment.max_regenerate", "最多重生成次数", "int", None, 0, None),
+            ("tts.default_voice.ref_audio", "默认参考音频", "path", None, None, None),
+            ("tts.default_voice.ref_text", "参考音频文本", "str", None, None, None),
+            ("tts.routing.mode", "路由模式", "select", ("auto", "manual"), None, None),
+            ("tts.routing.lock_provider_id", "锁定 provider", "str", None, None, None),
+            ("tts.routing.weights.capability", "路由权重·能力", "int", None, 0, None),
+            ("tts.routing.weights.quality", "路由权重·质量", "int", None, 0, None),
+            ("tts.routing.weights.consistency", "路由权重·一致性", "int", None, 0, None),
+            ("tts.routing.weights.latency", "路由权重·延迟", "int", None, 0, None),
+            ("tts.routing.weights.resource", "路由权重·资源", "int", None, 0, None),
+            ("tts.routing.retry_original_first", "先重试原 provider", "bool", None, None, None),
+            ("tts.routing.allow_noncommercial", "允许非商用 provider", "bool", None, None, None),
+            ("tts.routing.policy_revision", "路由策略版本", "int", None, 0, None),
+        ),
+    ),
+    (
+        "ComfyUI",
+        (
+            ("comfyui.templates_dir", "模板目录", "path", None, None, None),
+            ("comfyui.poll_interval_ms", "轮询间隔（毫秒）", "int", None, 100, None),
+            ("comfyui.request_timeout_ms", "请求超时（毫秒）", "int", None, 1000, None),
+            ("comfyui.job_timeout_ms", "任务超时（毫秒）", "int", None, 1000, None),
+            ("comfyui.status_timeout_ms", "状态超时（毫秒）", "int", None, 1000, None),
+        ),
+    ),
+    (
+        "GPU 与输出",
+        (
+            ("gpu.max_concurrent", "GPU 并发", "int", None, 1, None),
+            ("gpu.poll_interval_s", "队列轮询（秒）", "int", None, 1, None),
+            ("output.sample_rate", "混音采样率", "int", None, 8000, None),
+            ("output.channels", "声道数", "int", None, 1, 8),
+            ("output.loudness_target_lufs", "响度目标（LUFS）", "float", None, -60, 0),
+            ("output.video_max_ms", "视频最长时长（毫秒）", "int", None, 1000, None),
+            ("output.image_width", "默认图宽", "int", None, 64, None),
+            ("output.image_height", "默认图高", "int", None, 64, None),
+            ("audio.highpass_hz", "高通截止（Hz）", "int", None, 0, None),
+            ("audio.high_shelf_gain_db", "高频增益（dB）", "float", None, -24, 24),
+            ("audio.high_shelf_hz", "高频起始（Hz）", "int", None, 0, None),
+            ("audio.true_peak_db", "真峰值（dB）", "float", None, -24, 0),
+            ("audio.lra", "响度范围（LU）", "int", None, 0, 50),
+        ),
+    ),
+)
+
+#: 可编辑键：分组字段 + 设置页已有专属控件的键（同键不复用两次）
+CONFIG_EDITABLE = tuple(
+    item[0] for _group, items in CONFIG_FIELD_GROUPS for item in items
+) + (
     "omlx.endpoint",
     "omlx.model",
     "omlx.api_key",
@@ -40,9 +148,33 @@ CONFIG_EDITABLE = (
     "comfyui.base_url",
     "comfyui.models_dir",
     "comfyui.templates.image",
+    "comfyui.templates.image_ref",
     "comfyui.templates.video_t2v",
     "comfyui.templates.video_i2v",
     "paths.models_root",
+)
+
+#: 键 → (类型, 选项, 最小值, 最大值)，供统一校验
+CONFIG_FIELD_SPEC = {
+    item[0]: (item[2], item[3], item[4], item[5]) for _group, items in CONFIG_FIELD_GROUPS for item in items
+}
+CONFIG_FIELD_SPEC.update(
+    {
+        "omlx.endpoint": ("url", None, None, None),
+        "omlx.model": ("str", None, None, None),
+        "omlx.api_key": ("password", None, None, None),
+        "omlx.temperature": ("float", None, 0, 2),
+        "omlx.max_tokens": ("int", None, 1, None),
+        "tts.default_provider_id": ("str", None, None, None),
+        "tts.provider_order": ("strlist", None, None, None),
+        "comfyui.base_url": ("url", None, None, None),
+        "comfyui.models_dir": ("path", None, None, None),
+        "comfyui.templates.image": ("str", None, None, None),
+        "comfyui.templates.image_ref": ("str", None, None, None),
+        "comfyui.templates.video_t2v": ("str", None, None, None),
+        "comfyui.templates.video_i2v": ("str", None, None, None),
+        "paths.models_root": ("path", None, None, None),
+    }
 )
 
 #: 缺失标记：区分「键不存在」与「值为 None」
@@ -151,29 +283,49 @@ def _validate_config_patch(values: dict) -> dict:
         if raw is None or raw == "" or raw == []:
             cleaned[key] = None
             continue
-        if key in ("omlx.endpoint", "comfyui.base_url"):
+        kind, options, minimum, maximum = CONFIG_FIELD_SPEC[key]
+        if kind == "bool":
+            cleaned[key] = bool(raw)
+        elif kind == "int":
+            try:
+                number = int(raw)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"{key} 必须是整数") from exc
+            if minimum is not None and number < minimum:
+                raise ValueError(f"{key} 不能小于 {minimum}")
+            if maximum is not None and number > maximum:
+                raise ValueError(f"{key} 不能大于 {maximum}")
+            cleaned[key] = number
+        elif kind == "float":
+            try:
+                number = float(raw)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"{key} 必须是数字") from exc
+            if key == "omlx.temperature" and not 0 <= number <= 2:
+                raise ValueError("temperature 必须在 0~2 之间")
+            if minimum is not None and number < minimum:
+                raise ValueError(f"{key} 不能小于 {minimum}")
+            if maximum is not None and number > maximum:
+                raise ValueError(f"{key} 不能大于 {maximum}")
+            cleaned[key] = number
+        elif kind == "strlist":
+            if isinstance(raw, str):
+                raw = [item.strip() for item in raw.replace("，", ",").replace("\n", ",").split(",")]
+            if not isinstance(raw, list) or not all(isinstance(item, str) for item in raw):
+                raise ValueError(f"{key} 必须是字符串数组")
+            cleaned[key] = [item.strip() for item in raw if item.strip()]
+        elif kind == "url":
             text = str(raw).strip()
             if not text.startswith(("http://", "https://")):
                 raise ValueError(f"{key} 必须是 http:// 或 https:// 开头的地址")
             cleaned[key] = text
-        elif key == "omlx.temperature":
-            number = float(raw)
-            if not 0 <= number <= 2:
-                raise ValueError("temperature 必须在 0~2 之间")
-            cleaned[key] = number
-        elif key == "omlx.max_tokens":
-            number = int(raw)
-            if number < 1:
-                raise ValueError("max_tokens 必须大于 0")
-            cleaned[key] = number
-        elif key == "tts.provider_order":
-            if not isinstance(raw, list) or not all(isinstance(item, str) for item in raw):
-                raise ValueError("provider_order 必须是字符串数组")
-            cleaned[key] = [item.strip() for item in raw if item.strip()]
-        elif key in ("omlx.api_key", "omlx.model", "tts.default_provider_id", "comfyui.templates.image", "comfyui.templates.video_t2v", "comfyui.templates.video_i2v", "paths.models_root", "comfyui.models_dir"):
+        elif kind == "select":
+            text = str(raw).strip()
+            if options and text not in options:
+                raise ValueError(f"{key} 只能是 {'、'.join(options)}")
+            cleaned[key] = text
+        else:  # str / path / password
             cleaned[key] = str(raw).strip()
-        else:  # pragma: no cover - 白名单已覆盖全部键
-            cleaned[key] = raw
     return cleaned
 
 
@@ -208,6 +360,38 @@ def _templates_manifest(cfg) -> list[dict]:
             }
         )
     return rows
+
+
+def _advanced_payload(cfg) -> list[dict]:
+    """把 config.yaml 的其余可调项整理成分组表单。
+
+    参数:
+        cfg: AppConfig。
+
+    返回:
+        `[{group, fields: [{key, label, type, options, value}]}]`；
+        value 为当前生效值（缺失时 None），strlist 统一成数组。
+    """
+    groups: list[dict] = []
+    for group, items in CONFIG_FIELD_GROUPS:
+        fields: list[dict] = []
+        for key, label, kind, options, _minimum, _maximum in items:
+            value = _dig(cfg.raw, key)
+            if value is _MISSING:
+                value = None
+            if kind == "strlist":
+                value = list(value) if isinstance(value, (list, tuple)) else ([] if value is None else [str(value)])
+            fields.append(
+                {
+                    "key": key,
+                    "label": label,
+                    "type": kind,
+                    "options": list(options) if options else [],
+                    "value": value,
+                }
+            )
+        groups.append({"group": group, "fields": fields})
+    return groups
 
 
 def _config_payload(cfg) -> dict:
@@ -271,6 +455,7 @@ def _config_payload(cfg) -> dict:
             "models_root_exists": (Path(cfg.get("paths.models_root") or "")).is_dir() if cfg.get("paths.models_root") else False,
         },
         "editable": list(CONFIG_EDITABLE),
+        "advanced": _advanced_payload(cfg),
         "overrides": overrides,
         "ui_path": str(cfg.ui_path) if cfg.ui_path else None,
     }
@@ -1331,8 +1516,8 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         if not character_id:
             raise HTTPException(status_code=400, detail={"code": 2, "message": "缺少 id 参数"})
         kind = str(body.get("kind") or "").strip()
-        if kind not in ("closeup", "turnaround"):
-            raise HTTPException(status_code=400, detail={"code": 2, "message": "kind 必须是 closeup / turnaround"})
+        if kind not in ("fullbody", "closeup", "turnaround"):
+            raise HTTPException(status_code=400, detail={"code": 2, "message": "kind 必须是 fullbody / closeup / turnaround"})
         argv = ["--project", path, "--json", "character", "image", "--id", str(character_id), "--kind", kind]
         if body.get("force"):
             argv.append("--force")

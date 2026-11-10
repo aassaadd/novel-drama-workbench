@@ -33,8 +33,9 @@
         "image_assets": {
           "type": "object",
           "additionalProperties": false,
-          "description": "角色图像素材：特写与三视图，均为相对路径；为空表示未生成",
+          "description": "角色图像素材：全身像母图、头像特写与三视图，均为相对路径；为空表示未生成",
           "properties": {
+            "fullbody": { "type": ["string", "null"] },
             "closeup": { "type": ["string", "null"] },
             "turnaround": { "type": ["string", "null"] }
           }
