@@ -38,7 +38,8 @@ def build_writing_adapter(config: AppConfig, settings: dict | None = None):
     异常:
         AdapterError(INVALID_INPUT): 配置名未知。
     """
-    name = str(config.get("providers.writing") or "offline").strip()
+    # 配置里适配器写在 adapters.writing；providers.writing 是旧键，保留兼容
+    name = str(config.get("adapters.writing") or config.get("providers.writing") or "offline").strip()
     if name in ("offline", "offline-writing"):
         return OfflineWritingAdapter(config.get("writing.offline") or settings or {})
     if name == "omlx":
@@ -951,7 +952,7 @@ def generate_worlds(
         "count": len(worlds),
         "brief": brief_text or None,
         "overwrite": bool(overwrite),
-        "provider": str(config.get("providers.writing") or "offline"),
+        "provider": str(config.get("adapters.writing") or config.get("providers.writing") or "offline"),
     }
 
 
