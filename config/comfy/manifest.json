@@ -104,7 +104,10 @@
         "height",
         "seed",
         "filename_prefix",
-        "input_image"
+        "input_image",
+        "input_image_2",
+        "input_image_3",
+        "input_image_4"
       ],
       "required_placeholders": [
         "prompt",
@@ -143,6 +146,15 @@
           "node": "5",
           "input": "image"
         }
+      },
+      "slots": {
+        "node": "6",
+        "items": [
+          {"placeholder": "input_image", "source_node": "5", "input": "image", "key": "images.image_1"},
+          {"placeholder": "input_image_2", "source_node": "15", "input": "image", "key": "images.image_2"},
+          {"placeholder": "input_image_3", "source_node": "25", "input": "image", "key": "images.image_3"},
+          {"placeholder": "input_image_4", "source_node": "35", "input": "image", "key": "images.image_4"}
+        ]
       },
       "size_map": {
         "1:1": [

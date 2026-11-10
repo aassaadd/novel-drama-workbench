@@ -42,7 +42,7 @@ from .cli_models import cmd_models_import, cmd_models_install, cmd_models_list, 
 from .cli_outline import cmd_outline_bind, cmd_outline_check
 from .cli_produce import cmd_produce, cmd_run_show
 from .cli_setting import cmd_setting
-from .cli_voice import cmd_script, cmd_voice
+from .cli_voice import cmd_script, cmd_voice, cmd_voice_builtin
 from .cli_world import (
     cmd_world_apply,
     cmd_world_generate,
@@ -631,11 +631,21 @@ def cmd_media(args, config: AppConfig) -> int:
         lines = [f"[plan] {kind} 共 {len(rows)} 条（dry-run，未提交任何任务）"]
         for row in rows:
             size = f"{row['width']}×{row['height']}" if row.get("width") and row.get("height") else "-"
-            lines.append(
+            text = (
                 f"  {row['item_id']}  模板={row['template_id'] or '-'}  画幅={row['aspect_ratio']}  "
                 f"尺寸={size}  seed={row['seed']}  模式={row['source_mode']}"
                 + (f"  提示：{row['warning']}" if row.get("warning") else "")
             )
+            # 参考图字段由媒体规划任务补充；缺失时保持原输出，不影响 dry-run
+            refs = row.get("references") or []
+            if isinstance(refs, list) and refs:
+                names = "/".join(
+                    str(ref.get("name") or ref.get("id") or "") for ref in refs if isinstance(ref, dict)
+                )
+                text += f"  参考图={len(refs)}（{names}）"
+            for warning in row.get("reference_warnings") or []:
+                text += f"  提示：{warning}"
+            lines.append(text)
         _emit(args, "\n".join(lines), {"kind": kind, "dry_run": True, "items": rows})
         return EXIT_OK
     if getattr(args, "dry_run", False):
@@ -1074,6 +1084,12 @@ def build_parser() -> argparse.ArgumentParser:
     q = p_sub.add_parser("show")
     q.add_argument("--voice", required=True)
     q.set_defaults(func=cmd_voice)
+
+    q = p_sub.add_parser("builtin", help="内置音色：list / install / import")
+    q.add_argument("action", nargs="?", choices=["list", "install", "import"], default="list")
+    q.add_argument("--key", action="append", help="只处理指定内置音色键，可重复")
+    q.add_argument("--force", action="store_true", help="install 时强制重新下载")
+    q.set_defaults(func=cmd_voice_builtin)
 
     def _add_variant_args(q, *, need_name: bool = False) -> None:
         """为音色/变体命令挂上素材参数。"""

@@ -47,6 +47,10 @@ omlx:
 tts:
   default_provider_id: indextts_25
   provider_order: [indextts_25, cosyvoice3_mlx]
+  # 内置参考音色（IndexTTS 官方 Demo 示例音频），按需下载到外置盘，不入仓库
+  builtin_voices:
+    root: /Volumes/other/models/voice_refs/builtin
+    source: https://hf-mirror.com/spaces/IndexTeam/IndexTTS-2-Demo/resolve/main/examples
   providers:
     # 走「子进程 + 独立 Python 3.11 环境」，因为官方要求 <3.12 且钉 torch 2.8.*
     - provider_id: indextts_25

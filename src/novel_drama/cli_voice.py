@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from .cli_common import EXIT_OK, PreconditionError, _emit, _resolve_store, _tts_service
+from .cli_common import EXIT_FAILED, EXIT_OK, PreconditionError, _emit, _resolve_store, _tts_service
 from .models import entities
 from .models.ids import now_iso
 from .store import find_variant, find_voice, validate, variant_ref, voice_binding_summary
@@ -74,6 +74,43 @@ def _build_variant(args, store: ProjectStore, name: str) -> dict:
             }
         ]
     return variant
+
+
+def cmd_voice_builtin(args, config: AppConfig) -> int:
+    """内置音色：列出清单、下载到外置盘、导入当前工程。
+
+    参数:
+        args: 已解析参数（action=list/install/import，key 可重复，force 可选）。
+        config: 本机配置。
+
+    返回:
+        退出码。
+    """
+    from .tts import builtin_voices
+
+    action = args.action
+    if action == "list":
+        result = builtin_voices.rows(config)
+        root = builtin_voices.builtin_root(config)
+        print(f"内置音色目录: {root}")
+        for item in result:
+            state = "已下载" if item["present"] else "未下载"
+            print(f"{item['key']:<9} {item['name']:<14} {item['gender']:<7} {item['duration_ms']}ms  {state}")
+        return EXIT_OK
+    if action == "install":
+        result = builtin_voices.install(config, keys=args.key, force=args.force)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return EXIT_OK if result["ok"] else EXIT_FAILED
+    if action == "import":
+        store = _resolve_store(args, config)
+        result = builtin_voices.import_into_project(store, config, keys=args.key)
+        print(f"已导入 {len(result['added'])} 个音色，跳过 {len(result['skipped'])} 个。")
+        for item in result["added"]:
+            print(f"  + {item['name']}（{item['voice_id']}）")
+        for item in result["skipped"]:
+            print(f"  - {item['key']}: {item['reason']}")
+        return EXIT_OK
+    raise PreconditionError(f"未知操作: {action}")
 
 
 def cmd_voice(args, config: AppConfig) -> int:
@@ -207,10 +244,9 @@ def cmd_voice(args, config: AppConfig) -> int:
         target["voice_binding"] = {
             "adapter": args.adapter or binding.get("adapter") or "placeholder",
             "voice_id": voice["id"],
-            "reference_audio": None,
-            "seed": binding.get("seed"),
-            "speed": binding.get("speed") or 1.0,
-            "emotion_map": binding.get("emotion_map") or {},
+            "voice_library_id": voice["id"],
+            "default_variant_id": voice["default_variant_id"],
+            "emotion_variant_map": binding.get("emotion_variant_map") or {},
         }
         target["updated_at"] = now_iso()
         store.save_characters(characters)

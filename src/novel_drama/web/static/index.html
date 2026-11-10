@@ -287,21 +287,96 @@
           </div>
         </section>
 
-        <!-- ---------------- 人物：角色档案列表（本任务只搭骨架，业务逻辑后续任务接） ---------------- -->
+        <!-- ---------------- 人物：角色档案 + 音色库 ---------------- -->
         <section class="view page" id="view-characters" hidden>
           <div class="ws-head">
             <h2>人物设计</h2>
             <span class="muted">主角、配角与反派档案；人物与音色绑定后，配音和标注都按这里取名。</span>
           </div>
 
-          <div class="card">
-            <div class="card-head">
-              <h3>人物列表</h3>
-              <button id="charactersAdd" class="btn small" type="button">＋ 新增人物</button>
-              <button id="charactersGenerate" class="btn small" type="button">✨ 生成人物</button>
+          <div class="subtabs" id="charTabs">
+            <button class="subtab active" type="button" data-char-tab="profiles">人物档案</button>
+            <button class="subtab" type="button" data-char-tab="voices">音色库</button>
+          </div>
+
+          <div id="charProfilesPane">
+            <div class="card">
+              <div class="card-head">
+                <h3>人物列表</h3>
+                <button id="charactersAdd" class="btn small" type="button">＋ 新增人物</button>
+                <button id="charactersGenerate" class="btn small" type="button">✨ 生成人物</button>
+              </div>
+              <div id="charactersList" class="char-list"></div>
+              <p id="charactersEmpty" class="muted">还没有人物：先打开工程，再点「生成人物」或手工新增。</p>
             </div>
-            <div id="charactersList" class="char-list"></div>
-            <p id="charactersEmpty" class="muted">还没有人物：先打开工程，再点「生成人物」或手工新增。</p>
+          </div>
+
+          <div id="charVoicesPane" hidden>
+            <div class="card">
+              <div class="card-head">
+                <h3>内置音色</h3>
+                <span id="voiceBuiltinRoot" class="muted"></span>
+                <button id="voiceBuiltinInstall" class="btn small" type="button">下载全部</button>
+                <button id="voiceBuiltinImport" class="btn small primary" type="button">导入全部</button>
+              </div>
+              <p class="muted">来自 IndexTTS 官方示例，下载到外置盘后可直接导入工程；商用发布前请替换为自有授权录音。</p>
+              <div id="voiceBuiltinList" class="voice-grid"></div>
+            </div>
+
+            <div class="card">
+              <div class="card-head">
+                <h3>我的音色</h3>
+                <span id="voiceMineCount" class="muted"></span>
+              </div>
+              <div id="voiceMineList" class="voice-list"></div>
+              <p id="voiceMineEmpty" class="muted">还没有音色：可从上方导入内置音色，或在下方录制 / 上传。</p>
+            </div>
+
+            <div class="card">
+              <div class="card-head">
+                <h3>添加参考音色</h3>
+                <span class="muted">建议 3~10 秒、单人、无背景音乐；录完先试听再保存。</span>
+              </div>
+              <div class="form-grid">
+                <label class="stack">音色名称
+                  <input id="voiceName" placeholder="如：林晚-清冷女声" />
+                </label>
+                <label class="stack">性别
+                  <select id="voiceGender">
+                    <option value="female">女声</option>
+                    <option value="male">男声</option>
+                    <option value="other">其他</option>
+                    <option value="unknown">不确定</option>
+                  </select>
+                </label>
+                <label class="stack span-all">参考音频文本（可选）
+                  <input id="voiceRefText" placeholder="录音里说的那句话，用于提升克隆稳定性" />
+                </label>
+              </div>
+              <div class="actions">
+                <button id="voiceRecordBtn" class="btn small" type="button">● 开始录音</button>
+                <span id="voiceRecordState" class="muted">未录音</span>
+                <label class="btn small" for="voiceFile">选择音频文件</label>
+                <input id="voiceFile" type="file" accept="audio/*" hidden />
+              </div>
+              <audio id="voicePreviewAudio" controls hidden></audio>
+              <label class="check-line">
+                <input id="voiceConsent" type="checkbox" />
+                我确认拥有这段录音的使用授权
+              </label>
+              <div class="actions">
+                <button id="voiceSave" class="btn primary" type="button">保存音色</button>
+                <span id="voiceSaveState" class="muted"></span>
+              </div>
+            </div>
+
+            <div class="card">
+              <div class="card-head">
+                <h3>角色绑定</h3>
+                <span class="muted">给每个角色选一个音色；不选表示未绑定。</span>
+              </div>
+              <div id="voiceBindList" class="voice-bind-list"></div>
+            </div>
           </div>
         </section>
 
@@ -489,6 +564,7 @@
   <script src="/static/page-outline.js"></script>
   <script src="/static/page-worlds.js"></script>
   <script src="/static/page-characters.js"></script>
+  <script src="/static/page-voices.js"></script>
   <script src="/static/page-chapter.js"></script>
   <script src="/static/page-script.js"></script>
   <script src="/static/page-media.js"></script>

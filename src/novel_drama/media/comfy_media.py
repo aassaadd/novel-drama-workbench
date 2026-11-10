@@ -350,6 +350,61 @@ def _leftover_placeholders(node: object, found: set[str]) -> set[str]:
     return found
 
 
+def _apply_slots(template: dict, template_id: str, slots: dict, images: list[str]) -> dict[str, str]:
+    """按清单 `slots` 把参考图依次填入动态输入槽位。
+
+    ComfyUI 的 autogrow 动态输入在 API prompt 里必须是扁平键（如 `images.image_1`），
+    未使用的槽位必须同时移除源 LoadImage 节点与其连接，避免空图/空连接。
+
+    参数:
+        template: API 格式模板（就地修改：删除未使用槽位的源节点与连接）。
+        template_id: 模板 ID（用于报错）。
+        slots: 清单槽位配置 `{"node": "6", "items": [{"placeholder","source_node","input","key"}]}`。
+        images: 已归一化的参考图名列表，按顺序占用槽位。
+
+    返回:
+        `{placeholder: 图片名}`，只包含实际使用了图片的槽位。
+
+    异常:
+        AdapterError(INVALID_INPUT): 槽位配置缺字段，或指向的节点不存在。
+    """
+    items = slots.get("items") if isinstance(slots.get("items"), list) else []
+    host_id = str(slots.get("node") or "")
+    host = template.get(host_id) if host_id else None
+    if not isinstance(host, dict) or not isinstance(host.get("inputs"), dict):
+        raise AdapterError(
+            ErrorCode.INVALID_INPUT,
+            f"模板 {template_id} 的 slots.node 指向不存在的节点 {host_id or '（空）'}",
+        )
+    values: dict[str, str] = {}
+    for index, item in enumerate(items):
+        spec = item if isinstance(item, dict) else {}
+        placeholder = str(spec.get("placeholder") or "")
+        node_id = str(spec.get("source_node") or "")
+        input_name = str(spec.get("input") or "")
+        key = str(spec.get("key") or "")
+        if not (placeholder and node_id and input_name):
+            raise AdapterError(
+                ErrorCode.INVALID_INPUT,
+                f"模板 {template_id} 的 slots.items[{index}] 缺少 placeholder/source_node/input",
+            )
+        if index < len(images):
+            source = template.get(node_id)
+            if not isinstance(source, dict) or not isinstance(source.get("inputs"), dict):
+                raise AdapterError(
+                    ErrorCode.INVALID_INPUT,
+                    f"模板 {template_id} 的槽位 {placeholder} 指向不存在的节点 {node_id}",
+                )
+            source["inputs"][input_name] = images[index]
+            values[placeholder] = images[index]
+            continue
+        # 未使用的槽位：移除源节点与宿主节点上的动态输入键
+        template.pop(node_id, None)
+        if key:
+            host["inputs"].pop(key, None)
+    return values
+
+
 def build_prompt(
     config: AppConfig,
     template_id: str,
@@ -361,6 +416,7 @@ def build_prompt(
     item_id: str,
     revision: int,
     input_image: str | None = None,
+    input_images: list[str] | None = None,
     seed: int | None = None,
 ) -> dict:
     """按清单填参，生成可直接提交的 API 格式工作流。
@@ -374,12 +430,13 @@ def build_prompt(
         aspect_ratio: 请求的画幅。
         item_id: 条目 ID（用于 seed 与产物前缀）。
         revision: 条目版本号。
-        input_image: ComfyUI 输入图片名（i2v 首帧）。
+        input_image: 单张参考图/首帧的 ComfyUI 输入图片名（兼容旧调用）。
+        input_images: 多参考图列表（优先于 `input_image`），按顺序占用清单 `slots` 槽位。
         seed: 指定 seed；为空时按「条目 ID + revision」派生。
 
     返回:
         `{"template_id","kind","prompt","width","height","aspect_ratio","seed",
-        "filename_prefix","warning"}`。
+        "filename_prefix","warning","reference_count"}`。
 
     异常:
         AdapterError(INVALID_INPUT): 模板缺失/损坏、缺必需值、占位符未解析。
@@ -410,6 +467,19 @@ def build_prompt(
     width, height = size_map[ratio]
     actual_seed = int(seed) if seed is not None else seed_for(item_id, revision)
     prefix = output_prefix(item_id, revision)
+
+    # 参考图归一化：列表优先，兼容旧的单图参数
+    if input_images is not None:
+        images = [str(value) for value in input_images if value]
+    else:
+        images = [str(input_image)] if input_image else []
+
+    # 有 slots 的模板按槽位填图（未使用槽位会被就地裁剪），无 slots 时沿用单图逻辑
+    slot_values: dict[str, str] = {}
+    slots = entry.get("slots")
+    if isinstance(slots, dict):
+        slot_values = _apply_slots(template, actual_id, slots, images)
+
     values = {
         "prompt": prompt or "",
         "negative_prompt": negative_prompt or "",
@@ -417,8 +487,9 @@ def build_prompt(
         "height": int(height),
         "seed": actual_seed,
         "filename_prefix": prefix,
-        "input_image": input_image,
+        "input_image": images[0] if images else None,
     }
+    values.update(slot_values)
 
     required = entry.get("required_placeholders") or _DEFAULT_REQUIRED.get(kind, [])
     missing = [name for name in required if values.get(name) in (None, "")]
@@ -456,6 +527,7 @@ def build_prompt(
         "seed": actual_seed,
         "filename_prefix": prefix,
         "warning": note,
+        "reference_count": len(images),
     }
 
 

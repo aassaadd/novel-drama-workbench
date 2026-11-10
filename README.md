@@ -141,6 +141,14 @@ $PY -m novel_drama.cli -p ~/novels/changan voice set-default --voice 沈砚 --va
 $PY -m novel_drama.cli -p ~/novels/changan voice bind --character 沈砚 --voice 沈砚 --adapter cosyvoice3_mlx
 $PY -m novel_drama.cli -p ~/novels/changan voice preview --voice 沈砚 --variant 真人参考 --text "试听一句"
 
+# 3.1 内置音色：首次按需下载到外置盘（默认 /Volumes/other/models/voice_refs/builtin）
+$PY -m novel_drama.cli voice builtin list                 # 看清单与下载状态
+$PY -m novel_drama.cli voice builtin install              # 下载全部（约 2MB，24k 单声道）
+$PY -m novel_drama.cli -p ~/novels/changan voice builtin import   # 导入当前工程，可重复执行
+$PY -m novel_drama.cli -p ~/novels/changan voice bind --character 沈砚 --voice 内置男声·低沉
+
+# 3.2 Web：人物设计 → 「音色库」子标签，可浏览器录音 / 上传 / 试听 / 绑定角色
+
 # 4. 拆场景 → 切台词
 $PY -m novel_drama.cli -p ~/novels/changan scene split --chapter chp_xxx
 $PY -m novel_drama.cli -p ~/novels/changan line split --chapter chp_xxx

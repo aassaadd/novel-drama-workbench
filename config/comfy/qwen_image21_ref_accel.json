@@ -50,6 +50,18 @@
         "5",
         0
       ],
+      "images.image_2": [
+        "15",
+        0
+      ],
+      "images.image_3": [
+        "25",
+        0
+      ],
+      "images.image_4": [
+        "35",
+        0
+      ],
       "vae": [
         "3",
         0
@@ -112,6 +124,24 @@
         "9",
         0
       ]
+    }
+  },
+  "15": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "{{input_image_2}}"
+    }
+  },
+  "25": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "{{input_image_3}}"
+    }
+  },
+  "35": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "{{input_image_4}}"
     }
   }
 }

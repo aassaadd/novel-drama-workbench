@@ -26,12 +26,14 @@ from . import comfy_models
 from .comfy_media import (
     build_prompt,
     load_manifest,
+    manifest_entries,
     resolve_aspect,
     resolve_template,
     seed_for,
     templates_dir,
 )
 from .generate import probe_duration_ms, render_image, render_sfx, render_video
+from .references import appearance_digest, collect_references, reference_options, scene_characters, slot_hint
 from .styles import with_style
 
 
@@ -325,10 +327,90 @@ def _check_models(config: AppConfig, entry: dict, template_id: str) -> None:
         )
 
 
+def _auto_fill_characters(
+    store: ProjectStore,
+    config: AppConfig,
+    missing: list[dict],
+    limit: int = 3,
+) -> tuple[int, list[str]]:
+    """为缺设定图的角色自动补全身像（单次最多 limit 个）。
+
+    参数:
+        store: 工程。
+        config: 本机配置。
+        missing: `collect_references` 返回的缺图角色列表 `[{"id","name"}]`。
+        limit: 单次最多补全的角色数量。
+
+    返回:
+        `(成功补全数量, 中文告警列表)`；成功的角色其 `image_assets.fullbody` 会写回角色表。
+    """
+    from .art import _fullbody_asset
+
+    if not missing:
+        return 0, []
+    try:
+        count = max(0, int(limit))
+    except (TypeError, ValueError):
+        count = 3
+    table = store.load_characters()
+    by_id = {}
+    for character in table.get("characters") or []:
+        if isinstance(character, dict) and character.get("id"):
+            by_id[character["id"]] = character
+
+    visual = _visual_style(store)
+    filled = 0
+    warnings: list[str] = []
+    for entry in missing[:count]:
+        character_id = str(entry.get("id") or "")
+        name = str(entry.get("name") or character_id)
+        character = by_id.get(character_id)
+        if character is None:
+            warnings.append(f"角色「{name}」不在角色表中，跳过自动补全身像")
+            continue
+        try:
+            _fullbody_asset(store, config, character, character_id, visual)
+        except Exception as exc:  # 单个角色失败不影响其它角色与整条生成
+            warnings.append(f"角色「{name}」自动补全身像失败：{exc}")
+            continue
+        filled += 1
+    if filled:
+        store.save_characters(table)
+    return filled, warnings
+
+
+def _image_template_id(config: AppConfig, manifest: dict, explicit, has_refs: bool) -> tuple[str, str]:
+    """选出关键图要用的模板 ID 与用途类型。
+
+    参数:
+        config: 本机配置（读 `comfyui.templates.image` / `comfyui.templates.image_ref`）。
+        manifest: 模板清单。
+        explicit: 条目自带的 `workflow_template_id`（可为空）。
+        has_refs: 本次是否有参考图。
+
+    返回:
+        `(模板 ID, 用途类型)`；用途类型为 `image_ref`（有参考图）或 `image`。
+        只有 explicit 在清单里且其 kind 与目标类型一致时才采用 explicit。
+    """
+    kind = "image_ref" if has_refs else "image"
+    key = "comfyui.templates.image_ref" if has_refs else "comfyui.templates.image"
+    if explicit:
+        wanted = str(explicit)
+        for entry in manifest_entries(manifest or {}):
+            if str(entry.get("id") or entry.get("template_id")) != wanted:
+                continue
+            if str(entry.get("kind") or "") == kind:
+                return wanted, kind
+            break
+    return str(config.get(key) or ""), kind
+
+
 def _generate_image(
     store: ProjectStore,
     config: AppConfig,
     gateway: LocalComfyGateway,
+    chapter: dict,
+    scene: dict,
     item: dict,
     revision: int,
     settings: dict,
@@ -340,15 +422,30 @@ def _generate_image(
         store: 工程。
         config: 本机配置。
         gateway: ComfyUI 网关。
+        chapter: 所在章节（解析世界封面）。
+        scene: 所在场景（解析出场角色设定图）。
         item: 关键图条目。
         revision: 本次版本号。
         settings: 工程设置（画幅回落用）。
         out_dir: 产物目录。
 
     返回:
-        `{"path","asset_id","job_id","width","height","template_id","aspect","warning"}`。
+        `{"path","asset_id","job_id","width","height","template_id","aspect",
+        "warning","references","reference_warnings"}`。
     """
-    template_id = item.get("workflow_template_id") or config.get("comfyui.templates.image")
+    # 参考图：世界封面 + 出场角色设定图；按配置自动补全身像
+    options = reference_options(config)
+    refs = collect_references(store, config, chapter, scene, item)
+    ref_warnings = list(refs.get("warnings") or [])
+    if options["auto_fill"] and refs.get("missing"):
+        filled, fill_warnings = _auto_fill_characters(store, config, refs["missing"], limit=3)
+        ref_warnings.extend(fill_warnings)
+        if filled:
+            refs = collect_references(store, config, chapter, scene, item)
+            # 保留自动补全过程中的告警（如个别角色补全失败），再合并最新缺图告警
+            ref_warnings = [*fill_warnings, *(refs.get("warnings") or [])]
+    ref_items = refs.get("items") or []
+
     aspect = resolve_aspect(item, settings, "image")
     item["aspect_ratio"] = aspect["ratio"]
     item["width"], item["height"] = aspect["width"], aspect["height"]
@@ -356,19 +453,50 @@ def _generate_image(
     item["seed"] = seed
 
     manifest = load_manifest(templates_dir(config))
-    resolved = resolve_template(str(template_id), "image", manifest)
+    template_id, template_kind = _image_template_id(
+        config, manifest, item.get("workflow_template_id"), bool(ref_items)
+    )
+    resolved = resolve_template(template_id, template_kind, manifest)
     _check_models(config, resolved["template"], resolved["template_id"])
+
+    base = str(item.get("prompt") or "")
+    if ref_items:
+        hint = slot_hint(ref_items)
+        if hint:
+            base = f"{base}\n{hint}" if base else hint
+    prompt = with_style(base, {"style": {"visual_style": _visual_style(store)}})
+
+    # 参考图上传到 ComfyUI input/ndw，按顺序占用模板槽位
+    input_images: list[str] = []
+    for ref in ref_items:
+        path = Path(str(ref.get("path") or ""))
+        try:
+            uploaded = gateway.upload_image(path, subfolder="ndw")
+        except Exception as exc:
+            name = ref.get("name") or path.name
+            raise AdapterError(
+                ErrorCode.UPSTREAM_ERROR,
+                f"参考图上传失败（{name}）：{exc}",
+            ) from exc
+        name = str(uploaded.get("name") or path.name)
+        subfolder = str(uploaded.get("subfolder") or "").strip("/")
+        input_images.append(f"{subfolder}/{name}" if subfolder and not name.startswith(f"{subfolder}/") else name)
+
     payload = build_prompt(
         config,
         resolved["template_id"],
-        "image",
-        prompt=with_style(item.get("prompt") or "", {"style": {"visual_style": _visual_style(store)}}),
+        template_kind,
+        prompt=prompt,
         negative_prompt=item.get("negative_prompt") or "",
         aspect_ratio=aspect["ratio"],
         item_id=item["id"],
         revision=revision,
+        input_images=input_images or None,
         seed=seed,
     )
+    warnings = [*ref_warnings]
+    if payload["warning"]:
+        warnings.append(str(payload["warning"]))
     target, prompt_id = _submit_and_fetch(gateway, config, "image", payload["prompt"], item["id"], revision, out_dir)
     return {
         "path": target,
@@ -378,7 +506,12 @@ def _generate_image(
         "height": int(payload["height"]),
         "template_id": payload["template_id"],
         "aspect": payload["aspect_ratio"],
-        "warning": payload["warning"],
+        "warning": "；".join(value for value in warnings if value) or None,
+        "references": [
+            {"kind": ref.get("kind"), "id": ref.get("id"), "name": ref.get("name"), "rel": ref.get("rel")}
+            for ref in ref_items
+        ],
+        "reference_warnings": ref_warnings,
     }
 
 
@@ -387,6 +520,7 @@ def _generate_video(
     config: AppConfig,
     gateway: LocalComfyGateway,
     chapter: dict,
+    scene: dict,
     item: dict,
     revision: int,
     settings: dict,
@@ -399,6 +533,7 @@ def _generate_video(
         config: 本机配置。
         gateway: ComfyUI 网关。
         chapter: 章节（查找首帧关键图）。
+        scene: 所在场景（t2v 时补充出场角色外貌）。
         item: 视频条目。
         revision: 本次版本号。
         settings: 工程设置（画幅回落用）。
@@ -406,7 +541,7 @@ def _generate_video(
 
     返回:
         `{"path","asset_id","job_id","width","height","duration_s","template_id",
-        "aspect","source_mode","warning"}`。
+        "aspect","source_mode","warning","references","reference_warnings"}`。
     """
     source = _source_image(store, chapter, item)
     source_mode = "i2v" if source else "t2v"
@@ -435,11 +570,20 @@ def _generate_video(
         subfolder = str(uploaded.get("subfolder") or "").strip("/")
         input_image = f"{subfolder}/{name}" if subfolder and not name.startswith(f"{subfolder}/") else name
 
+    # 无首帧（t2v / 首帧缺失）时把出场角色外貌摘要拼进提示词，降低换脸；
+    # 总开关关闭时不做任何一致性增强，保持纯文生视频
+    base = str(item.get("prompt") or "")
+    if source is None and reference_options(config)["enabled"]:
+        digest = appearance_digest(scene_characters(store, scene, item))
+        if digest:
+            base = f"{base}\n人物：{digest}" if base else f"人物：{digest}"
+            warnings.append("无首帧，已补充出场角色外貌摘要（t2v）")
+
     payload = build_prompt(
         config,
         resolved["template_id"],
         "video_i2v" if source else "video_t2v",
-        prompt=with_style(item.get("prompt") or "", {"style": {"visual_style": _visual_style(store)}}),
+        prompt=with_style(base, {"style": {"visual_style": _visual_style(store)}}),
         negative_prompt=item.get("negative_prompt") or "",
         aspect_ratio=aspect["ratio"],
         item_id=item["id"],
@@ -463,6 +607,8 @@ def _generate_video(
         "aspect": payload["aspect_ratio"],
         "source_mode": source_mode,
         "warning": "；".join(warnings) or None,
+        "references": [],
+        "reference_warnings": [],
     }
 
 
@@ -496,7 +642,7 @@ def _run_comfy(
     health = gateway.health()
     processed = 0
 
-    for _scene, item in _iter_items(chapter, kind):
+    for scene, item in _iter_items(chapter, kind):
         stats["total"] += 1
         asset = item.setdefault("asset", {"status": "pending"})
         if _existing_asset(store, item, kind) and not force:
@@ -518,7 +664,7 @@ def _run_comfy(
         started = time.perf_counter()
         try:
             if kind == "image":
-                result = _generate_image(store, config, gateway, item, revision, settings, out_dir)
+                result = _generate_image(store, config, gateway, chapter, scene, item, revision, settings, out_dir)
                 asset.update(
                     {
                         "status": "ready",
@@ -531,7 +677,7 @@ def _run_comfy(
                     }
                 )
             else:
-                result = _generate_video(store, config, gateway, chapter, item, revision, settings, out_dir)
+                result = _generate_video(store, config, gateway, chapter, scene, item, revision, settings, out_dir)
                 asset.update(
                     {
                         "status": "ready",
@@ -557,6 +703,8 @@ def _run_comfy(
                     "height": result["height"],
                     "source_mode": result.get("source_mode"),
                     "warning": result.get("warning"),
+                    "references": result.get("references") or [],
+                    "reference_warnings": result.get("reference_warnings") or [],
                     "elapsed_ms": int((time.perf_counter() - started) * 1000),
                     "error": None,
                 }
@@ -616,7 +764,8 @@ def plan_media(store: ProjectStore, config: AppConfig, chapter_id: str, kind: st
         kind: image / video。
 
     返回:
-        每条 `{item_id, template_id, aspect_ratio, width, height, seed, source_mode, warning}`。
+        每条 `{item_id, template_id, aspect_ratio, width, height, seed, source_mode,
+        warning, references, reference_warnings}`。
 
     异常:
         ValueError: kind 非法。
@@ -632,9 +781,11 @@ def plan_media(store: ProjectStore, config: AppConfig, chapter_id: str, kind: st
     if provider == "comfyui":
         manifest = load_manifest(templates_dir(config))
 
-    for _scene, item in _iter_items(chapter, kind):
+    for scene, item in _iter_items(chapter, kind):
         revision = _next_revision(item)
         warnings: list[str] = []
+        references: list[dict] = []
+        reference_warnings: list[str] = []
         if provider != "comfyui":
             rel = item.get("aspect_ratio") or ((settings.get("output") or {}).get("aspect_ratio")) or "1:1"
             rows.append(
@@ -647,13 +798,26 @@ def plan_media(store: ProjectStore, config: AppConfig, chapter_id: str, kind: st
                     "seed": item.get("seed"),
                     "source_mode": "offline",
                     "warning": f"providers.{kind} 未设为 comfyui，将走离线占位渲染",
+                    "references": [],
+                    "reference_warnings": [],
                 }
             )
             continue
 
         if kind == "image":
-            template_id = item.get("workflow_template_id") or config.get("comfyui.templates.image")
-            resolved = resolve_template(str(template_id or ""), "image", manifest)
+            refs = collect_references(store, config, chapter, scene, item)
+            ref_items = refs.get("items") or []
+            reference_warnings = list(refs.get("warnings") or [])
+            if reference_options(config)["auto_fill"] and refs.get("missing"):
+                reference_warnings.append("缺图角色将在生成时自动补全身像（单次最多 3 个）")
+            references = [
+                {"kind": ref.get("kind"), "id": ref.get("id"), "name": ref.get("name"), "rel": ref.get("rel")}
+                for ref in ref_items
+            ]
+            template_id, template_kind = _image_template_id(
+                config, manifest, item.get("workflow_template_id"), bool(ref_items)
+            )
+            resolved = resolve_template(template_id, template_kind, manifest)
             source_mode = "comfy"
             aspect = resolve_aspect(item, settings, "image")
         else:
@@ -661,6 +825,10 @@ def plan_media(store: ProjectStore, config: AppConfig, chapter_id: str, kind: st
             source_mode = "i2v" if source else "t2v"
             if item.get("mode") == "i2v" and not source:
                 warnings.append("首帧关键图未就绪，将降级为文生视频（t2v）")
+            if source is None and reference_options(config)["enabled"] and appearance_digest(
+                scene_characters(store, scene, item)
+            ):
+                reference_warnings.append("无首帧，将补充出场角色外貌摘要（t2v）")
             key = "comfyui.templates.video_i2v" if source else "comfyui.templates.video_t2v"
             resolved = resolve_template(str(config.get(key) or ""), "video_i2v" if source else "video_t2v", manifest)
             aspect = resolve_aspect(item, settings, "video")
@@ -680,6 +848,8 @@ def plan_media(store: ProjectStore, config: AppConfig, chapter_id: str, kind: st
                 "seed": seed,
                 "source_mode": source_mode,
                 "warning": "；".join(warnings) or None,
+                "references": references,
+                "reference_warnings": reference_warnings,
             }
         )
     return rows

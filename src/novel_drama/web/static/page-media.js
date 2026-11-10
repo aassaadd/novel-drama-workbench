@@ -43,7 +43,7 @@
     const head =
       kind === "sfx"
         ? "<tr><th>#</th><th>类型</th><th>预览</th><th>提示词</th><th>状态</th><th>时长</th><th>产物 / 错误</th></tr>"
-        : "<tr><th>#</th><th>模式</th><th>模板</th><th>画幅</th><th>宽高</th><th>预览</th><th>提示词</th><th>状态</th><th>时长</th><th>产物 / 错误</th></tr>";
+        : "<tr><th>#</th><th>模式</th><th>模板</th><th>画幅</th><th>宽高</th><th>参考图</th><th>预览</th><th>提示词</th><th>状态</th><th>时长</th><th>产物 / 错误</th></tr>";
     const body = rows
       .map((item) => {
         const extra = item.error
@@ -57,12 +57,21 @@
             : `<td>${esc(item.template || "—")}</td>` +
               `<td>${esc(item.aspect_ratio || "—")}</td>` +
               `<td>${item.width && item.height ? `${esc(item.width)}×${esc(item.height)}` : "—"}</td>`;
+        // 参考图列：关键图显示「N 张（名称 / 名称）」，缺图告警逐条用小字提示
+        const refs = Array.isArray(item.references) ? item.references : [];
+        const refWarnings = Array.isArray(item.reference_warnings) ? item.reference_warnings : [];
+        const refNames = refs.map((ref) => ref.name || ref.id || "").filter(Boolean);
+        const refText = refs.length ? `${refs.length} 张${refNames.length ? `（${refNames.join(" / ")}）` : ""}` : "—";
+        const refCell =
+          kind === "sfx"
+            ? ""
+            : `<td class="wrap">${esc(refText)}${refWarnings.map((text) => `<br><span class="err">${esc(text)}</span>`).join("")}</td>`;
         const key = `${kind}:${item.id}`;
         rowsById.set(key, { kind, row: item });
         const active = selected === key ? "is-selected" : "";
         return (
           `<tr class="${active}" data-media="true" data-media-key="${esc(key)}">` +
-          `<td>${esc(item.index ?? "")}</td><td>${esc(kindText || "")}</td>${specCells}` +
+          `<td>${esc(item.index ?? "")}</td><td>${esc(kindText || "")}</td>${specCells}${refCell}` +
           `<td class="md-preview">${previewHtml(item, kind)}</td>` +
           `<td class="wrap">${esc(item.prompt || "")}</td>` +
           `<td><span class="state-badge s-${esc(item.status)}"><span class="dot"></span>${esc(item.status)}</span></td>` +

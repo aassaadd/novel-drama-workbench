@@ -761,6 +761,7 @@
     activate() {
       bind();
       load();
+      if (window.VoiceLibrary) window.VoiceLibrary.activate();
     },
   };
 })();
