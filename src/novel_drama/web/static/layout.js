@@ -550,31 +550,11 @@
     if (create) {
       create.addEventListener("click", () => {
         toggleProjectMenu(false);
-        gotoNewProjectForm();
+        const page = window.Pages && window.Pages.project;
+        if (page && typeof page.openCreate === "function") page.openCreate();
+        else location.hash = "#/project";
       });
     }
-  }
-
-  /* 跳到项目页的「新建工程」表单：切路由 → 滚到卡片 → 聚焦书名著录 → 高亮一次。
-   * 参数：无。
-   * 返回：无。
-   */
-  function gotoNewProjectForm() {
-    if (location.hash !== "#/project") location.hash = "#/project";
-    // 等一帧让 #view-project 显示出来，隐藏元素无法滚动与聚焦
-    setTimeout(() => {
-      const card = el("npDir") ? el("npDir").closest(".card") : null;
-      const target = card || el("npDir");
-      if (target && typeof target.scrollIntoView === "function") {
-        target.scrollIntoView({ behavior: "smooth", block: "center" });
-      }
-      if (card) {
-        card.classList.add("card-flash");
-        setTimeout(() => card.classList.remove("card-flash"), 1200);
-      }
-      const title = el("npTitle");
-      if (title) title.focus({ preventScroll: true });
-    }, 60);
   }
 
   /* 让 #hint 的 title 始终是完整文本（app.js 只写 textContent，这里旁路同步）。

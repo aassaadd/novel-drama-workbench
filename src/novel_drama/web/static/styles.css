@@ -1035,19 +1035,15 @@ table.grid td.wrap { word-break: break-word; }
 
 .card > h3 { margin: 0; font-size: var(--fs-md); }
 
-/* 项目页：左设定库 / 右世界设定 + 新建工程 */
+/* 项目页：设定库单列纵向铺开（新建工程改由顶栏弹窗触发） */
 .ws-project {
   display: grid;
-  grid-template-columns: minmax(340px, 1.05fr) minmax(340px, 1.35fr);
+  grid-template-columns: minmax(0, 1fr);
   gap: var(--sp-4);
   align-items: start;
 }
 
 .ws-col { display: flex; flex-direction: column; gap: var(--sp-4); min-width: 0; }
-
-@media (max-width: 1280px) {
-  .ws-project { grid-template-columns: minmax(0, 1fr); }
-}
 
 /* 工具条：把生成 / 切分 / 预览这类动作收成一条 */
 .toolbar {
@@ -1574,13 +1570,8 @@ table.grid td.wrap { word-break: break-word; }
   justify-content: center;
 }
 
-/* 从 popover 跳到「新建工程」表单时，卡片闪一次主色描边，帮用户确认落点 */
-@keyframes card-flash-kf {
-  0% { box-shadow: 0 0 0 2px var(--accent); }
-  100% { box-shadow: 0 0 0 2px transparent; }
-}
-
-.card-flash { animation: card-flash-kf 1.2s ease-out; }
+/* 从 popover 打开「新建工程」弹窗：复用模态遮罩，只放短表单 */
+.modal-editor.create-dialog { width: min(460px, 100%); }
 
 /* ---------------- 创作向导：设定分区 / 润色按钮 / 人物卡片 / 黄金三章 ---------------- */
 

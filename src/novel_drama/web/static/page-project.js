@@ -1,4 +1,4 @@
-/* 项目页：极简新建 + 创作向导（作品信息 / 梗概 / 文风）。
+/* 项目页：创作向导（作品信息 / 梗概 / 文风）；新建工程由顶栏「＋新建工程」弹窗触发。
  *
  * 取数纪律：
  *   - 读取走 `/api/project/info`、`/api/ui/setting`、`/api/ui/project/work`。
@@ -371,38 +371,106 @@
     }
   }
 
-  /* 新建工程并切过去：只提交目录与书名。 */
-  async function createProject() {
-    if (busy) return;
-    const dir = el("npDir").value.trim();
-    const title = el("npTitle").value.trim();
-    if (!dir || !title) {
+  /* 新建工程并切过去：只提交目录与书名。
+   * 参数：dir 工程目录；title 书名。
+   * 返回：Promise<boolean>，true 表示创建成功（调用方据此关闭弹窗）。
+   */
+  async function createProject(dir, title) {
+    if (busy) return false;
+    const targetDir = String(dir || "").trim();
+    const targetTitle = String(title || "").trim();
+    if (!targetDir || !targetTitle) {
       NW.toast("目录与书名都要填");
-      return;
+      return false;
     }
     busy = true;
     try {
       const result = await NW.api("/api/ui/project/init", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ dir, title }),
+        body: JSON.stringify({ dir: targetDir, title: targetTitle }),
       });
-      NW.state.path = result.root || dir;
+      NW.state.path = result.root || targetDir;
       localStorage.setItem("ndw.path", NW.state.path);
       el("projectPath").value = NW.state.path;
-      el("npDir").value = "";
-      el("npTitle").value = "";
       NW.toast("工程已创建，下一步：到大纲页生成大纲", true);
       // 新工程没有章节，openProject 只广播 project 事件；再显式 load 一次，
       // 保证设定库表单一定按新工程重渲染（否则可能还是空表，点保存就报错）
       await NW.openProject();
       await load();
       if (NW.refreshProjects) await NW.refreshProjects();
+      return true;
     } catch (error) {
       NW.toast(`创建失败（退出码 ${error.code}）：${error.message}`);
+      return false;
     } finally {
       busy = false;
     }
+  }
+
+  /* 新建工程弹窗：目录 + 书名，创建成功后关闭并切到项目页。
+   * 参数：无。
+   * 返回：无。
+   */
+  function openCreateDialog() {
+    if (document.querySelector(".create-dialog")) return; // 已经打开，不重复叠层
+    const mask = document.createElement("div");
+    mask.className = "modal-mask";
+    const dialog = document.createElement("div");
+    dialog.className = "modal-editor create-dialog";
+    dialog.setAttribute("role", "dialog");
+    dialog.setAttribute("aria-modal", "true");
+    dialog.innerHTML = `
+      <h3 class="modal-title">新建工程</h3>
+      <p class="modal-hint">只需要目录与书名；作者、题材建完后在「作品信息」里补。</p>
+      <label class="stack">目录
+        <input id="npDir" placeholder="~/novels/new-book" spellcheck="false" />
+      </label>
+      <label class="stack">书名
+        <input id="npTitle" placeholder="书名" />
+      </label>
+      <div class="modal-foot">
+        <button class="btn" type="button" data-act="cancel">取消</button>
+        <button class="btn primary" type="button" data-act="create">创建并打开</button>
+      </div>`;
+    mask.appendChild(dialog);
+    document.body.appendChild(mask);
+
+    /* 关闭弹窗并解绑键盘监听。 */
+    function close() {
+      document.removeEventListener("keydown", onKeydown, true);
+      mask.remove();
+    }
+
+    /* 提交：创建成功后关闭；失败保留弹窗，方便改目录重试。 */
+    async function submit() {
+      const ok = await createProject(el("npDir").value, el("npTitle").value);
+      if (!ok) return;
+      close();
+      if (location.hash !== "#/project") location.hash = "#/project";
+    }
+
+    /* Esc 关闭弹窗。 */
+    function onKeydown(event) {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      close();
+    }
+
+    mask.addEventListener("click", (event) => {
+      if (event.target === mask) close();
+    });
+    dialog.querySelector('[data-act="cancel"]').addEventListener("click", close);
+    dialog.querySelector('[data-act="create"]').addEventListener("click", submit);
+    dialog.querySelectorAll("input").forEach((input) => {
+      input.addEventListener("keydown", (event) => {
+        if (event.key !== "Enter") return;
+        event.preventDefault();
+        submit();
+      });
+    });
+    document.addEventListener("keydown", onKeydown, true);
+    el("npDir").focus();
   }
 
   /* 项目页统一点击分发：润色按钮在内容动态渲染后仍然可用。 */
@@ -426,7 +494,6 @@
     bound = true;
     el("pjSave").addEventListener("click", saveSettings);
     el("pjExport").addEventListener("click", exportBible);
-    el("npCreate").addEventListener("click", createProject);
     el("pjWorkSave").addEventListener("click", saveWork);
     el("pjGenPremise").addEventListener("click", () => generateSection("premise", el("pjGenPremise")));
     el("pjGenStyle").addEventListener("click", () => generateSection("style", el("pjGenStyle")));
@@ -441,5 +508,7 @@
       bind();
       load();
     },
+    /* 顶栏「＋新建工程」调用：弹窗独立于页面内容，不挤在项目页里。 */
+    openCreate: openCreateDialog,
   };
 })();
