@@ -153,6 +153,8 @@ class OfflineWritingAdapter:
             text = self._outline(meta)
         elif task == "chapter":
             text = self._chapter(meta, req)
+        elif task == "summarize":
+            text = self._summarize(meta)
         elif task == "script":
             text = self._script(meta)
         elif task == "image_prompt":
@@ -167,7 +169,7 @@ class OfflineWritingAdapter:
             text = self._freeform(req)
         else:
             raise ValueError(
-                f"离线写作不支持的 task={task!r}（可选 outline/chapter/script/image_prompt/setting/character/polish/freeform）"
+                f"离线写作不支持的 task={task!r}（可选 outline/chapter/summarize/script/image_prompt/setting/character/polish/freeform）"
             )
         return TextGenResult(
             text=text,
@@ -207,7 +209,7 @@ class OfflineWritingAdapter:
         返回:
             [{"id": "offline-writing", ...}]。
         """
-        return [{"id": "offline-writing", "kind": "offline", "tasks": ["outline", "chapter", "script", "image_prompt", "setting", "character", "polish"]}]
+        return [{"id": "offline-writing", "kind": "offline", "tasks": ["outline", "chapter", "summarize", "script", "image_prompt", "setting", "character", "polish"]}]
 
     def unload(self, model: str | None = None) -> dict:
         """无模型可卸载。
@@ -333,6 +335,114 @@ class OfflineWritingAdapter:
         if self._count_words(content) > target_total * 1.2:
             content = self._truncate(content, int(target_total * 1.15))
         return content
+
+    # ---------- 正文反向总结 ----------
+
+    def _summarize(self, meta: dict) -> str:
+        """从正文确定性反推标题、摘要、大纲与节拍。
+
+        参数:
+            meta: {title, content, beats}；content 为正文（可能已被服务端截取开头与结尾）。
+
+        返回:
+            JSON 字符串（`{"title", "synopsis", "outline", "beats": [...]}`）。
+        """
+        content = str(meta.get("content") or "").strip()
+        paragraphs = [item.strip() for item in content.split("\n\n") if item.strip()]
+        if not paragraphs:
+            paragraphs = [content or "（正文为空）"]
+        current_title = str(meta.get("title") or "").strip()
+        rng = self._rng(meta, "summarize")
+
+        title = self._summarize_title(paragraphs[0], current_title, rng)
+        synopsis = self._summarize_synopsis(paragraphs)
+        old_beats = [item for item in (meta.get("beats") or []) if isinstance(item, dict)]
+        count = max(1, min(8, len(old_beats) or min(3, len(paragraphs))))
+        beats = self._summarize_beats(paragraphs, count)
+        outline = "\n".join(f"{index}. {beat['summary']}" for index, beat in enumerate(beats, start=1))
+        return json.dumps(
+            {"title": title, "synopsis": synopsis, "outline": outline, "beats": beats},
+            ensure_ascii=False,
+            indent=2,
+        )
+
+    @staticmethod
+    def _summarize_title(first_paragraph: str, current_title: str, rng: random.Random) -> str:
+        """从首段摘出标题候选；与现有标题相同时改用标题池。
+
+        参数:
+            first_paragraph: 正文首段。
+            current_title: 当前章节标题。
+            rng: 确定性随机源。
+
+        返回:
+            不超过 20 字的标题。
+        """
+        candidate = OfflineWritingAdapter._clip_sentence(first_paragraph, 20)
+        if candidate and candidate != current_title:
+            return candidate
+        base = rng.randrange(len(CHAPTER_TITLES))
+        for offset in range(len(CHAPTER_TITLES)):
+            option = CHAPTER_TITLES[(base + offset) % len(CHAPTER_TITLES)]
+            if option != current_title:
+                return option
+        return current_title or "正文重述"
+
+    @staticmethod
+    def _summarize_synopsis(paragraphs: list[str]) -> str:
+        """用首段与末段拼出章节摘要。
+
+        参数:
+            paragraphs: 正文段落列表。
+
+        返回:
+            不超过 1000 字的摘要。
+        """
+        head = OfflineWritingAdapter._clip_sentence(paragraphs[0], 90)
+        tail = OfflineWritingAdapter._clip_sentence(paragraphs[-1], 60) if len(paragraphs) > 1 else ""
+        text = f"{head}……{tail}" if tail else head
+        return text[:1000] or "本章推进主线。"
+
+    @staticmethod
+    def _summarize_beats(paragraphs: list[str], count: int) -> list[dict]:
+        """把正文段落按顺序均分成若干节拍。
+
+        参数:
+            paragraphs: 正文段落列表。
+            count: 节拍数量（1–8）。
+
+        返回:
+            [{summary, turning_point}]，最后一条标记为转折点。
+        """
+        total = len(paragraphs)
+        base, extra = divmod(total, count)
+        beats: list[dict] = []
+        cursor = 0
+        for index in range(count):
+            take = base + (1 if index < extra else 0)
+            group = paragraphs[cursor : cursor + take] or [paragraphs[min(cursor, total - 1)]]
+            cursor += take
+            summary = OfflineWritingAdapter._clip_sentence(group[0], 80)
+            beats.append({"summary": summary or f"推进第 {index + 1} 个情节", "turning_point": index == count - 1})
+        return beats
+
+    @staticmethod
+    def _clip_sentence(text: str, limit: int) -> str:
+        """截取到最近的句读，避免标题或摘要停在半个词上。
+
+        参数:
+            text: 原文。
+            limit: 最大字数。
+
+        返回:
+            截断后的文本（不含句末标点）。
+        """
+        source = str(text or "").strip().replace("\n", " ")
+        positions = [source.find(mark) for mark in ("。", "！", "？", "；", "，", "…")]
+        positions = [position for position in positions if 2 <= position <= limit]
+        if positions:
+            return source[: min(positions)].strip()
+        return source[:limit].strip()
 
     @staticmethod
     def _dialogue_line(summary: str, index: int, rng: random.Random) -> str:

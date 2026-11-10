@@ -112,6 +112,18 @@
     return `<div class="settings-warn">${esc(health.message)}</div>`;
   }
 
+  /* 连接成功时的灰色说明（版本 / 显存 / 队列 / 耗时），失败时为空。
+   * 参数：无。
+   * 返回：HTML 字符串。
+   */
+  function healthDetailHtml() {
+    if (!health || !health.ok) return "";
+    const badTemplate = (health.templates || []).some((item) => item.ok === false);
+    if (badTemplate) return "";
+    const latency = health.latency_ms ? ` · 耗时 ${health.latency_ms}ms` : "";
+    return `<div class="settings-hint">${esc(health.message || "ComfyUI 连通正常")}${esc(latency)}</div>`;
+  }
+
   /* 渲染写作模型卡片（接口地址 / 模型 / API Key / 采样参数）。
    * 参数：writing GET 返回的 writing 段。
    * 返回：HTML 字符串。
@@ -341,8 +353,14 @@
     const missing = image.templates_dir_exists === false;
     const warn = missing ? '<div class="settings-warn">模板目录不存在，图像/视频阶段会没有可用模板</div>' : "";
     return `<section class="settings-card">
-      <div class="card-head"><h3>图像 / 视频（ComfyUI）</h3><span class="health-slot" id="setHealthBadge">${healthBadge()}</span></div>
+      <div class="card-head"><h3>图像 / 视频（ComfyUI）</h3>
+        <span class="health-slot">
+          <button class="btn small" type="button" id="setHealthCheck">检测连接</button>
+          <span id="setHealthBadge">${healthBadge()}</span>
+        </span>
+      </div>
       <div id="setHealthWarn">${healthWarnHtml()}</div>
+      <div id="setHealthDetail">${healthDetailHtml()}</div>
       <div class="settings-grid">
         ${fieldBlock(
           "comfyui.base_url",
@@ -545,16 +563,58 @@
     }
   }
 
-  /* 重新检查连接并只刷新状态徽标，供保存后（地址可能刚改）使用。
+  /* 把最近一次检查结果刷到卡片上（徽标 / 失败说明 / 成功详情），不重渲染整页。
+   * 参数：无。
+   * 返回：无。
+   */
+  function renderHealth() {
+    const badge = el("setHealthBadge");
+    if (badge) badge.innerHTML = healthBadge();
+    const warn = el("setHealthWarn");
+    if (warn) warn.innerHTML = healthWarnHtml();
+    const detail = el("setHealthDetail");
+    if (detail) detail.innerHTML = healthDetailHtml();
+  }
+
+  /* 重新检查连接并只刷新状态区，供保存后（地址可能刚改）使用。
    * 参数：无。
    * 返回：Promise，无。
    */
   async function refreshHealth() {
     await loadHealth();
+    renderHealth();
+  }
+
+  /* 手动联通检测：按输入框里当前填的地址探测，未保存的新地址也能测。
+   * 检测期间禁用按钮并显示「检测中…」，结束后刷新徽标与说明。
+   * 参数：无。
+   * 返回：Promise，无。
+   */
+  async function testHealth() {
+    const input = document.querySelector('#setBody [data-key="comfyui.base_url"]');
+    const baseUrl = input ? String(input.value || "").trim() : "";
+    const button = el("setHealthCheck");
     const badge = el("setHealthBadge");
-    if (badge) badge.innerHTML = healthBadge();
-    const warn = el("setHealthWarn");
-    if (warn) warn.innerHTML = healthWarnHtml();
+    if (button) {
+      button.disabled = true;
+      button.textContent = "检测中…";
+    }
+    if (badge) badge.innerHTML = '<span class="state-badge s-pending"><span class="dot"></span>检测中…</span>';
+    try {
+      health = await NW.api("/api/ui/comfy/health", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ base_url: baseUrl }),
+      });
+    } catch (error) {
+      health = { ok: false, message: `检测失败：${error.message}` };
+    } finally {
+      if (button) {
+        button.disabled = false;
+        button.textContent = "检测连接";
+      }
+      renderHealth();
+    }
   }
 
   /* 拉取模型清单（只读接口，失败时记录原因供卡片显示）。
@@ -857,7 +917,7 @@
     }
   }
 
-  /* 容器上的统一委托：保存 / 重置 / 恢复 / 下载 / 重新解析 / 手工指定。
+  /* 容器上的统一委托：保存 / 重置 / 恢复 / 下载 / 重新解析 / 手工指定 / 联通检测。
    * 参数：event 点击事件。
    * 返回：无。
    */
@@ -882,7 +942,8 @@
       resolveModel(resolve.dataset.resolve || "", resolve.dataset.mkey || "");
       return;
     }
-    if (event.target.closest("#setSave")) save();
+    if (event.target.closest("#setHealthCheck")) testHealth();
+    else if (event.target.closest("#setSave")) save();
     else if (event.target.closest("#setReset")) load();
   }
 

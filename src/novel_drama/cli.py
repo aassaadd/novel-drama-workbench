@@ -50,7 +50,7 @@ from .cli_world import (
     cmd_world_list,
     cmd_world_remove,
 )
-from .cli_writing import cmd_chapter_generate, cmd_outline, cmd_script_suggest
+from .cli_writing import cmd_chapter_edit, cmd_chapter_generate, cmd_chapter_save, cmd_chapter_summarize, cmd_outline, cmd_script_suggest
 from .config import AppConfig, load_config
 from .media import load_cues, plan_mix, render_mix, run_media
 from .media.runner import plan_media
@@ -897,6 +897,25 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--regen", action="store_true", help="已有正文时覆盖重写")
     q.add_argument("--dry-run", action="store_true", help="只预览，不落盘")
     q.set_defaults(func=cmd_chapter_generate)
+    q = p_sub.add_parser("save", help="用手写正文覆盖章节正文（UTF-8）")
+    q.add_argument("--chapter", required=True)
+    save_source = q.add_mutually_exclusive_group(required=True)
+    save_source.add_argument("--file", help="从 UTF-8 文本文件读取正文")
+    save_source.add_argument("--stdin", action="store_true", help="从标准输入读取正文")
+    save_source.add_argument("--text", help="直接给出正文文本")
+    q.set_defaults(func=cmd_chapter_save)
+    q = p_sub.add_parser("edit", help="按提示词让 LLM 改写正文（默认预览，--apply 才落盘）")
+    q.add_argument("--chapter", required=True)
+    q.add_argument("--instruction", required=True, help="改写提示词")
+    q.add_argument("--range", dest="char_range", help="选区 start:end（0 起算，左闭右开）；缺省改写整章")
+    edit_mode = q.add_mutually_exclusive_group()
+    edit_mode.add_argument("--dry-run", action="store_true", help="只预览（默认行为）")
+    edit_mode.add_argument("--apply", action="store_true", help="写盘并追加 continuations 记录")
+    q.set_defaults(func=cmd_chapter_edit)
+    q = p_sub.add_parser("summarize", help="根据正文反向总结标题/摘要/大纲/节拍（默认预览，--apply 才落盘）")
+    q.add_argument("--chapter", required=True)
+    q.add_argument("--apply", action="store_true", help="写回章节文件与设定库大纲")
+    q.set_defaults(func=cmd_chapter_summarize)
 
     p = sub.add_parser("setting", help="设定库（世界观/文风/大纲）")
     p_sub = p.add_subparsers(dest="action", required=True)

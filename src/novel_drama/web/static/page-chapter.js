@@ -17,6 +17,11 @@
 (function () {
   let bound = false;
   let busy = false;
+  let editing = false;      // 正文是否处于编辑态（textarea 会顶替只读段落）
+  let chapterCache = null;  // 最近一次渲染的章节详情（编辑 / 取消时用）
+  let lastSelection = null; // 最近一次在正文里选中的字符范围（打开 AI 编辑时用）
+  let aiMask = null;        // AI 编辑弹窗遮罩
+  let summarizeMask = null; // 按正文重总结弹窗遮罩
   let blocks = [];          // 当前正文段落 [{ index, start, end, text }]
   let lineMap = new Map();  // line_id → { block, start, end }（相对段落起点）
   let lineIndex = new Map(); // line_id → 章节详情里的行对象（右栏展示用）
@@ -146,8 +151,32 @@
       .join("");
   }
 
+  /* 切换正文编辑态：编辑时显示「保存 / 取消」，隐藏「编辑正文」。
+   * 参数：next 是否进入编辑态。
+   * 返回：无。
+   */
+  function setEditing(next) {
+    editing = next;
+    el("chEdit").hidden = next;
+    el("chSave").hidden = !next;
+    el("chCancel").hidden = !next;
+  }
+
+  /* 编辑态下拦截会重渲染正文的动作，避免未保存内容被覆盖。
+   * 参数：无。
+   * 返回：true 表示已拦截（调用方应直接 return）。
+   */
+  function blockWhileEditing() {
+    if (!editing) return false;
+    NW.toast("正在编辑正文，请先保存或取消");
+    return true;
+  }
+
   /* 渲染整页。参数：chapter 章节详情。返回：无。 */
   function render(chapter) {
+    chapterCache = chapter;
+    lastSelection = null;
+    setEditing(false);
     blocks = paragraphsOf(chapter.content);
     lineMap = buildLineMap(chapter, blocks);
     const lineTotal = (chapter.scenes || []).reduce((sum, scene) => sum + (scene.lines || []).length, 0);
@@ -199,6 +228,7 @@
   function onLineClick(event) {
     const chip = event.target.closest(".line-chip");
     if (!chip) return;
+    if (editing) return; // 编辑态下正文已被 textarea 顶替，不做定位也不重渲染
     const lineId = chip.dataset.line;
     const entry = lineMap.get(lineId);
     const found = lineIndex.get(lineId) || {};
@@ -246,6 +276,7 @@
    * 返回：无。
    */
   function onParaClick(event) {
+    if (editing) return; // 编辑态不触发段落联动
     const paraNode = event.target.closest(".doc-p");
     if (!paraNode) return;
     const para = Number(paraNode.dataset.para);
@@ -264,6 +295,7 @@
   /* 生成正文（regen 由勾选框决定）。 */
   async function generate() {
     if (busy || !NW.state.path || !NW.state.chapter) return;
+    if (blockWhileEditing()) return;
     busy = true;
     el("chGenerate").disabled = true;
     try {
@@ -286,6 +318,7 @@
   /* 只预览不写盘：预览文本按同样的段落规则渲染，但清掉定位映射（不是落盘正文）。 */
   async function preview() {
     if (busy || !NW.state.path || !NW.state.chapter) return;
+    if (blockWhileEditing()) return;
     busy = true;
     try {
       const result = await NW.api("/api/ui/chapter/generate", {
@@ -305,9 +338,69 @@
     }
   }
 
+  /* 进入正文编辑态：用 textarea 顶替只读段落，内容取当前章节正文。
+   * 参数：无。
+   * 返回：无。
+   */
+  function startEdit() {
+    if (busy || editing || !chapterCache) return;
+    el("chContent").innerHTML = '<textarea id="chEditArea" class="doc-edit" spellcheck="false"></textarea>';
+    const area = el("chEditArea");
+    // 落盘正文末尾统一带一个换行，编辑时去掉它，避免 textarea 里多出一个空行
+    area.value = String(chapterCache.content || "").replace(/\n$/, "");
+    setEditing(true);
+    area.focus();
+  }
+
+  /* 取消编辑：丢弃未保存内容，恢复只读段落渲染。
+   * 参数：无。
+   * 返回：无。
+   */
+  function cancelEdit() {
+    if (!editing) return;
+    setEditing(false);
+    renderDoc(blocks, new Map());
+  }
+
+  /* 保存正文：调用 /api/ui/chapter/save，成功后刷新章节详情与目录。
+   * 参数：无。
+   * 返回：Promise<void>。
+   */
+  async function saveEdit() {
+    if (busy || !editing || !NW.state.path || !NW.state.chapter) return;
+    const area = el("chEditArea");
+    if (!area) return;
+    const content = area.value;
+    if (!content.trim()) {
+      NW.toast("正文不能为空");
+      return;
+    }
+    busy = true;
+    el("chSave").disabled = true;
+    try {
+      const result = await NW.api("/api/ui/chapter/save", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: NW.state.path, chapter: NW.state.chapter, content }),
+      });
+      const warnings = result.warnings || [];
+      const note = warnings.length ? `；${warnings.join("；")}` : "";
+      setEditing(false);
+      NW.toast(`已保存：${result.word_count} 字（revision=${result.revision}）${note}`, true);
+      await load();
+      if (NW.openProject) await NW.openProject();
+    } catch (error) {
+      NW.toast(`保存失败：${error.message}`);
+    } finally {
+      busy = false;
+      el("chSave").disabled = false;
+    }
+  }
+
   /* 切分场景或台词。 */
   async function split(which) {
     if (busy || !NW.state.path || !NW.state.chapter) return;
+    if (blockWhileEditing()) return;
     busy = true;
     try {
       const result = await NW.api(which === "scene" ? "/api/ui/scene/split" : "/api/ui/line/split", {
@@ -329,16 +422,457 @@
     }
   }
 
+  /* 取某个 DOM 节点在正文全文里的字符偏移。
+   * 参数：node 选区端点节点；offset 节点内偏移。
+   * 返回：相对正文的绝对偏移；节点不在正文段落内时返回 null。
+   */
+  function offsetInContent(node, offset) {
+    if (!node) return null;
+    const elem = node.nodeType === 3 ? node.parentElement : node;
+    const para = elem && elem.closest ? elem.closest(".doc-p") : null;
+    if (!para) return null;
+    const block = blocks[Number(para.dataset.para)];
+    if (!block) return null;
+    if (node.nodeType !== 3) {
+      // 元素节点（整段选择）按子节点文本长度折算偏移
+      let inner = 0;
+      Array.from(node.childNodes).slice(0, offset).forEach((child) => {
+        inner += child.textContent.length;
+      });
+      return block.start + inner;
+    }
+    let inner = 0;
+    const walker = document.createTreeWalker(para, NodeFilter.SHOW_TEXT);
+    while (walker.nextNode()) {
+      if (walker.currentNode === node) return block.start + inner + offset;
+      inner += walker.currentNode.textContent.length;
+    }
+    return block.start + block.text.length;
+  }
+
+  /* 读取当前正文中用户选中的字符范围。
+   * 参数：无。
+   * 返回：{start, end} 或 null（未选中 / 选区不在正文里）。
+   */
+  function currentSelection() {
+    const sel = window.getSelection();
+    if (!sel || sel.isCollapsed || !sel.rangeCount) return null;
+    const range = sel.getRangeAt(0);
+    const box = el("chContent");
+    if (!box || !box.contains(range.startContainer) || !box.contains(range.endContainer)) return null;
+    const start = offsetInContent(range.startContainer, range.startOffset);
+    const end = offsetInContent(range.endContainer, range.endOffset);
+    if (start === null || end === null || start >= end) return null;
+    return { start, end };
+  }
+
+  /* 记住最近一次选区：点工具条按钮会清掉浏览器选区，用这里缓存的副本。
+   * 参数：无。
+   * 返回：无。
+   */
+  function captureSelection() {
+    if (editing) return;
+    lastSelection = currentSelection();
+  }
+
+  /* 把字符范围翻译成人能读的段号。
+   * 参数：range 字符范围 {start, end}。
+   * 返回：如「第 3 段」「第 3–5 段」。
+   */
+  function describeSelection(range) {
+    const first = blocks.findIndex((block) => block.start <= range.start && range.start < block.end);
+    const last = blocks.findIndex((block) => block.start < range.end && range.end <= block.end);
+    if (first < 0 || last < 0) return `字符 ${range.start}–${range.end}`;
+    return first === last ? `第 ${first + 1} 段` : `第 ${first + 1}–${last + 1} 段`;
+  }
+
+  /* 关闭 AI 编辑弹窗。参数：无。返回：无。 */
+  function closeAiEdit() {
+    if (!aiMask) return;
+    document.removeEventListener("keydown", onAiKeydown, true);
+    aiMask.remove();
+    aiMask = null;
+  }
+
+  /* Esc 关闭 AI 编辑弹窗。参数：event 键盘事件。返回：无。 */
+  function onAiKeydown(event) {
+    if (event.key === "Escape") closeAiEdit();
+  }
+
+  /* 构造 AI 编辑请求体。参数：state 弹窗状态；dryRun 是否只预览。返回：body 对象。 */
+  function aiBody(state, dryRun) {
+    const body = {
+      path: NW.state.path,
+      chapter: NW.state.chapter,
+      instruction: state.input.value.trim(),
+      dry_run: dryRun,
+    };
+    if (state.range) body.range = { char_start: state.range.start, char_end: state.range.end };
+    return body;
+  }
+
+  /* 在弹窗内渲染预览：整章显示全文，选区显示替换片段及前后各一段。
+   * 参数：state 弹窗状态；result `/api/ui/chapter/edit` 的返回。
+   * 返回：无。
+   */
+  function renderAiPreview(state, result) {
+    const box = state.preview;
+    box.hidden = false;
+    if (!state.range) {
+      box.innerHTML =
+        `<p class="ai-seg-title">整章改写结果（${Number(result.word_count) || 0} 字）</p>` +
+        `<pre class="ai-pre">${esc(result.after)}</pre>`;
+      return;
+    }
+    const tail = result.before.length - state.range.end;
+    const generated = result.after.slice(state.range.start, result.after.length - tail);
+    const list = paragraphsOf(result.before);
+    const prev = [...list].reverse().find((item) => item.end <= state.range.start);
+    const next = list.find((item) => item.start >= state.range.end);
+    const parts = [];
+    if (prev) parts.push(`<p class="ai-seg-title">前一段（未改动）</p><p class="ai-seg-text">${esc(prev.text)}</p>`);
+    parts.push(`<p class="ai-seg-title">改写后（将替换选中片段）</p><pre class="ai-pre">${esc(generated)}</pre>`);
+    if (next) parts.push(`<p class="ai-seg-title">后一段（未改动）</p><p class="ai-seg-text">${esc(next.text)}</p>`);
+    box.innerHTML = parts.join("");
+  }
+
+  /* 先请求 dry_run 预览，不写盘。参数：state 弹窗状态。返回：Promise<void>。 */
+  async function requestAiPreview(state) {
+    if (!state.input.value.trim()) {
+      NW.toast("提示词不能为空");
+      return;
+    }
+    state.previewBtn.disabled = true;
+    state.apply.hidden = true;
+    state.status.textContent = "正在请求模型…";
+    try {
+      const result = await NW.api("/api/ui/chapter/edit", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(aiBody(state, true)),
+      });
+      state.result = result;
+      renderAiPreview(state, result);
+      state.apply.hidden = !result.changed;
+      state.status.textContent = result.changed
+        ? `预览完成：${result.word_count} 字，尚未写盘`
+        : "改写结果与原文一致，无需应用";
+    } catch (error) {
+      state.result = null;
+      state.status.textContent = `预览失败：${error.message}`;
+    } finally {
+      state.previewBtn.disabled = false;
+    }
+  }
+
+  /* 应用改写：再次请求并落盘，成功后刷新章节与目录。
+   * 参数：state 弹窗状态。
+   * 返回：Promise<void>。
+   */
+  async function applyAiEdit(state) {
+    if (!state.result) return;
+    if (!state.input.value.trim()) {
+      NW.toast("提示词不能为空");
+      return;
+    }
+    state.apply.disabled = true;
+    state.status.textContent = "正在应用…";
+    try {
+      const result = await NW.api("/api/ui/chapter/edit", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(aiBody(state, false)),
+      });
+      const warnings = result.warnings || [];
+      const note = warnings.length ? `；${warnings.join("；")}` : "";
+      closeAiEdit();
+      NW.toast(`已应用 AI 改写：${result.word_count} 字（revision=${result.revision}）${note}`, true);
+      await load();
+      if (NW.openProject) await NW.openProject();
+    } catch (error) {
+      state.status.textContent = `应用失败：${error.message}`;
+      state.apply.disabled = false;
+    }
+  }
+
+  /* 打开「AI 编辑」弹窗：提示词 + 可选选区 + 预览 + 应用。
+   * 参数：无。
+   * 返回：无。
+   */
+  function openAiEdit() {
+    if (busy || !NW.state.path || !NW.state.chapter) return;
+    if (blockWhileEditing()) return;
+    if (!String((chapterCache && chapterCache.content) || "").trim()) {
+      NW.toast("正文为空，无法编辑");
+      return;
+    }
+    const range = currentSelection() || lastSelection;
+    closeAiEdit();
+
+    const mask = document.createElement("div");
+    mask.className = "modal-mask";
+    const dialog = document.createElement("div");
+    dialog.className = "modal-editor";
+    dialog.setAttribute("role", "dialog");
+    dialog.setAttribute("aria-modal", "true");
+
+    const title = document.createElement("h3");
+    title.className = "modal-title";
+    title.textContent = range ? `AI 编辑 · 将改写${describeSelection(range)}` : "AI 编辑 · 整章";
+    dialog.appendChild(title);
+
+    const hint = document.createElement("p");
+    hint.className = "modal-hint";
+    hint.textContent = range
+      ? `已带上选中范围（字符 ${range.start}–${range.end}），选区外正文保持不变。`
+      : "未选中正文，将改写整章；先预览，确认后再应用。";
+    dialog.appendChild(hint);
+
+    const input = document.createElement("textarea");
+    input.className = "ai-edit-input";
+    input.placeholder = "输入改写要求，例如：把对峙写得更克制，删掉解释性旁白";
+    dialog.appendChild(input);
+
+    const preview = document.createElement("div");
+    preview.className = "ai-edit-preview";
+    preview.hidden = true;
+    dialog.appendChild(preview);
+
+    const status = document.createElement("p");
+    status.className = "modal-hint";
+    dialog.appendChild(status);
+
+    const foot = document.createElement("div");
+    foot.className = "modal-foot";
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "btn";
+    cancel.textContent = "取消";
+    cancel.addEventListener("click", closeAiEdit);
+    foot.appendChild(cancel);
+
+    const previewBtn = document.createElement("button");
+    previewBtn.type = "button";
+    previewBtn.className = "btn";
+    previewBtn.textContent = "预览";
+    foot.appendChild(previewBtn);
+
+    const apply = document.createElement("button");
+    apply.type = "button";
+    apply.className = "btn primary";
+    apply.textContent = "应用";
+    apply.hidden = true;
+    foot.appendChild(apply);
+    dialog.appendChild(foot);
+
+    const state = { input, preview, status, previewBtn, apply, range, result: null };
+    previewBtn.addEventListener("click", () => requestAiPreview(state));
+    apply.addEventListener("click", () => applyAiEdit(state));
+    input.addEventListener("input", () => {
+      state.result = null;
+      apply.hidden = true;
+      status.textContent = "提示词已修改，请重新预览";
+    });
+
+    mask.appendChild(dialog);
+    mask.addEventListener("click", (event) => {
+      if (event.target === mask) closeAiEdit();
+    });
+    document.body.appendChild(mask);
+    document.addEventListener("keydown", onAiKeydown, true);
+    aiMask = mask;
+    input.focus();
+  }
+
+  /* 关闭「按正文重总结」弹窗。参数：无。返回：无。 */
+  function closeSummarize() {
+    if (!summarizeMask) return;
+    document.removeEventListener("keydown", onSummarizeKeydown, true);
+    summarizeMask.remove();
+    summarizeMask = null;
+  }
+
+  /* Esc 关闭重总结弹窗。参数：event 键盘事件。返回：无。 */
+  function onSummarizeKeydown(event) {
+    if (event.key === "Escape") closeSummarize();
+  }
+
+  /* 构造重总结请求体。参数：apply 是否写盘。返回：body 对象。 */
+  function summarizeBody(apply) {
+    return { path: NW.state.path, chapter: NW.state.chapter, apply: Boolean(apply) };
+  }
+
+  /* 在弹窗内渲染总结预览：标题新旧对照、摘要、大纲与节拍。
+   * 参数：state 弹窗状态；result `/api/ui/chapter/summarize` 的返回。
+   * 返回：无。
+   */
+  function renderSummarizePreview(state, result) {
+    const preview = result.preview || {};
+    const beats = preview.beats || [];
+    const box = state.box;
+    box.hidden = false;
+    const beatText = beats
+      .map((beat, index) => `${index + 1}. ${beat.turning_point ? "★ " : ""}${beat.summary || ""}`)
+      .join("\n");
+    box.innerHTML =
+      `<p class="ai-seg-title">标题（当前 → 新）</p>` +
+      `<p class="ai-seg-text">${esc(state.oldTitle || "（空）")} → ${esc(preview.title || "（空）")}</p>` +
+      `<p class="ai-seg-title">摘要</p>` +
+      `<p class="ai-seg-text">${esc(preview.synopsis || "（空）")}</p>` +
+      `<p class="ai-seg-title">大纲</p>` +
+      `<pre class="ai-pre">${esc(preview.outline || "（空）")}</pre>` +
+      `<p class="ai-seg-title">节拍（${beats.length} 条，替换旧节拍 ${Number(result.replaced_beats) || 0} 条）</p>` +
+      `<pre class="ai-pre">${esc(beatText || "（空）")}</pre>`;
+  }
+
+  /* 请求一次重总结预览，不写盘。参数：state 弹窗状态。返回：Promise<void>。 */
+  async function requestSummarizePreview(state) {
+    state.previewBtn.disabled = true;
+    state.apply.hidden = true;
+    state.status.textContent = "正在总结…";
+    try {
+      const result = await NW.api("/api/ui/chapter/summarize", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(summarizeBody(false)),
+      });
+      state.result = result;
+      renderSummarizePreview(state, result);
+      const changes = result.changes || [];
+      state.apply.hidden = !changes.length;
+      state.status.textContent = changes.length
+        ? `预览完成：将变更 ${changes.join("、")}；尚未写盘`
+        : "总结结果与当前内容一致，无需应用";
+    } catch (error) {
+      state.result = null;
+      state.status.textContent = `总结失败：${error.message}`;
+    } finally {
+      state.previewBtn.disabled = false;
+    }
+  }
+
+  /* 确认应用重总结：带 apply=true 再请求一次，成功后刷新章节、目录与大纲页。
+   * 参数：state 弹窗状态。
+   * 返回：Promise<void>。
+   */
+  async function applySummarize(state) {
+    if (!state.result) return;
+    state.apply.disabled = true;
+    state.status.textContent = "正在应用…";
+    try {
+      const result = await NW.api("/api/ui/chapter/summarize", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(summarizeBody(true)),
+      });
+      const warnings = result.warnings || [];
+      const note = warnings.length ? `；${warnings.join("；")}` : "";
+      closeSummarize();
+      const text = result.applied
+        ? `已按正文重总结：${result.old_title} → ${result.new_title}${note}`
+        : `总结结果与当前内容一致，未写盘${note}`;
+      NW.toast(text, true);
+      await load();
+      if (NW.openProject) await NW.openProject();
+    } catch (error) {
+      state.status.textContent = `应用失败：${error.message}`;
+      state.apply.disabled = false;
+    }
+  }
+
+  /* 打开「按正文重总结」弹窗：先请求预览，确认后再应用。
+   * 参数：无。
+   * 返回：无。
+   */
+  function openSummarize() {
+    if (busy || !NW.state.path || !NW.state.chapter) return;
+    if (blockWhileEditing()) return;
+    if (!String((chapterCache && chapterCache.content) || "").trim()) {
+      NW.toast("正文为空，无法总结");
+      return;
+    }
+    closeSummarize();
+
+    const mask = document.createElement("div");
+    mask.className = "modal-mask";
+    const dialog = document.createElement("div");
+    dialog.className = "modal-editor";
+    dialog.setAttribute("role", "dialog");
+    dialog.setAttribute("aria-modal", "true");
+
+    const title = document.createElement("h3");
+    title.className = "modal-title";
+    title.textContent = "按正文重总结 · 预览";
+    dialog.appendChild(title);
+
+    const hint = document.createElement("p");
+    hint.className = "modal-hint";
+    hint.textContent = "根据本章正文重写标题、摘要、大纲与节拍；确认后才会写回章节与设定库。";
+    dialog.appendChild(hint);
+
+    const box = document.createElement("div");
+    box.className = "ai-edit-preview";
+    box.hidden = true;
+    dialog.appendChild(box);
+
+    const status = document.createElement("p");
+    status.className = "modal-hint";
+    dialog.appendChild(status);
+
+    const foot = document.createElement("div");
+    foot.className = "modal-foot";
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "btn";
+    cancel.textContent = "取消";
+    cancel.addEventListener("click", closeSummarize);
+    foot.appendChild(cancel);
+
+    const previewBtn = document.createElement("button");
+    previewBtn.type = "button";
+    previewBtn.className = "btn";
+    previewBtn.textContent = "重新预览";
+    foot.appendChild(previewBtn);
+
+    const apply = document.createElement("button");
+    apply.type = "button";
+    apply.className = "btn primary";
+    apply.textContent = "确认应用";
+    apply.hidden = true;
+    foot.appendChild(apply);
+    dialog.appendChild(foot);
+
+    const state = { box, status, previewBtn, apply, result: null, oldTitle: (chapterCache && chapterCache.title) || "" };
+    previewBtn.addEventListener("click", () => requestSummarizePreview(state));
+    apply.addEventListener("click", () => applySummarize(state));
+
+    mask.appendChild(dialog);
+    mask.addEventListener("click", (event) => {
+      if (event.target === mask) closeSummarize();
+    });
+    document.body.appendChild(mask);
+    document.addEventListener("keydown", onSummarizeKeydown, true);
+    summarizeMask = mask;
+    requestSummarizePreview(state);
+  }
+
   /* 首次激活绑定事件。 */
   function bind() {
     if (bound) return;
     bound = true;
     el("chGenerate").addEventListener("click", generate);
+    el("chEdit").addEventListener("click", startEdit);
+    el("chAiEdit").addEventListener("click", openAiEdit);
+    el("chSummarize").addEventListener("click", openSummarize);
+    el("chSave").addEventListener("click", saveEdit);
+    el("chCancel").addEventListener("click", cancelEdit);
     el("chPreview").addEventListener("click", preview);
     el("chScenes").addEventListener("click", () => split("scene"));
     el("chLines").addEventListener("click", () => split("line"));
     el("chScenesBody").addEventListener("click", onLineClick);
     el("chContent").addEventListener("click", onParaClick);
+    el("chContent").addEventListener("mouseup", captureSelection);
+    el("chContent").addEventListener("keyup", captureSelection);
     NW.onChapter(() => load());
   }
 

@@ -1116,6 +1116,22 @@ table.grid td.wrap { word-break: break-word; }
   padding: 0 var(--sp-1);
 }
 
+/* 正文编辑态：textarea 顶替只读段落，字号 / 行高与正文保持一致 */
+.doc-edit {
+  display: block;
+  width: 100%;
+  min-height: 60vh;
+  box-sizing: border-box;
+  padding: 0;
+  border: none;
+  outline: none;
+  resize: vertical;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  line-height: inherit;
+}
+
 .scene-list {
   flex: 1;
   min-height: 0;
@@ -1459,7 +1475,8 @@ table.grid td.wrap { word-break: break-word; }
 
 .settings-actions { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; }
 
-/* 连接状态徽标靠右，与卡片标题同一行 */
+/* 连接状态徽标靠右，与卡片标题同一行；检测按钮与徽标横向排开 */
+.health-slot { display: inline-flex; align-items: center; gap: var(--sp-2); }
 .card-head > .health-slot { margin-left: auto; }
 
 /* ---------- 设置页：模板只读参数与模型下载 ---------- */
@@ -1696,6 +1713,42 @@ table.grid td.wrap { word-break: break-word; }
 .modal-foot { display: flex; align-items: center; gap: var(--sp-2); }
 
 .modal-count { margin-left: auto; color: var(--muted); font-size: var(--fs-xs); }
+
+/* AI 编辑：提示词输入 + 改写预览（整章全文 / 选区片段与前后段） */
+
+.ai-edit-input {
+  width: 100%;
+  min-height: 88px;
+  resize: vertical;
+  padding: var(--sp-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel-2);
+  color: var(--text);
+  font: inherit;
+}
+
+.ai-edit-input:focus { outline: none; border-color: var(--accent); }
+
+.ai-edit-preview {
+  max-height: 46vh;
+  overflow: auto;
+  padding: var(--sp-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel-2);
+}
+
+.ai-seg-title { margin: var(--sp-1) 0; color: var(--muted); font-size: var(--fs-xs); }
+.ai-seg-text { margin: 0 0 var(--sp-2); white-space: pre-wrap; word-break: break-word; }
+
+.ai-pre {
+  margin: 0 0 var(--sp-2);
+  white-space: pre-wrap;
+  word-break: break-word;
+  font: inherit;
+  color: var(--text);
+}
 
 /* ---------------- 世界页：条目卡片 / 封面 / 就地编辑 ---------------- */
 

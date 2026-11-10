@@ -1,5 +1,6 @@
 """写作编排包：大纲、章节正文、导演标注建议、设定与人物生成。"""
 
+from .editing import edit_chapter, save_chapter_content
 from .service import (
     apply_outline,
     bind_outline_characters,
@@ -17,6 +18,7 @@ from .service import (
     suggest_script,
     validate_chapter_binding,
 )
+from .summarize import summarize_chapter
 
 __all__ = [
     "apply_outline",
@@ -25,6 +27,7 @@ __all__ = [
     "build_art_prompt",
     "build_writing_adapter",
     "check_golden_three",
+    "edit_chapter",
     "generate_chapter",
     "generate_characters",
     "generate_outline",
@@ -32,6 +35,8 @@ __all__ = [
     "generate_settings",
     "generate_worlds",
     "polish_field",
+    "save_chapter_content",
     "suggest_script",
+    "summarize_chapter",
     "validate_chapter_binding",
 ]

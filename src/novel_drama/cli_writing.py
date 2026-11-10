@@ -6,13 +6,29 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
-from .cli_common import EXIT_OK, PreconditionError, TaskFailedError, _emit, _resolve_store
+from .cli_common import (
+    EXIT_OK,
+    PreconditionError,
+    TaskFailedError,
+    _emit,
+    _resolve_store,
+)
 from .config import AppConfig
 from .store import validate
 from .store.settings_store import SettingsStore
-from .writing import apply_outline, generate_chapter, generate_outline, suggest_script, validate_chapter_binding
+from .writing import (
+    apply_outline,
+    edit_chapter,
+    generate_chapter,
+    generate_outline,
+    save_chapter_content,
+    suggest_script,
+    summarize_chapter,
+    validate_chapter_binding,
+)
 
 
 def _fmt_outline(acts: list[dict]) -> str:
@@ -122,6 +138,169 @@ def cmd_chapter_generate(args, config: AppConfig) -> int:
         preview = result["content"][:400]
         text += f"\n--- 预览（前 400 字）---\n{preview}"
     _emit(args, text, {key: value for key, value in result.items() if key != "content"} | {"preview": (result.get("content") or "")[:400]})
+    return EXIT_OK
+
+
+def _read_save_content(args) -> str:
+    """读取 `chapter save` 的正文来源（--file / --stdin / --text 三选一，统一 UTF-8）。
+
+    参数:
+        args: 含 file（文件路径）、stdin（是否读标准输入）、text（直接给出的正文）。
+
+    返回:
+        正文文本；`--text` 未给值时返回空串，由 `save_chapter_content` 统一拒绝。
+    """
+    if args.file:
+        return Path(args.file).read_text(encoding="utf-8")
+    if args.stdin:
+        return sys.stdin.buffer.read().decode("utf-8")
+    return args.text or ""
+
+
+def cmd_chapter_save(args, config: AppConfig) -> int:
+    """用手写正文覆盖章节正文，并同步字数、版本与状态。
+
+    参数:
+        args: 参数（chapter 必填；file / stdin / text 三选一）。
+        config: 本机配置。
+
+    返回:
+        退出码。
+
+    异常:
+        ValueError: 正文为空（由 `save_chapter_content` 抛出）。
+        FileNotFoundError: 章节不存在。
+    """
+    store = _resolve_store(args, config)
+    result = save_chapter_content(store, args.chapter, _read_save_content(args))
+    text = (
+        f"章节 {result['chapter_id']} 正文已保存：{result['word_count']} 字"
+        f"（revision={result['revision']}，status={result['status']}）"
+    )
+    lines = [text]
+    lines.extend(f"  ! {item}" for item in result["warnings"])
+    _emit(args, "\n".join(lines), result)
+    return EXIT_OK
+
+
+def _parse_char_range(raw: str | None) -> tuple[int, int] | None:
+    """解析 `--range start:end` 选区参数。
+
+    参数:
+        raw: 形如 `120:260` 的字符串；None 或空串表示整章。
+
+    返回:
+        (start, end) 或 None。
+
+    异常:
+        ValueError: 格式不是两个整数。
+    """
+    if not raw:
+        return None
+    parts = str(raw).split(":")
+    if len(parts) != 2:
+        raise ValueError("选区格式应为 start:end，例如 --range 120:260")
+    try:
+        return int(parts[0]), int(parts[1])
+    except ValueError as exc:
+        raise ValueError("选区格式应为 start:end（两个整数偏移）") from exc
+
+
+def cmd_chapter_edit(args, config: AppConfig) -> int:
+    """按提示词让 LLM 改写章节正文（默认预览，`--apply` 才落盘）。
+
+    参数:
+        args: 参数（chapter/instruction 必填；range 可选；dry-run / apply 二选一）。
+        config: 本机配置。
+
+    返回:
+        退出码。
+
+    异常:
+        ValueError: 提示词为空、正文为空或选区越界（由 `edit_chapter` 抛出）。
+        AdapterError: 模型调用失败或返回空内容。
+    """
+    store = _resolve_store(args, config)
+    result = edit_chapter(
+        store,
+        config,
+        args.chapter,
+        args.instruction,
+        char_range=_parse_char_range(getattr(args, "char_range", None)),
+        dry_run=not args.apply,
+    )
+    head = "改写完成" if args.apply else "改写预览（未写盘，加 --apply 才保存）"
+    lines = [
+        f"章节 {result['chapter_id']} {head}：{result['word_count']} 字"
+        f"（status={result['status']}，revision={result['revision']}）"
+    ]
+    lines.extend(f"  ! {item}" for item in result["warnings"])
+    if not args.apply:
+        lines.append("--- 预览（前 400 字）---")
+        lines.append(result["after"][:400])
+    _emit(args, "\n".join(lines), result)
+    return EXIT_OK
+
+
+def _fmt_summarize_preview(old_title: str, result: dict) -> str:
+    """把反向总结预览渲染成中文可读文本。
+
+    参数:
+        old_title: 当前章节标题。
+        result: `summarize_chapter(apply=False)` 的返回。
+
+    返回:
+        多行文本。
+    """
+    preview = result["preview"]
+    lines = [
+        f"章节 {result['chapter_id']} 重总结预览（未写盘，加 --apply 才保存）",
+        f"旧标题：{old_title}",
+        f"新标题：{preview['title']}",
+        f"摘要：{preview['synopsis'] or '（空）'}",
+        "大纲：",
+        preview["outline"] or "（空）",
+    ]
+    changes = result["changes"]
+    if not changes:
+        lines.append("（与当前内容一致，应用不会改动任何字段）")
+        return "\n".join(lines)
+    lines.append(f"节拍（{len(preview['beats'])} 条，替换旧节拍 {result['replaced_beats']} 条）：")
+    for index, beat in enumerate(preview["beats"], start=1):
+        flag = "★" if beat["turning_point"] else " ·"
+        lines.append(f"  {flag} {index}. {beat['summary']}")
+    lines.append(f"变更字段：{', '.join(changes)}")
+    return "\n".join(lines)
+
+
+def cmd_chapter_summarize(args, config: AppConfig) -> int:
+    """根据正文反向总结标题、摘要、大纲与节拍（默认预览，`--apply` 才落盘）。
+
+    参数:
+        args: 参数（chapter 必填；apply 是否写盘）。
+        config: 本机配置。
+
+    返回:
+        退出码。
+
+    异常:
+        ValueError: 正文为空（由 `summarize_chapter` 抛出）。
+        AdapterError: 模型调用失败或输出不合法。
+    """
+    store = _resolve_store(args, config)
+    chapter = store.load_chapter(args.chapter)
+    result = summarize_chapter(store, config, args.chapter, apply=args.apply)
+    if args.apply:
+        lines = [
+            f"章节 {result['chapter_id']} 重总结已应用："
+            f"{result['old_title']} → {result['new_title']}",
+            f"变更字段：{', '.join(result['changed_fields']) or '（无）'}"
+            f"；替换旧节拍 {result['replaced_beats']} 条",
+        ]
+        lines.extend(f"  ! {item}" for item in result["warnings"])
+    else:
+        lines = [_fmt_summarize_preview(str(chapter.get("title") or ""), result)]
+    _emit(args, "\n".join(lines), result)
     return EXIT_OK
 
 

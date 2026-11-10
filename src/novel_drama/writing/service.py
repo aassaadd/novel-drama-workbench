@@ -17,6 +17,7 @@ from ..models.ids import new_id, now_iso
 from ..store import ProjectStore
 from ..store.settings_store import SettingsStore
 from ..store.world_store import WorldStore
+from ..text.context import POV_LABELS, ContextAssembler
 from .worlds import build_art_prompt as _build_art_prompt
 from .worlds import clean_world_entry, worlds_digest
 
@@ -257,6 +258,98 @@ def _chapter_beats(bible: dict, chapter: dict, settings_store: SettingsStore) ->
     return [{"summary": chapter.get("title") or "推进主线", "character_ids": [], "turning_point": False, "target_words": 0}]
 
 
+def build_chapter_context(store: ProjectStore, config: AppConfig, chapter: dict) -> dict:
+    """准备章节生成与 LLM 编辑共用的上下文素材。
+
+    参数:
+        store: 工程。
+        config: 本机配置。
+        chapter: 章节 dict（含 id/index/title/outline/content）。
+
+    返回:
+        {bible, work, characters, beats, chapter_words, entry, world_ids, world_context,
+         character_payload, speaker_ids, previous_chapters, style, adapter, metadata}。
+        metadata 字段与 `generate_chapter` 原有约定完全一致，离线适配器行为不变。
+    """
+    settings_store = SettingsStore(store.root)
+    bible = settings_store.ensure()
+    work = store.load_project().get("work") or {}
+    characters = store.load_characters()["characters"]
+    beats = _chapter_beats(bible, chapter, settings_store)
+    chapter_words = int(sum(int(beat.get("target_words") or 0) for beat in beats) or DEFAULT_CHAPTER_WORDS)
+    if chapter_words <= 0:
+        chapter_words = DEFAULT_CHAPTER_WORDS
+    adapter = build_writing_adapter(config, bible)
+
+    entry = settings_store.find_outline_chapter(bible, chapter.get("id"))
+    world_ids = list((entry or {}).get("world_ids") or [])
+    world_store = WorldStore(store.root)
+    world_context = _worlds_digest(world_store.find_many(world_ids) if (world_ids and world_store.exists()) else [], world_ids)
+    if world_context is None:
+        # 未绑定世界时回退设定库摘要，保持旧章节的上下文口味
+        world_context = _bible_digest(bible)
+
+    character_payload = _characters_payload(characters)
+    speaker_ids: list[str] | None = None
+    if entry:
+        # 角色上下文只取本章 POV 与节拍涉及的角色；找不到时保留全量角色
+        focus = {cid for cid in [entry.get("pov_character_id")] if cid}
+        for beat in beats:
+            focus.update(cid for cid in (beat.get("character_ids") or []) if cid)
+        focus.discard(entities.NARRATOR_ID)
+        focused = [item for item in character_payload if item["id"] in focus]
+        if focused:
+            character_payload = focused
+        if focus:
+            speaker_ids = sorted(focus)
+
+    # 前序章节：index 小于当前章节，按 index 倒序最多取 3 章，再转成从旧到新
+    previous_index = int(chapter.get("index") or 0)
+    previous_meta = [item for item in store.list_chapters() if int(item.get("index") or 0) < previous_index]
+    previous_meta.sort(key=lambda item: int(item.get("index") or 0), reverse=True)
+    previous_chapters: list[dict] = []
+    for meta in previous_meta[:3]:
+        full = store.load_chapter(meta["id"])
+        previous_chapters.append(
+            {
+                "index": full.get("index"),
+                "title": full.get("title"),
+                "synopsis": full.get("synopsis") or "",
+                "content": full.get("content") or "",
+            }
+        )
+    previous_chapters.reverse()
+
+    metadata = {
+        "title": chapter.get("title"),
+        "summary": (entry or {}).get("summary") or chapter.get("outline"),
+        "beats": beats,
+        "characters": character_payload,
+        "world": world_context,
+        "world_ids": world_ids,
+        "pov_character_id": (entry or {}).get("pov_character_id") or chapter.get("pov_character_id"),
+        "pov": (bible.get("style") or {}).get("pov"),
+        "tone": (bible.get("style") or {}).get("tone"),
+        "target_words": chapter_words,
+    }
+    return {
+        "bible": bible,
+        "work": work,
+        "characters": characters,
+        "beats": beats,
+        "chapter_words": chapter_words,
+        "entry": entry,
+        "world_ids": world_ids,
+        "world_context": world_context,
+        "character_payload": character_payload,
+        "speaker_ids": speaker_ids,
+        "previous_chapters": previous_chapters,
+        "style": bible.get("style") or {},
+        "adapter": adapter,
+        "metadata": metadata,
+    }
+
+
 def generate_chapter(store: ProjectStore, config: AppConfig, chapter_id: str, regen: bool = False, dry_run: bool = False) -> dict:
     """生成章节正文并落盘。
 
@@ -277,53 +370,47 @@ def generate_chapter(store: ProjectStore, config: AppConfig, chapter_id: str, re
     if (chapter.get("content") or "").strip() and not regen and not dry_run:
         raise ValueError(f"章节 {chapter_id} 已有正文；确认重写请加 --regen")
 
-    settings_store = SettingsStore(store.root)
-    bible = settings_store.ensure()
-    characters = store.load_characters()["characters"]
-    beats = _chapter_beats(bible, chapter, settings_store)
-    chapter_words = int(sum(int(beat.get("target_words") or 0) for beat in beats) or DEFAULT_CHAPTER_WORDS)
-    if chapter_words <= 0:
-        chapter_words = DEFAULT_CHAPTER_WORDS
-    adapter = build_writing_adapter(config, bible)
+    context = build_chapter_context(store, config, chapter)
+    bible = context["bible"]
+    beats = context["beats"]
+    chapter_words = context["chapter_words"]
+    entry = context["entry"]
+    style = context["style"]
 
-    entry = settings_store.find_outline_chapter(bible, chapter_id)
-    world_ids = list((entry or {}).get("world_ids") or [])
-    world_store = WorldStore(store.root)
-    world_context = _worlds_digest(world_store.find_many(world_ids) if (world_ids and world_store.exists()) else [], world_ids)
-    if world_context is None:
-        # 未绑定世界时回退设定库摘要，保持旧章节的上下文口味
-        world_context = _bible_digest(bible)
+    summary_text = (entry or {}).get("summary") or chapter.get("outline") or ""
+    pov_label = POV_LABELS.get((style.get("pov") or "").strip(), style.get("pov") or "第三人称有限视角")
+    tone_label = style.get("tone") or "沿用既有基调"
+    instruction_lines = [
+        f"写《{chapter.get('title')}》本章正文，目标字数约 {chapter_words} 字。",
+        f"本章摘要：{summary_text or '按设定推进主线'}",
+        "按以下节拍顺序推进：",
+    ]
+    for order, beat in enumerate(beats, start=1):
+        try:
+            target = int(beat.get("target_words") or 0)
+        except (TypeError, ValueError):
+            target = 0
+        turning = "是" if beat.get("turning_point") else "否"
+        instruction_lines.append(f"{order}. {beat.get('summary')}（目标 {target} 字，转折点：{turning}）")
+    instruction_lines.append(f"视角：{pov_label}；基调：{tone_label}。")
+    instruction_lines.append("输出格式：只输出正文，不要写章节标题或小标题，不要解释；对白使用中文引号“”。")
+    instruction = "\n".join(instruction_lines)
 
-    character_payload = _characters_payload(characters)
-    if entry:
-        # 角色上下文只取本章 POV 与节拍涉及的角色；找不到时保留全量角色
-        focus = {cid for cid in [entry.get("pov_character_id")] if cid}
-        for beat in beats:
-            focus.update(cid for cid in (beat.get("character_ids") or []) if cid)
-        focus.discard(entities.NARRATOR_ID)
-        focused = [item for item in character_payload if item["id"] in focus]
-        if focused:
-            character_payload = focused
-
-    req = TextGenRequest(
-        task="chapter",
-        system="你是中文小说作者，按节拍写正文；对白用中文引号，不要写标题。",
-        messages=[Message("user", f"写《{chapter.get('title')}》正文，约 {chapter_words} 字。")],
-        stream=False,
-        metadata={
-            "title": chapter.get("title"),
-            "summary": (entry or {}).get("summary") or chapter.get("outline"),
-            "beats": beats,
-            "characters": character_payload,
-            "world": world_context,
-            "world_ids": world_ids,
-            "pov_character_id": (entry or {}).get("pov_character_id") or chapter.get("pov_character_id"),
-            "pov": (bible.get("style") or {}).get("pov"),
-            "tone": (bible.get("style") or {}).get("tone"),
-            "target_words": chapter_words,
-        },
+    assembler = ContextAssembler(
+        work=context["work"],
+        bible=bible,
+        world_digest=context["world_context"],
+        characters=context["characters"],
+        chapter=chapter,
+        outline_chapter=entry or {},
+        previous_chapters=context["previous_chapters"],
+        current_content=chapter.get("content") or "",
+        budget_tokens=int(config.get("writing.context_budget_tokens") or 32768),
     )
-    result = adapter.generate(req)
+    req = assembler.build("chapter", instruction, context["speaker_ids"])
+    # metadata 保持原有字段不变：离线适配器依赖它，且产物需要确定性一致
+    req.metadata = context["metadata"]
+    result = context["adapter"].generate(req)
     content = (result.text or "").strip()
     if not content:
         raise AdapterError(ErrorCode.UPSTREAM_ERROR, "写作适配器返回了空正文", retryable=True)

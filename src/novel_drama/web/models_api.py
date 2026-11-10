@@ -577,15 +577,22 @@ def register_models_routes(app, config_path: str | None = None) -> None:
         return {"group": group, **result}
 
     @app.post("/api/ui/comfy/health")
-    def ui_comfy_health() -> dict:
+    def ui_comfy_health(body: dict | None = None) -> dict:
         """检查 ComfyUI 连接并校验模板依赖是否就位。
 
+        参数:
+            body: 可选 `{base_url}`；传了就先按这个地址探测，
+                这样页面里还没保存的新地址也能直接做联通检测。
+
         返回:
-            `{ok, version, queue, templates, models_dir, message}`；
+            `{ok, version, queue, templates, models_dir, base_url, latency_ms, message}`；
             连不上时 `ok=false`，HTTP 仍为 200，由页面显示红色状态。
         """
         config = load_config(config_path)
-        comfy = config.get("comfyui", {}) or {}
+        comfy = dict(config.get("comfyui", {}) or {})
+        override = str((body or {}).get("base_url") or "").strip()
+        if override:
+            comfy["base_url"] = override
         manifest = {}
         manifest_error = None
         try:
@@ -663,5 +670,7 @@ def register_models_routes(app, config_path: str | None = None) -> None:
             "queue": extra.get("queue"),
             "templates": templates,
             "models_dir": models_dir,
+            "base_url": gateway.base_url,
+            "latency_ms": status.latency_ms,
             "message": message,
         }

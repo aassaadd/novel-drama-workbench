@@ -18,8 +18,11 @@ from fastapi import HTTPException
 from .. import __version__
 from ..config import DEFAULT_UI_CONFIG_PATH, load_config
 from ..media import comfy_media
+from ..adapters.base import AdapterError
 from ..models.ids import now_iso
 from ..store import ProjectStore, list_workspaces
+from ..writing.editing import edit_chapter, save_chapter_content
+from ..writing.summarize import summarize_chapter
 from .actions import fail_body, run
 from .models_api import register_models_routes
 
@@ -736,6 +739,100 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         if body.get("dry_run"):
             argv.append("--dry-run")
         return _respond(_cli(*argv))
+
+    @app.post("/api/ui/chapter/save")
+    def ui_chapter_save(body: dict) -> dict:
+        """保存手工编辑后的章节正文。
+
+        正文可能有上万字：拼进 argv 会撞命令行长度上限，还会出现在进程列表里，
+        因此这里不转发 CLI，直接调用 `writing.editing.save_chapter_content`
+        （与上方直接读 store 的只读接口是同一取舍）。
+
+        参数:
+            body: {path 工程目录, chapter 章节 ID, content 新正文}。
+
+        返回:
+            {chapter_id, word_count, revision, status, warnings}。
+
+        异常:
+            HTTPException: 正文为空返回 400，章节不存在返回 404。
+        """
+        store = _store(body.get("path"))
+        try:
+            return save_chapter_content(store, body["chapter"], body.get("content") or "")
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/api/ui/chapter/edit")
+    def ui_chapter_edit(body: dict) -> dict:
+        """按提示词让 LLM 改写正文（默认预览，dry_run=false 才落盘）。
+
+        参数:
+            body: {path 工程目录, chapter 章节 ID, instruction 提示词,
+                   range? {char_start, char_end}, dry_run? 默认 true}。
+
+        返回:
+            {chapter_id, mode, before, after, changed, word_count, revision,
+             status, warnings, continuation_id?}。
+
+        异常:
+            HTTPException: 参数/正文/范围错误 400，章节不存在 404，模型异常 502。
+        """
+        store = _store(body.get("path"))
+        raw_range = body.get("range")
+        dry_run = body.get("dry_run")
+        char_range = None
+        if raw_range:
+            if not isinstance(raw_range, dict):
+                raise HTTPException(status_code=400, detail="range 需为 {char_start, char_end}")
+            char_range = (raw_range.get("char_start"), raw_range.get("char_end"))
+        try:
+            return edit_chapter(
+                store,
+                load_config(config_path),
+                body.get("chapter") or "",
+                body.get("instruction") or "",
+                char_range=char_range,
+                dry_run=True if dry_run is None else bool(dry_run),
+            )
+        except AdapterError as exc:
+            raise HTTPException(status_code=502, detail=exc.message) from exc
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/api/ui/chapter/summarize")
+    def ui_chapter_summarize(body: dict) -> dict:
+        """根据正文反向总结标题/摘要/大纲/节拍（默认预览，apply=true 才落盘）。
+
+        参数:
+            body: {path 工程目录, chapter 章节 ID, apply? 默认 false}。
+
+        返回:
+            预览: {chapter_id, preview, changes, replaced_beats}；
+            应用: {applied, chapter_id, old_title, new_title, changed_fields,
+                   replaced_beats, warnings}。
+
+        异常:
+            HTTPException: 正文为空 400，章节不存在 404，模型异常 502。
+        """
+        store = _store(body.get("path"))
+        try:
+            return summarize_chapter(
+                store,
+                load_config(config_path),
+                body.get("chapter") or "",
+                apply=bool(body.get("apply")),
+            )
+        except AdapterError as exc:
+            raise HTTPException(status_code=502, detail=exc.message) from exc
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @app.post("/api/ui/scene/split")
     def ui_scene_split(body: dict) -> dict:
