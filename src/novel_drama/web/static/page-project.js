@@ -35,6 +35,7 @@
   let bound = false;
   let busy = false;
   let bibleCache = null;
+  let stylePresets = []; // 固定画面风格预设（写实 / 动漫 / 古风…），图片与视频共用
 
   const el = (id) => document.getElementById(id);
 
@@ -99,6 +100,26 @@
   /* 单个设定字段：文本框带「✨润色」与「⤢ 放大」，枚举字段是下拉框（可选值固定，润色按钮置灰）。 */
   function fieldHtml(key, label, value) {
     const labels = ENUMS[key];
+    if (key === "visual_style") {
+      /* 视觉风格：预设下拉 + 可编辑文本框。选中预设即把风格词写入输入框，
+       * 图片（母图 / 头像 / 三视图）与视频生成都读这一份，保证统一。 */
+      const extra = value && !stylePresets.some((item) => item.prompt === value)
+        ? `<option value="${esc(value)}" selected>自定义（当前值）</option>`
+        : "";
+      const items = stylePresets
+        .map((item) => `<option value="${esc(item.prompt)}"${item.prompt === value ? " selected" : ""}>${esc(item.label)}</option>`)
+        .join("");
+      return `<div class="stack">${esc(label)}
+        <span class="field-action">
+          <select data-style-preset>${extra}<option value="">自定义 / 未选</option>${items}</select>
+        </span>
+        <span class="field-action">
+          <input data-field="${esc(key)}" value="${esc(value)}" placeholder="选上方预设，或直接填写风格词" />
+          ${amplifyButton(label)}
+          <button class="btn small polish-btn" type="button" data-polish="${esc(key)}">✨润色</button>
+        </span>
+      </div>`;
+    }
     if (labels) {
       /* 值不在枚举里时保留为一条「未识别」选项，避免静默丢数据 */
       const extra = value && !(value in labels)
@@ -146,12 +167,14 @@
       return;
     }
     try {
-      const [info, bible, work] = await Promise.all([
+      const [info, bible, work, styles] = await Promise.all([
         NW.api(`/api/project/info?${NW.qs({ path })}`),
         NW.api(`/api/ui/setting?${NW.qs({ path })}`),
         NW.api(`/api/ui/project/work?${NW.qs({ path })}`),
+        NW.api(`/api/ui/styles`).catch(() => ({ styles: [] })),
       ]);
       bibleCache = bible;
+      stylePresets = styles.styles || [];
       renderInfo(info, bible);
       renderWork(work);
       renderSettings(bible);
@@ -386,6 +409,15 @@
     if (polish) polishField(polish);
   }
 
+  /* 视觉风格预设下拉：选中后把风格词写入同一字段的输入框（保存仍走原逻辑）。 */
+  function onViewChange(event) {
+    const select = event.target.closest("[data-style-preset]");
+    if (!select) return;
+    const input = select.closest(".stack").querySelector('[data-field="visual_style"]');
+    if (!input) return;
+    input.value = select.value || input.value;
+  }
+
   /* 首次激活时绑定事件，避免重复绑定。 */
   function bind() {
     if (bound) return;
@@ -397,6 +429,7 @@
     el("pjGenPremise").addEventListener("click", () => generateSection("premise", el("pjGenPremise")));
     el("pjGenStyle").addEventListener("click", () => generateSection("style", el("pjGenStyle")));
     el("view-project").addEventListener("click", onViewClick);
+    el("view-project").addEventListener("change", onViewChange);
     if (window.NWTools) NWTools.bindAmplify(document);
     NW.onProject(() => load());
   }

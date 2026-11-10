@@ -32,6 +32,22 @@ from .comfy_media import (
     templates_dir,
 )
 from .generate import probe_duration_ms, render_image, render_sfx, render_video
+from .styles import with_style
+
+
+def _visual_style(store: ProjectStore) -> str:
+    """读取设定库里的统一画面风格词（图片与视频共用同一份）。
+
+    参数:
+        store: 工程。
+
+    返回:
+        风格词文本；未设置时返回空字符串。
+    """
+    from ..store.settings_store import SettingsStore
+
+    bible = SettingsStore(store.root).load_or_none() or {}
+    return str((bible.get("style") or {}).get("visual_style") or "").strip()
 
 # 每类媒体的产物目录与扩展名
 MEDIA_PATHS = {"sfx": ("assets/sfx", ".wav"), "image": ("assets/images", ".png"), "video": ("assets/video", ".mp4")}
@@ -346,7 +362,7 @@ def _generate_image(
         config,
         resolved["template_id"],
         "image",
-        prompt=item.get("prompt") or "",
+        prompt=with_style(item.get("prompt") or "", {"style": {"visual_style": _visual_style(store)}}),
         negative_prompt=item.get("negative_prompt") or "",
         aspect_ratio=aspect["ratio"],
         item_id=item["id"],
@@ -423,7 +439,7 @@ def _generate_video(
         config,
         resolved["template_id"],
         "video_i2v" if source else "video_t2v",
-        prompt=item.get("prompt") or "",
+        prompt=with_style(item.get("prompt") or "", {"style": {"visual_style": _visual_style(store)}}),
         negative_prompt=item.get("negative_prompt") or "",
         aspect_ratio=aspect["ratio"],
         item_id=item["id"],

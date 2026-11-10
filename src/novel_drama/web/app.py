@@ -716,6 +716,14 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
             return run("--config", config_path, *argv)
         return run(*argv)
 
+    @app.get("/api/ui/styles")
+    def ui_styles():
+        """固定画面风格预设（写实 / 动漫 / 古风等），图片与视频共用。"""
+        from ..media.styles import load_styles
+
+        cfg = load_config(config_path) if config_path else load_config()
+        return {"styles": load_styles(comfy_media.templates_dir(cfg))}
+
     @app.get("/api/ui/chapters")
     def ui_chapters(path: str = Query(...)):
         """章节目录（`chapter list --json`）。"""

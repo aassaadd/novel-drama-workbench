@@ -261,7 +261,7 @@ def render_character_sheet(store: ProjectStore, config: AppConfig, character_id:
         "角色设定图",
         f"{character_id}.{kind}",
         reference=reference,
-        aspect_ratio="3:1" if kind == "turnaround" else None,
+        aspect_ratio=None,
         seed=seed_for(character_id, 1),
     )
 
