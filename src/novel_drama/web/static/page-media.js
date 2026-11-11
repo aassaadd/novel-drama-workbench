@@ -49,7 +49,10 @@
         const extra = item.error
           ? `<span class="err">${esc(typeof item.error === "string" ? item.error : item.error.message || JSON.stringify(item.error))}</span>`
           : esc(item.asset_id || "—");
-        const kindText = kind === "sfx" ? item.kind : item.mode || "—";
+        const kindText =
+          kind === "sfx"
+            ? SFX_KIND_LABELS[item.kind] || item.kind || ""
+            : ANIM_MODE_LABELS[item.mode] || item.mode || "—";
         // 图像/视频多三列只读信息：模板、画幅、宽高（后端解析失败时给空值）
         const specCells =
           kind === "sfx"
@@ -74,7 +77,7 @@
           `<td>${esc(item.index ?? "")}</td><td>${esc(kindText || "")}</td>${specCells}${refCell}` +
           `<td class="md-preview">${previewHtml(item, kind)}</td>` +
           `<td class="wrap">${esc(item.prompt || "")}</td>` +
-          `<td><span class="state-badge s-${esc(item.status)}"><span class="dot"></span>${esc(item.status)}</span></td>` +
+          `<td><span class="state-badge s-${esc(item.status)}"><span class="dot"></span>${esc(NW.statusLabel(item.status))}</span></td>` +
           `<td>${msText(item.duration_ms)}</td><td class="wrap">${extra}</td></tr>`
         );
       })
@@ -156,10 +159,10 @@
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ path: NW.state.path, chapter: NW.state.chapter, kind, force: el("mdForce").checked }),
-        busy: `正在生成${({ sfx: "音效", image: "配图", video: "视频位" })[kind] || kind}…`,
+        busy: `正在生成${MEDIA_KIND_LABELS[kind] || kind}…`,
         busyDetail: "媒体生成较慢，请勿关闭页面",
       });
-      const text = `${kind}：就绪 ${result.ready} / 跳过 ${result.skipped} / 失败 ${result.failed}`;
+      const text = `${MEDIA_KIND_LABELS[kind] || kind}：就绪 ${result.ready} / 跳过 ${result.skipped} / 失败 ${result.failed}`;
       NW.toast(text, result.failed === 0);
       await load();
       if (window.NWInspector) NWInspector.refreshMedia();

@@ -89,7 +89,7 @@ function rowHtml(row, top) {
     `<span class="c-kind">${kindLabel(row.kind)}</span>` +
     `<span class="c-speaker ${unknown}">${escapeHtml(row.speaker || "")}</span>` +
     `<span class="c-text" title="${text}">${text}</span>` +
-    `<span class="c-num">${row.emotion || ""}</span>` +
+    `<span class="c-num">${escapeHtml(emotionLabel(row.emotion))}</span>` +
     `<span class="c-num">${fmt(row.emotion_intensity)}</span>` +
     `<span class="c-num">${fmt(row.speed)}</span>` +
     `<span class="c-state">${stateBadge(row.state)}</span>` +
@@ -584,6 +584,8 @@ window.NW = {
   escapeHtml,
   fmt,
   kindLabel,
+  emotionLabel,
+  statusLabel,
   openProject,
   loadChapter,
   /* 重新拉工程列表（新建工程后刷新顶栏候选，避免要刷新页面才出现） */

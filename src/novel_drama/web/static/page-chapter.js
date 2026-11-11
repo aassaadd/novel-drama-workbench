@@ -104,7 +104,7 @@
     const scenes = chapter.scenes || [];
     el("chInfo").innerHTML = [
       `<div class="kv-row"><span class="kv-key">章节</span><span class="kv-val">${esc(chapter.index)}. ${esc(chapter.title || "")}</span></div>`,
-      `<div class="kv-row"><span class="kv-key">状态</span><span class="kv-val">${esc(chapter.status || "")}</span></div>`,
+      `<div class="kv-row"><span class="kv-key">状态</span><span class="kv-val">${esc(NW.statusLabel(chapter.status))}</span></div>`,
       `<div class="kv-row"><span class="kv-key">字数</span><span class="kv-val">${esc(chapter.word_count || 0)}</span></div>`,
       `<div class="kv-row"><span class="kv-key">场景</span><span class="kv-val">${scenes.length}</span></div>`,
       `<div class="kv-row"><span class="kv-key">台词</span><span class="kv-val">${lineTotal} 行</span></div>`,

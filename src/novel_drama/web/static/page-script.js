@@ -16,6 +16,42 @@
   const KIND_LABEL = { dialogue: "对白", narration: "旁白", inner_monologue: "独白" };
   const CUE_LABEL = { sfx: "音效", visual: "画面", anim: "动画", silence: "静音" };
 
+  /* 标注里的英文枚举 → 中文：只影响展示，markup 原文与写回仍是英文原值。
+   * 情绪 / 时间 / 音效类别 / 动画模式 / 机位的中文名来自 core.js，避免多处维护。 */
+  const META_LABELS = { location: "地点", time: "时间", mood: "情绪" };
+
+  /* 查表翻译英文枚举；未登记的值原样返回，避免静默丢信息。
+   * 参数：labels 枚举映射；value 原值。
+   * 返回：中文字符串；空值返回空串。
+   */
+  function labelOf(labels, value) {
+    return labels[value] || value || "";
+  }
+
+  /* 指令位置参数翻译：after-line=N → 第 N 行后，其他值原样返回。
+   * 参数：token 位置参数。
+   * 返回：展示文本。
+   */
+  function positionText(token) {
+    const match = /^after-line=(\d+)$/.exec(token || "");
+    return match ? `第 ${match[1]} 行后` : token || "";
+  }
+
+  /* 镜头参数（location=… / time=… / mood=…）拆成中文名与中文值。
+   * 参数：token 形如 `time=night`。
+   * 返回：{ name, value }；无法解析时 name 为空、value 为原文。
+   */
+  function metaPair(token) {
+    const index = String(token || "").indexOf("=");
+    if (index <= 0) return { name: "", value: token || "" };
+    const key = token.slice(0, index);
+    const value = token.slice(index + 1);
+    let text = value;
+    if (key === "time") text = labelOf(TIME_LABELS, value);
+    else if (key === "mood") text = emotionLabel(value);
+    return { name: META_LABELS[key] || key, value: text };
+  }
+
   /* 把标注文本解析成「镜头 → 台词行 / 指令行」两段结构。
    * 参数：markup 标注原文（`scripts/<chapter>.markup.txt`）。
    * 返回：数组，元素为 { index, name, meta, lines, cues }；
@@ -73,18 +109,18 @@
     let key = "";
     let detail = "";
     if (cue.head === "sfx") {
-      key = parts[0] || "";
-      detail = `${parts[1] || "?"}ms · ${parts[2] || "?"}`;
+      key = labelOf(SFX_KIND_LABELS, parts[0] || "");
+      detail = [parts[1] ? `${parts[1]}ms` : "", positionText(parts[2])].filter(Boolean).join(" · ");
       parts.splice(0, 3);
     } else if (cue.head === "silence") {
-      detail = `${parts[0] || "?"}ms · ${parts[1] || "?"}`;
+      detail = [parts[0] ? `${parts[0]}ms` : "", positionText(parts[1])].filter(Boolean).join(" · ");
       parts.splice(0, 2);
     } else if (cue.head === "visual") {
       key = parts[0] || "";
       parts.splice(0, 1);
     } else if (cue.head === "anim") {
-      key = [parts[0], parts[1], parts[2]].filter(Boolean).join(" ");
-      detail = parts[2] || "";
+      key = labelOf(ANIM_MODE_LABELS, parts[0] || "");
+      detail = [parts[1] ? `${parts[1]}ms` : "", labelOf(CAMERA_LABELS, parts[2] || "")].filter(Boolean).join(" · ");
       parts.splice(0, 3);
     }
     const color = { sfx: "mk-sfx", visual: "mk-visual", anim: "mk-anim", silence: "mk-silence" }[cue.head] || "mk-kind";
@@ -109,7 +145,7 @@
     const kindText = KIND_LABEL[kind] || kind;
     return (
       `<div class="mk-line"><span class="mk-speaker">${esc(speaker)}</span>` +
-      (emotion ? `<span class="mk-tag mk-emotion">[${esc(emotion)}]</span>` : "") +
+      (emotion ? `<span class="mk-tag mk-emotion">[${esc(emotionLabel(emotion))}]</span>` : "") +
       (kindText ? `<span class="mk-tag mk-kind">(${esc(kindText)})</span>` : "") +
       `<span class="mk-text">${esc(row.text || "")}</span></div>`
     );
@@ -124,7 +160,14 @@
           `<div class="shot-head">` +
           (shot.index ? `<span class="shot-no">#${esc(shot.index)}</span>` : "") +
           `<span class="shot-name">${esc(shot.name || "未命名镜头")}</span>` +
-          (shot.meta.length ? `<span class="shot-meta">${shot.meta.map((item) => `<span>${esc(item)}</span>`).join("")}</span>` : "") +
+          (shot.meta.length
+            ? `<span class="shot-meta">${shot.meta
+                .map((item) => {
+                  const pair = metaPair(item);
+                  return `<span>${esc([pair.name, pair.value].filter(Boolean).join(" "))}</span>`;
+                })
+                .join("")}</span>`
+            : "") +
           `</div>`;
         const body = shot.lines.map(lineHtml).join("") + shot.cues.map(cueHtml).join("");
         return `<div class="shot">${head}${body || "<p class='muted'>这个镜头没有行</p>"}</div>`;

@@ -56,7 +56,7 @@
       const status = item ? item.status : "pending";
       const note = item ? item.error || item.note || "" : "";
       return (
-        `<li class="step" data-status="${esc(status)}" title="${esc(note || `${label}：${status}`)}">` +
+        `<li class="step" data-status="${esc(status)}" title="${esc(note || `${label}：${statusLabel(status)}`)}">` +
         `${esc(item && item.label ? item.label : label)}</li>`
       );
     }).join("");
@@ -72,7 +72,7 @@
     const stages = run.stages || [];
     const running = run.status === "running";
     el("exStatus").textContent =
-      `run ${run.run_id}　状态 ${run.status}　章节 ${run.chapter_id}　开始 ${run.started_at || ""}` +
+      `run ${run.run_id}　状态 ${statusLabel(run.status)}　章节 ${run.chapter_id}　开始 ${run.started_at || ""}` +
       (run.finished_at ? `　结束 ${run.finished_at}` : "") +
       (running ? `　已记录 ${stages.length} 个阶段` : "");
     el("exStages").innerHTML = stepbarHtml(run);

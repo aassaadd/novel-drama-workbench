@@ -280,7 +280,8 @@
     cast.forEach((item) => {
       const option = document.createElement("option");
       option.value = item.id || "";
-      option.textContent = `${item.name || item.id}（${item.role === "protagonist" ? "主角" : "配角"}）`;
+      const roleLabels = { protagonist: "主角", antagonist: "反派", supporting: "配角", minor: "龙套" };
+      option.textContent = `${item.name || item.id}（${roleLabels[item.role] || "配角"}）`;
       option.selected = item.id === currentPov;
       select.appendChild(option);
     });

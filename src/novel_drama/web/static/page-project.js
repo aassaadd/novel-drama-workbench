@@ -120,12 +120,17 @@
       </div>`;
     }
     if (labels) {
+      /* 回显兼容：旧数据/模型可能存的是中文标签，按标签反查枚举值后再选中 */
+      const byLabel = value && !(value in labels)
+        ? Object.entries(labels).find(([, text]) => text === value)
+        : null;
+      const selected = byLabel ? byLabel[0] : value;
       /* 值不在枚举里时保留为一条「未识别」选项，避免静默丢数据 */
-      const extra = value && !(value in labels)
-        ? `<option value="${esc(value)}" selected>${esc(value)}（未识别）</option>`
+      const extra = selected && !(selected in labels)
+        ? `<option value="${esc(selected)}" selected>${esc(selected)}（未识别）</option>`
         : "";
       const items = Object.entries(labels)
-        .map(([val, text]) => `<option value="${esc(val)}"${val === value ? " selected" : ""}>${esc(text)}</option>`)
+        .map(([val, text]) => `<option value="${esc(val)}"${val === selected ? " selected" : ""}>${esc(text)}</option>`)
         .join("");
       return `<div class="stack">${esc(label)}
         <span class="field-action">
@@ -303,7 +308,11 @@
     if (!input) return;
     const text = value === null || value === undefined ? "" : String(value);
     if (input.tagName === "SELECT") {
-      if (Array.from(input.options).some((option) => option.value === text)) input.value = text;
+      /* 优先按值匹配；旧数据是中文标签时按选项文本反查，保证回显选中 */
+      const match = Array.from(input.options).find(
+        (option) => option.value === text || option.textContent === text,
+      );
+      if (match) input.value = match.value;
       return;
     }
     input.value = text;

@@ -325,8 +325,12 @@
       let read;
 
       if (enums) {
-        /* 枚举字段：用下拉菜单展示，值不在枚举里时保留一条「未识别」，避免静默丢数据 */
-        const current = text.trim();
+        /* 枚举字段：用下拉菜单展示；中文标签也能反查回英文值，避免「未识别」 */
+        const raw = text.trim();
+        const byLabel = raw && !(raw in enums)
+          ? Object.entries(enums).find(([, label]) => label === raw)
+          : null;
+        const current = byLabel ? byLabel[0] : raw;
         const select = document.createElement("select");
         select.className = "gen-input";
         select.id = inputId;

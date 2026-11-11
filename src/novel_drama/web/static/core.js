@@ -101,7 +101,47 @@ const STATE_LABELS = {
   failed: "失败",
   stale: "已过期",
   skipped: "已跳过",
+  draft: "草稿",
+  done: "已完成",
 };
+
+/* 状态枚举 → 中文：章节 draft/done、媒体 pending/ready/failed 等共用。
+ * 参数：status 状态枚举。
+ * 返回：中文字符串；未登记的值原样返回。
+ */
+function statusLabel(status) {
+  return STATE_LABELS[status] || status || "";
+}
+
+/* 配音情绪的中文名：情绪值是 schema 枚举，界面显示中文、写回仍是英文。 */
+const EMOTION_LABELS = {
+  neutral: "中性",
+  joy: "喜悦",
+  sad: "悲伤",
+  angry: "愤怒",
+  fear: "恐惧",
+  surprise: "惊讶",
+  tender: "温柔",
+  excited: "激动",
+  whisper: "低语",
+  serious: "严肃",
+  calm: "冷静",
+};
+
+/* 情绪枚举 → 中文；未登记的值原样返回，避免静默丢信息。
+ * 参数：emotion 情绪枚举。
+ * 返回：中文字符串。
+ */
+function emotionLabel(emotion) {
+  return EMOTION_LABELS[emotion] || emotion || "";
+}
+
+/* 媒体/标注里的英文枚举 → 中文：只影响展示，写回与解析仍用英文原值。 */
+const TIME_LABELS = { dawn: "黎明", morning: "上午", day: "白天", dusk: "黄昏", night: "夜晚", unknown: "未知" };
+const MEDIA_KIND_LABELS = { sfx: "音效", image: "配图", video: "视频" };
+const SFX_KIND_LABELS = { ambience: "环境音", foley: "拟音", impact: "冲击音", transition: "转场音", music_sting: "音乐点" };
+const ANIM_MODE_LABELS = { i2v: "图生视频", t2v: "文生视频" };
+const CAMERA_LABELS = { static: "固定", slow_push_in: "缓慢推近", pan_left: "向左摇镜", pan_right: "向右摇镜", handheld: "手持" };
 
 /* 行状态徽标（台词校对页与右栏共用同一套 class）。
  * 参数：name 状态名（pending / queued / running / ready / failed / stale / skipped）。

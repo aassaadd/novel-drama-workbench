@@ -61,7 +61,7 @@
     const scenes = (chapter.scenes || []).length || chapter.scene_count || 0;
     return (
       `<div class="ins-title"><span><b>${esc(chapter.index ?? "")}. ${esc(chapter.title || "")}</b></span>` +
-      `<span class="kicker">${esc(chapter.status || "")}</span></div>` +
+      `<span class="kicker">${esc(NW.statusLabel(chapter.status))}</span></div>` +
       row("章节 ID", `<code>${esc(summary.id)}</code>`) +
       row("字数", esc(chapter.word_count ?? 0)) +
       row("场景", String(scenes)) +
@@ -81,9 +81,9 @@
     const id = line.line_id || line.id || "";
     if (!id) return "<p class='muted'>没有选中台词行。</p>";
     const tts = line.tts || {};
-    const state = line.state || tts.status || "—";
+    const state = NW.statusLabel(line.state || tts.status || "—");
     const duration = line.duration_ms ?? tts.duration_ms;
-    const bits = [`[${esc(line.emotion || "neutral")}] ×${esc(line.emotion_intensity ?? "?")}`, `语速 ${esc(line.speed ?? "?")}`];
+    const bits = [`[${esc(NW.emotionLabel(line.emotion || "neutral"))}] ×${esc(line.emotion_intensity ?? "?")}`, `语速 ${esc(line.speed ?? "?")}`];
     return (
       `<div class="ins-title"><span><b>${esc(NW.kindLabel(line.kind))}</b></span><span class="kicker">${esc(state)}</span></div>` +
       row("行 ID", `<code>${esc(id)}</code>`) +
@@ -118,12 +118,12 @@
       player = `<div class="ins-note">配图文件：${esc(rel)}</div>`;
     }
     return (
-      `<div class="ins-title"><span><b>${esc(kind)} #${esc(item.index ?? "")}</b></span>` +
-      `<span class="kicker">${esc(item.status || "")}</span></div>` +
-      row("类型", esc(kind === "sfx" ? item.kind || "sfx" : item.mode || kind)) +
+      `<div class="ins-title"><span><b>${esc(MEDIA_KIND_LABELS[kind] || kind)} #${esc(item.index ?? "")}</b></span>` +
+      `<span class="kicker">${esc(NW.statusLabel(item.status))}</span></div>` +
+      row("类型", esc(kind === "sfx" ? SFX_KIND_LABELS[item.kind] || item.kind || "音效" : ANIM_MODE_LABELS[item.mode] || item.mode || kind)) +
       row("提示词", esc(item.prompt || "—")) +
       row("时长", esc(msText(item.duration_ms))) +
-      row("状态", esc(item.status || "—")) +
+      row("状态", esc(NW.statusLabel(item.status) || "—")) +
       (item.error ? row("错误", `<span class="err">${esc(typeof item.error === "string" ? item.error : JSON.stringify(item.error))}</span>`) : "") +
       row("文件", `<code>${esc(rel || "—")}</code>`) +
       player +
