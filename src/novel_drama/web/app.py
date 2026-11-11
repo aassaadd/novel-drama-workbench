@@ -589,6 +589,62 @@ def _cached_summary(store: ProjectStore, chapter_id: str, content: str) -> dict 
     return cached
 
 
+def _voice_binding_index(voices: list[dict]) -> dict:
+    """建立「绑定值 → 音色 ID」索引，兼容旧字段、变体 ID 与旧版内置名称。
+
+    参数:
+        voices: 工程 `voices.json` 里的音色列表。
+
+    返回:
+        字典：音色 ID / 变体 ID / 音色名称 / 旧版内置名称 都映射到音色 ID。
+    """
+    from ..tts.builtin_voices import LEGACY_NAME_MAP
+
+    index: dict[str, str] = {}
+    names: dict[str, str] = {}
+    for voice in voices:
+        voice_id = str(voice.get("id") or "")
+        if not voice_id:
+            continue
+        index[voice_id] = voice_id
+        name = str(voice.get("name") or "")
+        if name:
+            names[name] = voice_id
+            index[name] = voice_id
+        for variant in voice.get("variants") or []:
+            variant_id = str(variant.get("id") or "")
+            if variant_id:
+                index[variant_id] = voice_id
+    # 旧版内置音色重命名后，旧名称仍可能留在 characters.json 里
+    for old_name, new_name in LEGACY_NAME_MAP.items():
+        target = names.get(new_name)
+        if target:
+            index.setdefault(old_name, target)
+    return index
+
+
+def _resolve_voice_binding(binding: dict | None, index: dict) -> str | None:
+    """把人物绑定解析成音色库里的音色 ID。
+
+    参数:
+        binding: `character.voice_binding`。
+        index: `_voice_binding_index` 生成的索引。
+
+    返回:
+        匹配到的音色 ID；无法解析时返回 None。
+    """
+    if not binding:
+        return None
+    for key in ("voice_library_id", "voice_id", "default_variant_id"):
+        raw = binding.get(key)
+        if not raw:
+            continue
+        resolved = index.get(str(raw))
+        if resolved:
+            return resolved
+    return None
+
+
 def create_app(project_root: str | None = None, config_path: str | None = None):
     """创建 FastAPI 应用。
 
@@ -1870,16 +1926,18 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         store = _store(path)
         cfg = _tts_config()
         characters = store.load_characters()["characters"]
+        voices = store.load_voices()["voices"]
+        binding_index = _voice_binding_index(voices)
         return {
-            "voices": store.load_voices()["voices"],
+            "voices": voices,
             "characters": [
                 {
                     "id": item["id"],
                     "name": item["name"],
                     "role": item.get("role"),
                     "gender": item.get("gender"),
-                    "voice_id": (item.get("voice_binding") or {}).get("voice_library_id")
-                    or (item.get("voice_binding") or {}).get("voice_id"),
+                    # 兼容 v2 voice_library_id、v1 voice_id、变体 ID 与旧版内置名称
+                    "voice_id": _resolve_voice_binding(item.get("voice_binding"), binding_index),
                 }
                 for item in characters
             ],

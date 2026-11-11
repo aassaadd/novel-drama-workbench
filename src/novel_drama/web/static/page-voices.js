@@ -133,7 +133,10 @@
       .join("");
   }
 
-  /* 渲染角色 → 音色绑定表。 */
+  /* 渲染角色 → 音色绑定表。
+   * 绑定值统一按字符串比较；后端已把 v1 voice_id、变体 id、旧版内置名称
+   * 解析成音色 id，这里再做一次容错，避免类型或残留旧值导致下拉不回显。
+   */
   function renderBinds() {
     const box = el("voiceBindList");
     if (!box) return;
@@ -143,22 +146,41 @@
     }
     box.innerHTML = state.characters
       .map((character) => {
+        const bound = character.voice_id === null || character.voice_id === undefined ? "" : String(character.voice_id);
         const options = state.voices
-          .map(
-            (voice) =>
-              `<option value="${esc(voice.id)}" ${voice.id === character.voice_id ? "selected" : ""}>${esc(voice.name)}</option>`
-          )
+          .map((voice) => {
+            const voiceId = String(voice.id);
+            return `<option value="${esc(voiceId)}" ${voiceId === bound ? "selected" : ""}>${esc(voice.name)}</option>`;
+          })
           .join("");
+        const matched = !bound || state.voices.some((voice) => String(voice.id) === bound);
+        const missing = matched
+          ? ""
+          : `<option value="${esc(bound)}" selected disabled>已绑定（音色缺失）</option>`;
         return `<div class="voice-bind-row">
           <span class="voice-bind-name">${esc(character.name)}</span>
           <span class="tag">${esc(character.role || "")}</span>
           <select data-voice-act="bind" data-character="${esc(character.id)}">
             <option value="">未绑定</option>
+            ${missing}
             ${options}
           </select>
         </div>`;
       })
       .join("");
+
+    // innerHTML 写入后再显式赋值一次，确保各浏览器都把已绑定项回显出来
+    box.querySelectorAll('select[data-voice-act="bind"]').forEach((select) => {
+      const character = state.characters.find((item) => item.id === select.dataset.character);
+      const bound = character && character.voice_id !== null && character.voice_id !== undefined
+        ? String(character.voice_id)
+        : "";
+      if (bound && Array.from(select.options).some((option) => option.value === bound)) {
+        select.value = bound;
+      } else {
+        select.value = "";
+      }
+    });
   }
 
   /* 统一调用 POST 接口，失败时 toast。 */
