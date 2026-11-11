@@ -10,8 +10,10 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from fastapi import HTTPException
@@ -23,6 +25,7 @@ from ..media import comfy_media
 from ..media.references import collect_references
 from ..models.ids import now_iso
 from ..store import ProjectStore, list_workspaces
+from ..store.queue_store import QueueStore
 from ..writing.editing import edit_chapter, save_chapter_content
 from ..writing.summarize import apply_summary, summarize_chapter
 from .actions import fail_body, run
@@ -206,6 +209,32 @@ SETTING_SCALARS = (
     "prose_style",
     "visual_style",
 )
+
+
+def _is_tts_process(pid: int) -> bool:
+    """判断 pid 是否为本工程启动的配音消费进程。
+
+    说明:
+        pid 文件可能在进程自然退出后残留；系统复用 pid 时直接 killpg 会误杀无关进程，
+        因此先用 ps 确认命令行里确实是 `novel_drama.cli ... tts run`。
+
+    参数:
+        pid: 待确认的进程号。
+
+    返回:
+        True 表示可以安全终止。
+    """
+    try:
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "command="],
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    command = (result.stdout or "").strip()
+    return "novel_drama.cli" in command and "tts run" in command
 
 
 def _dig(data: dict, dotted: str):
@@ -877,6 +906,8 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         """
         path = body["path"]
         chapter = body["chapter"]
+        # regenerate：已就绪行也重新合成（绕过同键去重与产物缓存）；continue：只补未生成/过期/失败
+        mode = "regenerate" if str(body.get("mode") or "") == "regenerate" else "continue"
         # 前置检查：权重缺失/不可用时直接拒绝，不静默降级，也不启动一个必然失败的后台进程
         ready = ui_readiness()
         if not ready["ready"]:
@@ -888,7 +919,8 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
             since = min((job.get("created_at") or "") for job in active) or now_iso()
             return {"started": False, "active": len(active), "since": since}
 
-        log_dir = ProjectStore(path).root / ".ndw" / "logs"
+        store = ProjectStore(path)
+        log_dir = store.root / ".ndw" / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
         since = now_iso()
         log_path = log_dir / f"web-tts-{since.replace(':', '').replace('-', '')}.log"
@@ -899,6 +931,8 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         if config_path:
             argv += ["--config", config_path]
         argv += ["tts", "run", "--chapter", chapter, "--wait"]
+        if mode == "regenerate":
+            argv += ["--scope", "chapter", "--force"]
         with log_path.open("wb") as log:
             process = subprocess.Popen(
                 argv,
@@ -909,7 +943,56 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
                 env=env,
                 start_new_session=True,
             )
-        return {"started": True, "pid": process.pid, "log": str(log_path), "since": since}
+        # 记录后台进程 pid，供「停止生成」终止（进程组由 start_new_session 独立出来）
+        pid_file = store.root / ".ndw" / "web-tts.pid"
+        pid_file.write_text(str(process.pid), encoding="utf-8")
+        return {"started": True, "mode": mode, "pid": process.pid, "log": str(log_path), "since": since}
+
+    @app.post("/api/ui/stop")
+    def ui_stop(body: dict) -> dict:
+        """停止配音生成：终止后台消费进程，并把未完成任务标记为已取消。
+
+        参数:
+            body: {path 工程目录}。
+
+        返回:
+            {stopped 是否确实停下, killed 是否终止了进程, canceled 被取消的任务数}。
+        """
+        store = ProjectStore(body["path"])
+        pid_file = store.root / ".ndw" / "web-tts.pid"
+        killed = False
+        pid = 0
+        if pid_file.is_file():
+            try:
+                pid = int(pid_file.read_text(encoding="utf-8").strip())
+            except ValueError:
+                pid = 0
+            if pid and _is_tts_process(pid):
+                try:
+                    os.killpg(os.getpgid(pid), signal.SIGTERM)
+                    killed = True
+                except (ProcessLookupError, PermissionError):
+                    killed = False
+                # 进程收到 SIGTERM 立刻退出；稍等再改队列，避免和它的写入互相覆盖
+                for _ in range(20):
+                    try:
+                        os.kill(pid, 0)
+                    except (ProcessLookupError, PermissionError):
+                        break
+                    time.sleep(0.1)
+            pid_file.unlink(missing_ok=True)
+        queue = QueueStore(store)
+        jobs = queue.load()
+        canceled = 0
+        for job in jobs:
+            if job.get("status") in ("queued", "running"):
+                job["status"] = "canceled"
+                job["finished_at"] = now_iso()
+                job["error"] = {"code": "CANCELED", "message": "用户停止生成"}
+                canceled += 1
+        if canceled:
+            queue.save(jobs)
+        return {"stopped": killed or canceled > 0, "killed": killed, "canceled": canceled}
 
     @app.post("/api/ui/line/set")
     def ui_line_set(body: dict) -> dict:

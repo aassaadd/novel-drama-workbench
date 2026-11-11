@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from pathlib import Path
 
 from . import __version__
@@ -342,9 +343,18 @@ def cmd_tts(args, config: AppConfig) -> int:
     snapshots = line_state.load_snapshots(store.root, chapter)
     live_ids = line_state.live_line_ids(store)
     engine = line_state.engine_params(config)
-    statuses = line_state.parse_states(args.status)
+    # force：忽略状态筛选（含已就绪行），强制重新生成
+    force = bool(getattr(args, "force", False))
+    statuses = () if force else line_state.parse_states(args.status)
     # 默认范围：给了 --line 就是「选中」；给了 --scene 就是「场景」；否则「待处理」
-    scope = args.scope or ("selected" if args.line else ("scene" if args.scene else "pending"))
+    if args.scope:
+        scope = args.scope
+    elif args.line:
+        scope = "selected"
+    elif args.scene:
+        scope = "scene"
+    else:
+        scope = "chapter" if force else "pending"
     states = line_state.chapter_states(
         chapter, {item["id"]: item for item in characters}, snapshots, root=store.root, live_ids=live_ids, engine=engine
     )
@@ -352,7 +362,13 @@ def cmd_tts(args, config: AppConfig) -> int:
         states, scope=scope, line_ids=args.line, scene_ids=args.scene, statuses=statuses
     )
     counts = line_state.state_counts(selected)
-    todo_ids = {row["line"]["id"] for row in selected if row["state"] in line_state.PENDING_STATES}
+    if force:
+        # 强制重生成：范围内所有行都入队（含 ready）
+        todo_ids = {row["line"]["id"] for row in selected}
+        run_nonce = f"regen-{time.time_ns()}"
+    else:
+        todo_ids = {row["line"]["id"] for row in selected if row["state"] in line_state.PENDING_STATES}
+        run_nonce = None
     jobs = build_tts_jobs(
         chapter,
         characters,
@@ -362,6 +378,8 @@ def cmd_tts(args, config: AppConfig) -> int:
         root=store.root,
         live_ids=live_ids,
         line_ids=todo_ids,
+        force=force,
+        run_nonce=run_nonce,
     )
     if args.action == "plan":
         summary = (
@@ -1270,6 +1288,7 @@ def build_parser() -> argparse.ArgumentParser:
     q = p_sub.add_parser("run", help="按范围入队合成")
     q.add_argument("--chapter", required=True)
     q.add_argument("--wait", action="store_true")
+    q.add_argument("--force", action="store_true", help="忽略状态筛选与产物缓存，强制重新生成（含已就绪行）")
     _add_scope_args(q)
     q.set_defaults(func=cmd_tts)
     q = p_sub.add_parser("batch", help="行级批量合成（单并发，失败不中断，支持跨章节与缓存续跑）")

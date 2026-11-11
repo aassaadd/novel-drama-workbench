@@ -92,6 +92,8 @@ def cmd_line_list(args, config: AppConfig) -> int:
                 "tts_status": row["persisted"],
                 "changes": row["changes"],
                 "duration_ms": (line.get("tts") or {}).get("duration_ms"),
+                # 已生成音频的相对路径，供页面直接试听
+                "audio": (line.get("tts") or {}).get("asset_id"),
             }
         )
     if getattr(args, "json", False):

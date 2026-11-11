@@ -552,7 +552,42 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); }
 }
 
 .run-progress { color: var(--text); font-variant-numeric: tabular-nums; }
-.runbar .btn { margin-left: auto; }
+.runbar .btn { margin-left: 0; }
+.run-actions { margin-left: auto; display: flex; align-items: center; gap: var(--sp-2); }
+
+/* ---------------- 台词试听 ---------------- */
+
+.c-play { display: inline-flex; align-items: center; gap: 4px; }
+
+.play-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--accent);
+  font-size: 10px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.play-btn:hover { background: var(--panel-2); border-color: var(--accent); }
+
+/* ---------------- 生成方式选择 ---------------- */
+
+.choice-dialog { width: min(380px, 100%); }
+
+.choice-actions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.choice-actions .btn { width: 100%; margin: 0; }
 
 /* ---------------- 视图容器 ---------------- */
 

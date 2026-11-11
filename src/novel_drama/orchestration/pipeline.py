@@ -133,8 +133,10 @@ def build_tts_jobs(
     root=None,
     live_ids: set[str] | None = None,
     line_ids: set[str] | None = None,
+    force: bool = False,
+    run_nonce: str | None = None,
 ) -> list[dict]:
-    """规划整章配音任务（只针对过期/失败行）。
+    """规划整章配音任务（默认只针对过期/失败行）。
 
     参数:
         chapter: 章节 dict。
@@ -145,6 +147,8 @@ def build_tts_jobs(
         root: 工程根目录；给出时产物丢失的行会重新排队。
         live_ids: 当前队列里活跃的行 ID；用于僵尸态降级。
         line_ids: 只保留这些行（范围选择器的结果）；为空表示整章。
+        force: 强制重新生成；忽略过期判定（已就绪行也入队）。
+        run_nonce: 本次重生成的批次标识；写进幂等键，避免与历史任务去重。
 
     返回:
         渲染任务列表（未入队）。
@@ -156,7 +160,7 @@ def build_tts_jobs(
         for line in scene.get("lines") or []:
             if line_ids is not None and line.get("id") not in line_ids:
                 continue
-            if not is_line_stale(
+            if not force and not is_line_stale(
                 line,
                 char_index,
                 snapshot_index.get(line.get("id")),
@@ -166,9 +170,15 @@ def build_tts_jobs(
             ):
                 continue
             target = {"chapter_id": chapter["id"], "scene_id": scene["id"], "line_id": line["id"]}
-            key = build_idempotency_key("tts", target, line.get("revision"), adapter, {"voice": line.get("speaker_id"), "speed": line.get("speed"), "emotion": line.get("emotion")})
+            params = {"voice": line.get("speaker_id"), "speed": line.get("speed"), "emotion": line.get("emotion")}
+            if run_nonce:
+                params["run"] = run_nonce
+            key = build_idempotency_key("tts", target, line.get("revision"), adapter, params)
             job = entities.new_job("tts", target, key, priority=100, adapter=adapter)
             job["params_hash"] = key
+            if force:
+                # 标记强制重生成：执行时跳过产物缓存，真正重新合成
+                job["force"] = True
             jobs.append(job)
     return jobs
 

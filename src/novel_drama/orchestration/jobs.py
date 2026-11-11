@@ -180,7 +180,16 @@ def _execute_tts_job(job: dict, store: ProjectStore, adapters: Adapters) -> list
             detail={"chapter_id": chapter_id, "line_id": line_id},
         )
 
-    report = run_batch(service, store, chapter, [row], batch_size=1, batch_id=f"job_{job.get('id')}")
+    # force 任务跳过产物缓存，确保「重新生成」真的重新合成
+    report = run_batch(
+        service,
+        store,
+        chapter,
+        [row],
+        batch_size=1,
+        batch_id=f"job_{job.get('id')}",
+        use_cache=not bool(job.get("force")),
+    )
     entry = (report.get("rows") or [{}])[0]
     if entry.get("status") != "ready":
         error = entry.get("error") or {}

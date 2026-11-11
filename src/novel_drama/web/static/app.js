@@ -83,6 +83,12 @@ function rowHtml(row, top) {
   const selected = state.selected === row.line_id ? "selected" : "";
   const unknown = row.speaker_id === "chr_unknown" || !row.speaker_id ? "unknown" : "";
   const text = escapeHtml(row.text || "");
+  const duration = row.duration_ms ? Math.round(row.duration_ms) : "—";
+  // 已就绪且有音频的行：时长格里换成试听按钮，时长放在按钮文字里
+  const playable = row.state === "ready" && row.audio;
+  const durationCell = playable
+    ? `<span class="c-num c-play"><button class="play-btn" type="button" data-play="${row.line_id}" title="试听">▶</button>${duration}</span>`
+    : `<span class="c-num">${duration}</span>`;
   return (
     `<div class="row ${selected}" data-line="${row.line_id}" style="position:absolute;top:${top}px;left:0;right:0">` +
     `<span class="c-index">${row.index ?? ""}</span>` +
@@ -93,7 +99,7 @@ function rowHtml(row, top) {
     `<span class="c-num">${fmt(row.emotion_intensity)}</span>` +
     `<span class="c-num">${fmt(row.speed)}</span>` +
     `<span class="c-state">${stateBadge(row.state)}</span>` +
-    `<span class="c-num">${row.duration_ms ? Math.round(row.duration_ms) : "—"}</span>` +
+    durationCell +
     `<span class="c-num">${row.pause_before_ms ?? ""}</span>` +
     `<span class="c-num">${row.pause_after_ms ?? ""}</span>` +
     `</div>`
@@ -185,6 +191,7 @@ async function openProject() {
       $("runInfo").textContent = "本次将生成 0 行";
       $("runProgress").textContent = "";
       $("btnStart").disabled = true;
+      $("btnStop").hidden = true;
       NW.notifyProject();
       NW.notifyChapter();
       return;
@@ -370,6 +377,118 @@ async function revertLine() {
   }
 }
 
+/* ---------------- 试听与生成控制 ---------------- */
+
+/* 试听状态：全页共用一个 Audio，切行时先停掉上一个。 */
+const playback = { audio: null, line: "" };
+
+/* 播放/暂停某行配音。
+ * 参数：lineId 台词行 ID。
+ * 返回：无。
+ */
+function togglePlay(lineId) {
+  const row = state.rows.find((item) => item.line_id === lineId);
+  if (!row || !row.audio) return;
+  if (playback.line === lineId && playback.audio) {
+    if (playback.audio.paused) playback.audio.play();
+    else playback.audio.pause();
+    return;
+  }
+  if (playback.audio) playback.audio.pause();
+  const audio = new Audio(uiFileUrl(row.audio, state.path));
+  playback.audio = audio;
+  playback.line = lineId;
+  audio.addEventListener("ended", () => {
+    if (playback.audio === audio) playback.line = "";
+  });
+  audio.play().catch((error) => toast(`试听失败：${error.message}`));
+}
+
+/* 询问生成方式：已有配音时让用户选「继续补生成」还是「全部重新生成」。
+ * 参数：readyCount 已就绪行数；pendingCount 待补生成行数。
+ * 返回：Promise<"continue"|"regenerate"|null>，null 表示取消。
+ */
+function askGenerateMode(readyCount, pendingCount) {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (value) => {
+      if (done) return;
+      done = true;
+      document.removeEventListener("keydown", onKey, true);
+      mask.remove();
+      resolve(value);
+    };
+    // Esc 等同于「取消」
+    const onKey = (event) => {
+      if (event.key === "Escape") finish(null);
+    };
+    const mask = document.createElement("div");
+    mask.className = "modal-mask";
+    const dialog = document.createElement("div");
+    dialog.className = "modal-editor choice-dialog";
+    dialog.setAttribute("role", "dialog");
+    dialog.setAttribute("aria-modal", "true");
+
+    const title = document.createElement("h3");
+    title.className = "modal-title";
+    title.textContent = "选择生成方式";
+    dialog.appendChild(title);
+
+    const hint = document.createElement("p");
+    hint.className = "modal-hint";
+    hint.textContent = pendingCount
+      ? `已有 ${readyCount} 行配音，还有 ${pendingCount} 行待生成。`
+      : `已有 ${readyCount} 行配音，没有待生成的行。`;
+    dialog.appendChild(hint);
+
+    const actions = document.createElement("div");
+    actions.className = "choice-actions";
+    dialog.appendChild(actions);
+
+    if (pendingCount) {
+      const cont = document.createElement("button");
+      cont.className = "btn primary";
+      cont.type = "button";
+      cont.textContent = `继续生成（补 ${pendingCount} 行）`;
+      cont.addEventListener("click", () => finish("continue"));
+      actions.appendChild(cont);
+    }
+
+    const regen = document.createElement("button");
+    regen.className = "btn danger";
+    regen.type = "button";
+    regen.textContent = `全部重新生成（覆盖 ${readyCount + pendingCount} 行）`;
+    regen.addEventListener("click", () => finish("regenerate"));
+    actions.appendChild(regen);
+
+    const cancel = document.createElement("button");
+    cancel.className = "btn";
+    cancel.type = "button";
+    cancel.textContent = "取消";
+    cancel.addEventListener("click", () => finish(null));
+    actions.appendChild(cancel);
+
+    mask.appendChild(dialog);
+    mask.addEventListener("click", (event) => {
+      if (event.target === mask) finish(null);
+    });
+    document.body.appendChild(mask);
+    document.addEventListener("keydown", onKey, true);
+  });
+}
+
+/* 同步运行区按钮：生成中显示「停止」并禁用「开始」。
+ * 参数：无。
+ * 返回：无。
+ */
+function syncRunButtons() {
+  const phase = $("btnStop");
+  if (phase) phase.hidden = !run.polling;
+  const readyCount = state.counts.ready || 0;
+  $("btnStart").disabled =
+    run.polling || !state.ready || (run.total === 0 && readyCount === 0);
+}
+
 /* ---------------- 生成与队列进度 ---------------- */
 
 /* 读配音链就绪状态：模型缺失/不可用时禁用「开始」并显示原因，不静默降级。 */
@@ -393,12 +512,18 @@ async function loadPlan() {
     const data = await api(`/api/ui/plan?${qs({ path: state.path, chapter: state.chapter })}`);
     run.total = data.jobs || 0;
     const counts = data.counts || {};
-    $("runInfo").textContent = state.ready
-      ? `本次将生成 ${run.total} 行（未生成 ${counts.pending || 0} / 过期 ${counts.stale || 0} / 失败 ${counts.failed || 0}）`
-      : `无法开始：${state.readyReason}`;
+    const readyCount = state.counts.ready || 0;
+    if (!state.ready) {
+      $("runInfo").textContent = `无法开始：${state.readyReason}`;
+    } else if (run.total === 0 && readyCount > 0) {
+      $("runInfo").textContent = `全部 ${readyCount} 行已生成，再次生成会覆盖现有配音`;
+    } else {
+      $("runInfo").textContent =
+        `本次将生成 ${run.total} 行（未生成 ${counts.pending || 0} / 过期 ${counts.stale || 0} / 失败 ${counts.failed || 0}）`;
+    }
     $("runProgress").textContent = "";
     renderRunFill(0, run.total);
-    $("btnStart").disabled = !state.ready || run.polling || run.total === 0;
+    syncRunButtons();
   } catch (error) {
     $("runInfo").textContent = `无法读取生成计划：${error.message}`;
     $("btnStart").disabled = true;
@@ -413,12 +538,21 @@ function renderRunFill(done, total) {
 /* 点「开始生成」：入队 + 后台消费进程，接口立即返回，进度靠 queue list。 */
 async function startGenerate() {
   if (!state.path || !state.chapter) return;
+  // 已有配音时先问方式：继续补生成 / 全部重新生成
+  const readyCount = state.counts.ready || 0;
+  let mode = "continue";
+  if (readyCount > 0) {
+    const picked = await askGenerateMode(readyCount, run.total);
+    if (!picked) return;
+    mode = picked;
+  }
   try {
     const result = await api("/api/ui/generate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ path: state.path, chapter: state.chapter }),
+      body: JSON.stringify({ path: state.path, chapter: state.chapter, mode }),
     });
+    if (mode === "regenerate") run.total = readyCount + run.total;
     run.since = result.since || null;
     run.seenJobs = false;
     run.idleSince = Date.now();
@@ -426,11 +560,39 @@ async function startGenerate() {
     run.done = new Set();
     run.failed = new Set();
     run.polling = true;
-    $("btnStart").disabled = true;
-    $("runProgress").textContent = result.started ? "已入队，等待队列…" : `已有 ${result.active} 条任务在执行，跟随进度`;
+    syncRunButtons();
+    $("runProgress").textContent = result.started
+      ? (mode === "regenerate" ? "已重新入队，等待队列…" : "已入队，等待队列…")
+      : `已有 ${result.active} 条任务在执行，跟随进度`;
     schedulePoll(600);
   } catch (error) {
     toast(`启动失败（退出码 ${error.code}）：${error.message}`);
+  }
+}
+
+/* 停止生成：终止后台消费进程，未完成任务由后端标记取消。
+ * 参数：无。
+ * 返回：Promise，无。
+ */
+async function stopGenerate() {
+  if (!state.path) return;
+  $("btnStop").disabled = true;
+  try {
+    const result = await api("/api/ui/stop", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: state.path }),
+    });
+    run.polling = false;
+    clearTimeout(run.timer);
+    await loadLines();
+    await loadPlan();
+    toast(result.canceled ? `已停止，取消 ${result.canceled} 条任务` : "已停止", true);
+  } catch (error) {
+    toast(`停止失败：${error.message}`);
+  } finally {
+    $("btnStop").disabled = false;
+    syncRunButtons();
   }
 }
 
@@ -466,6 +628,10 @@ async function pollQueue() {
       run.patched.add(lineId);
       run.failed.add(lineId);
       finished.push(job);
+    } else if (job.status === "canceled") {
+      // 被停止的任务：刷新那一行，让它回到真实状态
+      run.patched.add(lineId);
+      finished.push(job);
     }
   });
 
@@ -490,7 +656,7 @@ async function pollQueue() {
     return;
   }
   run.polling = false;
-  $("btnStart").disabled = false;
+  syncRunButtons();
   await loadPlan();
   toast(`生成结束：成功 ${run.done.size} / 失败 ${run.failed.size}`, run.failed.size === 0);
 }
@@ -559,6 +725,13 @@ function bindEvents() {
     renderTable();
   });
   $("rows").addEventListener("click", (event) => {
+    const play = event.target.closest(".play-btn");
+    if (play) {
+      // 试听按钮不触发整行选中
+      event.stopPropagation();
+      togglePlay(play.dataset.play);
+      return;
+    }
     const target = event.target.closest(".row");
     if (target) selectLine(target.dataset.line);
   });
@@ -568,6 +741,7 @@ function bindEvents() {
   $("btnSave").addEventListener("click", saveLine);
   $("btnRevert").addEventListener("click", revertLine);
   $("btnStart").addEventListener("click", startGenerate);
+  $("btnStop").addEventListener("click", stopGenerate);
   window.addEventListener("resize", renderTable);
 }
 

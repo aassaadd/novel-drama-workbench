@@ -295,6 +295,7 @@ def run_batch(
     reporter=None,
     write_report: bool = True,
     batch_id: str | None = None,
+    use_cache: bool = True,
 ) -> dict:
     """逐行合成并回写章节。
 
@@ -308,6 +309,7 @@ def run_batch(
         reporter: 可选回调 `reporter(批次序号, 批次结果列表, 累计统计)`。
         write_report: 是否单独写一份章节批次报告（多章节汇总时置 False）。
         batch_id: 批次 ID；缺省自动生成。
+        use_cache: 是否复用产物缓存（只影响读取；新产物仍会写回缓存）。
 
     返回:
         批次报告 dict（write_report 为真时同时写入 `.ndw/tts_batches/<batch_id>.json`）。
@@ -400,7 +402,7 @@ def run_batch(
                 expected_pid,
                 expected_spec.spec.model_version if expected_spec else None,
             )
-            hit = cache.lookup(store.root, key, table=cache_table)
+            hit = cache.lookup(store.root, key, table=cache_table) if use_cache else None
             if hit:
                 try:
                     src_path = Path(hit["asset_id"])
@@ -580,7 +582,8 @@ def run_batch(
 
     # 本章所有行处理完后统一落盘一次：run_chapters 逐章调用本函数，
     # 因此等价于「每章 flush 一次」，中断时已完成的章节缓存不会丢
-    cache.put_many(store.root, pending_cache)
+    if pending_cache:
+        cache.put_many(store.root, pending_cache)
 
     elapsed_ms = int((time.perf_counter() - started) * 1000)
     report = {
