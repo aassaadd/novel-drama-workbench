@@ -32,10 +32,13 @@ MANIFEST_NAME = ".ndw-voices.json"
 CONSENT_NOTE = "IndexTTS 官方 Demo 示例音频（随模型许可）；对外商用请替换为自有授权录音"
 
 #: 内置音色清单。
-#: 命名统一为「内置男声 01-05 / 内置女声 01-05」，按实测基频从低到高排列。
-#: f0_hz 是实测基频中位数，只描述音区，不直接等于性别结论；
-#: gender 已用两个独立音频性别分类模型复核（voice_01/06/07 早期按 F0 粗判为
-#: 女声，复核后确认是男声，故改名并保留 legacy_names 供旧工程迁移）。
+#: 命名统一为「内置男声 01-06 / 内置女声 01-04」。
+#: f0_hz 是 librosa.pyin 实测的基频中位数，只描述音区，不能单独作为性别依据：
+#:   - voice_04 基频 282Hz 落在常见女声区间，但共振峰 F2≈1509Hz（推算声道长约
+#:     17.4cm，男声典型 17-18cm），实际是「声音较尖锐的男声」，用户复测也确认是男声；
+#:   - voice_01/06/07 同样是男声，其中 voice_01 基频 324Hz，属于高音男声。
+#: IndexTTS 官方 Demo 只提供 wav 与 cases.jsonl 文本，没有性别标注，性别由听感 +
+#: 基频/共振峰实测判定。legacy_names 保留历史名称，供已导入工程原地迁移。
 #: duration_ms 为清单初值，安装后会再用 ffprobe 校正。
 CATALOG: list[dict] = [
     {
@@ -43,7 +46,7 @@ CATALOG: list[dict] = [
         "file": "voice_12.wav",
         "name": "内置男声 01",
         "gender": "male",
-        "f0_hz": 107,
+        "f0_hz": 94,
         "duration_ms": 2673,
         "legacy_names": ["内置男声·低沉"],
     },
@@ -52,7 +55,7 @@ CATALOG: list[dict] = [
         "file": "voice_05.wav",
         "name": "内置男声 02",
         "gender": "male",
-        "f0_hz": 147,
+        "f0_hz": 135,
         "duration_ms": 8406,
         "legacy_names": ["内置男声·中音"],
     },
@@ -61,72 +64,72 @@ CATALOG: list[dict] = [
         "file": "voice_07.wav",
         "name": "内置男声 03",
         "gender": "male",
-        "f0_hz": 170,
+        "f0_hz": 213,
         "duration_ms": 2036,
-        "legacy_names": ["内置女声·中低 A"],
+        "legacy_names": ["内置女声·中低 A", "内置男声 03"],
     },
     {
         "key": "voice_06",
         "file": "voice_06.wav",
         "name": "内置男声 04",
         "gender": "male",
-        "f0_hz": 176,
+        "f0_hz": 193,
         "duration_ms": 6229,
-        "legacy_names": ["内置女声·中低 B"],
+        "legacy_names": ["内置女声·中低 B", "内置男声 04"],
     },
     {
         "key": "voice_01",
         "file": "voice_01.wav",
         "name": "内置男声 05",
         "gender": "male",
-        "f0_hz": 296,
+        "f0_hz": 324,
         "duration_ms": 2439,
-        "legacy_names": ["内置女声·高音 A"],
+        "legacy_names": ["内置女声·高音 A", "内置男声 05"],
+    },
+    {
+        "key": "voice_04",
+        "file": "voice_04.wav",
+        "name": "内置男声 06",
+        "gender": "male",
+        "f0_hz": 282,
+        "duration_ms": 2346,
+        "legacy_names": ["内置女声·中音 B", "内置女声 02"],
     },
     {
         "key": "voice_09",
         "file": "voice_09.wav",
         "name": "内置女声 01",
         "gender": "female",
-        "f0_hz": 219,
+        "f0_hz": 233,
         "duration_ms": 10194,
         "legacy_names": ["内置女声·中音 A"],
     },
     {
-        "key": "voice_04",
-        "file": "voice_04.wav",
-        "name": "内置女声 02",
-        "gender": "female",
-        "f0_hz": 222,
-        "duration_ms": 2346,
-        "legacy_names": ["内置女声·中音 B"],
-    },
-    {
         "key": "voice_11",
         "file": "voice_11.wav",
-        "name": "内置女声 03",
+        "name": "内置女声 02",
         "gender": "female",
-        "f0_hz": 258,
+        "f0_hz": 302,
         "duration_ms": 7862,
-        "legacy_names": ["内置女声·中高 A"],
+        "legacy_names": ["内置女声·中高 A", "内置女声 03"],
     },
     {
         "key": "voice_02",
         "file": "voice_02.wav",
-        "name": "内置女声 04",
+        "name": "内置女声 03",
         "gender": "female",
-        "f0_hz": 262,
+        "f0_hz": 273,
         "duration_ms": 2927,
-        "legacy_names": ["内置女声·中高 B"],
+        "legacy_names": ["内置女声·中高 B", "内置女声 04"],
     },
     {
         "key": "voice_03",
         "file": "voice_03.wav",
-        "name": "内置女声 05",
+        "name": "内置女声 04",
         "gender": "female",
-        "f0_hz": 308,
+        "f0_hz": 406,
         "duration_ms": 2111,
-        "legacy_names": ["内置女声·高音 B"],
+        "legacy_names": ["内置女声·高音 B", "内置女声 05"],
     },
 ]
 
