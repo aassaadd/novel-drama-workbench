@@ -157,10 +157,26 @@
 
   /* 生成标注；apply=true 时一并应用。 */
   async function suggest(apply) {
-    if (busy || !NW.state.path || !NW.state.chapter) return;
+    if (busy) {
+      NW.toast("正在生成标注，请稍候…");
+      return;
+    }
+    if (!NW.state.path || !NW.state.chapter) {
+      NW.toast("先打开工程并选择章节");
+      return;
+    }
     busy = true;
-    el("scSuggest").disabled = true;
-    el("scApply").disabled = true;
+    const buttons = [el("scSuggest"), el("scApply")];
+    const labels = buttons.map((btn) => btn.textContent);
+    buttons.forEach((btn) => {
+      btn.disabled = true;
+    });
+    const hint = apply
+      ? "正在生成并应用标注（长章节会分批调用模型，可能需要 1–2 分钟）…"
+      : "正在生成标注（长章节会分批调用模型，可能需要 1–2 分钟）…";
+    el("scInfo").textContent = hint;
+    el("scMarkup").innerHTML = "<p class='muted'>生成中，请稍候…</p>";
+    NW.toast(hint);
     try {
       const result = await NW.api("/api/ui/script/suggest", {
         method: "POST",
@@ -183,10 +199,13 @@
       if (apply && NW.openProject) await NW.openProject();
     } catch (error) {
       NW.toast(`生成失败（退出码 ${error.code}）：${error.message}`);
+      await load();
     } finally {
       busy = false;
-      el("scSuggest").disabled = false;
-      el("scApply").disabled = false;
+      buttons.forEach((btn, index) => {
+        btn.disabled = false;
+        btn.textContent = labels[index];
+      });
     }
   }
 

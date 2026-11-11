@@ -15,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import json
 import random
+import re
 from typing import Iterator
 
 from .base import HealthStatus, TextGenChunk, TextGenRequest, TextGenResult, Usage
@@ -198,6 +199,16 @@ class OfflineWritingAdapter:
         # 单人物规则输出多包一层 {"characters": [...]}，而工具参数要求平铺
         if name == "emit_character" and isinstance(payload.get("characters"), list) and payload["characters"]:
             return payload["characters"][0]
+        # 单幕工具：从确定性整本大纲里取出本轮对应的那一幕（metadata.act_offset 由编排层指定）
+        if name == "emit_act":
+            acts = payload.get("acts")
+            if isinstance(acts, list) and acts:
+                try:
+                    offset = int((req.metadata or {}).get("act_offset") or 0)
+                except (TypeError, ValueError):
+                    offset = 0
+                index = offset if 0 <= offset < len(acts) else 0
+                return {"act": acts[index]}
         return payload
 
     def stream(self, req: TextGenRequest) -> Iterator[TextGenChunk]:
@@ -324,6 +335,9 @@ class OfflineWritingAdapter:
         返回:
             正文文本，段落之间空行分隔。
         """
+        # 多轮续写：消息里有多条 user（首轮指令 + 续写指令）时，只按最后一条 user 指令产出增量
+        if sum(1 for message in req.messages or [] if message.role == "user") > 1:
+            return self._chapter_continuation(meta, req)
         beats = meta.get("beats") or [{"summary": meta.get("summary") or "推进主线", "target_words": 1000}]
         characters = [item for item in (meta.get("characters") or []) if item.get("name")]
         names = [item["name"] for item in characters] or ["主人公"]
@@ -356,6 +370,62 @@ class OfflineWritingAdapter:
         if self._count_words(content) > target_total * 1.2:
             content = self._truncate(content, int(target_total * 1.15))
         return content
+
+    @staticmethod
+    def _last_user_content(req: TextGenRequest) -> str:
+        """取最后一条 user 消息的正文（多轮续写的输入）。
+
+        参数:
+            req: 统一文本请求。
+
+        返回:
+            最后一条 user 消息的 content；没有 user 消息时返回空串。
+        """
+        for message in reversed(req.messages or []):
+            if message.role == "user":
+                return message.content or ""
+        return ""
+
+    @staticmethod
+    def _segment_target(instruction: str, default: int = 400) -> int:
+        """从续写指令里解析本段目标字数。
+
+        参数:
+            instruction: 续写指令文本（形如「本段目标约 800 字」）。
+            default: 解析失败时的默认字数。
+
+        返回:
+            目标字数，限制在 100–4000 之间。
+        """
+        match = re.search(r"(\d+)\s*字", instruction or "")
+        if not match:
+            return default
+        try:
+            value = int(match.group(1))
+        except ValueError:
+            return default
+        return max(100, min(4000, value))
+
+    def _chapter_continuation(self, meta: dict, req: TextGenRequest) -> str:
+        """多轮续写轮：按最后一条 user 指令产出确定性的新增正文。
+
+        参数:
+            meta: 章节元信息（提供确定性种子）。
+            req: 当前轮请求（最后一条 user 消息即续写指令）。
+
+        返回:
+            新增正文文本，段落之间空行分隔。
+        """
+        instruction = self._last_user_content(req)
+        target = self._segment_target(instruction)
+        # 轮次不同 → 消息条数不同 → 种子不同，保证每轮新增内容不重复且可复现
+        rng = self._rng(meta, f"chapter-continue:{len(req.messages)}:{instruction}")
+        paragraphs: list[str] = []
+        while self._count_words("\n\n".join(paragraphs)) < target:
+            paragraphs.append(rng.choice(NARRATION_POOL))
+            if len(paragraphs) > 60:
+                break
+        return "\n\n".join(paragraphs).strip() + "\n"
 
     # ---------- 正文反向总结 ----------
 
@@ -836,5 +906,5 @@ class OfflineWritingAdapter:
         返回:
             带说明的文本。
         """
-        last = req.messages[-1].content if req.messages else ""
+        last = self._last_user_content(req)
         return f"[offline-writing] 已收到 {len(req.messages)} 条消息，末条长度 {len(last)}。系统提示：{req.system[:80]}"

@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
 from ..adapters.base import AdapterError, ErrorCode, Message, TextGenRequest
 from ..adapters.offline_writing import OfflineWritingAdapter
@@ -74,6 +75,8 @@ def generate_outline(
     chapter_words: int = DEFAULT_CHAPTER_WORDS,
     dry_run: bool = False,
     binding: str = "auto",
+    multi_turn: bool = False,
+    acts_per_round: int = 1,
 ) -> dict:
     """生成幕/章/节拍大纲并写入设定库。
 
@@ -86,10 +89,12 @@ def generate_outline(
         chapter_words: 单章目标字数（用于分配节拍字数）。
         dry_run: 只生成不落盘。
         binding: auto=把节拍绑定到已有人物；none=不改动角色引用。
+        multi_turn: True 时按幕分批调用 `emit_act`，False 走原单轮 `emit_outline`。
+        acts_per_round: 每轮计划生成的幕数（默认 1）；每次工具调用产出一幕。
 
     返回:
         {"acts": [...], "chapters": N, "beats": M, "provider": name, "settings_revision": r,
-        "golden_three": {"passed", "issues"}}。
+        "golden_three": {"passed", "issues"}, "multi_turn": bool, "rounds": N}。
 
     异常:
         AdapterError: 模型输出不是合法大纲 JSON。
@@ -129,11 +134,15 @@ def generate_outline(
             "characters": char_rows,
         },
     )
-    payload = _generate_json(adapter, req, "outline")
-    raw_acts = payload.get("acts")
+    outline_rounds = 1
+    if multi_turn:
+        raw_acts = _generate_outline_acts(adapter, req, acts, chapters_per_act, acts_per_round)
+        outline_rounds = (max(1, int(acts)) + max(1, int(acts_per_round)) - 1) // max(1, int(acts_per_round))
+    else:
+        payload = _generate_json(adapter, req, "outline")
+        raw_acts = payload.get("acts")
     if not isinstance(raw_acts, list) or not raw_acts:
         raise AdapterError(ErrorCode.INVALID_INPUT, "写作适配器返回的大纲为空：acts 必须是非空数组")
-
     # 结构化补全：分配稳定 ID、合并到设定库（不覆盖已有正文）
     built_acts = []
     chapter_count = 0
@@ -188,7 +197,64 @@ def generate_outline(
         "binding": binding,
         "golden_three": golden,
         "dry_run": dry_run,
+        "multi_turn": bool(multi_turn),
+        "rounds": outline_rounds,
     }
+
+
+def _generate_outline_acts(adapter, req: TextGenRequest, acts: int, chapters_per_act: int, acts_per_round: int) -> list[dict]:
+    """按幕分批调用 `emit_act`，合并为完整幕列表。
+
+    每轮的 user 消息追加在固定首条 user 之后：先说明本轮要生成第几幕，
+    再给出已完成幕的「标题 + 概要」只读摘要（不回传整段节拍），保证前缀稳定。
+
+    参数:
+        adapter: 写作适配器（需实现 generate_tool）。
+        req: 单轮大纲请求（system 与首条 user 作为固定前缀）。
+        acts: 计划总幕数。
+        chapters_per_act: 每幕章节数（写进本轮提示）。
+        acts_per_round: 每轮计划生成的幕数（每次工具调用产出一幕）。
+
+    返回:
+        合并后的幕对象列表，顺序与生成顺序一致。
+
+    异常:
+        AdapterError: 某轮未返回 act 对象。
+    """
+    total = max(1, int(acts))
+    per_round = max(1, int(acts_per_round))
+    base_messages = list(req.messages)
+    base_metadata = dict(req.metadata or {})
+    collected: list[dict] = []
+    for act_index in range(total):
+        start = act_index + 1
+        end = min(total, (act_index // per_round + 1) * per_round)
+        lines = []
+        if end > start:
+            lines.append(f"请生成第 {start}–{end} 幕中的第 {start} 幕（共 {total} 幕，每幕 {chapters_per_act} 章）。")
+        else:
+            lines.append(f"请生成第 {start} 幕（共 {total} 幕，每幕 {chapters_per_act} 章）。")
+        if collected:
+            done = []
+            for done_index, act in enumerate(collected, start=1):
+                title = str(act.get("title") or "").strip()
+                summary = str(act.get("summary") or "").strip()
+                done.append(f"第 {done_index} 幕《{title}》：{summary}")
+            lines.append("已完成幕（不要重复）：\n" + "\n".join(done))
+        request = replace(req, messages=base_messages + [Message("user", "\n".join(lines))])
+        # 离线适配器据此从确定性整本大纲里挑出对应幕
+        request.metadata = dict(base_metadata, act_offset=act_index)
+        payload = _generate_json(adapter, request, "act")
+        act = payload.get("act") if isinstance(payload, dict) else None
+        if not isinstance(act, dict) and isinstance(payload, dict):
+            # 最小兼容：模型仍按整本大纲返回 {"acts": [...]}
+            fallback = payload.get("acts")
+            if isinstance(fallback, list) and fallback and isinstance(fallback[0], dict):
+                act = fallback[0]
+        if not isinstance(act, dict) or not act:
+            raise AdapterError(ErrorCode.INVALID_INPUT, f"大纲第 {start} 幕生成失败：工具调用未返回 act 对象")
+        collected.append(act)
+    return collected
 
 
 def apply_outline(store: ProjectStore, dry_run: bool = False) -> dict:
@@ -362,8 +428,17 @@ def build_chapter_context(store: ProjectStore, config: AppConfig, chapter: dict)
     }
 
 
-def generate_chapter(store: ProjectStore, config: AppConfig, chapter_id: str, regen: bool = False, dry_run: bool = False) -> dict:
-    """生成章节正文并落盘。
+def generate_chapter(
+    store: ProjectStore,
+    config: AppConfig,
+    chapter_id: str,
+    regen: bool = False,
+    dry_run: bool = False,
+    multi_turn: bool | None = None,
+    segment_words: int | None = None,
+    max_rounds: int | None = None,
+) -> dict:
+    """生成章节正文并落盘；长章节按目标字数拆成多轮续写。
 
     参数:
         store: 工程。
@@ -371,12 +446,17 @@ def generate_chapter(store: ProjectStore, config: AppConfig, chapter_id: str, re
         chapter_id: 章节 ID。
         regen: 已有正文时是否覆盖重写。
         dry_run: 只生成不落盘。
+        multi_turn: 显式多轮开关；None 时按目标字数与 `writing.multi_turn.enabled` 自动判断。
+        segment_words: 每段目标字数；None 时取 `writing.multi_turn.segment_words`（默认 800）。
+        max_rounds: 最大轮数；None 时取 `writing.multi_turn.max_rounds`（默认 8）。
 
     返回:
-        {"chapter_id", "status", "words", "provider", "content"}（content 在 dry_run 时为全文预览）。
+        {"chapter_id", "status", "words", "provider", "content",
+         "rounds", "segments", "multi_turn", "stop_reason"}；content 在 dry_run 时为全文预览。
 
     异常:
         ValueError: 已有正文且未指定 regen。
+        AdapterError: 模型返回空正文。
     """
     chapter = store.load_chapter(chapter_id)
     if (chapter.get("content") or "").strip() and not regen and not dry_run:
@@ -426,14 +506,57 @@ def generate_chapter(store: ProjectStore, config: AppConfig, chapter_id: str, re
     req = assembler.build("chapter", instruction, context["speaker_ids"])
     # metadata 保持原有字段不变：离线适配器依赖它，且产物需要确定性一致
     req.metadata = context["metadata"]
-    result = context["adapter"].generate(req)
-    content = (result.text or "").strip()
+
+    # 多轮参数：显式参数优先，其次读配置，最后用默认值兜底
+    mt = config.get("writing.multi_turn") or {}
+    enabled = mt.get("enabled", True)
+    threshold_words = int(mt.get("threshold_words") or 1200)
+    seg_words = max(1, int(segment_words or mt.get("segment_words") or 800))
+    rounds_cap = max(1, int(max_rounds or mt.get("max_rounds") or 8))
+    round_max_tokens = max(1, int(mt.get("round_max_tokens") or 2048))
+    target_words = int(context["metadata"].get("target_words") or chapter_words or 0)
+
+    if multi_turn is not None:
+        use_multi = bool(multi_turn)
+    else:
+        use_multi = bool(enabled) and target_words > threshold_words
+    if target_words <= 0:
+        use_multi = False
+    segments = (target_words + seg_words - 1) // seg_words if use_multi else 1
+
+    if use_multi:
+        # 首轮复用装配结果，仅收紧单轮输出预算；前缀缓存键固定为 工程 id + 章节 id
+        req.max_tokens = round_max_tokens
+        work_id = str(context["work"].get("id") or "").strip()
+        if work_id:
+            req.prompt_cache_key = f"{work_id}:{chapter_id}"
+        outcome = _generate_chapter_rounds(context["adapter"], req, target_words, seg_words, rounds_cap)
+        content = outcome["content"].strip()
+        provider = outcome["provider"]
+        rounds = outcome["rounds"]
+        stop_reason = outcome["stop_reason"]
+    else:
+        result = context["adapter"].generate(req)
+        content = (result.text or "").strip()
+        provider = result.model
+        rounds = 1
+        stop_reason = "single_round"
     if not content:
         raise AdapterError(ErrorCode.UPSTREAM_ERROR, "写作适配器返回了空正文", retryable=True)
 
-    words = sum(1 for char in content if not char.isspace())
+    words = _count_words(content)
     if dry_run:
-        return {"chapter_id": chapter_id, "status": chapter.get("status"), "words": words, "provider": result.model, "content": content}
+        return {
+            "chapter_id": chapter_id,
+            "status": chapter.get("status"),
+            "words": words,
+            "provider": provider,
+            "content": content,
+            "rounds": rounds,
+            "segments": segments,
+            "multi_turn": use_multi,
+            "stop_reason": stop_reason,
+        }
 
     chapter["content"] = content + "\n"
     chapter["word_count"] = words
@@ -441,10 +564,127 @@ def generate_chapter(store: ProjectStore, config: AppConfig, chapter_id: str, re
     chapter["revision"] = int(chapter.get("revision") or 1) + 1
     chapter["updated_at"] = now_iso()
     store.save_chapter(chapter)
-    return {"chapter_id": chapter_id, "status": chapter["status"], "words": words, "provider": result.model, "content": None}
+    return {
+        "chapter_id": chapter_id,
+        "status": chapter["status"],
+        "words": words,
+        "provider": provider,
+        "content": None,
+        "rounds": rounds,
+        "segments": segments,
+        "multi_turn": use_multi,
+        "stop_reason": stop_reason,
+    }
 
 
-def suggest_script(store: ProjectStore, config: AppConfig, chapter_id: str, dry_run: bool = False) -> dict:
+def _count_words(text: str) -> int:
+    """统计正文有效字数（去掉空白后的字符数）。
+
+    参数:
+        text: 正文文本。
+
+    返回:
+        字数；None 视为 0。
+    """
+    return sum(1 for char in (text or "") if not char.isspace())
+
+
+def _append_segment(text: str, segment: str, max_overlap: int = 200) -> str:
+    """把新增段落追加到正文末尾，并裁掉与结尾重复的重叠文本。
+
+    参数:
+        text: 已生成正文。
+        segment: 本轮新增段落。
+        max_overlap: 最多比较的重叠字数。
+
+    返回:
+        拼接后的正文；空段落返回原文，整段重复时不会重复追加。
+    """
+    base = (text or "").rstrip()
+    piece = (segment or "").strip()
+    if not piece:
+        return text or ""
+    if not base:
+        return piece
+    limit = min(max_overlap, len(base), len(piece))
+    overlap = 0
+    for size in range(limit, 0, -1):
+        if base[-size:] == piece[:size]:
+            overlap = size
+            break
+    if overlap:
+        piece = piece[overlap:].lstrip()
+    if not piece:
+        return base
+    return f"{base}\n\n{piece}"
+
+
+def _continue_instruction(segment_words: int) -> str:
+    """构造续写轮的用户短指令（固定句式，只有本段字数是可变量）。
+
+    参数:
+        segment_words: 本段目标字数。
+
+    返回:
+        一句话续写指令。
+    """
+    return f"继续写下一段，紧接上文，不要重复已写内容，保持人物人设与文风。本段目标约 {segment_words} 字，只输出新增正文。"
+
+
+def _generate_chapter_rounds(adapter, req: TextGenRequest, target_words: int, segment_words: int, max_rounds: int) -> dict:
+    """按轮续写章节正文。
+
+    前缀（system、首条 user、temperature、stop）全程不变，仅在末尾追加
+    「assistant 已生成正文」与一句短 user 续写指令，保证前缀缓存可复用。
+
+    参数:
+        adapter: 写作适配器（需实现 generate）。
+        req: 首轮请求。
+        target_words: 目标字数。
+        segment_words: 每段目标字数。
+        max_rounds: 最大轮数。
+
+    返回:
+        {"content", "rounds", "stop_reason", "provider"}；stop_reason 取
+        single_round/target_reached/max_rounds/empty_output/short_output。
+    """
+    content = ""
+    rounds = 0
+    stop_reason = "max_rounds"
+    provider = ""
+    for index in range(1, max(1, max_rounds) + 1):
+        if index == 1:
+            request = req
+        else:
+            request = replace(
+                req,
+                messages=list(req.messages) + [Message("assistant", content), Message("user", _continue_instruction(segment_words))],
+            )
+        result = adapter.generate(request)
+        provider = result.model or provider
+        segment = (result.text or "").strip()
+        rounds = index
+        if not segment:
+            stop_reason = "empty_output"
+            break
+        before = _count_words(content)
+        content = _append_segment(content, segment)
+        if _count_words(content) - before < 50:
+            stop_reason = "short_output"
+            break
+        if _count_words(content) >= target_words * 1.1:
+            stop_reason = "target_reached"
+            break
+    return {"content": content, "rounds": rounds, "stop_reason": stop_reason, "provider": provider}
+
+
+def suggest_script(
+    store: ProjectStore,
+    config: AppConfig,
+    chapter_id: str,
+    dry_run: bool = False,
+    scenes_per_round: int | None = None,
+) -> dict:
     """生成导演脚本标注建议并试解析。
 
     参数:
@@ -452,9 +692,10 @@ def suggest_script(store: ProjectStore, config: AppConfig, chapter_id: str, dry_
         config: 本机配置。
         chapter_id: 章节 ID。
         dry_run: 只解析不落盘。
+        scenes_per_round: 每批镜头数；None 时取 `writing.multi_turn.script_scenes_per_round`（默认 8）。
 
     返回:
-        {"markup", "script", "warnings", "shots", "lines"}。
+        {"markup", "script", "warnings", "shots", "lines", "provider", "dry_run", "rounds"}。
 
     异常:
         ValueError: 章节没有场景或台词行。
@@ -515,13 +756,69 @@ def suggest_script(store: ProjectStore, config: AppConfig, chapter_id: str, dry_
     prompt_parts.append(f"任务：为以上 {len(scenes_payload)} 个镜头生成 NDW 标注文本（@shot / !sfx / !visual / !anim），保留台词原文与顺序，不要解释。")
     req = TextGenRequest(
         task="script",
-        system="你是有声剧导演，输出 NDW 标注文本（@shot / !sfx / !visual / !anim），不要解释。",
+        system=(
+            "你是有声剧导演，把给定台词改写成 NDW 标注文本，不要解释、不要 Markdown 代码块。\n"
+            "严格格式：\n"
+            "@shot 1 镜头名 location=验尸房 time=night mood=压抑\n"
+            "旁白：夜色渐深。\n"
+            "沈砚秋|calm：执照可以收，尸体不能白躺。\n"
+            "!sfx ambience 8000 after-line=1 雨声敲窗\n"
+            "!visual 3:4 画面描述\n"
+            "!anim i2v 5000 slow_push_in 镜头运动\n"
+            "规则：@shot 后必须是整数序号与镜头名，序号与提示中的【镜头 N】一致；"
+            "time 取 dawn/morning/day/dusk/night/unknown；"
+            "!sfx 的 kind 只能是 ambience/foley/impact/transition/music_sting，第二个参数是毫秒数，位置写 after-line=N；"
+            "!visual 的第一个参数只能是 1:1/3:4/4:3/9:16/16:9，后面跟画面提示词；"
+            "!silence 写成「!silence 800 after-line=N 原因」；"
+            "!anim 的 mode 只能是 i2v/t2v，第二个参数是 500~5000 的毫秒数，第三个参数只能是 "
+            "static/slow_push_in/pan_left/pan_right/handheld；每个镜头至少一句台词；台词保留原文。"
+        ),
         messages=[Message("user", "\n\n".join(prompt_parts))],
         stream=False,
         metadata={"scenes": scenes_payload, "style": bible.get("style") or {}},
     )
-    result = adapter.generate(req)
-    markup = (result.text or "").strip()
+
+    mt = config.get("writing.multi_turn") or {}
+    try:
+        per_round = int(scenes_per_round or mt.get("script_scenes_per_round") or 8)
+    except (TypeError, ValueError):
+        per_round = 8
+    per_round = max(1, per_round)
+
+    rounds = 1
+    if len(scenes_payload) > per_round:
+        # 批量标注：固定前缀不变，只在末尾追加本批镜头/台词与任务；镜头编号沿用全局序号便于合并解析
+        rounds = (len(scenes_payload) + per_round - 1) // per_round
+        markup_parts: list[str] = []
+        result = None
+        for index in range(rounds):
+            start_at = index * per_round
+            batch = scenes_payload[start_at:start_at + per_round]
+            batch_lines: list[str] = []
+            for scene in batch:
+                batch_lines.append(
+                    f"【镜头 {scene['index'] + 1}】{scene['title']}｜地点：{scene['location']}｜时间：{scene['time_of_day']}｜情绪：{scene['mood']}"
+                )
+                for line in scene["lines"]:
+                    batch_lines.append(f"{line['speaker_name'] or '未知'}：{line['text']}")
+            body = [
+                f"本批镜头 {batch[0]['index'] + 1}–{batch[-1]['index'] + 1}（共 {len(scenes_payload)} 个镜头，编号沿用全局序号）：",
+                "\n".join(batch_lines),
+            ]
+            if markup_parts:
+                body.append(f"上一批输出结尾（供衔接，不要重复）：{markup_parts[-1][-200:]}")
+            body.append(f"任务：仅为本批 {len(batch)} 个镜头生成 NDW 标注文本（@shot <序号> <镜头名> / !sfx / !visual / !anim），序号沿用提示中的镜头编号，保留台词原文与顺序，不要解释。")
+            request = replace(req, messages=list(req.messages) + [Message("user", "\n\n".join(body))])
+            # 离线适配器按 metadata.scenes 产出标注，这里同步收窄为本批
+            request.metadata = {"scenes": batch, "style": bible.get("style") or {}}
+            result = adapter.generate(request)
+            batch_markup = (result.text or "").strip()
+            if batch_markup:
+                markup_parts.append(batch_markup)
+        markup = "\n\n".join(markup_parts).strip()
+    else:
+        result = adapter.generate(req)
+        markup = (result.text or "").strip()
     try:
         script = parse_markup(markup, chapter, characters, store.settings())
     except ValueError as exc:
@@ -534,6 +831,7 @@ def suggest_script(store: ProjectStore, config: AppConfig, chapter_id: str, dry_
         "lines": sum(len(shot.get("lines") or []) for shot in script.get("shots") or []),
         "provider": result.model,
         "dry_run": dry_run,
+        "rounds": rounds,
     }
     return summary
 
@@ -821,11 +1119,20 @@ _OUTLINE_TOOL_SCHEMA = {
 }
 
 
+#: 单幕参数 schema：复用大纲结构里的 act 对象，外面再包一层 act 键，
+#: 让 `emit_act` 一轮只产出一幕（title/summary/chapters[title/summary/beats]）。
+_ACT_TOOL_SCHEMA = {
+    "type": "object",
+    "properties": {"act": _OUTLINE_TOOL_SCHEMA["properties"]["acts"]["items"]},
+    "required": ["act"],
+}
+
+
 def _gen_tool(step: str | None) -> dict | None:
     """按生成步骤返回对应的工具定义（OpenAI tools 单项）。
 
     参数:
-        step: outline|premise|style|world|worlds|character|characters。
+        step: outline|act|premise|style|world|worlds|character|characters。
 
     返回:
         工具定义 dict；未知步骤返回 None。
@@ -837,6 +1144,11 @@ def _gen_tool(step: str | None) -> dict | None:
         return {
             "type": "function",
             "function": {"name": "emit_outline", "description": "输出幕/章/节拍大纲", "parameters": _OUTLINE_TOOL_SCHEMA},
+        }
+    if step == "act":
+        return {
+            "type": "function",
+            "function": {"name": "emit_act", "description": "输出单幕大纲（含本幕章节与节拍）", "parameters": _ACT_TOOL_SCHEMA},
         }
     if step == "premise":
         return {
@@ -1280,6 +1592,7 @@ def generate_worlds(
     count: int | None = None,
     overwrite: bool = False,
     brief: str | None = None,
+    batch_size: int | None = None,
 ) -> dict:
     """一次生成 1..6 条世界条目（只返回预览，不落盘）。
 
@@ -1289,9 +1602,10 @@ def generate_worlds(
         count: 期望世界条数（1..6）；为空时由适配器决定。
         overwrite: True 表示调用方打算覆盖已有世界；本函数仍只预览，仅在返回值里标记。
         brief: 用户补充要求（拼进提示词与请求元信息）。
+        batch_size: 每批条数；None 时取 `writing.multi_turn.batch_size_worlds`（默认 2）。
 
     返回:
-        {"step": "worlds", "worlds": [...], "count", "brief", "overwrite", "provider"}；
+        {"step": "worlds", "worlds": [...], "count", "brief", "overwrite", "provider", "batches"}；
         worlds 为清洗后通过 world schema 的完整条目（可直接交给 WorldStore.add）。
 
     异常:
@@ -1342,10 +1656,48 @@ def generate_worlds(
             "seed": work.get("id"),
         },
     )
-    payload = _generate_json(adapter, req, "worlds")
-    rows = payload.get("worlds")
-    if isinstance(rows, dict):
-        rows = [rows]
+    mt = config.get("writing.multi_turn") or {}
+    try:
+        batch = int(batch_size or mt.get("batch_size_worlds") or 2)
+    except (TypeError, ValueError):
+        batch = 2
+    batch = max(1, batch)
+
+    rows: list = []
+    batches = 1
+    if wanted and wanted > batch:
+        # 数量超过单批上限：按批生成，每批在固定前缀后追加本批要求与已生成名单
+        batches = (wanted + batch - 1) // batch
+        names: list[str] = []
+        for index in range(batches):
+            take = min(batch, wanted - len(rows))
+            if take <= 0:
+                break
+            lines = [f"本批生成 {take} 条世界（第 {index + 1}/{batches} 批）。"]
+            if names:
+                lines.append("已生成世界（不要重复名称）：" + "、".join(names))
+            batch_req = replace(req, messages=list(req.messages) + [Message("user", "\n".join(lines))])
+            batch_req.metadata = dict(req.metadata or {}, count=take)
+            batch_payload = _generate_json(adapter, batch_req, "worlds")
+            batch_rows = batch_payload.get("worlds")
+            if isinstance(batch_rows, dict):
+                batch_rows = [batch_rows]
+            if not isinstance(batch_rows, list):
+                continue
+            for row in batch_rows:
+                if not isinstance(row, dict):
+                    continue
+                name = str(row.get("name") or "").strip()
+                if name and name in names:
+                    continue
+                if name:
+                    names.append(name)
+                rows.append(row)
+    else:
+        payload = _generate_json(adapter, req, "worlds")
+        rows = payload.get("worlds")
+        if isinstance(rows, dict):
+            rows = [rows]
     if not isinstance(rows, list) or not rows:
         raise ValueError("LLM 返回的世界列表为空")
     if wanted:
@@ -1358,6 +1710,7 @@ def generate_worlds(
         "brief": brief_text or None,
         "overwrite": bool(overwrite),
         "provider": str(config.get("adapters.writing") or config.get("providers.writing") or "offline"),
+        "batches": batches,
     }
 
 
@@ -1434,7 +1787,13 @@ def generate_settings(store: ProjectStore, config: AppConfig, step: str, overwri
     return {"step": step, "fields": final, "skipped": skipped}
 
 
-def generate_characters(store: ProjectStore, config: AppConfig, count: int | None = None, brief: str | None = None) -> dict:
+def generate_characters(
+    store: ProjectStore,
+    config: AppConfig,
+    count: int | None = None,
+    brief: str | None = None,
+    batch_size: int | None = None,
+) -> dict:
     """生成人物设定（只返回结果，不写盘）。
 
     参数:
@@ -1442,10 +1801,11 @@ def generate_characters(store: ProjectStore, config: AppConfig, count: int | Non
         config: 本机配置。
         count: 期望人物总数；为空时由模型按需求自行判断需要几个角色。
         brief: 用户补充要求（拼进提示词，离线实现会写进人物小传/性格）。
+        batch_size: 每批条数；None 时取 `writing.multi_turn.batch_size_characters`（默认 5）。
 
     返回:
         {"characters": [{name, role, gender, age_range, personality, background,
-        appearance_prompt, negative_prompt, relationships}]}。
+        appearance_prompt, negative_prompt, relationships}], "batches": N}。
 
     异常:
         ValueError: 模型输出不是合法 JSON 或重名。
@@ -1483,8 +1843,46 @@ def generate_characters(store: ProjectStore, config: AppConfig, count: int | Non
             "seed": work.get("id"),
         },
     )
-    payload = _generate_json(adapter, req, "characters")
-    rows = payload.get("characters")
+    mt = config.get("writing.multi_turn") or {}
+    try:
+        batch = int(batch_size or mt.get("batch_size_characters") or 5)
+        total = int(count) if count else 0
+    except (TypeError, ValueError):
+        batch = 5
+        total = 0
+    batch = max(1, batch)
+
+    batches = 1
+    if total > batch:
+        # 数量超过单批上限：按批生成，每批在固定前缀后追加本批要求与已生成名单
+        batches = (total + batch - 1) // batch
+        rows: list = []
+        names: list[str] = []
+        for index in range(batches):
+            take = min(batch, total - len(rows))
+            if take <= 0:
+                break
+            lines = [f"本批生成 {take} 条人物（第 {index + 1}/{batches} 批）。"]
+            if names:
+                lines.append("已生成人物（不要重复姓名）：" + "、".join(names))
+            batch_req = replace(req, messages=list(req.messages) + [Message("user", "\n".join(lines))])
+            batch_req.metadata = dict(req.metadata or {}, count=take)
+            batch_payload = _generate_json(adapter, batch_req, "characters")
+            batch_rows = batch_payload.get("characters")
+            if not isinstance(batch_rows, list):
+                continue
+            for row in batch_rows:
+                if not isinstance(row, dict):
+                    continue
+                name = str(row.get("name") or "").strip()
+                if name and name in names:
+                    continue
+                if name:
+                    names.append(name)
+                rows.append(row)
+    else:
+        payload = _generate_json(adapter, req, "characters")
+        rows = payload.get("characters")
     if not isinstance(rows, list) or not rows:
         raise ValueError("LLM 返回的人物列表为空")
 
@@ -1522,7 +1920,7 @@ def generate_characters(store: ProjectStore, config: AppConfig, count: int | Non
     # 角色数量与定位由需求决定，这里只保证至少有一个主角，不再限定配角人数
     if not any(item["role"] == "protagonist" for item in characters):
         raise ValueError("人物里至少需要 1 个 protagonist（主角）")
-    return {"characters": characters}
+    return {"characters": characters, "batches": batches}
 
 
 def _clean_character_entry(row: dict) -> dict:

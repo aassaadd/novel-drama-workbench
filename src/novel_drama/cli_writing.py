@@ -80,6 +80,8 @@ def cmd_outline(args, config: AppConfig) -> int:
             chapter_words=args.words,
             dry_run=args.dry_run,
             binding=getattr(args, "binding", "auto"),
+            multi_turn=bool(getattr(args, "multi_turn", False)),
+            acts_per_round=int(getattr(args, "acts_per_round", 1) or 1),
         )
         head = f"[dry-run] " if args.dry_run else ""
         golden = result.get("golden_three") or {"passed": True, "issues": []}
@@ -88,10 +90,11 @@ def cmd_outline(args, config: AppConfig) -> int:
             hints = "\n黄金三章提示（不阻断）：\n" + "\n".join(
                 f"  第 {issue['chapter']} 章：{issue['problem']}——{issue['hint']}" for issue in golden["issues"]
             )
+        rounds_note = f"，multi-turn，{result.get('rounds') or 1} 轮" if result.get("multi_turn") else ""
         _emit(
             args,
             f"{head}大纲已生成：{result['acts'].__len__()} 幕 / {result['chapters']} 章 / {result['beats']} 个节拍"
-            f"（provider={result['provider']}，settings_revision={result['settings_revision']}，binding={result.get('binding')}）\n"
+            f"（provider={result['provider']}，settings_revision={result['settings_revision']}，binding={result.get('binding')}{rounds_note}）\n"
             + _fmt_outline(result["acts"])
             + hints,
             result,
@@ -117,7 +120,7 @@ def cmd_chapter_generate(args, config: AppConfig) -> int:
     """按大纲生成章节正文。
 
     参数:
-        args: 参数（chapter/regen/dry-run）。
+        args: 参数（chapter/regen/dry-run/multi_turn/segment_words/max_rounds）。
         config: 本机配置。
 
     返回:
@@ -131,9 +134,21 @@ def cmd_chapter_generate(args, config: AppConfig) -> int:
         validate_chapter_binding(store, args.chapter)
     except ValueError as exc:
         raise TaskFailedError(str(exc)) from exc
-    result = generate_chapter(store, config, args.chapter, regen=args.regen, dry_run=args.dry_run)
+    result = generate_chapter(
+        store,
+        config,
+        args.chapter,
+        regen=args.regen,
+        dry_run=args.dry_run,
+        multi_turn=getattr(args, "multi_turn", None),
+        segment_words=getattr(args, "segment_words", None),
+        max_rounds=getattr(args, "max_rounds", None),
+    )
     head = "[dry-run] " if args.dry_run else ""
-    text = f"{head}章节 {result['chapter_id']} 正文生成完成：{result['words']} 字（provider={result['provider']}）"
+    text = (
+        f"{head}章节 {result['chapter_id']} 正文生成完成：{result['words']} 字"
+        f"（{result.get('rounds') or 1} 轮，provider={result['provider']}）"
+    )
     if args.dry_run and result.get("content"):
         preview = result["content"][:400]
         text += f"\n--- 预览（前 400 字）---\n{preview}"
@@ -210,7 +225,7 @@ def cmd_chapter_edit(args, config: AppConfig) -> int:
     """按提示词让 LLM 改写章节正文（默认预览，`--apply` 才落盘）。
 
     参数:
-        args: 参数（chapter/instruction 必填；range 可选；dry-run / apply 二选一）。
+        args: 参数（chapter/instruction 必填；range / chunk_words 可选；dry-run / apply 二选一）。
         config: 本机配置。
 
     返回:
@@ -228,11 +243,14 @@ def cmd_chapter_edit(args, config: AppConfig) -> int:
         args.instruction,
         char_range=_parse_char_range(getattr(args, "char_range", None)),
         dry_run=not args.apply,
+        chunk_words=getattr(args, "chunk_words", None),
     )
     head = "改写完成" if args.apply else "改写预览（未写盘，加 --apply 才保存）"
     lines = [
-        f"章节 {result['chapter_id']} {head}：{result['word_count']} 字"
-        f"（status={result['status']}，revision={result['revision']}）"
+        (
+            f"章节 {result['chapter_id']} {head}：{result['word_count']} 字"
+            f"（status={result['status']}，revision={result['revision']}，{result.get('rounds') or 1} 轮）"
+        )
     ]
     lines.extend(f"  ! {item}" for item in result["warnings"])
     if not args.apply:
@@ -277,7 +295,7 @@ def cmd_chapter_summarize(args, config: AppConfig) -> int:
     """根据正文反向总结标题、摘要、大纲与节拍（默认预览，`--apply` 才落盘）。
 
     参数:
-        args: 参数（chapter 必填；apply 是否写盘）。
+        args: 参数（chapter 必填；apply 是否写盘；chunk_words 分块阈值）。
         config: 本机配置。
 
     返回:
@@ -289,7 +307,13 @@ def cmd_chapter_summarize(args, config: AppConfig) -> int:
     """
     store = _resolve_store(args, config)
     chapter = store.load_chapter(args.chapter)
-    result = summarize_chapter(store, config, args.chapter, apply=args.apply)
+    result = summarize_chapter(
+        store,
+        config,
+        args.chapter,
+        apply=args.apply,
+        chunk_words=getattr(args, "chunk_words", None),
+    )
     if args.apply:
         lines = [
             (
@@ -299,11 +323,13 @@ def cmd_chapter_summarize(args, config: AppConfig) -> int:
             (
                 f"变更字段：{', '.join(result['changed_fields']) or '（无）'}"
                 f"；替换旧节拍 {result['replaced_beats']} 条"
+                f"；{result.get('rounds') or 1} 轮"
             ),
         ]
         lines.extend(f"  ! {item}" for item in result["warnings"])
     else:
         lines = [_fmt_summarize_preview(str(chapter.get("title") or ""), result)]
+        lines.append(f"轮次：{result.get('rounds') or 1} 轮")
     _emit(args, "\n".join(lines), result)
     return EXIT_OK
 
@@ -312,14 +338,20 @@ def cmd_script_suggest(args, config: AppConfig) -> int:
     """生成导演标注建议，可选直接落盘并同步到章节。
 
     参数:
-        args: 参数（chapter/apply/dry-run/out）。
+        args: 参数（chapter/apply/dry-run/out/scenes_per_round）。
         config: 本机配置。
 
     返回:
         退出码。
     """
     store = _resolve_store(args, config)
-    result = suggest_script(store, config, args.chapter, dry_run=args.dry_run)
+    result = suggest_script(
+        store,
+        config,
+        args.chapter,
+        dry_run=args.dry_run,
+        scenes_per_round=getattr(args, "scenes_per_round", None),
+    )
     markup = result["markup"]
     chapter_id = args.chapter
 
@@ -329,7 +361,10 @@ def cmd_script_suggest(args, config: AppConfig) -> int:
         out_path.write_text(markup + "\n", encoding="utf-8")
 
     lines = [
-        f"标注建议：镜头 {result['shots']} 个，台词 {result['lines']} 行，告警 {len(result['warnings'])} 条（provider={result['provider']}）",
+        (
+            f"标注建议：镜头 {result['shots']} 个，台词 {result['lines']} 行，告警 {len(result['warnings'])} 条"
+            f"（provider={result['provider']}，{result.get('rounds') or 1} 轮）"
+        ),
         f"标注文本: {out_path}",
     ]
     lines.extend(f"  ! {item}" for item in result["warnings"])

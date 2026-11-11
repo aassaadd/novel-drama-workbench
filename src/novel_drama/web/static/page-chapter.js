@@ -304,7 +304,12 @@
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ path: NW.state.path, chapter: NW.state.chapter, regen: el("chRegen").checked }),
       });
-      NW.toast(`正文已生成：${result.words} 字（provider=${result.provider}）`, true);
+      // 多轮生成会带回 rounds：优先展示轮次与字数，旧版无 rounds 时回落到原提示
+      if (result.rounds) {
+        NW.toast(`生成完成（${result.rounds} 轮，${result.words} 字）`, true);
+      } else {
+        NW.toast(`正文已生成：${result.words} 字（provider=${result.provider}）`, true);
+      }
       await load();
       if (NW.openProject) await NW.openProject();
     } catch (error) {
@@ -751,7 +756,7 @@
     }
   }
 
-  /* 确认应用重总结：带 apply=true 再请求一次，成功后刷新章节、目录与大纲页。
+  /* 确认应用重总结：后端复用刚生成的预览直接写盘（不再跑模型），成功后刷新章节、目录与大纲页。
    * 参数：state 弹窗状态。
    * 返回：Promise<void>。
    */

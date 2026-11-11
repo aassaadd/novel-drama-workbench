@@ -319,10 +319,48 @@ class OmlxWritingAdapter:
         # omlx 支持通过 chat_template_kwargs 关闭思考，降低延迟与 token 消耗
         if self.enable_thinking is not None:
             payload["chat_template_kwargs"] = {"enable_thinking": bool(self.enable_thinking)}
+        # 多轮续写前缀稳定时显式请求前缀缓存；服务不支持该字段会忽略
+        if req.prompt_cache_key and bool(self.settings.get("cache_prompt", True)):
+            payload["cache_prompt"] = True
+            payload["prompt_cache_key"] = req.prompt_cache_key
         extra_body = (req.metadata or {}).get("extra_body")
         if isinstance(extra_body, dict):
             payload.update(extra_body)
         return payload
+
+    @staticmethod
+    def _parse_usage(usage: dict | None) -> Usage:
+        """把上游 `usage` 映射为统一用量结构，缺失缓存字段时保持 None。
+
+        参数:
+            usage: OpenAI 兼容响应里的 usage dict；可能为 None 或缺少字段。
+
+        返回:
+            Usage；`cached_tokens` 依次尝试 `prompt_tokens_details.cached_tokens`、
+            `cache_n`、`cached_tokens`，都取不到时为 None。
+        """
+        usage = usage if isinstance(usage, dict) else {}
+        details = usage.get("prompt_tokens_details")
+        cached = details.get("cached_tokens") if isinstance(details, dict) else None
+        if cached is None:
+            cached = usage.get("cache_n")
+        if cached is None:
+            cached = usage.get("cached_tokens")
+        cached_tokens: int | None = None
+        if cached is not None:
+            try:
+                cached_tokens = int(cached)
+            except (TypeError, ValueError):
+                cached_tokens = None
+        try:
+            prompt_tokens = int(usage.get("prompt_tokens") or 0)
+        except (TypeError, ValueError):
+            prompt_tokens = 0
+        try:
+            completion_tokens = int(usage.get("completion_tokens") or 0)
+        except (TypeError, ValueError):
+            completion_tokens = 0
+        return Usage(prompt_tokens=prompt_tokens, completion_tokens=completion_tokens, cached_tokens=cached_tokens)
 
     def generate(self, req: TextGenRequest) -> TextGenResult:
         """非流式生成文本（POST /v1/chat/completions，stream=false）。
@@ -344,15 +382,11 @@ class OmlxWritingAdapter:
             raise AdapterError(ErrorCode.UPSTREAM_ERROR, f"omlx 返回空 choices：{str(data)[:300]}", detail={"path": "/v1/chat/completions"})
         message = choices[0].get("message") or {}
         text = message.get("content") or message.get("reasoning_content") or ""
-        usage = data.get("usage") or {}
         return TextGenResult(
             text=text,
             finish_reason=str(choices[0].get("finish_reason") or "stop"),
             model=str(data.get("model") or self.model),
-            usage=Usage(
-                prompt_tokens=int(usage.get("prompt_tokens") or 0),
-                completion_tokens=int(usage.get("completion_tokens") or 0),
-            ),
+            usage=self._parse_usage(data.get("usage")),
             raw=data,
         )
 
@@ -464,10 +498,7 @@ class OmlxWritingAdapter:
                 usage = data.get("usage")
                 usage_obj = None
                 if usage:
-                    usage_obj = Usage(
-                        prompt_tokens=int(usage.get("prompt_tokens") or 0),
-                        completion_tokens=int(usage.get("completion_tokens") or 0),
-                    )
+                    usage_obj = self._parse_usage(usage)
                 if not choices:
                     if usage_obj:
                         yield TextGenChunk(delta="", done=False, usage=usage_obj)

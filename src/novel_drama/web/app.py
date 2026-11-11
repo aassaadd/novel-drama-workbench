@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import subprocess
@@ -23,7 +24,7 @@ from ..media.references import collect_references
 from ..models.ids import now_iso
 from ..store import ProjectStore, list_workspaces
 from ..writing.editing import edit_chapter, save_chapter_content
-from ..writing.summarize import summarize_chapter
+from ..writing.summarize import apply_summary, summarize_chapter
 from .actions import fail_body, run
 from .models_api import register_models_routes
 
@@ -493,6 +494,72 @@ def _project_dir(raw) -> Path:
     return root
 
 
+#: 重总结预览缓存：key → {content_hash, preview, rounds}；只在内存里，进程重启即失效
+_SUMMARY_PREVIEWS: dict[str, dict] = {}
+#: 缓存条数上限，超出按写入顺序淘汰最早的一条
+_SUMMARY_PREVIEW_LIMIT = 64
+
+
+def _summary_cache_key(store: ProjectStore, chapter_id: str) -> str:
+    """生成重总结预览缓存键。
+
+    参数:
+        store: 工程。
+        chapter_id: 章节 ID。
+
+    返回:
+        「工程绝对路径::章节 ID」字符串，保证不同工程互不覆盖。
+    """
+    return f"{store.root.resolve()}::{chapter_id}"
+
+
+def _summary_content_hash(content: str) -> str:
+    """计算正文哈希，用于判断预览生成后正文是否被改动。
+
+    参数:
+        content: 章节正文。
+
+    返回:
+        sha1 十六进制字符串。
+    """
+    return hashlib.sha1(content.encode("utf-8")).hexdigest()
+
+
+def _remember_summary(store: ProjectStore, chapter_id: str, content: str, result: dict) -> None:
+    """缓存一份重总结预览，供「应用」时直接复用，避免重复跑模型。
+
+    参数:
+        store: 工程。
+        chapter_id: 章节 ID。
+        content: 生成预览时的正文（用于校验是否过期）。
+        result: `summarize_chapter(apply=False)` 的返回。
+    """
+    _SUMMARY_PREVIEWS[_summary_cache_key(store, chapter_id)] = {
+        "content_hash": _summary_content_hash(content),
+        "preview": result["preview"],
+        "rounds": int(result.get("rounds") or 1),
+    }
+    while len(_SUMMARY_PREVIEWS) > _SUMMARY_PREVIEW_LIMIT:
+        _SUMMARY_PREVIEWS.pop(next(iter(_SUMMARY_PREVIEWS)), None)
+
+
+def _cached_summary(store: ProjectStore, chapter_id: str, content: str) -> dict | None:
+    """读取未过期的重总结预览。
+
+    参数:
+        store: 工程。
+        chapter_id: 章节 ID。
+        content: 当前正文。
+
+    返回:
+        命中且正文未变时返回缓存项，否则 None。
+    """
+    cached = _SUMMARY_PREVIEWS.get(_summary_cache_key(store, chapter_id))
+    if not cached or cached["content_hash"] != _summary_content_hash(content):
+        return None
+    return cached
+
+
 def create_app(project_root: str | None = None, config_path: str | None = None):
     """创建 FastAPI 应用。
 
@@ -916,11 +983,23 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
 
     @app.post("/api/ui/outline/generate")
     def ui_outline_generate(body: dict) -> dict:
-        """生成大纲（`outline generate`）。"""
+        """生成大纲（`outline generate`）。
+
+        参数:
+            body: {path 工程目录, acts, chapters_per_act, beats_per_chapter, words,
+                   multi_turn 是否按幕多轮, acts_per_round 每轮幕数, dry_run}。
+
+        返回:
+            CLI 的 JSON 负载（含 rounds / multi_turn）。
+        """
         argv = ["--project", body["path"], "--json", "outline", "generate"]
         for key, flag in (("acts", "--acts"), ("chapters_per_act", "--chapters-per-act"), ("beats_per_chapter", "--beats-per-chapter"), ("words", "--words")):
             if body.get(key) is not None:
                 argv += [flag, str(body[key])]
+        if body.get("multi_turn"):
+            argv.append("--multi-turn")
+        if body.get("acts_per_round") is not None:
+            argv += ["--acts-per-round", str(body["acts_per_round"])]
         if body.get("dry_run"):
             argv.append("--dry-run")
         return _respond(_cli(*argv))
@@ -935,12 +1014,27 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
 
     @app.post("/api/ui/chapter/generate")
     def ui_chapter_generate(body: dict) -> dict:
-        """生成章节正文（`chapter generate`）。"""
+        """生成章节正文（`chapter generate`）。
+
+        参数:
+            body: {path 工程目录, chapter 章节 ID, regen, dry_run,
+                   multi_turn 是否多轮续写, segment_words 每段字数, max_rounds 最大轮数}。
+
+        返回:
+            CLI 的 JSON 负载（含 words / rounds / segments / multi_turn）。
+        """
         argv = ["--project", body["path"], "--json", "chapter", "generate", "--chapter", body["chapter"]]
         if body.get("regen"):
             argv.append("--regen")
         if body.get("dry_run"):
             argv.append("--dry-run")
+        # 显式开关才带参数；缺省交给配置里的 writing.multi_turn 判断
+        if body.get("multi_turn") is not None:
+            argv.append("--multi-turn" if body["multi_turn"] else "--no-multi-turn")
+        if body.get("segment_words") is not None:
+            argv += ["--segment-words", str(body["segment_words"])]
+        if body.get("max_rounds") is not None:
+            argv += ["--max-rounds", str(body["max_rounds"])]
         return _respond(_cli(*argv))
 
     @app.post("/api/ui/chapter/save")
@@ -1019,17 +1113,33 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
             应用: {applied, chapter_id, old_title, new_title, changed_fields,
                    replaced_beats, warnings}。
 
+        说明:
+            预览会按「工程 + 章节 + 正文哈希」缓存；随后 apply 命中缓存时直接写盘，
+            不再重跑多轮模型，避免「点应用」后长时间无响应。
+
         异常:
             HTTPException: 正文为空 400，章节不存在 404，模型异常 502。
         """
         store = _store(body.get("path"))
+        chapter_id = body.get("chapter") or ""
+        apply = bool(body.get("apply"))
         try:
-            return summarize_chapter(
-                store,
-                load_config(config_path),
-                body.get("chapter") or "",
-                apply=bool(body.get("apply")),
-            )
+            chapter = store.load_chapter(chapter_id)
+            content = str(chapter.get("content") or "")
+            if apply:
+                cached = _cached_summary(store, chapter_id, content)
+                if cached:
+                    return apply_summary(
+                        store,
+                        load_config(config_path),
+                        chapter_id,
+                        cached["preview"],
+                        rounds=cached["rounds"],
+                    )
+            result = summarize_chapter(store, load_config(config_path), chapter_id, apply=apply)
+            if not apply:
+                _remember_summary(store, chapter_id, content, result)
+            return result
         except AdapterError as exc:
             raise HTTPException(status_code=502, detail=exc.message) from exc
         except (ValueError, TypeError) as exc:

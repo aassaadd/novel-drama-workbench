@@ -8,8 +8,9 @@
 from __future__ import annotations
 
 import re
+from dataclasses import replace
 
-from ..adapters.base import AdapterError, ErrorCode
+from ..adapters.base import AdapterError, ErrorCode, Message
 from ..config import AppConfig
 from ..models.ids import new_id, now_iso
 from ..store import ProjectStore
@@ -164,6 +165,81 @@ def _finish_chapter(chapter: dict, text: str, exact: bool) -> tuple[str, int, st
     return final, _count_words(final), ("stale" if has_downstream else "written")
 
 
+def _split_text_chunks(text: str, limit: int) -> list[str]:
+    """把长文本按段落边界切成若干块，每块约不超过 limit 字。
+
+    切分优先级：空行段落 → 段内句号；块与块之间不重复内容。
+
+    参数:
+        text: 待切分文本。
+        limit: 每块目标字数上限（按非空白字符统计）。
+
+    返回:
+        文本块列表（按原顺序）；空文本返回空列表。
+    """
+    if not text:
+        return []
+    units: list[str] = []
+    for part in re.split(r"(\n{2,})", text):
+        if not part:
+            continue
+        if not part.strip():
+            # 段落分隔符挂到上一块末尾，保证拼接后不丢换行
+            if units:
+                units[-1] += part
+            continue
+        if _count_words(part) <= limit:
+            units.append(part)
+            continue
+        # 超长段落按句号再切，仍然超长的单句只能整块保留
+        cursor = ""
+        for sentence in re.split(r"(?<=。)", part):
+            if not sentence:
+                continue
+            if cursor and _count_words(cursor + sentence) > limit:
+                units.append(cursor)
+                cursor = sentence
+            else:
+                cursor += sentence
+        if cursor:
+            units.append(cursor)
+
+    chunks: list[str] = []
+    current = ""
+    for unit in units:
+        if current and _count_words(current + unit) > limit:
+            chunks.append(current)
+            current = unit
+        else:
+            current += unit
+    if current.strip():
+        chunks.append(current)
+    return [chunk for chunk in chunks if chunk.strip()]
+
+
+def _chunk_instruction(chunk: str, before: str, after: str, prompt: str, rule: str) -> str:
+    """构造单块改写请求的末尾 user 消息（前后文只读，改写要求固定）。
+
+    参数:
+        chunk: 本块原文。
+        before: 本块之前最多 200 字的只读参考。
+        after: 本块之后最多 200 字的只读参考。
+        prompt: 用户改写提示词。
+        rule: 输出约束（整章/选区不同）。
+
+    返回:
+        拼好的 user 消息文本。
+    """
+    parts: list[str] = []
+    if before.strip():
+        parts.append(f"前文参考（只读，不要改写）：{before.strip()}")
+    parts.append(f"本块原文：\n{chunk}")
+    if after.strip():
+        parts.append(f"后文参考（只读，不要改写）：{after.strip()}")
+    parts.append(f"改写要求：{prompt}\n输出要求：{rule}。")
+    return "\n\n".join(parts)
+
+
 def edit_chapter(
     store: ProjectStore,
     config: AppConfig,
@@ -171,6 +247,7 @@ def edit_chapter(
     instruction: str,
     char_range: tuple[int, int] | None = None,
     dry_run: bool = True,
+    chunk_words: int | None = None,
 ) -> dict:
     """按提示词让 LLM 改写章节正文（整章或选区），默认只预览。
 
@@ -181,10 +258,12 @@ def edit_chapter(
         instruction: 用户提示词；strip 后不能为空。
         char_range: (start, end) 0 起算字符偏移，左闭右开；None 表示整章改写。
         dry_run: True 只返回预览，不写盘、不追加 continuations。
+        chunk_words: 分块阈值；None 时取 `writing.multi_turn.edit_chunk_words`（默认 1200）。
 
     返回:
         {chapter_id, mode, before, after, changed, word_count, revision, status,
-         warnings, continuation_id?}；before/after 为完整正文。
+         warnings, rounds, chunks, continuation_id?}；before/after 为完整正文，
+         rounds/chunks 为实际改写块数（短正文为 1）。
 
     异常:
         ValueError: 提示词为空、正文为空或选区越界（中文消息）。
@@ -204,57 +283,117 @@ def edit_chapter(
     context = build_chapter_context(store, config, chapter)
     configured_budget = int(config.get("writing.context_budget_tokens") or 32768)
 
-    if selection is None:
-        # 整章改写必须让模型看到全文；在配置预算外预留装配余量，避免摘录被裁掉
-        budget = max(configured_budget, min(len(content) + 32768, 262144))
-        excerpt_blocks = [{"kind": "current", "title": "【当前正文（全文）】", "text": content}]
-        instruction_text = (
-            f"按以下提示词改写本章正文。\n提示词：{prompt}\n输出要求：{WHOLE_OUTPUT_RULE}。"
-        )
-    else:
-        start, end = selection
-        budget = configured_budget
-        excerpt_blocks = _selection_excerpt(content, start, end)
-        selected = content[start:end]
-        instruction_text = (
-            f"按以下提示词改写选中片段。\n提示词：{prompt}\n"
-            f"选中片段：\n{selected}\n输出要求：{SELECTION_OUTPUT_RULE}。"
-        )
-
-    assembler = _EditContextAssembler(
-        work=context["work"],
-        bible=context["bible"],
-        world_digest=context["world_context"],
-        characters=context["characters"],
-        chapter=chapter,
-        outline_chapter=context["entry"] or {},
-        previous_chapters=context["previous_chapters"],
-        current_content=content,
-        budget_tokens=budget,
-        excerpt_blocks=excerpt_blocks,
-    )
-    req = assembler.build("chapter", instruction_text, context["speaker_ids"])
-    # 离线适配器依赖 metadata 产出确定性正文；编辑时沿用同一份，真实模型只用到 prompt
-    req.metadata = context["metadata"]
-
+    mt = config.get("writing.multi_turn") or {}
     try:
-        result = context["adapter"].generate(req)
-    except AdapterError:
-        raise
-    except Exception as exc:  # 适配器内部异常统一转成中文可读错误
-        raise AdapterError(ErrorCode.UPSTREAM_ERROR, f"模型调用失败：{exc}", retryable=True) from exc
-
-    generated = (result.text or "").strip()
-    if not generated:
-        raise AdapterError(ErrorCode.UPSTREAM_ERROR, "模型未返回可用内容，正文未修改", retryable=True)
+        chunk_limit = int(chunk_words or mt.get("edit_chunk_words") or 1200)
+    except (TypeError, ValueError):
+        chunk_limit = 1200
+    chunk_limit = max(200, chunk_limit)
 
     if selection is None:
-        final, word_count, status = _finish_chapter(chapter, generated, exact=False)
-        produced = {"char_start": 0, "char_end": len(generated)}
+        target_start = 0
+        target_text = content
     else:
-        start, end = selection
-        final, word_count, status = _finish_chapter(chapter, content[:start] + generated + content[end:], exact=True)
-        produced = {"char_start": start, "char_end": start + len(generated)}
+        target_start, target_end = selection
+        target_text = content[target_start:target_end]
+    chunks = _split_text_chunks(target_text, chunk_limit) if _count_words(target_text) > chunk_limit else [target_text]
+
+    if len(chunks) > 1:
+        # 分块改写：前缀只保留固定的任务说明，块正文与前后文放到末尾 user，保证前缀缓存可复用
+        rule = WHOLE_OUTPUT_RULE if selection is None else SELECTION_OUTPUT_RULE
+        instruction_text = f"按以下提示词改写正文。\n提示词：{prompt}\n输出要求：{rule}。"
+        assembler = _EditContextAssembler(
+            work=context["work"],
+            bible=context["bible"],
+            world_digest=context["world_context"],
+            characters=context["characters"],
+            chapter=chapter,
+            outline_chapter=context["entry"] or {},
+            previous_chapters=context["previous_chapters"],
+            current_content=content,
+            budget_tokens=configured_budget,
+            excerpt_blocks=[],
+        )
+        req = assembler.build("chapter", instruction_text, context["speaker_ids"])
+        req.metadata = context["metadata"]
+        work_id = str(context["work"].get("id") or "").strip()
+        if work_id:
+            req.prompt_cache_key = f"{work_id}:{chapter_id}:edit"
+        generated_parts: list[str] = []
+        cursor = 0
+        result = None
+        for chunk in chunks:
+            start_at = target_text.find(chunk, cursor)
+            if start_at < 0:
+                start_at = cursor
+            before = target_text[max(0, start_at - 200):start_at]
+            after = target_text[start_at + len(chunk):start_at + len(chunk) + 200]
+            request = replace(req, messages=list(req.messages) + [Message("user", _chunk_instruction(chunk, before, after, prompt, rule))])
+            try:
+                result = context["adapter"].generate(request)
+            except AdapterError:
+                raise
+            except Exception as exc:  # 适配器内部异常统一转成中文可读错误
+                raise AdapterError(ErrorCode.UPSTREAM_ERROR, f"模型调用失败：{exc}", retryable=True) from exc
+            generated = (result.text or "").strip()
+            if not generated:
+                raise AdapterError(ErrorCode.UPSTREAM_ERROR, "模型未返回可用内容，正文未修改", retryable=True)
+            generated_parts.append(generated)
+            cursor = start_at + len(chunk)
+        generated_text = "\n\n".join(generated_parts)
+        rounds = len(chunks)
+    else:
+        if selection is None:
+            # 整章改写必须让模型看到全文；在配置预算外预留装配余量，避免摘录被裁掉
+            budget = max(configured_budget, min(len(content) + 32768, 262144))
+            excerpt_blocks = [{"kind": "current", "title": "【当前正文（全文）】", "text": content}]
+            instruction_text = (
+                f"按以下提示词改写本章正文。\n提示词：{prompt}\n输出要求：{WHOLE_OUTPUT_RULE}。"
+            )
+        else:
+            start, end = selection
+            budget = configured_budget
+            excerpt_blocks = _selection_excerpt(content, start, end)
+            selected = content[start:end]
+            instruction_text = (
+                f"按以下提示词改写选中片段。\n提示词：{prompt}\n"
+                f"选中片段：\n{selected}\n输出要求：{SELECTION_OUTPUT_RULE}。"
+            )
+
+        assembler = _EditContextAssembler(
+            work=context["work"],
+            bible=context["bible"],
+            world_digest=context["world_context"],
+            characters=context["characters"],
+            chapter=chapter,
+            outline_chapter=context["entry"] or {},
+            previous_chapters=context["previous_chapters"],
+            current_content=content,
+            budget_tokens=budget,
+            excerpt_blocks=excerpt_blocks,
+        )
+        req = assembler.build("chapter", instruction_text, context["speaker_ids"])
+        # 离线适配器依赖 metadata 产出确定性正文；编辑时沿用同一份，真实模型只用到 prompt
+        req.metadata = context["metadata"]
+
+        try:
+            result = context["adapter"].generate(req)
+        except AdapterError:
+            raise
+        except Exception as exc:  # 适配器内部异常统一转成中文可读错误
+            raise AdapterError(ErrorCode.UPSTREAM_ERROR, f"模型调用失败：{exc}", retryable=True) from exc
+
+        generated_text = (result.text or "").strip()
+        if not generated_text:
+            raise AdapterError(ErrorCode.UPSTREAM_ERROR, "模型未返回可用内容，正文未修改", retryable=True)
+        rounds = 1
+
+    if selection is None:
+        final, word_count, status = _finish_chapter(chapter, generated_text, exact=False)
+        produced = {"char_start": 0, "char_end": len(generated_text)}
+    else:
+        final, word_count, status = _finish_chapter(chapter, content[:target_start] + generated_text + content[target_end:], exact=True)
+        produced = {"char_start": target_start, "char_end": target_start + len(generated_text)}
 
     warnings = list(assembler.warnings)
     has_downstream = bool(chapter.get("scenes") or chapter.get("script_path"))
@@ -272,6 +411,8 @@ def edit_chapter(
         "revision": revision,
         "status": status,
         "warnings": warnings,
+        "rounds": rounds,
+        "chunks": rounds,
     }
     if dry_run:
         return response

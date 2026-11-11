@@ -913,6 +913,15 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--chapter", required=True)
     q.add_argument("--regen", action="store_true", help="已有正文时覆盖重写")
     q.add_argument("--dry-run", action="store_true", help="只预览，不落盘")
+    q.add_argument(
+        "--multi-turn",
+        dest="multi_turn",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="强制开启/关闭多轮续写；缺省按 writing.multi_turn.enabled 与目标字数自动判断",
+    )
+    q.add_argument("--segment-words", dest="segment_words", type=int, help="每段目标字数（默认取配置 segment_words）")
+    q.add_argument("--max-rounds", dest="max_rounds", type=int, help="最大续写轮数（默认取配置 max_rounds）")
     q.set_defaults(func=cmd_chapter_generate)
     q = p_sub.add_parser("save", help="用手写正文覆盖章节正文（UTF-8）")
     q.add_argument("--chapter", required=True)
@@ -925,6 +934,7 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--chapter", required=True)
     q.add_argument("--instruction", required=True, help="改写提示词")
     q.add_argument("--range", dest="char_range", help="选区 start:end（0 起算，左闭右开）；缺省改写整章")
+    q.add_argument("--chunk-words", dest="chunk_words", type=int, help="分块阈值（默认取配置 edit_chunk_words）")
     edit_mode = q.add_mutually_exclusive_group()
     edit_mode.add_argument("--dry-run", action="store_true", help="只预览（默认行为）")
     edit_mode.add_argument("--apply", action="store_true", help="写盘并追加 continuations 记录")
@@ -932,6 +942,7 @@ def build_parser() -> argparse.ArgumentParser:
     q = p_sub.add_parser("summarize", help="根据正文反向总结标题/摘要/大纲/节拍（默认预览，--apply 才落盘）")
     q.add_argument("--chapter", required=True)
     q.add_argument("--apply", action="store_true", help="写回章节文件与设定库大纲")
+    q.add_argument("--chunk-words", dest="chunk_words", type=int, help="分块阈值（默认取配置 summary_chunk_words）")
     q.set_defaults(func=cmd_chapter_summarize)
 
     p = sub.add_parser("setting", help="设定库（世界观/文风/大纲）")
@@ -1000,6 +1011,8 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--beats-per-chapter", dest="beats_per_chapter", type=int, default=3)
     q.add_argument("--words", type=int, default=1200, help="单章目标字数")
     q.add_argument("--binding", choices=["auto", "none"], default="auto", help="auto=生成后把节拍绑定到已有人物")
+    q.add_argument("--multi-turn", dest="multi_turn", action="store_true", help="按幕分批生成（单轮工具调用只产出一幕）")
+    q.add_argument("--acts-per-round", dest="acts_per_round", type=int, default=1, help="每轮计划生成的幕数（默认 1）")
     q.add_argument("--dry-run", action="store_true")
     q.set_defaults(func=cmd_outline)
     q = p_sub.add_parser("apply", help="把大纲落地成章节文件")
@@ -1170,6 +1183,7 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--apply", action="store_true", help="解析并同步进章节（含音效/画面/视频位）")
     q.add_argument("--dry-run", action="store_true", help="只预览，不写盘")
     q.add_argument("--out", help="标注文本输出路径，默认 scripts/<chapter>.markup.txt")
+    q.add_argument("--scenes-per-round", dest="scenes_per_round", type=int, help="每批镜头数（默认取配置 script_scenes_per_round）")
     q.set_defaults(func=cmd_script_suggest)
     q = p_sub.add_parser("parse")
     q.add_argument("--chapter", required=True)

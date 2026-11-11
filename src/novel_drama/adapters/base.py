@@ -85,6 +85,8 @@ class Usage:
 
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    #: 前缀缓存命中的 token 数；上游不返回缓存统计时为 None
+    cached_tokens: int | None = None
 
 
 @dataclass
@@ -100,6 +102,8 @@ class TextGenRequest:
     stream: bool = True
     context_budget_tokens: int = 32768
     metadata: dict = field(default_factory=dict)
+    #: 前缀缓存键（工程 id + 章节 id 等稳定值）；为 None 时不透传缓存开关
+    prompt_cache_key: str | None = None
 
 
 @dataclass

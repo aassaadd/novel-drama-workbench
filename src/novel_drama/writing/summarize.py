@@ -12,6 +12,7 @@ from ..models.ids import new_id
 from ..store import ProjectStore
 from ..store.settings_store import SettingsStore
 from ..text.context import POV_LABELS
+from .editing import _split_text_chunks
 from .service import _extract_json_object, build_chapter_context
 
 #: 章节字段上限（与 `schema/chapter.schema.json` 保持一致）
@@ -115,13 +116,15 @@ def _current_beats_text(beats: list[dict]) -> str:
     return "\n".join(lines) or "（无）"
 
 
-def _build_request(context: dict, chapter: dict, excerpt: str) -> TextGenRequest:
+def _build_request(context: dict, chapter: dict, excerpt: str, intro: str | None = None, body_label: str = "正文") -> TextGenRequest:
     """组装反向总结用的文本生成请求。
 
     参数:
         context: `build_chapter_context` 的返回。
         chapter: 章节 dict。
-        excerpt: 可能被截断的正文。
+        excerpt: 可能被截断的正文，或分块总结出的要点。
+        intro: 首句任务说明；None 时使用单轮默认说明。
+        body_label: 正文区标题（单轮为「正文」，分块合并为「各段事件要点」）。
 
     返回:
         TextGenRequest（task=summarize，metadata 供离线适配器确定性复现）。
@@ -130,7 +133,7 @@ def _build_request(context: dict, chapter: dict, excerpt: str) -> TextGenRequest
     style = context["style"]
     instruction = "\n".join(
         [
-            "请根据下面这章正文，反向总结章节标题、摘要、大纲与节拍。",
+            intro or "请根据下面这章正文，反向总结章节标题、摘要、大纲与节拍。",
             (
                 f"作品：《{work.get('title') or '未命名'}》；类型：{'、'.join(work.get('genre') or []) or '未设定'}；"
                 f"一句话简介：{work.get('logline') or '未设定'}"
@@ -141,7 +144,7 @@ def _build_request(context: dict, chapter: dict, excerpt: str) -> TextGenRequest
             f"当前大纲：{(chapter.get('outline') or '').strip() or '（无）'}",
             "当前节拍：",
             _current_beats_text(context["beats"]),
-            "正文：",
+            f"{body_label}：",
             excerpt,
             "输出 JSON 结构：",
             JSON_SHAPE,
@@ -333,11 +336,41 @@ def _sync_beats(old_beats: list[dict], new_beats: list[dict], pov_id: str | None
     return result
 
 
+def _chunk_notes_request(chapter: dict, work: dict, chunk: str) -> TextGenRequest:
+    """构造单块事件要点提取请求。
+
+    参数:
+        chapter: 章节 dict（提供标题）。
+        work: 作品信息（提供作品名）。
+        chunk: 本块正文。
+
+    返回:
+        TextGenRequest；system 固定，只替换本块正文，便于前缀缓存复用。
+    """
+    instruction = "\n".join(
+        [
+            "请阅读下面这段章节正文，提取本段发生的事件要点。",
+            f"作品：《{work.get('title') or '未命名'}》；章节：{chapter.get('title') or ''}",
+            "要求：每条一行，用「- 」开头，按发生顺序写清人物与动作，不要评论、不要解释。",
+            "本段正文：",
+            chunk,
+        ]
+    )
+    return TextGenRequest(
+        task="summarize",
+        system="你是长篇小说的结构编辑，擅长从正文提取事件要点。只输出要点列表，不要解释。",
+        messages=[Message("user", instruction)],
+        stream=False,
+        metadata={"title": chapter.get("title"), "content": chunk},
+    )
+
+
 def summarize_chapter(
     store: ProjectStore,
     config: AppConfig,
     chapter_id: str,
     apply: bool = False,
+    chunk_words: int | None = None,
 ) -> dict:
     """根据已有正文反向总结章节标题、摘要、大纲与节拍，默认只预览。
 
@@ -346,11 +379,13 @@ def summarize_chapter(
         config: 本机配置（决定写作适配器）。
         chapter_id: 章节 ID。
         apply: True 时写回章节文件与设定库；False 只返回预览。
+        chunk_words: 分块阈值；None 时取 `writing.multi_turn.summary_chunk_words`（默认 3000）。
 
     返回:
-        apply=False: {chapter_id, preview, changes, replaced_beats}；
+        apply=False: {chapter_id, preview, changes, replaced_beats, rounds}；
         apply=True: {applied, chapter_id, old_title, new_title, changed_fields,
-                      replaced_beats, warnings}。
+                      replaced_beats, warnings, rounds}。
+        rounds 为实际模型调用轮数：短正文为 1，分块时为块数 + 1（合并请求）。
 
     异常:
         ValueError: 正文为空（中文消息）。
@@ -367,8 +402,37 @@ def summarize_chapter(
     old_beats = list((entry or {}).get("beats") or [])
     excerpt, truncated = _content_excerpt(content)
 
-    req = _build_request(context, chapter, excerpt)
+    mt = config.get("writing.multi_turn") or {}
     try:
+        chunk_limit = int(chunk_words or mt.get("summary_chunk_words") or 3000)
+    except (TypeError, ValueError):
+        chunk_limit = 3000
+    chunk_limit = max(500, chunk_limit)
+
+    rounds = 1
+    chunked = len(content) > chunk_limit
+    try:
+        if chunked:
+            # 先逐块提取事件要点（system 固定，只换本块正文），再用一次合并请求产出与单轮一致的 JSON
+            chunks = _split_text_chunks(content, chunk_limit)
+            notes_parts: list[str] = []
+            for index, chunk in enumerate(chunks, start=1):
+                chunk_result = context["adapter"].generate(_chunk_notes_request(chapter, context["work"], chunk))
+                notes = (chunk_result.text or "").strip()
+                if notes:
+                    notes_parts.append(f"第 {index} 段要点：\n{notes}")
+            if not notes_parts:
+                raise AdapterError(ErrorCode.UPSTREAM_ERROR, "分块总结未返回任何要点", retryable=True)
+            rounds = len(chunks) + 1
+            req = _build_request(
+                context,
+                chapter,
+                "\n\n".join(notes_parts),
+                intro="请根据下面各段的事件要点，汇总成本章标题、摘要、大纲与节拍。",
+                body_label="各段事件要点",
+            )
+        else:
+            req = _build_request(context, chapter, excerpt)
         result = context["adapter"].generate(req)
     except AdapterError:
         raise
@@ -392,8 +456,50 @@ def summarize_chapter(
             "preview": preview,
             "changes": changes,
             "replaced_beats": replaced_beats,
+            "rounds": rounds,
         }
 
+    return _apply_preview(
+        store,
+        chapter,
+        context,
+        preview,
+        changes,
+        replaced_beats,
+        truncated=truncated and not chunked,
+        rounds=rounds,
+    )
+
+
+def _apply_preview(
+    store: ProjectStore,
+    chapter: dict,
+    context: dict,
+    preview: dict,
+    changes: list[str],
+    replaced_beats: int,
+    truncated: bool,
+    rounds: int,
+) -> dict:
+    """把已生成的重总结预览写回章节与设定库（不调用模型）。
+
+    参数:
+        store: 工程。
+        chapter: 章节完整数据。
+        context: `build_chapter_context` 的结果（提供 bible 与 entry）。
+        preview: 已通过校验的预览（title/synopsis/outline/beats）。
+        changes: 字段变更列表。
+        replaced_beats: 被替换的旧节拍数量。
+        truncated: 单轮总结时是否发生正文截断（用于告警）。
+        rounds: 原预览的模型轮次，仅回显。
+
+    返回:
+        与 `summarize_chapter(apply=True)` 相同的结构。
+
+    异常:
+        SchemaValidationError: 设定库校验不通过（章节与设定库都不写盘）。
+    """
+    entry = context["entry"]
     warnings: list[str] = []
     if truncated:
         warnings.append(f"正文过长，仅截取开头 {PROMPT_HEAD_CHARS} 字与结尾 {PROMPT_TAIL_CHARS} 字参与总结")
@@ -401,6 +507,8 @@ def summarize_chapter(
         warnings.append("设定库中没有本章的大纲条目，已跳过节拍同步")
 
     old_title = str(chapter.get("title") or "")
+    chapter_id = str(chapter.get("id") or "")
+    old_beats = list((entry or {}).get("beats") or [])
     changed_fields = list(changes)
     if not changed_fields:
         warnings.append("总结结果与当前内容一致，无需写盘")
@@ -412,6 +520,7 @@ def summarize_chapter(
             "changed_fields": [],
             "replaced_beats": 0,
             "warnings": warnings,
+            "rounds": rounds,
         }
 
     # 正文只作为事实来源，绑定的世界 / POV 保持不变
@@ -449,4 +558,41 @@ def summarize_chapter(
         "changed_fields": changed_fields,
         "replaced_beats": replaced_beats,
         "warnings": warnings,
+        "rounds": rounds,
     }
+
+
+def apply_summary(
+    store: ProjectStore,
+    config: AppConfig,
+    chapter_id: str,
+    preview: dict,
+    rounds: int = 1,
+) -> dict:
+    """直接应用一份已生成的重总结预览，不再调用模型。
+
+    预览已由 `summarize_chapter(apply=False)` 生成时，网页端「应用」会走这里，
+    避免重复跑多轮模型导致界面长时间无响应。
+
+    参数:
+        store: 工程。
+        config: 本机配置（用于重建章节上下文）。
+        chapter_id: 章节 ID。
+        preview: 已校验的预览（title/synopsis/outline/beats）。
+        rounds: 原预览的模型轮次，仅回显。
+
+    返回:
+        与 `summarize_chapter(apply=True)` 相同的结构。
+
+    异常:
+        FileNotFoundError: 章节不存在。
+        SchemaValidationError: 设定库校验不通过（不写盘）。
+    """
+    chapter = store.load_chapter(chapter_id)
+    context = build_chapter_context(store, config, chapter)
+    entry = context["entry"]
+    old_beats = list((entry or {}).get("beats") or [])
+    changes = _diff_fields(chapter, old_beats, preview, entry is not None)
+    replaced_beats = min(len(old_beats), len(preview["beats"])) if "beats" in changes else 0
+    # 本次没有调用模型，不存在截断告警
+    return _apply_preview(store, chapter, context, preview, changes, replaced_beats, truncated=False, rounds=rounds)
