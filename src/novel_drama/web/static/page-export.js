@@ -248,12 +248,57 @@
     }
   }
 
+  /* 生成剪映草稿 zip：成功后展示 zip 路径、轨道统计、素材对账与字幕兜底记录。
+   * 返回：无。
+   */
+  async function startJianying() {
+    if (busy || !NW.state.path || !NW.state.chapter) {
+      NW.toast("先打开工程并选中章节");
+      return;
+    }
+    const button = el("exJianying");
+    const box = el("exJianyingResult");
+    busy = true;
+    button.disabled = true;
+    box.textContent = "正在生成剪映草稿…";
+    try {
+      const result = await NW.api("/api/ui/export/jianying", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        busy: "正在生成剪映草稿…",
+        busyDetail: `章节 ${NW.state.chapter}`,
+        body: JSON.stringify({ path: NW.state.path, chapter: NW.state.chapter }),
+      });
+      const counts = result.counts || {};
+      const reconcile = result.reconcile || {};
+      const lines = [
+        `草稿：${result.draft_dir}`,
+        `压缩包：${result.zip}`,
+        `导入位置：${result.install_dir}`,
+        `字幕 ${counts.subtitles || 0}/${counts.dialogue_lines || 0} 行　视频 ${counts.video_segments || 0}　图片 ${counts.image_segments || 0}　配音 ${counts.voice_segments || 0}　音效 ${counts.sfx_segments || 0}　BGM ${counts.bgm_segments || 0}`,
+        `素材对账：引用 ${reconcile.referenced || 0} / 已复制 ${reconcile.copied || 0} / 缺失 ${(reconcile.missing || []).length}`,
+      ];
+      (result.subtitle_gaps || []).forEach((item) => lines.push(`字幕兜底：${item.line_id} ${item.reason}`));
+      (result.warnings || []).forEach((item) => lines.push(`告警：${item}`));
+      box.textContent = lines.join("\n");
+      NW.toast("剪映草稿已生成", true);
+      await loadFiles();
+    } catch (error) {
+      box.textContent = `生成失败：${error.message}`;
+      NW.toast(`生成失败（退出码 ${error.code}）：${error.message}`);
+    } finally {
+      busy = false;
+      button.disabled = false;
+    }
+  }
+
   /* 首次激活绑定事件。 */
   function bind() {
     if (bound) return;
     bound = true;
     fillStages();
     el("exStart").addEventListener("click", start);
+    el("exJianying").addEventListener("click", startJianying);
     el("exRefresh").addEventListener("click", loadFiles);
     NW.onProject(() => {
       // 换工程后先禁用，等新记录读回来再决定按钮状态，避免刷新/切换期间连点触发第二个编排

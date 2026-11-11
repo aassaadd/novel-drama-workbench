@@ -146,6 +146,12 @@ CONFIG_FIELD_GROUPS = (
             ("audio.lra", "响度范围（LU）", "int", None, 0, 50),
         ),
     ),
+    (
+        "导出",
+        (
+            ("export.jianying.drafts_root", "剪映草稿根目录", "path", None, None, None),
+        ),
+    ),
 )
 
 #: 可编辑键：分组字段 + 设置页已有专属控件的键（同键不复用两次）
@@ -1115,6 +1121,28 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
                 argv += [flag, str(body[key])]
         return _respond(_cli(*argv))
 
+    @app.post("/api/ui/line/edit")
+    def ui_line_edit(body: dict) -> dict:
+        """就地编辑台词文本，并同步回章节正文（`line edit --json`）。
+
+        正文对不上时 CLI 返回退出码 2，界面会收到「正文已变更，请先重新切分」。
+        """
+        return _respond(
+            _cli(
+                "--project",
+                body["path"],
+                "--json",
+                "line",
+                "edit",
+                "--chapter",
+                body["chapter"],
+                "--line",
+                body["line"],
+                "--text",
+                body["text"],
+            )
+        )
+
     @app.post("/api/ui/line/revert")
     def ui_line_revert(body: dict) -> dict:
         """回滚到上次生成时的参数（`line revert`）。"""
@@ -1492,6 +1520,23 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
             argv += ["--limit", str(body["limit"])]
         return _respond(_cli(*argv))
 
+    @app.post("/api/ui/export/jianying")
+    def ui_export_jianying(body: dict) -> dict:
+        """导出剪映草稿 zip（`export --format jianying`）。"""
+        argv = [
+            "--project",
+            body["path"],
+            "--json",
+            "export",
+            "--chapter",
+            body["chapter"],
+            "--format",
+            "jianying",
+        ]
+        if body.get("out_dir"):
+            argv += ["--out-dir", body["out_dir"]]
+        return _respond(_cli(*argv))
+
     @app.post("/api/ui/produce")
     def ui_produce(body: dict) -> dict:
         """启动全链路编排（后台进程，进度靠 `run show` 反映）。"""
@@ -1554,10 +1599,19 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
             for item in sorted(folder.rglob("*")):
                 if not item.is_file():
                     continue
+                rel = item.relative_to(root)
+                # 剪映草稿的 media 目录是素材副本，逐条列出会刷屏，只展示 zip 与草稿元数据
+                if (
+                    len(rel.parts) > 3
+                    and rel.parts[0] == "exports"
+                    and rel.parts[1] == "jianying"
+                    and rel.parts[3] == "media"
+                ):
+                    continue
                 stat = item.stat()
                 files.append(
                     {
-                        "rel": str(item.relative_to(root)),
+                        "rel": str(rel),
                         "path": str(item),
                         "size": stat.st_size,
                         "mtime": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),

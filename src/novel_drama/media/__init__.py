@@ -6,6 +6,7 @@ from .bundle import export_bundle
 from .concat import concat_voice, plan_concat
 from .export import build_manifest, build_srt, write_export
 from .generate import probe_duration_ms, render_image, render_sfx, render_video
+from .jianying import JianyingExportError, export_jianying
 from .mixer import plan_mix, render_mix
 from .mux import mux, plan_mux
 from .normalize import measure_all, measure_loudness, measure_peak, normalize_audio
@@ -20,6 +21,7 @@ from .timeline_builder import (
 )
 
 __all__ = [
+    "JianyingExportError",
     "add_cue",
     "apply_silences",
     "build_manifest",
@@ -29,6 +31,7 @@ __all__ = [
     "compute_source_hash",
     "concat_voice",
     "export_bundle",
+    "export_jianying",
     "format_schedule_tsv",
     "import_asset",
     "load_cues",

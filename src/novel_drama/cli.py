@@ -32,6 +32,7 @@ from .cli_comfy import cmd_comfy
 from .cli_group import cmd_group_apply, cmd_group_diff, cmd_group_list
 from .cli_line import (
     cmd_line_diff,
+    cmd_line_edit,
     cmd_line_list,
     cmd_line_revert,
     cmd_line_set,
@@ -1364,6 +1365,11 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--text")
     q.add_argument("--kind", choices=["dialogue", "narration", "inner_monologue"])
     q.set_defaults(func=cmd_line_set)
+    q = p_sub.add_parser("edit", help="就地编辑台词文本，并同步回章节正文对应位置")
+    q.add_argument("--chapter", required=True)
+    q.add_argument("--line", required=True)
+    q.add_argument("--text", required=True)
+    q.set_defaults(func=cmd_line_edit)
 
     p = sub.add_parser("group", help="虚拟分组（按条件批量改行参数，物化写入 .ndw/groups）")
     p_sub = p.add_subparsers(dest="action", required=True)
@@ -1509,7 +1515,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("export", help="导出成片")
     p.add_argument("--chapter", required=True)
-    p.add_argument("--format", default="srt", choices=["srt", "bundle"], help="srt=字幕与清单 / bundle=交付包（MP3+MP4+SRT+README）")
+    p.add_argument("--format", default="srt", choices=["srt", "bundle", "jianying"], help="srt=字幕与清单 / bundle=交付包（MP3+MP4+SRT+README）/ jianying=剪映草稿 zip")
     p.add_argument("--out-dir", dest="out_dir", help="输出目录，默认 <工程>/exports")
     p.set_defaults(func=cmd_export)
 

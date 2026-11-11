@@ -371,6 +371,42 @@ def cmd_export(args, config: AppConfig) -> int:
     characters = {item["id"]: item for item in store.load_characters()["characters"]}
     out_dir = Path(args.out_dir) if args.out_dir else store.root / "exports"
     silences = _silence_events(store, chapter["id"])
+    if getattr(args, "format", "srt") == "jianying":
+        from .media import export_jianying
+
+        result = export_jianying(
+            store,
+            chapter,
+            timeline,
+            drafts_root=config.get("export.jianying.drafts_root"),
+            ffprobe=config.get("ffmpeg.probe_binary", "ffprobe"),
+            out_dir=(Path(args.out_dir) if args.out_dir else store.root / "exports" / "jianying"),
+        )
+        counts = result["counts"]
+        reconcile = result["reconcile"]
+        lines = [
+            f"剪映草稿: {result['draft_dir']}",
+            f"压缩包: {result['zip']}",
+            f"导入位置: {result['install_dir']}",
+            f"清单: {result['manifest']}",
+            (
+                f"分镜 {counts['video_segments']} 视频 + {counts['image_segments']} 图  "
+                f"配音 {counts['voice_segments']}  音效 {counts['sfx_segments']}  BGM {counts['bgm_segments']}  "
+                f"字幕 {counts['subtitles']}/{counts['dialogue_lines']} 行  轨道 {counts['tracks']}"
+            ),
+            (
+                f"素材对账: 引用 {reconcile['referenced']} / 已复制 {reconcile['copied']} / "
+                f"缺失 {len(reconcile['missing'])}"
+            ),
+        ]
+        if result["subtitle_gaps"]:
+            lines.append(f"字幕兜底 {len(result['subtitle_gaps'])} 行（已按估算时间补齐，详见清单）")
+            for item in result["subtitle_gaps"]:
+                lines.append(f"  ~ {item['line_id']}  {item['reason']}")
+        if result["warnings"]:
+            lines.extend(["告警："] + [f"  ! {item}" for item in result["warnings"]])
+        _emit(args, "\n".join(lines), result)
+        return EXIT_OK
     if getattr(args, "format", "srt") == "bundle":
         from .media import export_bundle
 

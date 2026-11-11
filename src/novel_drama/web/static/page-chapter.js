@@ -25,6 +25,7 @@
   let blocks = [];          // 当前正文段落 [{ index, start, end, text }]
   let lineMap = new Map();  // line_id → { block, start, end }（相对段落起点）
   let lineIndex = new Map(); // line_id → 章节详情里的行对象（右栏展示用）
+  let lineEdit = null;      // 正在行内编辑的台词：{ lineId, wrap, input }
 
   const el = (id) => document.getElementById(id);
 
@@ -133,7 +134,7 @@
             const para = entry ? entry.block : "";
             return (
               `<button class="line-chip" data-line="${esc(line.id)}" data-para="${para}" ` +
-              `title="${para === "" ? "正文里没找到这一行，无法定位" : `正文第 ${Number(para) + 1} 段`}">` +
+              `title="${para === "" ? "正文里没找到这一行，无法定位" : `正文第 ${Number(para) + 1} 段`} · 双击编辑台词">` +
               `<span class="lc-no">${lineIndexer + 1}</span>` +
               `<span class="lc-kind">${esc(NW.kindLabel(line.kind))}</span>` +
               `<span class="lc-text">${esc(line.text || "")}</span></button>`
@@ -176,6 +177,7 @@
   function render(chapter) {
     chapterCache = chapter;
     lastSelection = null;
+    lineEdit = null;
     setEditing(false);
     blocks = paragraphsOf(chapter.content);
     lineMap = buildLineMap(chapter, blocks);
@@ -229,6 +231,7 @@
     const chip = event.target.closest(".line-chip");
     if (!chip) return;
     if (editing) return; // 编辑态下正文已被 textarea 顶替，不做定位也不重渲染
+    if (lineEdit || chip.classList.contains("is-editing")) return; // 行内编辑时不响应单击定位
     const lineId = chip.dataset.line;
     const entry = lineMap.get(lineId);
     const found = lineIndex.get(lineId) || {};
@@ -269,6 +272,102 @@
     }
     payload.para = entry.block;
     NW.emit("line", payload);
+  }
+
+  /* 双击台词行：把这一行换成输入框就地编辑。
+   * 交互约定：Enter 保存、Esc 取消、失焦保存；空内容拒绝保存并提示。
+   * 参数：event 台词列表的双击事件。
+   * 返回：无。
+   */
+  function beginLineEdit(event) {
+    if (editing || busy || !NW.state.path || !NW.state.chapter) return;
+    const chip = event.target.closest(".line-chip");
+    if (!chip || chip.classList.contains("is-editing")) return;
+    if (lineEdit) return; // 一次只编辑一行
+    const lineId = chip.dataset.line;
+    const found = lineIndex.get(lineId);
+    if (!found) {
+      NW.toast("没有这一行的数据，请刷新后重试");
+      return;
+    }
+    const line = found.line || {};
+    const original = line.text || "";
+    const para = chip.dataset.para || "";
+
+    // 复用行样式：序号/类型保持原位，文本区换成输入框
+    const wrap = document.createElement("div");
+    wrap.className = "line-chip is-editing";
+    wrap.dataset.line = lineId;
+    wrap.dataset.para = para;
+    wrap.innerHTML = `<span class="lc-kind">${esc(NW.kindLabel(line.kind))}</span>`;
+    const input = document.createElement("input");
+    input.type = "text";
+    input.className = "line-edit-input";
+    input.maxLength = 5000;
+    input.value = original;
+    wrap.appendChild(input);
+    chip.replaceWith(wrap);
+    input.focus();
+    input.select();
+
+    let finished = false;   // 已保存或已取消
+    let submitting = false; // 正在请求保存
+
+    /* 取消编辑：丢弃输入，还原原来的台词行。 */
+    function cancel() {
+      if (finished || submitting) return;
+      finished = true;
+      wrap.replaceWith(chip);
+      lineEdit = null;
+    }
+
+    /* 保存：调接口同步台词与正文，成功后重载整页（正文与定位映射一起更新）。 */
+    async function save() {
+      if (finished || submitting) return;
+      const value = input.value.trim();
+      if (!value) {
+        NW.toast("台词内容不能为空");
+        input.focus();
+        return;
+      }
+      if (value === original.trim()) {
+        cancel();
+        return;
+      }
+      submitting = true;
+      input.disabled = true;
+      try {
+        const result = await NW.api("/api/ui/line/edit", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ path: NW.state.path, chapter: NW.state.chapter, line: lineId, text: value }),
+        });
+        finished = true;
+        lineEdit = null;
+        NW.toast(`已保存台词（revision=${result.revision}），正文已同步`, true);
+        await load();
+      } catch (error) {
+        // 失败不静默：保留输入框与用户输入，允许改完重试或按 Esc 放弃
+        submitting = false;
+        input.disabled = false;
+        const reason = String(error.message || error).replace(/^\[[A-Z]+\]\s*/, "");
+        NW.toast(`保存失败：${reason}`);
+        input.focus();
+      }
+    }
+
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        save();
+      } else if (event.key === "Escape") {
+        event.preventDefault();
+        cancel();
+      }
+    });
+    input.addEventListener("blur", () => save());
+
+    lineEdit = { lineId, wrap, input };
   }
 
   /* 点正文段落：高亮该段映射到的台词行，便于从正文找回台词。
@@ -885,6 +984,7 @@
     el("chScenes").addEventListener("click", () => split("scene"));
     el("chLines").addEventListener("click", () => split("line"));
     el("chScenesBody").addEventListener("click", onLineClick);
+    el("chScenesBody").addEventListener("dblclick", beginLineEdit);
     el("chContent").addEventListener("click", onParaClick);
     el("chContent").addEventListener("mouseup", captureSelection);
     el("chContent").addEventListener("keyup", captureSelection);

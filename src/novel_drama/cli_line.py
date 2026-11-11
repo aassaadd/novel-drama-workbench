@@ -11,6 +11,9 @@ from .models import entities
 from .orchestration.pipeline import split_chapter_scenes, split_scene_lines
 from .tts import line_state
 
+# 正文与切分数据对不上时的统一提示：宁可拒绝写盘，也不静默改到错误位置
+_CONTENT_MISMATCH = "正文已变更，请先重新切分"
+
 
 # ---------------- scene / line ----------------
 
@@ -240,4 +243,123 @@ def cmd_line_set(args, config: AppConfig) -> int:
     # revision 只承担并发锁职责（见 docs/tts-line-state-and-seams.md §4.3）
     store.save_chapter(chapter)
     _emit(args, f"已更新 {line['id']}（revision={line['revision']}，读取时按参数指纹判定是否过期）", line)
+    return EXIT_OK
+
+
+def _ordered_lines(chapter: dict) -> list[dict]:
+    """按章节里场景与台词的出现顺序摊平所有台词行。
+
+    参数:
+        chapter: 章节 dict。
+
+    返回:
+        台词行列表，顺序即正文中的先后顺序。
+    """
+    return [line for scene in chapter.get("scenes") or [] for line in scene.get("lines") or []]
+
+
+def _locate_lines(content: str, lines: list[dict], cursor: int = 0) -> tuple[dict[str, tuple[int, int]], list[str]]:
+    """按顺序在正文里定位台词行（原文匹配 + 单调游标，不依赖任何落盘偏移）。
+
+    台词行只存 scene_id/index/text，没有字符区间；切分产出的行文本都是正文原文片段，
+    因此从游标处依次向后查找即可还原文中出现位置。
+
+    参数:
+        content: 章节正文。
+        lines: 按出现顺序排列的台词行。
+        cursor: 起始查找位置（用于只校验目标行之后的部分）。
+
+    返回:
+        `(锚点, 未命中的行 ID 列表)`；锚点为 `{line_id: (start, end)}`。
+    """
+    anchors: dict[str, tuple[int, int]] = {}
+    missing: list[str] = []
+    for line in lines:
+        needle = (line.get("text") or "").strip()
+        if not needle:
+            continue
+        start = content.find(needle, cursor)
+        if start < 0:
+            missing.append(line.get("id"))
+            continue
+        end = start + len(needle)
+        anchors[line.get("id")] = (start, end)
+        cursor = end
+    return anchors, missing
+
+
+def cmd_line_edit(args, config: AppConfig) -> int:
+    """就地编辑一条台词文本，并把同一处文本同步回章节正文。
+
+    定位方式（不新增字段、不改切分）：按「场景 → 台词」顺序在正文里做单调游标原文匹配。
+    保存前先用新正文重算一遍：目标行必须仍落在原位置，且前面与后面的行都能定位；
+    任一行对不上就拒绝写盘，避免把正文改到错误位置。
+
+    参数:
+        args: 含 chapter、line、text。
+        config: 本机配置。
+
+    返回:
+        退出码。
+
+    异常:
+        ValueError: 文本为空/含换行/超长，或正文与切分结果已不一致。
+        KeyError: 台词行不存在。
+    """
+    store = _resolve_store(args, config)
+    chapter = store.load_chapter(args.chapter)
+    _, line, _ = store.find_line(chapter, args.line)
+
+    new_text = str(args.text or "").strip()
+    if not new_text:
+        raise ValueError("台词内容不能为空")
+    if "\n" in new_text or "\r" in new_text:
+        raise ValueError("台词不能包含换行")
+    if len(new_text) > 5000:
+        raise ValueError("台词过长（最多 5000 字）")
+
+    old_text = line.get("text") or ""
+    if new_text == old_text.strip():
+        _emit(
+            args,
+            f"{line['id']} 文本没有变化",
+            {"changed": False, "line_id": line["id"], "text": old_text, "revision": line.get("revision")},
+        )
+        return EXIT_OK
+
+    lines = _ordered_lines(chapter)
+    anchors, missing = _locate_lines(chapter.get("content") or "", lines)
+    if missing or line["id"] not in anchors:
+        # 正文与切分数据已经对不上，拒绝写盘
+        raise ValueError(_CONTENT_MISMATCH)
+
+    start, end = anchors[line["id"]]
+    updated = (chapter.get("content") or "")[:start] + new_text + (chapter.get("content") or "")[end:]
+
+    # 校验：目标行之前的部分不受影响；目标行之后的行在新正文里仍能按序定位
+    target_index = next(index for index, item in enumerate(lines) if item.get("id") == line["id"])
+    _, prefix_missing = _locate_lines(updated[:start], lines[:target_index])
+    _, suffix_missing = _locate_lines(updated, lines[target_index + 1:], cursor=start + len(new_text))
+    if prefix_missing or suffix_missing:
+        raise ValueError(_CONTENT_MISMATCH)
+
+    line["text"] = new_text
+    line["revision"] = int(line.get("revision") or 1) + 1
+    chapter["content"] = updated
+    chapter["word_count"] = sum(1 for char in updated if not char.isspace())
+    chapter["revision"] = int(chapter.get("revision") or 1) + 1
+    store.save_chapter(chapter)
+    _emit(
+        args,
+        f"已更新 {line['id']}（revision={line['revision']}），正文已同步",
+        {
+            "changed": True,
+            "line_id": line["id"],
+            "text": new_text,
+            "revision": line["revision"],
+            "chapter_revision": chapter["revision"],
+            "start": start,
+            "end": start + len(new_text),
+        },
+    )
     return EXIT_OK

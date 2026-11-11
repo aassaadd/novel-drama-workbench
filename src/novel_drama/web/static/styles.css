@@ -1299,6 +1299,17 @@ table.grid td.wrap { word-break: break-word; }
 .line-chip .lc-kind { flex: none; font-size: var(--fs-xs); color: var(--muted); }
 .line-chip .lc-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .line-chip[data-para=""] .lc-text { color: var(--muted); }
+.line-chip.is-editing { align-items: center; cursor: text; background: #1c2027; }
+.line-edit-input {
+  flex: 1;
+  min-width: 0;
+  padding: 1px var(--sp-1);
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  background: #12141a;
+  color: var(--text);
+  font: inherit;
+}
 
 /* 标注页：按镜头分段的只读视图，行内标记高亮 */
 .markup { display: flex; flex-direction: column; gap: var(--sp-2); }
@@ -2217,3 +2228,11 @@ select.gen-input {
   font-size: var(--fs-sm);
 }
 #voicePreviewAudio { width: 100%; margin-top: var(--sp-2); }
+
+/* 导出页：剪映草稿结果说明（多行文本按换行展示） */
+.export-result {
+  margin-top: var(--sp-2);
+  white-space: pre-line;
+  line-height: 1.7;
+  word-break: break-all;
+}
