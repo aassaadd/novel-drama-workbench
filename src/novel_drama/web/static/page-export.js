@@ -35,6 +35,40 @@
 
   const el = (id) => document.getElementById(id);
 
+  /* 切换「开始编排」按钮状态。
+   * 参数：mode 取值 running（禁用 + 文案「编排中…」）/ checking（只禁用，等记录读回来）/ idle（按是否有章节恢复）。
+   * 返回：无。
+   */
+  function setStartButton(mode) {
+    const button = el("exStart");
+    if (!button) return;
+    if (mode === "running") {
+      button.disabled = true;
+      button.textContent = "编排中…";
+      return;
+    }
+    button.textContent = "开始编排";
+    button.disabled = mode === "checking" || !NW.state.chapter;
+  }
+
+  /* 由编排记录推算阶段进度：计划区间内的总步数、已记录步数、正在执行的下一阶段。
+   * 参数：run 编排记录，可为 null。
+   * 返回：{ total, done, current, failed }；current / failed 为阶段名，取不到时为空串。
+   */
+  function runProgressOf(run) {
+    const recorded = new Set(((run && run.stages) || []).map((item) => item.stage));
+    const fromIndex = Math.max(0, STAGES.findIndex(([value]) => value === ((run && run.from_stage) || "setting")));
+    const toIndex = STAGES.findIndex(([value]) => value === ((run && run.to_stage) || "export"));
+    const planned = STAGES.slice(fromIndex, (toIndex < 0 ? STAGES.length - 1 : toIndex) + 1).map(([value]) => value);
+    const failed = ((run && run.stages) || []).find((item) => item.status === "failed");
+    return {
+      total: planned.length,
+      done: planned.filter((stage) => recorded.has(stage)).length,
+      current: planned.find((stage) => !recorded.has(stage)) || "",
+      failed: failed ? failed.stage : "",
+    };
+  }
+
   /* 填两个阶段下拉框。 */
   function fillStages() {
     const options = STAGES.map(([value, label]) => `<option value="${value}">${esc(label)}</option>`).join("");
@@ -44,16 +78,16 @@
     el("exTo").value = "export";
   }
 
-  /* 按编排记录画横向步骤条：15 个阶段全列出，缺记录的阶段按 pending。
-   * 参数：run 编排记录（`run show --json` 的负载），可为 null。
+  /* 按编排记录画横向步骤条：15 个阶段全列出，缺记录的阶段按 pending，正在跑的那一步标 running。
+   * 参数：run 编排记录（`run show --json` 的负载），可为 null；current 当前阶段名，可空。
    * 返回：HTML 字符串。
    */
-  function stepbarHtml(run) {
+  function stepbarHtml(run, current) {
     const recorded = new Map();
     ((run && run.stages) || []).forEach((item) => recorded.set(item.stage, item));
     return STAGES.map(([stage, label]) => {
       const item = recorded.get(stage);
-      const status = item ? item.status : "pending";
+      const status = item ? item.status : stage === current ? "running" : "pending";
       const note = item ? item.error || item.note || "" : "";
       return (
         `<li class="step" data-status="${esc(status)}" title="${esc(note || `${label}：${statusLabel(status)}`)}">` +
@@ -62,21 +96,39 @@
     }).join("");
   }
 
-  /* 渲染阶段进度与状态行。参数：run 编排记录，可为 null。返回：无。 */
+  /* 渲染阶段进度与状态行：运行中给「当前阶段 + 已完成 X / 共 N 步」，失败给失败阶段与原因。
+   * 参数：run 编排记录，可为 null。
+   * 返回：无。
+   */
   function renderRun(run) {
     if (!run) {
       el("exStatus").textContent = "还没有编排记录。";
-      el("exStages").innerHTML = stepbarHtml(null);
+      el("exStages").innerHTML = stepbarHtml(null, "");
+      setStartButton("idle");
       return;
     }
     const stages = run.stages || [];
+    const progress = runProgressOf(run);
     const running = run.status === "running";
-    el("exStatus").textContent =
-      `run ${run.run_id}　状态 ${statusLabel(run.status)}　章节 ${run.chapter_id}　开始 ${run.started_at || ""}` +
-      (run.finished_at ? `　结束 ${run.finished_at}` : "") +
-      (running ? `　已记录 ${stages.length} 个阶段` : "");
-    el("exStages").innerHTML = stepbarHtml(run);
-    el("exStart").disabled = running || !NW.state.chapter;
+    const last = stages.length ? stages[stages.length - 1] : null;
+    const parts = [`run ${run.run_id}`, `状态 ${statusLabel(run.status)}`, `章节 ${run.chapter_id}`, `开始 ${run.started_at || ""}`];
+    if (running) {
+      const currentLabel = progress.current ? LABEL[progress.current] : "收尾";
+      parts.push(`当前阶段「${currentLabel}」`);
+      parts.push(`已完成 ${progress.done} / 共 ${progress.total} 步`);
+      // 阶段自带的统计（如「沿用已有台词 12 行」）直接当作逐条进度展示
+      if (last && last.note) parts.push(`上一步${last.label || LABEL[last.stage] || last.stage}：${last.note}`);
+    } else {
+      parts.push(`共 ${progress.done} / ${progress.total} 步`);
+      if (progress.failed) {
+        const item = stages.find((row) => row.stage === progress.failed) || {};
+        parts.push(`失败阶段「${item.label || LABEL[progress.failed] || progress.failed}」：${item.error || "未给出原因"}`);
+      }
+      if (run.finished_at) parts.push(`结束 ${run.finished_at}`);
+    }
+    el("exStatus").textContent = parts.join("　");
+    el("exStages").innerHTML = stepbarHtml(run, running ? progress.current : "");
+    setStartButton(running ? "running" : "idle");
   }
 
   /* 拉最近一次编排记录。 */
@@ -91,6 +143,7 @@
       return data.run;
     } catch (error) {
       el("exStatus").textContent = `读取编排记录失败：${error.message}`;
+      setStartButton("idle");
       return null;
     }
   }
@@ -150,21 +203,30 @@
     if (!run || run.status !== "running") {
       polling = false;
       await loadFiles();
-      if (run) NW.toast(`编排结束：${run.status}`, run.status === "succeeded" || run.status === "dry_run");
+      if (!run) return;
+      if (run.status === "failed") {
+        const item = (run.stages || []).find((row) => row.status === "failed") || {};
+        const stageLabel = item.label || LABEL[item.stage] || "未知阶段";
+        NW.toast(`编排失败于「${stageLabel}」：${item.error || "未给出原因"}`);
+      } else {
+        NW.toast(`编排结束：${statusLabel(run.status)}`, run.status === "succeeded" || run.status === "dry_run");
+      }
       return;
     }
     schedule(2500);
   }
 
-  /* 启动编排。 */
+  /* 启动编排：按钮立刻进入运行态（禁用 + 「编排中…」），接口超过 200ms 才弹 busy 蒙版。 */
   async function start() {
     if (busy || !NW.state.path || !NW.state.chapter) return;
     busy = true;
-    el("exStart").disabled = true;
+    setStartButton("running");
     try {
       const result = await NW.api("/api/ui/produce", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        busy: "正在启动编排…",
+        busyDetail: `${LABEL[el("exFrom").value] || ""} → ${LABEL[el("exTo").value] || ""}`,
         body: JSON.stringify({
           path: NW.state.path,
           chapter: NW.state.chapter,
@@ -180,7 +242,7 @@
       schedule(1200);
     } catch (error) {
       NW.toast(`启动失败（退出码 ${error.code}）：${error.message}`);
-      el("exStart").disabled = false;
+      setStartButton("idle");
     } finally {
       busy = false;
     }
@@ -194,6 +256,8 @@
     el("exStart").addEventListener("click", start);
     el("exRefresh").addEventListener("click", loadFiles);
     NW.onProject(() => {
+      // 换工程后先禁用，等新记录读回来再决定按钮状态，避免刷新/切换期间连点触发第二个编排
+      setStartButton("checking");
       loadFiles();
       loadRun();
     });
@@ -205,6 +269,7 @@
   window.Pages.export = {
     activate() {
       bind();
+      setStartButton("checking");
       loadFiles();
       loadRun().then((run) => {
         if (run && run.status === "running") {
