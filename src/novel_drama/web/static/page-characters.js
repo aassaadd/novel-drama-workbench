@@ -11,8 +11,7 @@
  */
 
 (function () {
-  /* 人物定位 / 性别的中文名（写回仍是英文枚举） */
-  const ROLE_LABELS = { protagonist: "主角", antagonist: "反派", supporting: "配角", minor: "龙套" };
+  /* 人物定位的中文名统一在 core.js 定义（ROLE_LABELS / roleLabel），这里只保留性别映射。 */
   const GENDER_LABELS = { male: "男", female: "女", other: "其他", unknown: "性别未知" };
 
   const NARRATOR_ID = "chr_narrator";
@@ -179,8 +178,9 @@
    * 返回：HTML 字符串。
    */
   function roleBadge(role) {
+    // 未登记的定位仍按配角配色，但文字保留原值，避免把未知枚举显示成「配角」
     const key = ROLE_LABELS[role] ? role : "supporting";
-    return `<span class="char-badge role-${esc(key)}">${esc(ROLE_LABELS[key])}</span>`;
+    return `<span class="char-badge role-${esc(key)}">${esc(roleLabel(role))}</span>`;
   }
 
   /* 关系备注展示：把目标 ID 换成人物姓名，未命中时直接显示 ID。

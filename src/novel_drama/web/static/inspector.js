@@ -87,7 +87,7 @@
     return (
       `<div class="ins-title"><span><b>${esc(NW.kindLabel(line.kind))}</b></span><span class="kicker">${esc(state)}</span></div>` +
       row("行 ID", `<code>${esc(id)}</code>`) +
-      row("说话人", esc(line.speaker || line.speaker_id || "—")) +
+      row("说话人", esc(NW.speakerLabel(line.speaker, line.speaker_id))) +
       row("表演", esc(bits.join(" · "))) +
       row("停顿", `${esc(line.pause_before_ms ?? 0)} / ${esc(line.pause_after_ms ?? 0)} ms`) +
       row("时长", esc(msText(duration))) +

@@ -68,7 +68,7 @@
     target_length: { short: "短篇", novella: "中篇", novel: "长篇", series: "长篇连载" },
     pov: { first: "第一人称", third_limited: "第三人称·有限", third_omniscient: "第三人称·全知", second: "第二人称" },
     tense: { past: "过去时", present: "现在时" },
-    role: { protagonist: "主角", antagonist: "反派", supporting: "配角", minor: "龙套" },
+    role: { protagonist: "主角", antagonist: "反派", supporting: "配角", narrator: "旁白", minor: "龙套" },
     gender: { male: "男", female: "女", other: "其他", unknown: "性别未知" },
   };
 

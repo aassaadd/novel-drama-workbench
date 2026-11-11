@@ -280,8 +280,8 @@
     cast.forEach((item) => {
       const option = document.createElement("option");
       option.value = item.id || "";
-      const roleLabels = { protagonist: "主角", antagonist: "反派", supporting: "配角", minor: "龙套" };
-      option.textContent = `${item.name || item.id}（${roleLabels[item.role] || "配角"}）`;
+      // 角色定位统一走 core.js 的 roleLabel，未知值原样显示，不再兜底成「配角」
+      option.textContent = `${item.name || item.id}（${roleLabel(item.role)}）`;
       option.selected = item.id === currentPov;
       select.appendChild(option);
     });

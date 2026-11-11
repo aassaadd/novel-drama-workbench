@@ -179,6 +179,8 @@ $PY -m novel_drama.cli -p ~/novels/changan tts batch --chapter chp_xxx --batch-s
 $PY -m novel_drama.cli -p ~/novels/changan tts batch --chapter chp_xxx --dry-run
 $PY -m novel_drama.cli -p ~/novels/changan tts plan --chapter chp_xxx --scope selected --line lin_xxx --line lin_yyy
 $PY -m novel_drama.cli -p ~/novels/changan tts batch --chapter chp_xxx --status pending,stale --batch-size 5
+# 同一句多 provider 对比试听（默认产物落 <工程>/var/tts/compare，随工程迁移）
+$PY -m novel_drama.cli -p ~/novels/changan tts compare --text "你终于来了。"
 
 # 6. 时间轴（自动读取脚本静音事件）→ 可核对时间表 → 拼接 → 导出
 $PY -m novel_drama.cli -p ~/novels/changan timeline build --chapter chp_xxx

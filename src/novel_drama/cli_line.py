@@ -78,7 +78,7 @@ def cmd_line_list(args, config: AppConfig) -> int:
                 "line_id": line["id"],
                 "index": line.get("index"),
                 "kind": line.get("kind"),
-                "speaker": characters.get(line.get("speaker_id"), {}).get("name", line.get("speaker_id")),
+                "speaker": entities.speaker_display_name(line.get("speaker_id"), characters),
                 "speaker_id": line.get("speaker_id"),
                 "text": line.get("text"),
                 "emotion": line.get("emotion"),

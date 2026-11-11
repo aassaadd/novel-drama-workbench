@@ -149,7 +149,8 @@
     const width = Math.max(3, ((span.end - span.start) / 1000) * px);
     const left = (span.start / 1000) * px;
     const label = line.text || "";
-    const tip = `#${Number(line.index) + 1} ${line.speaker || line.speaker_id || ""} · ${(Number(line.duration_ms) || 0)} ms · ${line.state || ""}\n${label}`;
+    const speaker = speakerLabel(line.speaker, line.speaker_id);
+    const tip = `#${Number(line.index) + 1} ${speaker} · ${(Number(line.duration_ms) || 0)} ms · ${line.state || ""}\n${label}`;
     const speakerColor = voiced ? colors.get(line.speaker_id || "unknown") : "#6b7280";
     return (
       `<button class="tl-block" data-line="${esc(line.line_id)}" data-speaker="${esc(line.speaker_id || "unknown")}" ` +
@@ -168,7 +169,7 @@
     const names = new Map();
     list.forEach((line) => {
       const key = line.speaker_id || "unknown";
-      if (!names.has(key)) names.set(key, line.speaker || key);
+      if (!names.has(key)) names.set(key, speakerLabel(line.speaker, line.speaker_id));
     });
     return [...names.entries()]
       .map(([key, name]) => `<span class="tl-legend-item"><i style="background:${colors.get(key)}"></i>${esc(name)}</span>`)

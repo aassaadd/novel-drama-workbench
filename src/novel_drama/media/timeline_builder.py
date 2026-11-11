@@ -14,7 +14,7 @@ import hashlib
 import json
 
 from ..models import new_id
-from ..models.entities import provisional_line_duration_ms
+from ..models.entities import provisional_line_duration_ms, speaker_display_name
 
 # 关键图默认展示时长
 DEFAULT_IMAGE_HOLD_MS = 3000
@@ -149,7 +149,7 @@ def build_schedule(timeline: dict, chapter: dict, characters: dict[str, dict] | 
             {
                 "kind": "line",
                 "line_id": item.get("source_id"),
-                "speaker": (characters.get(line.get("speaker_id")) or {}).get("name") or line.get("speaker_id") or "",
+                "speaker": speaker_display_name(line.get("speaker_id"), characters),
                 "text": line.get("text") or item.get("label") or "",
                 "start_ms": start,
                 "end_ms": end,

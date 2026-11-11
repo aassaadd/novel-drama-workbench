@@ -144,7 +144,7 @@
     const kind = tokens[2] || "";
     const kindText = KIND_LABEL[kind] || kind;
     return (
-      `<div class="mk-line"><span class="mk-speaker">${esc(speaker)}</span>` +
+      `<div class="mk-line"><span class="mk-speaker">${esc(speakerLabel(speaker))}</span>` +
       (emotion ? `<span class="mk-tag mk-emotion">[${esc(emotionLabel(emotion))}]</span>` : "") +
       (kindText ? `<span class="mk-tag mk-kind">(${esc(kindText)})</span>` : "") +
       `<span class="mk-text">${esc(row.text || "")}</span></div>`

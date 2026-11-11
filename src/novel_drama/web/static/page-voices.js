@@ -159,7 +159,7 @@
           : `<option value="${esc(bound)}" selected disabled>已绑定（音色缺失）</option>`;
         return `<div class="voice-bind-row">
           <span class="voice-bind-name">${esc(character.name)}</span>
-          <span class="tag">${esc(character.role || "")}</span>
+          <span class="tag">${esc(roleLabel(character.role))}</span>
           <select data-voice-act="bind" data-character="${esc(character.id)}">
             <option value="">未绑定</option>
             ${missing}

@@ -17,6 +17,33 @@ NARRATOR_ID = "chr_narrator"
 # 未识别说话人
 UNKNOWN_SPEAKER_ID = "chr_unknown"
 
+# 虚拟角色的固定中文显示名：旁白与「未识别说话人」不写进 characters.json，只在展示层使用
+VIRTUAL_SPEAKER_NAMES = {
+    NARRATOR_ID: "旁白",
+    UNKNOWN_SPEAKER_ID: "未知角色",
+}
+
+
+def speaker_display_name(speaker_id: str | None, characters: dict[str, dict] | None = None) -> str:
+    """把说话人 ID 解析成可展示的中文名（台词表、时间轴、导出等展示层统一入口）。
+
+    参数:
+        speaker_id: 说话人角色 ID，可能为空。
+        characters: 角色表（角色 ID → 角色 dict），可选。
+
+    返回:
+        人物姓名；旁白 / 未识别说话人返回固定中文名；其余解析不到时返回「未知角色」。
+        任何情况下都不会把 `chr_xxx` 内部 ID 当作名字返回。
+    """
+    key = str(speaker_id or "")
+    if not key:
+        return "未知角色"
+    virtual = VIRTUAL_SPEAKER_NAMES.get(key)
+    if virtual:
+        return virtual
+    name = ((characters or {}).get(key) or {}).get("name")
+    return name or "未知角色"
+
 
 def new_work(title: str, author: str = "", language: str = "zh-CN", genre: list[str] | None = None) -> dict:
     """构造作品元数据。

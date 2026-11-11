@@ -136,6 +136,40 @@ function emotionLabel(emotion) {
   return EMOTION_LABELS[emotion] || emotion || "";
 }
 
+/* 角色定位的中文名：取值与 schema/character.schema.json 的 role 枚举一一对应。
+ * 界面只做展示翻译，写回 characters.json 的仍是英文枚举。 */
+const ROLE_LABELS = {
+  protagonist: "主角",
+  antagonist: "反派",
+  supporting: "配角",
+  narrator: "旁白",
+  minor: "龙套",
+};
+
+/* 角色定位枚举 → 中文。
+ * 参数：role 角色定位（protagonist/antagonist/supporting/narrator/minor）。
+ * 返回：中文字符串；未登记的值原样返回，避免静默丢信息。
+ */
+function roleLabel(role) {
+  return ROLE_LABELS[role] || role || "";
+}
+
+/* 虚拟角色 ID → 固定中文名：旁白与「未识别说话人」不在人物表里，不能直接展示 ID。 */
+const VIRTUAL_SPEAKER_LABELS = { chr_narrator: "旁白", chr_unknown: "未知角色" };
+
+/* 说话人展示名：后端已解析成姓名时直接用；拿到的仍是内部 ID 或为空时按虚拟角色兜底，
+ * 保证界面上不会出现 chr_xxx 这类内部 ID。
+ * 参数：speaker 后端给的说话人展示名（可能是 ID）；speakerId 说话人角色 ID。
+ * 返回：中文名字符串；解析不到时为「未知角色」。
+ */
+function speakerLabel(speaker, speakerId) {
+  const name = String(speaker || "").trim();
+  const virtual = VIRTUAL_SPEAKER_LABELS[speakerId] || VIRTUAL_SPEAKER_LABELS[name];
+  if (virtual) return virtual;
+  if (!name || /^chr_[0-9A-Za-z]+$/.test(name)) return "未知角色";
+  return name;
+}
+
 /* 媒体/标注里的英文枚举 → 中文：只影响展示，写回与解析仍用英文原值。 */
 const TIME_LABELS = { dawn: "黎明", morning: "上午", day: "白天", dusk: "黄昏", night: "夜晚", unknown: "未知" };
 const MEDIA_KIND_LABELS = { sfx: "音效", image: "配图", video: "视频" };

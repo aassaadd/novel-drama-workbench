@@ -238,7 +238,7 @@
       line_id: lineId,
       index: line.index,
       kind: line.kind,
-      speaker: line.speaker || line.speaker_id,
+      speaker: speakerLabel(line.speaker, line.speaker_id),
       text: line.text || chip.textContent.trim(),
       emotion: line.emotion,
       emotion_intensity: line.emotion_intensity,

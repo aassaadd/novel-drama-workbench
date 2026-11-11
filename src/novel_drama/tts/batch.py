@@ -123,7 +123,13 @@ def _relative(store, path: Path) -> str:
 
 
 def _chunk_index(store, out_path: Path, text: str, provider_id: str | None, variant_id: str | None, limit: int) -> list[dict]:
-    """读取切块产物目录，生成 tts.chunks 记录。"""
+    """生成 tts.chunks 记录。
+
+    说明:
+        中间分块在合成成功写完成片后会被清理，因此这里通常拿不到分块文件，
+        `asset_id` 为空、状态仍记 `ready`（表示该块已随成片合成完成）。
+        若分块目录仍存在（旧产物或清理失败），则照常回填相对路径。
+    """
     chunk_dir = out_path.parent / f"{out_path.stem}_chunks"
     chunks = []
     for idx, chunk_text in enumerate(split_text(text, limit) or [text]):
@@ -136,7 +142,7 @@ def _chunk_index(store, out_path: Path, text: str, provider_id: str | None, vari
                 "duration_ms": None,
                 "provider_id": provider_id,
                 "variant_id": variant_id,
-                "status": "ready" if chunk_path.exists() else "pending",
+                "status": "ready",
             }
         )
     return chunks

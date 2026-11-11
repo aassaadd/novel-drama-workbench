@@ -8,8 +8,6 @@
 
 from __future__ import annotations
 
-import tempfile
-
 from .base import (
     AdapterError,
     ErrorCode,
@@ -88,7 +86,14 @@ class ProviderTtsAdapter:
             ref_audio=req.reference_audio or voice.ref_audio,
             ref_text=voice.ref_text,
         )
-        out = req.output_path or str(tempfile.NamedTemporaryFile(suffix=".wav", delete=False).name)
+        # 产物必须落在调用方指定位置（通常是工程内），不再回退系统临时目录，
+        # 避免留下无人认领的 wav 文件。
+        if not req.output_path:
+            raise AdapterError(
+                ErrorCode.INVALID_INPUT,
+                "合成请求缺少 output_path：请由调用方指定工程内的输出路径",
+            )
+        out = req.output_path
         locked = None if self.provider_id == "auto" else self.provider_id
         try:
             payload = self.service.synthesize(

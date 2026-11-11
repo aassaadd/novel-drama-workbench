@@ -536,12 +536,25 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); }
 
 .run-info { color: var(--muted); }
 
-.run-track {
+.run-meter {
   flex: 0 1 260px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.run-track {
+  width: 100%;
   height: 6px;
   border-radius: 3px;
   background: var(--panel-2);
   overflow: hidden;
+}
+
+.run-eta {
+  color: var(--muted);
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
 }
 
 .run-fill {

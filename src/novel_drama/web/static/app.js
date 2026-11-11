@@ -52,7 +52,13 @@ const run = {
   patched: new Set(),
   done: new Set(),
   failed: new Set(),
+  // 最近若干条成功任务的耗时（毫秒），用于估算剩余时间
+  samples: [],
 };
+
+// 预计剩余：至少 2 条成功样本才显示，滑动平均只取最近 8 条
+const ETA_MIN_SAMPLES = 2;
+const ETA_SAMPLE_MAX = 8;
 
 const $ = (id) => document.getElementById(id);
 
@@ -93,7 +99,7 @@ function rowHtml(row, top) {
     `<div class="row ${selected}" data-line="${row.line_id}" style="position:absolute;top:${top}px;left:0;right:0">` +
     `<span class="c-index">${row.index ?? ""}</span>` +
     `<span class="c-kind">${kindLabel(row.kind)}</span>` +
-    `<span class="c-speaker ${unknown}">${escapeHtml(row.speaker || "")}</span>` +
+    `<span class="c-speaker ${unknown}">${escapeHtml(speakerLabel(row.speaker, row.speaker_id))}</span>` +
     `<span class="c-text" title="${text}">${text}</span>` +
     `<span class="c-num">${escapeHtml(emotionLabel(row.emotion))}</span>` +
     `<span class="c-num">${fmt(row.emotion_intensity)}</span>` +
@@ -192,6 +198,7 @@ async function openProject() {
       $("runProgress").textContent = "";
       $("btnStart").disabled = true;
       $("btnStop").hidden = true;
+      $("runEta").hidden = true;
       NW.notifyProject();
       NW.notifyChapter();
       return;
@@ -523,6 +530,7 @@ async function loadPlan() {
     }
     $("runProgress").textContent = "";
     renderRunFill(0, run.total);
+    renderEta(0);
     syncRunButtons();
   } catch (error) {
     $("runInfo").textContent = `无法读取生成计划：${error.message}`;
@@ -533,6 +541,69 @@ async function loadPlan() {
 /* 进度条：只按「已完成 / 总数」推进，不做估算。 */
 function renderRunFill(done, total) {
   $("runFill").style.width = total > 0 ? `${Math.min(100, (done / total) * 100)}%` : "0";
+}
+
+/* 取一条任务的实际耗时：优先「开始→结束」，缺失开始时间时退回「入队→结束」。
+ * 参数：job 队列任务。
+ * 返回：毫秒数；无法计算时返回 0。
+ */
+function jobDurationMs(job) {
+  const timings = job.timings || {};
+  const end = Date.parse(timings.finished_at || "");
+  const start = Date.parse(timings.started_at || job.created_at || "");
+  if (!Number.isFinite(end) || !Number.isFinite(start)) return 0;
+  const ms = end - start;
+  return ms > 0 ? ms : 0;
+}
+
+/* 记录一条成功任务的耗时，超出上限时丢掉最旧的样本（滑动平均）。
+ * 参数：ms 单条耗时（毫秒）。
+ * 返回：无。
+ */
+function pushEtaSample(ms) {
+  if (!(ms > 0)) return;
+  run.samples.push(ms);
+  if (run.samples.length > ETA_SAMPLE_MAX) run.samples.shift();
+}
+
+/* 把剩余毫秒写成人话：秒 / 分秒 / 约 X 小时 Y 分。
+ * 参数：ms 剩余毫秒。
+ * 返回：中文时长文本。
+ */
+function formatEta(ms) {
+  const total = Math.max(1, Math.round(ms / 1000));
+  if (total >= 3600) {
+    let hours = Math.floor(total / 3600);
+    let minutes = Math.round((total % 3600) / 60);
+    if (minutes === 60) {
+      hours += 1;
+      minutes = 0;
+    }
+    return minutes ? `约 ${hours} 小时 ${minutes} 分` : `约 ${hours} 小时`;
+  }
+  if (total >= 60) {
+    const minutes = Math.floor(total / 60);
+    const seconds = total % 60;
+    return seconds ? `${minutes} 分 ${seconds} 秒` : `${minutes} 分`;
+  }
+  return `${total} 秒`;
+}
+
+/* 刷新「预计剩余」：样本不足、没有剩余条数或已不在生成中时隐藏。
+ * 参数：remaining 剩余条数。
+ * 返回：无。
+ */
+function renderEta(remaining) {
+  const node = $("runEta");
+  if (!node) return;
+  if (!run.polling || remaining <= 0 || run.samples.length < ETA_MIN_SAMPLES) {
+    node.hidden = true;
+    node.textContent = "";
+    return;
+  }
+  const avg = run.samples.reduce((sum, ms) => sum + ms, 0) / run.samples.length;
+  node.textContent = `预计剩余 ${formatEta(avg * remaining)}`;
+  node.hidden = false;
 }
 
 /* 点「开始生成」：入队 + 后台消费进程，接口立即返回，进度靠 queue list。 */
@@ -559,6 +630,9 @@ async function startGenerate() {
     run.patched = new Set();
     run.done = new Set();
     run.failed = new Set();
+    // 新一轮生成：清空上一轮（含失败中断）留下的耗时样本
+    run.samples = [];
+    renderEta(0);
     run.polling = true;
     syncRunButtons();
     $("runProgress").textContent = result.started
@@ -585,6 +659,7 @@ async function stopGenerate() {
     });
     run.polling = false;
     clearTimeout(run.timer);
+    renderEta(0);
     await loadLines();
     await loadPlan();
     toast(result.canceled ? `已停止，取消 ${result.canceled} 条任务` : "已停止", true);
@@ -623,6 +698,7 @@ async function pollQueue() {
     if (job.status === "succeeded") {
       run.patched.add(lineId);
       run.done.add(lineId);
+      pushEtaSample(jobDurationMs(job));
       finished.push(job);
     } else if (job.status === "failed") {
       run.patched.add(lineId);
@@ -640,6 +716,7 @@ async function pollQueue() {
   $("runProgress").textContent =
     `完成 ${run.done.size} / ${run.total}` + (run.failed.size ? `（失败 ${run.failed.size}）` : "");
   renderRunFill(run.done.size, run.total);
+  renderEta(Math.max(0, run.total - run.done.size - run.failed.size));
 
   // 某行完成 → 只取那一行的状态，只重画那一行
   for (const job of finished) await patchRow(job.target.line_id);
@@ -656,6 +733,7 @@ async function pollQueue() {
     return;
   }
   run.polling = false;
+  renderEta(0);
   syncRunButtons();
   await loadPlan();
   toast(`生成结束：成功 ${run.done.size} / 失败 ${run.failed.size}`, run.failed.size === 0);
@@ -760,6 +838,8 @@ window.NW = {
   kindLabel,
   emotionLabel,
   statusLabel,
+  roleLabel,
+  speakerLabel,
   openProject,
   loadChapter,
   /* 重新拉工程列表（新建工程后刷新顶栏候选，避免要刷新页面才出现） */

@@ -18,6 +18,7 @@ from pathlib import Path
 
 from ..adapters.base import AdapterError, ErrorCode
 from ..adapters.comfyui import LocalComfyGateway
+from ..cleanup import remove_dir_quietly, remove_stale_temp_dirs
 from ..config import AppConfig
 from ..models.ids import now_iso
 from ..orchestration.gpu_queue import GpuLock
@@ -281,24 +282,25 @@ def _submit_and_fetch(
     )
     temp_dir = out_dir / f".ndw-tmp-{item_id}-r{revision}"
     with lock.hold(f"comfy-{item_id}-r{revision}"):
+        # 锁内先清上一次中断残留的临时目录，避免与本次下载混在一起
+        remove_stale_temp_dirs(out_dir)
         submitted = gateway.submit_prompt(prompt, client_id=f"ndw-{item_id}")
         prompt_id = submitted.prompt_id
         _wait_for_job(gateway, config, prompt_id, timeout_s, kind)
-        try:
-            artifacts = gateway.fetch(prompt_id, str(temp_dir))
-            artifact = next((item for item in artifacts if item.kind == kind), None)
-            if artifact is None or not artifact.local_path:
-                names = "、".join(item.filename for item in artifacts) or "无"
-                raise AdapterError(
-                    ErrorCode.UPSTREAM_ERROR,
-                    f"ComfyUI 未返回{('图片' if kind == 'image' else '视频')}产物（实际：{names}）",
-                )
-            ext = Path(artifact.filename).suffix.lower() or _FALLBACK_EXT[kind]
-            target = out_dir / f"{item_id}_r{revision}{ext}"
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(artifact.local_path, target)
-        finally:
-            shutil.rmtree(temp_dir, ignore_errors=True)
+        artifacts = gateway.fetch(prompt_id, str(temp_dir))
+        artifact = next((item for item in artifacts if item.kind == kind), None)
+        if artifact is None or not artifact.local_path:
+            names = "、".join(item.filename for item in artifacts) or "无"
+            raise AdapterError(
+                ErrorCode.UPSTREAM_ERROR,
+                f"ComfyUI 未返回{('图片' if kind == 'image' else '视频')}产物（实际：{names}）",
+            )
+        ext = Path(artifact.filename).suffix.lower() or _FALLBACK_EXT[kind]
+        target = out_dir / f"{item_id}_r{revision}{ext}"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(artifact.local_path, target)
+        # 产物已改名到最终路径，删除本次下载临时目录；失败时保留现场便于排查
+        remove_dir_quietly(temp_dir, "ComfyUI 下载临时目录")
     return target, prompt_id
 
 

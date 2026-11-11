@@ -12,6 +12,8 @@ import json
 import subprocess
 from pathlib import Path
 
+from ..cleanup import remove_dir_quietly
+
 # 默认编码参数
 CODEC = {"video": "libx264", "audio": "aac", "fps": 24, "width": 1280, "height": 720, "pix_fmt": "yuv420p"}
 # 无画面时的兜底色
@@ -199,6 +201,7 @@ def mux(plan: dict) -> dict:
 
     返回:
         {"path", "duration_ms", "clips", "audio", "elapsed_ms"}。
+        成片成功后中间片段目录 `_<章名>_mux/` 会被删除；失败时保留用于排查。
 
     异常:
         ValueError: 缺少音轨或参数非法。
@@ -305,11 +308,12 @@ def mux(plan: dict) -> dict:
         ]
     )
     actual = _probe_ms(output, ffprobe)
+    # 成片已生成，删除中间片段目录；清理失败只告警，不阻断返回结果
+    remove_dir_quietly(work_dir, "混流中间片段目录")
     return {
         "path": str(output),
         "duration_ms": actual or duration_ms,
         "clips": len(clips),
         "audio": str(audio),
-        "work_dir": str(work_dir),
         "elapsed_ms": int((time.perf_counter() - started) * 1000),
     }

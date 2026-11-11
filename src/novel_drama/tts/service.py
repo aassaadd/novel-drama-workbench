@@ -12,6 +12,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+from ..cleanup import remove_dir_quietly
 from . import sidecar
 from .errors import BAD_OUTPUT, TtsError
 from .fingerprint import line_fingerprint
@@ -457,6 +458,8 @@ class TtsService:
                 }
 
         sf.write(str(out_path), audio, sample_rate)
+        # 成片已落盘，删除中间分块；清理失败只告警，不影响本次合成结果
+        remove_dir_quietly(chunk_dir, "配音分块目录")
         return {
             "audio_path": str(out_path),
             "sample_rate": sample_rate,

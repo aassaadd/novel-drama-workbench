@@ -172,7 +172,10 @@
 
           <footer class="runbar">
             <span class="run-info" id="runInfo">本次将生成 — 行</span>
-            <div class="run-track"><div class="run-fill" id="runFill"></div></div>
+            <div class="run-meter">
+              <div class="run-track"><div class="run-fill" id="runFill"></div></div>
+              <span class="run-eta" id="runEta" hidden></span>
+            </div>
             <span class="run-progress" id="runProgress"></span>
             <div class="run-actions">
               <button id="btnStop" class="btn danger" hidden>停止生成</button>
