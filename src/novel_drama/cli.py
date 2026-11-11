@@ -109,6 +109,84 @@ def _make_queue(store: ProjectStore, config: AppConfig) -> GpuQueue:
     return GpuQueue(store, adapters, lock_path, poll_interval_s=float(config.get("gpu.poll_interval_s", 2)))
 
 
+def _queue_service(queue: GpuQueue):
+    """取队列内部使用的配音服务实例（与执行阶段完全同一个对象）。
+
+    参数:
+        queue: 串行队列。
+
+    返回:
+        TtsService；占位适配器时为 None。
+    """
+    tts = getattr(getattr(queue, "adapters", None), "tts", None)
+    return getattr(tts, "service", None)
+
+
+def _sort_jobs_by_group(jobs: list[dict], chapter: dict, characters: list[dict], service, store: ProjectStore) -> list[dict]:
+    """按 worker 复用键对配音任务做稳定排序（只改执行顺序，不改产物与章节顺序）。
+
+    一级键 `(provider_id, model_dir, use_qwen_emo)` 决定是否重启 worker；
+    二级键 `(ref_audio, emo_audio_prompt)` 决定组内聚簇，减少参考音频重复编码。
+
+    参数:
+        jobs: `build_tts_jobs` 生成的任务列表。
+        chapter: 章节 dict。
+        characters: 角色表。
+        service: TtsService（用于预解析路由与音色）。
+        store: 工程读写入口。
+
+    返回:
+        排序后的任务列表；预解析失败时原样返回，保证不会漏排或错排。
+    """
+    if len(jobs) <= 1:
+        return jobs
+    try:
+        from .tts.batch import _line_voice
+        from .tts.types import Requirement
+
+        line_index = {}
+        for scene in chapter.get("scenes") or []:
+            for line in scene.get("lines") or []:
+                line_index[line.get("id")] = line
+        char_index = {item.get("id"): item for item in characters}
+        characters_table = {"characters": characters}
+
+        def group_key(job: dict) -> tuple:
+            """计算一条任务的 (一级键 + 二级键)，用于稳定排序。"""
+            line = line_index.get((job.get("target") or {}).get("line_id"))
+            if line is None:
+                return ("~", "", 1, "", "")
+            voice_info = _line_voice(store, characters_table, line, service)
+            character = char_index.get(line.get("speaker_id")) or {}
+            binding = character.get("voice_binding") or {}
+            adapter = binding.get("adapter")
+            character_provider = adapter if adapter and adapter != "placeholder" else None
+            line_provider = (line.get("voice") or {}).get("provider_id")
+            requirement = Requirement(
+                text=line.get("text") or "",
+                emotion=line.get("emotion"),
+                emotion_intensity=max(0, min(3, round(float(line.get("emotion_intensity") or 0) * 3))),
+                clone_required=True,
+                target_duration_ms=line.get("target_duration_ms"),
+                character_id=line.get("speaker_id"),
+                line_id=line.get("id"),
+            )
+            decision = service.decide(requirement, line_provider, character_provider)
+            pid = decision["selected"]["provider_id"]
+            provider = service.providers.get(pid)
+            model_dir = (provider.spec.weights_path if provider else None) or ""
+            # 文字情绪需要 qwen，进程内切换模式会重启，故按开关分组
+            use_qwen = 1 if (line.get("delivery_note") or "").strip() else 0
+            ref_audio = voice_info.get("ref_audio") or ""
+            emo_audio = ref_audio if voice_info.get("source") == "emotion_ref" else ""
+            return (str(pid), str(model_dir), use_qwen, str(ref_audio), str(emo_audio))
+
+        return sorted(jobs, key=group_key)
+    except Exception as exc:  # noqa: BLE001 - 分组只是优化，失败必须退回原顺序
+        print(f"[warn] 配音分组预解析失败，按原顺序执行：{exc}")
+        return jobs
+
+
 def _drain(queue: GpuQueue) -> int:
     """执行队列中所有可执行任务，并按执行结果给出退出码。
 
@@ -403,11 +481,20 @@ def cmd_tts(args, config: AppConfig) -> int:
         _emit(args, "没有需要合成的台词行", {"jobs": 0, "scope": scope, "counts": counts})
         return EXIT_OK
     queue = _make_queue(store, config)
-    created = sum(1 for job in jobs if queue.enqueue(job)[1])
-    print(f"已入队 {created} 条配音任务（去重后）")
-    if getattr(args, "wait", False):
-        return _drain(queue)
-    return EXIT_OK
+    # 入队前按 worker 复用键稳定排序：只改执行顺序，产物/章节顺序不变
+    service = _queue_service(queue)
+    if service is not None:
+        jobs = _sort_jobs_by_group(jobs, chapter, characters, service, store)
+    try:
+        created = sum(1 for job in jobs if queue.enqueue(job)[1])
+        print(f"已入队 {created} 条配音任务（去重后）")
+        if getattr(args, "wait", False):
+            return _drain(queue)
+        return EXIT_OK
+    finally:
+        # 整批结束（含异常/停止）都要回收常驻 worker，避免留下孤儿进程
+        if service is not None:
+            service.close()
 
 
 # ---------------- 配音：provider / 路由 / 单句 / 对比 ----------------
@@ -560,15 +647,19 @@ def cmd_tts_say(args, config: AppConfig) -> int:
     import time
 
     started = time.perf_counter()
-    payload = service.synthesize(
-        text,
-        out,
-        requirement=requirement,
-        voice=voice,
-        instruct=_tts_instruct(args),
-        line_provider_id=getattr(args, "provider", None),
-        character_provider_id=getattr(args, "character_provider", None),
-    )
+    try:
+        payload = service.synthesize(
+            text,
+            out,
+            requirement=requirement,
+            voice=voice,
+            instruct=_tts_instruct(args),
+            line_provider_id=getattr(args, "provider", None),
+            character_provider_id=getattr(args, "character_provider", None),
+        )
+    finally:
+        # 单句命令也要回收常驻 worker（正常情况下 worker 会因 stdin EOF 自行退出）
+        service.close()
     wall_ms = int((time.perf_counter() - started) * 1000)
 
     if getattr(args, "json", False):
@@ -602,13 +693,16 @@ def cmd_tts_compare(args, config: AppConfig) -> int:
             if provider.spec.enabled and provider.spec.capabilities.get("allow_auto_select")
         ]
     out_dir = getattr(args, "out_dir", None) or "var/tts/compare"
-    record = service.compare(
-        text,
-        provider_ids,
-        out_dir,
-        requirement=_tts_requirement(args, text),
-        voice=_tts_voice(args, service),
-    )
+    try:
+        record = service.compare(
+            text,
+            provider_ids,
+            out_dir,
+            requirement=_tts_requirement(args, text),
+            voice=_tts_voice(args, service),
+        )
+    finally:
+        service.close()
     if getattr(args, "json", False):
         print(json.dumps(record, ensure_ascii=False, indent=2))
         return EXIT_OK
@@ -757,7 +851,12 @@ def cmd_queue(args, config: AppConfig) -> int:
         return EXIT_OK
     if args.action == "run":
         queue = _make_queue(store, config)
-        processed = queue.run(once=args.once)
+        service = _queue_service(queue)
+        try:
+            processed = queue.run(once=args.once)
+        finally:
+            if service is not None:
+                service.close()
         print(f"已处理 {processed} 条任务")
         return EXIT_OK
     if args.action == "retry":

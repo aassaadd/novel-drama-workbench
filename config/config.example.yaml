@@ -62,6 +62,11 @@ tts:
         python: ~/git/index-tts-official/.venv/bin/python
         repo: ~/git/index-tts-official
         timeout_s: 1800
+        # 常驻 worker：整批复用同一进程，模型只加载一次；per_call 为旧的逐行起进程
+        worker_mode: resident
+        idle_timeout_s: 300          # 空闲多久自动退出
+        request_timeout_s: 300       # 单行请求超时
+        max_restarts: 2              # 连续崩溃达到该次数后自动降级为 per_call
       capabilities:
         # 情绪通路三选一：emo_vector_8d / emo_text / emo_audio_prompt，冲突直接报错
         emotion_control: emo_vector_8d

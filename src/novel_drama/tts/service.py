@@ -265,6 +265,24 @@ class TtsService:
         self.alignment_cfg = dict(config.get("tts.alignment") or {})
         self.project_root = Path(project_root) if project_root else None
 
+    # ---------- 生命周期 ----------
+
+    def close(self) -> None:
+        """关闭所有 provider 的常驻资源（例如 IndexTTS 的常驻 worker）。
+
+        说明:
+            只在整批结束时调用；单个 provider 关闭失败不影响其它 provider，
+            也不向上抛异常，避免打断 finally 里的收尾逻辑。
+        """
+        for provider in self.providers.values():
+            closer = getattr(provider, "close", None)
+            if closer is None:
+                continue
+            try:
+                closer()
+            except Exception:  # noqa: BLE001, S110 - 关闭失败只影响资源回收，不影响批次结果
+                pass
+
     # ---------- 历史（同角色一致性） ----------
 
     def _history_path(self) -> Path | None:

@@ -237,6 +237,57 @@ def _is_tts_process(pid: int) -> bool:
     return "novel_drama.cli" in command and "tts run" in command
 
 
+#: 本次 Web 服务启动过的配音批次所属工程；服务退出时逐个回收
+_ACTIVE_TTS_PROJECTS: set[str] = set()
+
+
+def _stop_tts_project(path: str) -> dict:
+    """终止某工程的后台配音批次，并把未完成任务标记为已取消。
+
+    参数:
+        path: 工程目录。
+
+    返回:
+        {stopped 是否确实停下, killed 是否终止了进程, canceled 被取消的任务数}。
+    """
+    store = ProjectStore(path)
+    pid_file = store.root / ".ndw" / "web-tts.pid"
+    killed = False
+    pid = 0
+    if pid_file.is_file():
+        try:
+            pid = int(pid_file.read_text(encoding="utf-8").strip())
+        except ValueError:
+            pid = 0
+        if pid and _is_tts_process(pid):
+            try:
+                # 配音 CLI 用 start_new_session 独立进程组，killpg 会同时打到常驻 worker
+                os.killpg(os.getpgid(pid), signal.SIGTERM)
+                killed = True
+            except (ProcessLookupError, PermissionError):
+                killed = False
+            # 进程收到 SIGTERM 立刻退出；稍等再改队列，避免和它的写入互相覆盖
+            for _ in range(20):
+                try:
+                    os.kill(pid, 0)
+                except (ProcessLookupError, PermissionError):
+                    break
+                time.sleep(0.1)
+        pid_file.unlink(missing_ok=True)
+    queue = QueueStore(store)
+    jobs = queue.load()
+    canceled = 0
+    for job in jobs:
+        if job.get("status") in ("queued", "running"):
+            job["status"] = "canceled"
+            job["finished_at"] = now_iso()
+            job["error"] = {"code": "CANCELED", "message": "用户停止生成"}
+            canceled += 1
+    if canceled:
+        queue.save(jobs)
+    return {"stopped": killed or canceled > 0, "killed": killed, "canceled": canceled}
+
+
 def _dig(data: dict, dotted: str):
     """按点号路径取值。
 
@@ -665,6 +716,16 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
 
     app = FastAPI(title="novel-drama-workbench", version=__version__)
 
+    @app.on_event("shutdown")
+    def _shutdown_tts_batches() -> None:
+        """Web 服务退出时回收本次启动的配音批次，避免留下无主 CLI/worker 进程。"""
+        for root in list(_ACTIVE_TTS_PROJECTS):
+            try:
+                _stop_tts_project(root)
+            except Exception:  # noqa: BLE001, S110 - 退出钩子不能抛错
+                pass
+            _ACTIVE_TTS_PROJECTS.discard(root)
+
     def _store(path: str | None) -> ProjectStore:
         """按请求参数定位工程。
 
@@ -976,6 +1037,21 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
             return {"started": False, "active": len(active), "since": since}
 
         store = ProjectStore(path)
+        # pid 文件显示已有进程活着时直接拒绝，避免重复启动第二个批次
+        pid_file = store.root / ".ndw" / "web-tts.pid"
+        if pid_file.is_file():
+            try:
+                old_pid = int(pid_file.read_text(encoding="utf-8").strip())
+            except ValueError:
+                old_pid = 0
+            if old_pid and _is_tts_process(old_pid):
+                return {
+                    "started": False,
+                    "active": 0,
+                    "since": now_iso(),
+                    "pid": old_pid,
+                    "reason": "已有配音进程在运行",
+                }
         log_dir = store.root / ".ndw" / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
         since = now_iso()
@@ -1002,6 +1078,7 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         # 记录后台进程 pid，供「停止生成」终止（进程组由 start_new_session 独立出来）
         pid_file = store.root / ".ndw" / "web-tts.pid"
         pid_file.write_text(str(process.pid), encoding="utf-8")
+        _ACTIVE_TTS_PROJECTS.add(str(store.root))
         return {"started": True, "mode": mode, "pid": process.pid, "log": str(log_path), "since": since}
 
     @app.post("/api/ui/stop")
@@ -1014,41 +1091,9 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         返回:
             {stopped 是否确实停下, killed 是否终止了进程, canceled 被取消的任务数}。
         """
-        store = ProjectStore(body["path"])
-        pid_file = store.root / ".ndw" / "web-tts.pid"
-        killed = False
-        pid = 0
-        if pid_file.is_file():
-            try:
-                pid = int(pid_file.read_text(encoding="utf-8").strip())
-            except ValueError:
-                pid = 0
-            if pid and _is_tts_process(pid):
-                try:
-                    os.killpg(os.getpgid(pid), signal.SIGTERM)
-                    killed = True
-                except (ProcessLookupError, PermissionError):
-                    killed = False
-                # 进程收到 SIGTERM 立刻退出；稍等再改队列，避免和它的写入互相覆盖
-                for _ in range(20):
-                    try:
-                        os.kill(pid, 0)
-                    except (ProcessLookupError, PermissionError):
-                        break
-                    time.sleep(0.1)
-            pid_file.unlink(missing_ok=True)
-        queue = QueueStore(store)
-        jobs = queue.load()
-        canceled = 0
-        for job in jobs:
-            if job.get("status") in ("queued", "running"):
-                job["status"] = "canceled"
-                job["finished_at"] = now_iso()
-                job["error"] = {"code": "CANCELED", "message": "用户停止生成"}
-                canceled += 1
-        if canceled:
-            queue.save(jobs)
-        return {"stopped": killed or canceled > 0, "killed": killed, "canceled": canceled}
+        result = _stop_tts_project(body["path"])
+        _ACTIVE_TTS_PROJECTS.discard(str(ProjectStore(body["path"]).root))
+        return result
 
     @app.post("/api/ui/line/set")
     def ui_line_set(body: dict) -> dict:

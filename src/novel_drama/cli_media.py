@@ -183,18 +183,22 @@ def cmd_tts_batch(args, config: AppConfig) -> int:
             f"成功 {ok}（缓存 {cached}）失败 {failed}；累计 {stats['succeeded']}/{stats['requested']}"
         )
 
-    report = run_chapters(
-        service,
-        store,
-        chapters,
-        batch_size=args.batch_size,
-        dry_run=False,
-        reporter=reporter,
-        scene_ids=args.scene,
-        include_ready=include_ready,
-        limit=args.limit,
-        line_ids=line_ids,
-    )
+    try:
+        report = run_chapters(
+            service,
+            store,
+            chapters,
+            batch_size=args.batch_size,
+            dry_run=False,
+            reporter=reporter,
+            scene_ids=args.scene,
+            include_ready=include_ready,
+            limit=args.limit,
+            line_ids=line_ids,
+        )
+    finally:
+        # 整批结束回收常驻 worker，避免跨命令残留进程
+        service.close()
     stats = report["stats"]
     text = (
         f"批量合成完成：{stats['chapters']} 章 / 请求 {stats['requested']} 行，成功 {stats['succeeded']}"

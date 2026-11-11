@@ -28,6 +28,10 @@ class TtsProvider(Protocol):
         """释放常驻内存/显存；无状态 provider 可为空实现。"""
         ...
 
+    def close(self) -> None:
+        """关闭常驻子进程/连接；无状态 provider 可为空实现。"""
+        ...
+
 
 class BaseProvider:
     """适配器公共实现：保存配置、默认卸载。"""
@@ -50,4 +54,6 @@ class BaseProvider:
 
     def unload(self) -> None:
         """无状态 provider 无需卸载。"""
-        return None
+
+    def close(self) -> None:
+        """无状态 provider 无需关闭。"""

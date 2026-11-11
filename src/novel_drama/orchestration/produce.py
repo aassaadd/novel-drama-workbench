@@ -245,17 +245,21 @@ def _stage_tts(ctx: dict) -> list[dict]:
     store = ctx["store"]
     chapter = store.load_chapter(ctx["chapter_id"])
     service = _tts_service(_Namespace(project=str(store.root)), ctx["config"])
-    report = run_chapters(
-        service,
-        store,
-        [chapter],
-        batch_size=int(ctx["config"].get("tts.batch_size", 5)),
-        dry_run=False,
-        scene_ids=None,
-        include_ready=False,
-        limit=None,
-        line_ids=None,
-    )
+    try:
+        report = run_chapters(
+            service,
+            store,
+            [chapter],
+            batch_size=int(ctx["config"].get("tts.batch_size", 5)),
+            dry_run=False,
+            scene_ids=None,
+            include_ready=False,
+            limit=None,
+            line_ids=None,
+        )
+    finally:
+        # 阶段结束回收常驻 worker；后续媒体阶段不需要它
+        service.close()
     stats = report.get("stats") or {}
     if int(stats.get("failed") or 0):
         raise RuntimeError(f"配音有 {stats['failed']} 行失败（成功 {stats.get('succeeded', 0)} 行），详见 {report.get('report_path')}")
