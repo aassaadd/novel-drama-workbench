@@ -1753,6 +1753,26 @@ table.grid td.wrap { word-break: break-word; }
 .char-meta .muted,
 .char-bg .muted { margin-right: var(--sp-1); }
 .char-edit { border-top: 1px solid var(--line); padding-top: var(--sp-2); }
+
+/* 关系备注列表：每行「人物下拉 + 备注输入框 + 删除」 */
+.rel-list { display: flex; flex-direction: column; gap: var(--sp-2); }
+.rel-row { display: grid; grid-template-columns: minmax(110px, 180px) 1fr 28px; gap: var(--sp-2); align-items: center; }
+.rel-row select, .rel-row input { width: 100%; color: var(--text); }
+.rel-del {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--muted);
+  font-size: var(--fs-sm);
+  line-height: 1;
+  cursor: pointer;
+}
+.rel-del:hover { border-color: var(--c-failed); color: var(--c-failed); }
+.rel-actions { margin-top: var(--sp-1); }
+.rel-empty { margin: 0; color: var(--muted); font-size: var(--fs-xs); }
 .pending-title { margin: 0; font-size: var(--fs-xs); }
 
 /* 黄金三章检查结果 */

@@ -104,9 +104,14 @@ def cmd_voice_builtin(args, config: AppConfig) -> int:
     if action == "import":
         store = _resolve_store(args, config)
         result = builtin_voices.import_into_project(store, config, keys=args.key)
-        print(f"已导入 {len(result['added'])} 个音色，跳过 {len(result['skipped'])} 个。")
+        print(
+            f"新增 {len(result['added'])} 个，更新 {len(result['updated'])} 个，"
+            f"跳过 {len(result['skipped'])} 个。"
+        )
         for item in result["added"]:
             print(f"  + {item['name']}（{item['voice_id']}）")
+        for item in result["updated"]:
+            print(f"  ~ {item['name']}（{item['voice_id']}，已修正）")
         for item in result["skipped"]:
             print(f"  - {item['key']}: {item['reason']}")
         return EXIT_OK

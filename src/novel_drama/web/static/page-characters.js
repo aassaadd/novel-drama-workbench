@@ -78,34 +78,100 @@
     return value.length > limit ? `${value.slice(0, limit)}…` : value;
   }
 
-  /* 把「目标ID=备注」多行文本解析成 relationships 对象。
-   * 参数：text 多行文本。
-   * 返回：{目标ID: 备注}。
+  /* 可绑定的人物：排除旁白与当前人物自己。
+   * 参数：ownId 当前人物 ID。
+   * 返回：人物数组。
    */
-  function parseRelationships(text) {
-    const result = {};
-    String(text || "")
-      .split("\n")
-      .map((line) => line.trim())
-      .filter(Boolean)
-      .forEach((line) => {
-        const index = line.indexOf("=");
-        if (index <= 0) return;
-        const key = line.slice(0, index).trim();
-        const note = line.slice(index + 1).trim();
-        if (key) result[key] = note;
-      });
-    return result;
+  function pickableCharacters(ownId) {
+    return characters.filter((row) => row.id !== ownId && row.id !== NARRATOR_ID && row.role !== "narrator");
   }
 
-  /* 把关系对象转成多行文本（一行一项「目标ID=备注」）。
-   * 参数：notes 关系对象。
-   * 返回：多行文本；空对象返回空串。
+  /* 关系列表为空且没有可绑定人物时的中文空状态提示。
+   * 参数：无。
+   * 返回：HTML 字符串。
    */
-  function relationshipsText(notes) {
-    return Object.entries(notes || {})
-      .map(([key, note]) => `${key}=${note || ""}`)
-      .join("\n");
+  function relEmptyHtml() {
+    return `<p class="rel-empty">暂无可绑定的人物：先新增其他人物，再填写关系备注。</p>`;
+  }
+
+  /* 关系目标下拉：选项为本工程人物姓名，回显按人物 ID 选中。
+   * 参数：key 当前关系目标 ID；ownId 当前人物 ID。
+   * 返回：<option> HTML 字符串。
+   */
+  function relationshipOptions(key, ownId) {
+    const pickable = pickableCharacters(ownId);
+    const nameById = Object.fromEntries(characters.map((row) => [row.id, row.name]));
+    // 生成的人物关系以姓名为键：能对上人物时自动改绑到 ID，保存时顺带迁移旧键
+    const matched = pickable.find((row) => row.id === key || row.name === key);
+    const selectedId = matched ? matched.id : key;
+    // 历史关系指向已删除人物时保留原键并标记，保存时不会静默丢弃
+    const unknown = key && !matched
+      ? `<option value="${esc(key)}" selected>${esc(nameById[key] || key)}${nameById[key] ? "（不可选）" : "（未找到该人物）"}</option>`
+      : "";
+    const placeholder = key ? "" : `<option value="">请选择人物</option>`;
+    const options = pickable
+      .map((row) => `<option value="${esc(row.id)}"${row.id === selectedId ? " selected" : ""}>${esc(row.name || row.id)}</option>`)
+      .join("");
+    return placeholder + unknown + options;
+  }
+
+  /* 一行关系备注：左侧人物下拉，右侧备注输入框与删除按钮。
+   * 参数：key 关系目标 ID（新增行为空）；note 备注；ownId 当前人物 ID。
+   * 返回：HTML 字符串。
+   */
+  function relationshipRowHtml(key, note, ownId) {
+    return `<div class="rel-row" data-rel-row data-key="${esc(key || "")}">
+      <select data-rel-target>${relationshipOptions(key, ownId)}</select>
+      <input data-rel-note value="${esc(note || "")}" placeholder="关系备注，如：互相提防" maxlength="500" />
+      <button class="rel-del" type="button" data-rel-act="remove" title="删除这一行">×</button>
+    </div>`;
+  }
+
+  /* 整个关系备注编辑区：若干关系行 + 新增按钮。
+   * 参数：notes 关系对象 `{目标ID: 备注}`；ownId 当前人物 ID。
+   * 返回：HTML 字符串。
+   */
+  function relationshipListHtml(notes, ownId) {
+    const pickable = pickableCharacters(ownId);
+    const entries = Object.entries(notes || {});
+    const rows = entries
+      .map(([key, note]) => relationshipRowHtml(key, note, ownId))
+      .join("");
+    const addDisabled = pickable.length ? "" : " disabled";
+    // 记住渲染时的目标集合，保存时据此判断哪些关系被删除了
+    const original = esc(JSON.stringify(entries.map(([key]) => key)));
+    return `<div class="rel-list" data-rel-list data-rel-orig="${original}">${pickable.length ? "" : relEmptyHtml()}${rows}</div>
+      <div class="rel-actions">
+        <button class="btn small" type="button" data-rel-act="add"${addDisabled}>＋ 新增关系</button>
+      </div>`;
+  }
+
+  /* 读取关系列表：当前行组成的关系对象，以及被删除行的原目标 ID。
+   * 参数：card 人物卡片节点。
+   * 返回：{notes: {目标ID: 备注}, removed: [被删除的目标ID]}。
+   */
+  function readRelationshipRows(card) {
+    const list = card.querySelector("[data-rel-list]");
+    const notes = {};
+    const removed = [];
+    if (!list) return { notes, removed };
+    list.querySelectorAll("[data-rel-row]").forEach((row) => {
+      const select = row.querySelector("[data-rel-target]");
+      const note = row.querySelector("[data-rel-note]");
+      const key = select ? select.value : "";
+      if (key) notes[key] = note ? note.value.trim() : "";
+    });
+    // 渲染时的目标在保存时已不存在（整行删除或改了绑定对象）→ 交给后端删除该关系
+    let original = [];
+    try {
+      original = JSON.parse(list.dataset.relOrig || "[]");
+    } catch (error) {
+      original = [];
+    }
+    original.forEach((key) => {
+      if (key && !(key in notes)) removed.push(key);
+    });
+    return { notes, removed };
   }
 
   /* 人物定位徽标：主角 / 反派 / 配角 / 龙套用不同颜色区分。
@@ -204,8 +270,9 @@
           ${amplifyButton("负面提示词")}
         </span>
       </div>
-      <div class="stack">关系备注（目标ID=备注，一行一项）
-        <textarea data-edit="relationships" rows="2" placeholder="chr_xxx=互相提防">${esc(relationshipsText(notes))}</textarea>
+      <div class="stack">关系备注
+        <span class="muted">每行选一个人物并填写备注；删除行后保存会一并清除该关系</span>
+        <div data-rel-block>${relationshipListHtml(notes, item.id || "")}</div>
       </div>
       <div class="actions">
         <button class="btn primary" type="button" data-char-act="save">保存</button>
@@ -336,6 +403,7 @@
       const node = card.querySelector(`[data-edit="${name}"]`);
       return node ? node.value.trim() : "";
     };
+    const rel = readRelationshipRows(card);
     return {
       name: read("name"),
       role: read("role") || "supporting",
@@ -345,7 +413,8 @@
       background: read("background"),
       appearance_prompt: read("appearance_prompt"),
       negative_prompt: read("negative_prompt"),
-      relationships: parseRelationships(read("relationships")),
+      relationships: rel.notes,
+      removed_relationships: Array.from(new Set(rel.removed)),
     };
   }
 
@@ -461,7 +530,8 @@
     set("appearance_prompt", fields.appearance_prompt || "");
     set("negative_prompt", fields.negative_prompt || "");
     const notes = (fields.state && fields.state.relationship_notes) || fields.relationships || {};
-    set("relationships", relationshipsText(notes));
+    const block = card.querySelector("[data-rel-block]");
+    if (block) block.innerHTML = relationshipListHtml(notes, card.dataset.id || "");
     NW.toast("已回填生成结果，确认后点保存", true);
   }
 
@@ -705,11 +775,36 @@
     });
   }
 
+  /* 关系行操作：新增一行 / 删除一行。
+   * 参数：button 触发按钮。
+   * 返回：无。
+   */
+  function handleRelationshipAction(button) {
+    const card = button.closest(".char-card");
+    const list = card ? card.querySelector("[data-rel-list]") : null;
+    if (!list) return;
+    if (button.dataset.relAct === "remove") {
+      const row = button.closest("[data-rel-row]");
+      if (row) row.remove();
+      // 删空且已无可绑定人物时补回空状态提示
+      if (!list.querySelector("[data-rel-row]") && !pickableCharacters(card.dataset.id || "").length) {
+        list.innerHTML = relEmptyHtml();
+      }
+      return;
+    }
+    list.insertAdjacentHTML("beforeend", relationshipRowHtml("", "", card.dataset.id || ""));
+  }
+
   /* 卡片点击分发：编辑 / 取消 / 保存 / 生成 / 删除 / 生成图像。
    * 参数：event 点击事件。
    * 返回：无。
    */
   function onListClick(event) {
+    const relAct = event.target.closest("[data-rel-act]");
+    if (relAct) {
+      handleRelationshipAction(relAct);
+      return;
+    }
     const trigger = event.target.closest("[data-char-act]");
     if (!trigger) return;
     const act = trigger.dataset.charAct;

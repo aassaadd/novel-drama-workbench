@@ -249,6 +249,16 @@ def cmd_character_update(args, config: AppConfig) -> int:
         state["relationship_notes"] = notes
         state_changed = True
         changed.append(f"relationship:{key}")
+    for item in getattr(args, "relationship_remove", None) or []:
+        key = str(item or "").strip()
+        if not key:
+            continue
+        notes = state.get("relationship_notes") or {}
+        if key in notes:
+            del notes[key]
+            state["relationship_notes"] = notes
+            state_changed = True
+            changed.append(f"relationship-remove:{key}")
     if state_changed:
         target["state"] = state
 

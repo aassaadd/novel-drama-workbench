@@ -1792,7 +1792,8 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
 
         参数:
             body: `{path, id, name?, role?, gender?, age_range?, personality?, background?,
-            aliases?, appearance_prompt?, negative_prompt?, situation?, relationships?}`。
+            aliases?, appearance_prompt?, negative_prompt?, situation?, relationships?,
+            removed_relationships?}`；removed_relationships 为要删除的关系目标 ID 列表。
 
         异常:
             HTTPException 400: 缺少 id。
@@ -1826,6 +1827,10 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
             relationships = [f"{key}={value}" for key, value in relationships.items()]
         for item in relationships:
             argv += ["--relationship", str(item)]
+        # 列表编辑里被删掉的关系行：显式通知 CLI 移除，避免旧关系残留
+        for target_id in body.get("removed_relationships") or []:
+            if str(target_id).strip():
+                argv += ["--relationship-remove", str(target_id).strip()]
         return _respond(_cli(*argv))
 
     @app.post("/api/ui/characters/delete")
@@ -1908,13 +1913,13 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
 
     @app.post("/api/ui/voices/builtin/import")
     def ui_voices_builtin_import(body: dict) -> dict:
-        """把内置音色导入工程音色库（按名称去重）。
+        """把内置音色导入工程音色库（按名称/路径迁移旧条目，可重复执行）。
 
         参数:
             body: `{path, keys?: [...]}`。
 
         返回:
-            `{added, skipped, voices, items}`。
+            `{added, updated, skipped, voices, items}`。
         """
         from ..tts import builtin_voices
 
@@ -1924,6 +1929,7 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         result = builtin_voices.import_into_project(store, cfg, keys=body.get("keys") or None)
         return {
             "added": result["added"],
+            "updated": result["updated"],
             "skipped": result["skipped"],
             "voices": result["voices"],
             "items": builtin_voices.rows(cfg),

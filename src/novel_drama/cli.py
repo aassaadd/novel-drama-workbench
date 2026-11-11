@@ -1104,6 +1104,7 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--negative-prompt", dest="negative_prompt", help="角色负向提示词（配图用，空串表示清空）")
     q.add_argument("--situation", help="当前处境")
     q.add_argument("--relationship", action="append", help="`目标ID=备注`，可重复")
+    q.add_argument("--relationship-remove", dest="relationship_remove", action="append", help="要移除的关系目标ID，可重复")
     q.set_defaults(func=cmd_character_update)
     q = p_sub.add_parser("remove", help="按 ID 删除角色（旁白不可删）")
     q.add_argument("--id", required=True)

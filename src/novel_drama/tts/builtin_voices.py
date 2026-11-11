@@ -32,90 +32,108 @@ MANIFEST_NAME = ".ndw-voices.json"
 CONSENT_NOTE = "IndexTTS 官方 Demo 示例音频（随模型许可）；对外商用请替换为自有授权录音"
 
 #: 内置音色清单。
-#: f0_hz 为实测基频中位数（仅用于大致区分男女声与音区，不是声学标注）；
-#: duration_ms 为实测时长，安装后会再用 ffprobe 校正。
+#: 命名统一为「内置男声 01-05 / 内置女声 01-05」，按实测基频从低到高排列。
+#: f0_hz 是实测基频中位数，只描述音区，不直接等于性别结论；
+#: gender 已用两个独立音频性别分类模型复核（voice_01/06/07 早期按 F0 粗判为
+#: 女声，复核后确认是男声，故改名并保留 legacy_names 供旧工程迁移）。
+#: duration_ms 为清单初值，安装后会再用 ffprobe 校正。
 CATALOG: list[dict] = [
     {
         "key": "voice_12",
         "file": "voice_12.wav",
-        "name": "内置男声·低沉",
+        "name": "内置男声 01",
         "gender": "male",
         "f0_hz": 107,
         "duration_ms": 2673,
+        "legacy_names": ["内置男声·低沉"],
     },
     {
         "key": "voice_05",
         "file": "voice_05.wav",
-        "name": "内置男声·中音",
+        "name": "内置男声 02",
         "gender": "male",
         "f0_hz": 147,
         "duration_ms": 8406,
+        "legacy_names": ["内置男声·中音"],
     },
     {
         "key": "voice_07",
         "file": "voice_07.wav",
-        "name": "内置女声·中低 A",
-        "gender": "female",
+        "name": "内置男声 03",
+        "gender": "male",
         "f0_hz": 170,
         "duration_ms": 2036,
+        "legacy_names": ["内置女声·中低 A"],
     },
     {
         "key": "voice_06",
         "file": "voice_06.wav",
-        "name": "内置女声·中低 B",
-        "gender": "female",
+        "name": "内置男声 04",
+        "gender": "male",
         "f0_hz": 176,
         "duration_ms": 6229,
-    },
-    {
-        "key": "voice_09",
-        "file": "voice_09.wav",
-        "name": "内置女声·中音 A",
-        "gender": "female",
-        "f0_hz": 219,
-        "duration_ms": 10194,
-    },
-    {
-        "key": "voice_04",
-        "file": "voice_04.wav",
-        "name": "内置女声·中音 B",
-        "gender": "female",
-        "f0_hz": 222,
-        "duration_ms": 2346,
-    },
-    {
-        "key": "voice_11",
-        "file": "voice_11.wav",
-        "name": "内置女声·中高 A",
-        "gender": "female",
-        "f0_hz": 258,
-        "duration_ms": 7862,
-    },
-    {
-        "key": "voice_02",
-        "file": "voice_02.wav",
-        "name": "内置女声·中高 B",
-        "gender": "female",
-        "f0_hz": 262,
-        "duration_ms": 2927,
+        "legacy_names": ["内置女声·中低 B"],
     },
     {
         "key": "voice_01",
         "file": "voice_01.wav",
-        "name": "内置女声·高音 A",
-        "gender": "female",
+        "name": "内置男声 05",
+        "gender": "male",
         "f0_hz": 296,
         "duration_ms": 2439,
+        "legacy_names": ["内置女声·高音 A"],
+    },
+    {
+        "key": "voice_09",
+        "file": "voice_09.wav",
+        "name": "内置女声 01",
+        "gender": "female",
+        "f0_hz": 219,
+        "duration_ms": 10194,
+        "legacy_names": ["内置女声·中音 A"],
+    },
+    {
+        "key": "voice_04",
+        "file": "voice_04.wav",
+        "name": "内置女声 02",
+        "gender": "female",
+        "f0_hz": 222,
+        "duration_ms": 2346,
+        "legacy_names": ["内置女声·中音 B"],
+    },
+    {
+        "key": "voice_11",
+        "file": "voice_11.wav",
+        "name": "内置女声 03",
+        "gender": "female",
+        "f0_hz": 258,
+        "duration_ms": 7862,
+        "legacy_names": ["内置女声·中高 A"],
+    },
+    {
+        "key": "voice_02",
+        "file": "voice_02.wav",
+        "name": "内置女声 04",
+        "gender": "female",
+        "f0_hz": 262,
+        "duration_ms": 2927,
+        "legacy_names": ["内置女声·中高 B"],
     },
     {
         "key": "voice_03",
         "file": "voice_03.wav",
-        "name": "内置女声·高音 B",
+        "name": "内置女声 05",
         "gender": "female",
         "f0_hz": 308,
         "duration_ms": 2111,
+        "legacy_names": ["内置女声·高音 B"],
     },
 ]
+
+#: 旧版清单名称 → 新名称，供已导入工程原地迁移（也用于 README/接口提示）。
+LEGACY_NAME_MAP: dict[str, str] = {
+    old: item["name"] for item in CATALOG for old in item.get("legacy_names") or []
+}
 
 
 def builtin_root(config) -> Path:
@@ -341,8 +359,121 @@ def install(config, keys: list[str] | None = None, force: bool = False) -> dict:
     }
 
 
+def _reference_audio_path(voice: dict) -> str:
+    """取音色默认变体的参考音频路径；默认变体缺失时回退到第一个变体。
+
+    参数:
+        voice: `voices.json` 中的单条音色。
+
+    返回:
+        绝对路径字符串；没有变体时返回空串。
+    """
+    variants = voice.get("variants") or []
+    default_id = voice.get("default_variant_id")
+    chosen = None
+    for variant in variants:
+        if variant.get("id") == default_id:
+            chosen = variant
+            break
+    if chosen is None and variants:
+        chosen = variants[0]
+    if chosen is None:
+        return ""
+    return str((chosen.get("reference") or {}).get("audio_path") or "")
+
+
+def _find_existing(voices: list[dict], by_name: dict, by_path: dict, item: dict, path: Path) -> tuple:
+    """在工程已有音色中定位清单项对应的旧记录。
+
+    匹配顺序：新名称精确命中 → 参考音频绝对路径命中（导入后文件路径不变）
+    → 旧名称命中且带「内置」标签（兜底，防止路径被手工改过）。
+
+    参数:
+        voices: 工程现有音色列表。
+        by_name: 名称索引。
+        by_path: 参考音频路径索引。
+        item: 清单项。
+        path: 当前内置音频绝对路径。
+
+    返回:
+        `(voice, matched_by)`；未命中返回 `(None, "")`。
+    """
+    voice = by_name.get(item["name"])
+    if voice is not None:
+        return voice, "name"
+
+    voice = by_path.get(str(path))
+    if voice is not None:
+        return voice, "path"
+
+    for legacy in item.get("legacy_names") or []:
+        candidate = by_name.get(legacy)
+        if candidate is not None and "内置" in (candidate.get("tags") or []):
+            return candidate, "legacy"
+    return None, ""
+
+
+def _apply_catalog_update(voice: dict, item: dict, path: Path) -> bool:
+    """把清单里的新名称/性别/标签/参考路径原地同步到已有音色。
+
+    只改展示与性别字段，保留音色 id、变体 id、情绪映射和角色绑定，
+    避免迁移后角色丢失配音或产生重复音色。内容已一致时不写盘、不涨版本号。
+
+    参数:
+        voice: 工程已有音色（原地修改）。
+        item: 清单项。
+        path: 当前内置音频绝对路径。
+
+    返回:
+        True 表示有字段变化并已更新；False 表示已是最新。
+    """
+    gender_tag = "男声" if item["gender"] == "male" else "女声"
+    current_tags = voice.get("tags") or []
+    desired_tags = [tag for tag in current_tags if tag not in {"男声", "女声"}]
+    for required in ("内置", "官方示例", gender_tag):
+        if required not in desired_tags:
+            desired_tags.append(required)
+
+    variants = voice.get("variants") or []
+    target = None
+    for variant in variants:
+        if variant.get("id") == voice.get("default_variant_id"):
+            target = variant
+            break
+    if target is None and variants:
+        target = variants[0]
+    reference = target.get("reference") or {} if target is not None else {}
+    desired_path = str(path)
+    duration = reference.get("duration_ms") or int(item["duration_ms"])
+
+    unchanged = (
+        voice.get("name") == item["name"]
+        and voice.get("gender") == item["gender"]
+        and set(current_tags) == set(desired_tags)
+        and str(reference.get("audio_path") or "") == desired_path
+        and bool(reference.get("duration_ms"))
+    )
+    if unchanged:
+        return False
+
+    voice["name"] = item["name"]
+    voice["gender"] = item["gender"]
+    voice["tags"] = desired_tags
+    voice["status"] = "ready"
+    voice["updated_at"] = now_iso()
+    voice["revision"] = int(voice.get("revision") or 1) + 1
+    if target is not None:
+        reference["audio_path"] = desired_path
+        # 旧导入可能没有时长或时长来自旧清单，这里按当前文件补齐
+        reference["duration_ms"] = int(duration)
+    return True
+
+
 def import_into_project(store, config, keys: list[str] | None = None) -> dict:
-    """把内置音色导入工程 `voices.json`（按名称去重，可重复执行）。
+    """把内置音色导入工程 `voices.json`（按名称/路径迁移旧条目，可重复执行）。
+
+    已导入过旧版内置音色的工程会原地改名并修正性别，不会重复新增；
+    角色绑定通过音色 id 关联，因此迁移后绑定保持不变。
 
     参数:
         store: ProjectStore。
@@ -350,12 +481,23 @@ def import_into_project(store, config, keys: list[str] | None = None) -> dict:
         keys: 只导入这些键；None 表示全部已下载项。
 
     返回:
-        `{"installed": {...}, "added": [...], "skipped": [...], "voices": [...]}`。
+        `{"installed": {...}, "added": [...], "updated": [...], "skipped": [...], "voices": [...]}`。
     """
     install_result = install(config, keys=keys)
     table = store.load_voices()
-    existing = {voice.get("name") for voice in table.get("voices") or []}
-    added, skipped = [], []
+    voices = table.get("voices")
+    if not isinstance(voices, list):
+        # load_voices 缺文件时返回空库；这里确保列表挂回 table，新增项才能落盘
+        voices = []
+        table["voices"] = voices
+    by_name = {voice.get("name"): voice for voice in voices}
+    by_path = {}
+    for voice in voices:
+        ref_path = _reference_audio_path(voice)
+        if ref_path:
+            by_path[ref_path] = voice
+
+    added, updated, skipped = [], [], []
     for item in CATALOG:
         if keys is not None and item["key"] not in keys:
             continue
@@ -363,9 +505,30 @@ def import_into_project(store, config, keys: list[str] | None = None) -> dict:
         if path is None:
             skipped.append({"key": item["key"], "reason": "未下载"})
             continue
-        if item["name"] in existing:
-            skipped.append({"key": item["key"], "reason": "已存在"})
+
+        voice, matched_by = _find_existing(voices, by_name, by_path, item, path)
+        if voice is not None:
+            before_name = voice.get("name")
+            changed = _apply_catalog_update(voice, item, path)
+            if not changed:
+                skipped.append({"key": item["key"], "reason": "已是最新"})
+                continue
+            updated.append(
+                {
+                    "key": item["key"],
+                    "voice_id": voice.get("id"),
+                    "name": item["name"],
+                    "gender": item["gender"],
+                    "matched_by": matched_by,
+                    "changed": True,
+                }
+            )
+            # 名称/路径可能变化，同步索引避免后续项误匹配
+            by_name.pop(before_name, None)
+            by_name[voice.get("name")] = voice
+            by_path[str(path)] = voice
             continue
+
         duration = item["duration_ms"]
         variant_id = entities.new_id("vav")
         voice = {
@@ -406,14 +569,17 @@ def import_into_project(store, config, keys: list[str] | None = None) -> dict:
             "created_at": now_iso(),
             "updated_at": now_iso(),
         }
-        table["voices"].append(voice)
-        added.append({"key": item["key"], "voice_id": voice["id"], "name": item["name"]})
-        existing.add(item["name"])
-    if added:
+        voices.append(voice)
+        by_name[item["name"]] = voice
+        by_path[str(path)] = voice
+        added.append({"key": item["key"], "voice_id": voice["id"], "name": item["name"], "gender": item["gender"]})
+
+    if added or updated:
         store.save_voices(table)
     return {
         "installed": install_result,
         "added": added,
+        "updated": updated,
         "skipped": skipped,
         "voices": table["voices"],
     }

@@ -145,7 +145,7 @@ $PY -m novel_drama.cli -p ~/novels/changan voice preview --voice 沈砚 --varian
 $PY -m novel_drama.cli voice builtin list                 # 看清单与下载状态
 $PY -m novel_drama.cli voice builtin install              # 下载全部（约 2MB，24k 单声道）
 $PY -m novel_drama.cli -p ~/novels/changan voice builtin import   # 导入当前工程，可重复执行
-$PY -m novel_drama.cli -p ~/novels/changan voice bind --character 沈砚 --voice 内置男声·低沉
+$PY -m novel_drama.cli -p ~/novels/changan voice bind --character 沈砚 --voice "内置男声 01"
 
 # 3.2 Web：人物设计 → 「音色库」子标签，可浏览器录音 / 上传 / 试听 / 绑定角色
 

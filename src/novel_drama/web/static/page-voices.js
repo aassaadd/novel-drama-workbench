@@ -99,7 +99,7 @@
         return `<div class="voice-card">
           <div class="voice-title"><span class="voice-name">${esc(item.name)}</span>
             <span class="tag">${genderText(item.gender)}</span></div>
-          <div class="voice-meta">基频 ~${esc(item.f0_hz)}Hz · ${msText(item.duration_ms)} · ${stateText}</div>
+          <div class="voice-meta">源文件 ${esc(item.key)}.wav · ${msText(item.duration_ms)} · ${stateText}</div>
           <div class="voice-actions">${listen}${action}</div>
         </div>`;
       })
@@ -199,9 +199,12 @@
     }
     const button = el("voiceBuiltinImport");
     if (button) button.disabled = true;
-    const data = await post("/api/ui/voices/builtin/import", keys ? { path, keys } : { path }, "内置音色已导入");
+    const data = await post("/api/ui/voices/builtin/import", keys ? { path, keys } : { path });
     if (button) button.disabled = false;
     if (data) {
+      const added = (data.added || []).length;
+      const updated = (data.updated || []).length;
+      toast(`内置音色：新增 ${added} 个，更新 ${updated} 个`, true);
       state.voices = data.voices || [];
       state.builtin.items = data.items || state.builtin.items;
       renderAll();
