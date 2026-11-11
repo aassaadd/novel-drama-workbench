@@ -182,6 +182,8 @@
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ path: NW.state.path, chapter: NW.state.chapter, apply }),
+        busy: apply ? "正在生成并应用标注…" : "正在生成导演标注…",
+        busyDetail: "分批调用模型，长章节可能需要 1–2 分钟",
       });
       const warnings = result.warnings || [];
       const box = el("scWarnings");

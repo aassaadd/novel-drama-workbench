@@ -241,6 +241,8 @@
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ path: NW.state.path, chapter: NW.state.chapter, kind, force: true }),
+        busy: `正在重新生成${kind}…`,
+        busyDetail: "媒体生成较慢，请勿关闭页面",
       });
       NW.toast(`${kind}：就绪 ${result.ready} / 跳过 ${result.skipped} / 失败 ${result.failed}`, result.failed === 0);
       // 直接等媒体页刷完清单，再用最新条目重画右栏（状态字段会变）

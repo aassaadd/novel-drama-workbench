@@ -156,6 +156,8 @@
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ path: NW.state.path, chapter: NW.state.chapter, kind, force: el("mdForce").checked }),
+        busy: `正在生成${({ sfx: "音效", image: "配图", video: "视频位" })[kind] || kind}…`,
+        busyDetail: "媒体生成较慢，请勿关闭页面",
       });
       const text = `${kind}：就绪 ${result.ready} / 跳过 ${result.skipped} / 失败 ${result.failed}`;
       NW.toast(text, result.failed === 0);

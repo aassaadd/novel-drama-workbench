@@ -537,6 +537,14 @@
   </div>
 
   <div id="toast" class="toast" hidden></div>
+  <div id="busyMask" class="busy-mask" hidden role="alert" aria-live="polite" aria-busy="true">
+    <div class="busy-card">
+      <div class="busy-spinner" aria-hidden="true"></div>
+      <div id="busyTitle" class="busy-title">正在生成…</div>
+      <div id="busyDetail" class="busy-detail"></div>
+      <div class="busy-bar" aria-hidden="true"><span></span></div>
+    </div>
+  </div>
   <script src="/static/core.js"></script>
   <script src="/static/modal.js"></script>
   <script src="/static/field-tools.js"></script>

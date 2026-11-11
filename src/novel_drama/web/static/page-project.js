@@ -361,6 +361,8 @@
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ path: NW.state.path, field, text }),
+        busy: "正在润色文案…",
+        busyDetail: "正在调用本地模型，请稍候",
       });
       const polished = String(result.text || "").trim();
       if (!polished) {

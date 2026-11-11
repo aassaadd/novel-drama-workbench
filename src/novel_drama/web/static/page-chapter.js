@@ -303,6 +303,8 @@
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ path: NW.state.path, chapter: NW.state.chapter, regen: el("chRegen").checked }),
+        busy: "正在生成正文…",
+        busyDetail: "多轮续写，长章节需要较长时间",
       });
       // 多轮生成会带回 rounds：优先展示轮次与字数，旧版无 rounds 时回落到原提示
       if (result.rounds) {
@@ -330,6 +332,8 @@
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ path: NW.state.path, chapter: NW.state.chapter, regen: true, dry_run: true }),
+        busy: "正在生成正文预览…",
+        busyDetail: "多轮续写，长章节需要较长时间",
       });
       blocks = paragraphsOf(result.preview || "");
       lineMap = new Map();
@@ -555,6 +559,8 @@
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(aiBody(state, true)),
+        busy: "正在按提示改写正文…",
+        busyDetail: "长章节会分块改写，请稍候",
       });
       state.result = result;
       renderAiPreview(state, result);
@@ -587,6 +593,8 @@
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(aiBody(state, false)),
+        busy: "正在应用改写…",
+        busyDetail: "会重新调用模型改写，长章节需要较长时间",
       });
       const warnings = result.warnings || [];
       const note = warnings.length ? `；${warnings.join("；")}` : "";
@@ -740,6 +748,8 @@
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(summarizeBody(false)),
+        busy: "正在根据正文重总结…",
+        busyDetail: "长章节会分块提炼事件要点",
       });
       state.result = result;
       renderSummarizePreview(state, result);

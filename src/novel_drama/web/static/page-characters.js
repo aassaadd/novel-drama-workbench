@@ -431,6 +431,8 @@
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ path: NW.state.path, id, kind, force: hasImage }),
+        busy: `正在生成${label}…`,
+        busyDetail: "图像生成较慢，请勿关闭页面",
       });
       NW.toast(`${label}已生成`, true);
       await load();
@@ -690,6 +692,8 @@
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ path: NW.state.path, brief }),
+            busy: "正在生成人物…",
+            busyDetail: "数量较多时分批生成",
           });
           openWizard(result.characters || []);
         } catch (error) {

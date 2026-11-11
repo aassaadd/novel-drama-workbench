@@ -380,6 +380,8 @@
           beats_per_chapter: Number(el("olBeats").value),
           words: Number(el("olWords").value),
         }),
+        busy: "正在生成大纲…",
+        busyDetail: "按幕分批生成，幕数越多耗时越长",
       });
       NW.toast(`大纲已生成：${result.chapters} 章 / ${result.beats} 个节拍（provider=${result.provider}）`, true);
       /* 重新拉取大纲与候选，保证绑定信息一并刷新 */

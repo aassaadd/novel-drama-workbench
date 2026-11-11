@@ -126,31 +126,97 @@ function toast(message, ok = false) {
   toast.timer = setTimeout(() => { node.hidden = true; }, 4000);
 }
 
+/* ---------------- 生成中蒙版 ---------------- */
+
+/* 蒙版状态：depth 支持嵌套调用，内层结束不会提前关掉外层。 */
+const busyState = { depth: 0, title: "", baseDetail: "", startedAt: 0, timer: null };
+
+/* 刷新蒙版文案：主文案 + 明细 + 已用时。参数：无。返回：无。 */
+function busyRender() {
+  const title = document.getElementById("busyTitle");
+  const detail = document.getElementById("busyDetail");
+  if (!title || !detail) return;
+  title.textContent = busyState.title || "正在生成…";
+  const elapsed = Math.floor((Date.now() - busyState.startedAt) / 1000);
+  const parts = [];
+  if (busyState.baseDetail) parts.push(busyState.baseDetail);
+  if (elapsed > 0) parts.push(`已用时 ${elapsed}s`);
+  detail.textContent = parts.join(" · ");
+}
+
+/* 显示生成蒙版；重复调用叠加计数并更新文案，计数归零才隐藏。
+ * 参数：text 主文案；detail 明细文案（可空）。
+ * 返回：无。
+ */
+function busyShow(text, detail) {
+  busyState.depth += 1;
+  busyState.title = text || "正在生成…";
+  busyState.baseDetail = detail || "";
+  if (busyState.depth === 1) {
+    busyState.startedAt = Date.now();
+    const mask = document.getElementById("busyMask");
+    if (mask) mask.hidden = false;
+    clearInterval(busyState.timer);
+    busyState.timer = setInterval(busyRender, 1000);
+  }
+  busyRender();
+}
+
+/* 关闭生成蒙版；嵌套调用时只减计数。参数：无。返回：无。 */
+function busyHide() {
+  if (busyState.depth === 0) return;
+  busyState.depth -= 1;
+  if (busyState.depth > 0) return;
+  clearInterval(busyState.timer);
+  busyState.timer = null;
+  const mask = document.getElementById("busyMask");
+  if (mask) mask.hidden = true;
+}
+
 /* 统一取数：把非 2xx 的 detail 翻译成人能读的文本，并带上接口给的退出码。
- * 参数：url 请求地址；options fetch 选项。
+ * 参数：url 请求地址；options fetch 选项，额外支持 busy（主文案）与 busyDetail（明细）。
+ *       传了 busy 时，请求超过 200ms 仍未返回就弹出全屏生成蒙版，结束后自动收起。
  * 返回：Promise<解析后的 JSON>；失败抛 Error（error.code = 接口退出码或 HTTP 状态）。
  */
 async function api(url, options) {
-  const response = await fetch(url, options);
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    const detail = data.detail;
-    let text;
-    if (typeof detail === "string") {
-      text = detail;
-    } else if (Array.isArray(detail)) {
-      // FastAPI 自身的参数校验错误（缺 chapter 之类）
-      text = detail.map((item) => `${(item.loc || []).slice(1).join(".")}: ${item.msg}`).join("；");
-    } else if (detail && detail.message) {
-      text = detail.message;
-    } else {
-      text = `HTTP ${response.status}`;
-    }
-    const error = new Error(text);
-    error.code = detail && detail.code !== undefined ? detail.code : response.status;
-    throw error;
+  const opts = options || {};
+  const busyText = opts.busy;
+  let busyTimer = null;
+  let busyVisible = false;
+  if (busyText) {
+    busyTimer = setTimeout(() => {
+      busyVisible = true;
+      busyShow(busyText, opts.busyDetail);
+    }, 200);
   }
-  return data;
+  try {
+    const rest = { ...opts };
+    delete rest.busy;
+    delete rest.busyDetail;
+    const response = await fetch(url, rest);
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const detail = data.detail;
+      let text;
+      if (typeof detail === "string") {
+        text = detail;
+      } else if (Array.isArray(detail)) {
+        // FastAPI 自身的参数校验错误（缺 chapter 之类）
+        text = detail.map((item) => `${(item.loc || []).slice(1).join(".")}: ${item.msg}`).join("；");
+      } else if (detail && detail.message) {
+        text = detail.message;
+      } else {
+        text = `HTTP ${response.status}`;
+      }
+      const error = new Error(text);
+      error.code = detail && detail.code !== undefined ? detail.code : response.status;
+      throw error;
+    }
+    return data;
+  } finally {
+    if (busyTimer) clearTimeout(busyTimer);
+    if (busyVisible) busyHide();
+  }
 }
 
 /* 查询串构造（与 buildQuery 同实现，保留旧名给各页面复用）。 */

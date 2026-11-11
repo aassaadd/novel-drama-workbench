@@ -420,6 +420,7 @@
    */
   async function runGenerate(section, path, brief, opts) {
     const button = opts.button;
+    const label = SECTION_LABELS[section] || section;
     setLoading(button, true, "生成中…");
     try {
       const body = { path, section, brief };
@@ -428,6 +429,8 @@
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
+        busy: `正在生成${label}…`,
+        busyDetail: "正在调用本地模型，请稍候",
       });
       const fields = (result && result.fields) || {};
       if (!Object.keys(fields).length) {
