@@ -492,8 +492,15 @@
     if (!rec) return "";
     const state = rec.status === "running" ? "is-running" : rec.status === "done" ? "is-done" : "is-failed";
     const label = { running: "运行中", done: "完成", failed: "失败" }[rec.status] || rec.status;
+    const p = rec.progress || {};
+    const percent = typeof p.percent === "number" ? p.percent : null;
+    const sizeLine =
+      p.total_bytes > 0 ? `${modelBytes(Number(p.done_bytes) || 0)} / ${modelBytes(Number(p.total_bytes))}` : "";
+    const progress = percent === null
+      ? ""
+      : `<div class="settings-hint">进度：${percent.toFixed(1)}%${sizeLine ? `（${sizeLine}）` : ""}</div>`;
     const logs = (rec.logs || []).slice(-8).join("\n");
-    return `<div class="dl-status ${state}">${esc(label)}${logs ? "\n" + esc(logs) : ""}</div>`;
+    return `<div class="dl-status ${state}">${esc(label)}${logs ? "\n" + esc(logs) : ""}</div>${progress}`;
   }
 
   /* 渲染一组模型表（音频 / 图像 / 视频）。
@@ -558,7 +565,9 @@
       ? '<span class="settings-hint">已就位</span>'
       : item.downloadable === false
         ? '<span class="settings-hint">不可下载</span>'
-        : `<button class="btn small" type="button" data-download="${esc(group)}" data-mkey="${esc(key)}">下载</button>`;
+        : `<button class="btn small" type="button" data-download="${esc(group)}" data-mkey="${esc(key)}">${
+            jobs[id] && jobs[id].status === "failed" ? "重试" : "下载"
+          }</button>`;
     const resolve = `<button class="btn small" type="button" data-resolve="${esc(group)}" data-mkey="${esc(key)}">重新解析</button>`;
     const stateRow = jobs[id]
       ? `<tr class="job-row"><td colspan="6" data-job="${esc(id)}">${jobHtml(id)}</td></tr>`
@@ -1105,6 +1114,7 @@
       rec.status = job.status;
       rec.logs = job.logs || [];
       rec.result = job.result;
+      rec.progress = job.progress || rec.progress || {};
       attachJobRow(id);
       if (job.status !== "running") {
         stopPolling();
@@ -1119,6 +1129,8 @@
           await refreshModels();
         } else {
           NW.toast("下载失败，请查看日志");
+          // 重新渲染清单，让下载按钮变成「重试」并保留失败状态
+          await refreshModels();
         }
       }
     } catch (error) {

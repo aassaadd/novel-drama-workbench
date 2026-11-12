@@ -185,6 +185,125 @@ CATALOG: list[dict] = [
         "license_gate": GATE_RETIRED,
         "note": "已退役，不再提供下载",
     },
+    {
+        "key": "sa3_small_sfx",
+        "provider_id": "stable_audio3_small_sfx",
+        "display_name": "Stable Audio 3 Small-SFX（音效）",
+        # 官方仓库是 gated（需登录 + 申请），这里用内容完全一致的公开镜像；来源另记 hf_repo_origin
+        "hf_repo": "cocktailpeanut/stable-audio-3-small-sfx",
+        "hf_repo_origin": "stabilityai/stable-audio-3-small-sfx",
+        "bytes": 3501998080,
+        "required_files": [
+            "model.safetensors",
+            "model_config.json",
+            "t5gemma-b-b-ul2/model.safetensors",
+        ],
+        "license": "Stability AI Community License（年收入 <100 万美元可商用）",
+        "commercial_use": True,
+        "license_gate": GATE_NONE,
+        "note": (
+            "音效专用（非音乐）：433M，输出 44.1kHz 立体声，最长 120s；"
+            "整包约 3.3 GiB（含 t5gemma 文本编码器，另受 Gemma Terms 约束）；"
+            "官方源已 gated，默认从公开镜像下载，文件与官方同哈希"
+        ),
+    },
+    {
+        "key": "stable_audio_open_10",
+        "provider_id": "stable_audio_open_10",
+        "display_name": "Stable Audio Open 1.0（配乐）",
+        # 官方仓库 gated；权重与配置分别来自公开镜像，文件哈希与官方一致
+        "hf_repo": "Comfy-Org/stable-audio-open-1.0",
+        "hf_repo_origin": "stabilityai/stable-audio-open-1.0",
+        # 直链下载时用清单里的静态体积，不走 HF 仓库探测（镜像小文件不稳定）
+        "bytes": 5295669195,
+        "required_files": [
+            "model.safetensors",
+            "model_config.json",
+            "LICENSE.md",
+            "t5-base/config.json",
+            "t5-base/model.safetensors",
+            "t5-base/spiece.model",
+            "t5-base/tokenizer.json",
+        ],
+        "license": "Stability AI Community License（年收入 <100 万美元可商用）",
+        "commercial_use": True,
+        "license_gate": GATE_NONE,
+        "note": (
+            "1B 参数，输出 44.1kHz 立体声，最长约 47 秒（训练窗口 2097152 采样）；"
+            "含 t5-base 文本编码器；官方源 gated，权重按公开镜像直链下载（与官方同 sha256）"
+        ),
+        "direct_files": [
+            {
+                "path": "model.safetensors",
+                "bytes": 4853889016,
+                "sha256": "7b20458a071231aaf32613b6fbc7945f28f34dbba4f295bb49bad56f5f66b57e",
+                "urls": [
+                    "https://modelscope.cn/models/AI-ModelScope/stable-audio-open-1.0/resolve/master/model.safetensors",
+                    "https://hf-mirror.com/Comfy-Org/stable-audio-open-1.0/resolve/main/stable-audio-open-1.0.safetensors",
+                ],
+            },
+            {
+                "path": "model_config.json",
+                "bytes": 4172,
+                "urls": [
+                    "https://modelscope.cn/models/AI-ModelScope/stable-audio-open-1.0/resolve/master/model_config.json",
+                    "https://hf-mirror.com/cocktailpeanut/stable-audio-open-1.0/resolve/main/model_config.json",
+                ],
+            },
+            {
+                "path": "LICENSE.md",
+                "bytes": 11852,
+                "urls": [
+                    "https://modelscope.cn/models/AI-ModelScope/stable-audio-open-1.0/resolve/master/LICENSE.md",
+                ],
+            },
+            {
+                "path": "t5-base/config.json",
+                "bytes": 1497,
+                "urls": [
+                    "https://modelscope.cn/models/AI-ModelScope/stable-audio-open-1.0/resolve/master/text_encoder/config.json",
+                    "https://hf-mirror.com/google-t5/t5-base/resolve/main/config.json",
+                ],
+            },
+            {
+                "path": "t5-base/model.safetensors",
+                "bytes": 438525864,
+                "urls": [
+                    "https://modelscope.cn/models/AI-ModelScope/stable-audio-open-1.0/resolve/master/text_encoder/model.safetensors",
+                ],
+            },
+            {
+                "path": "t5-base/special_tokens_map.json",
+                "bytes": 2201,
+                "urls": [
+                    "https://modelscope.cn/models/AI-ModelScope/stable-audio-open-1.0/resolve/master/tokenizer/special_tokens_map.json",
+                ],
+            },
+            {
+                "path": "t5-base/spiece.model",
+                "bytes": 791656,
+                "urls": [
+                    "https://modelscope.cn/models/AI-ModelScope/stable-audio-open-1.0/resolve/master/tokenizer/spiece.model",
+                    "https://hf-mirror.com/google-t5/t5-base/resolve/main/spiece.model",
+                ],
+            },
+            {
+                "path": "t5-base/tokenizer.json",
+                "bytes": 2422169,
+                "urls": [
+                    "https://modelscope.cn/models/AI-ModelScope/stable-audio-open-1.0/resolve/master/tokenizer/tokenizer.json",
+                    "https://hf-mirror.com/google-t5/t5-base/resolve/main/tokenizer.json",
+                ],
+            },
+            {
+                "path": "t5-base/tokenizer_config.json",
+                "bytes": 20768,
+                "urls": [
+                    "https://modelscope.cn/models/AI-ModelScope/stable-audio-open-1.0/resolve/master/tokenizer/tokenizer_config.json",
+                ],
+            },
+        ],
+    },
 ]
 
 
@@ -363,13 +482,15 @@ def write_manifest(path: Path, key: str, repo: str) -> dict:
     return manifest
 
 
-def required_missing(path: Path) -> list[str]:
+def required_missing(path: Path, required: list[str] | tuple[str, ...] | None = None) -> list[str]:
     """列出缺失/不完整的必需文件。
 
-    有下载清单时按清单逐文件核对（存在 + 大小一致），否则只查 `REQUIRED_FILES`。
+    有下载清单时按清单逐文件核对（存在 + 大小一致）；否则按调用方给的
+    必需文件列表核对，未给时回落到 `REQUIRED_FILES`。
 
     参数:
         path: 权重目录。
+        required: 该模型的必需文件（相对路径，可含子目录）；None 用默认集合。
 
     返回:
         问题列表（缺失或大小不符）；空列表表示齐全。
@@ -387,7 +508,7 @@ def required_missing(path: Path) -> list[str]:
                 problems.append(f"{item['name']}（大小不符：{file.stat().st_size}/{expected}）")
         return problems
     missing = []
-    for name in REQUIRED_FILES:
+    for name in required or REQUIRED_FILES:
         file = path / name
         if not file.exists() or file.stat().st_size <= 0:
             missing.append(name)
@@ -408,7 +529,8 @@ def scan(config) -> list[dict]:
     for item in CATALOG:
         path = root / item["key"]
         present = path.is_dir()
-        missing = required_missing(path) if present else list(REQUIRED_FILES)
+        required = item.get("required_files")
+        missing = required_missing(path, required) if present else list(required or REQUIRED_FILES)
         rows.append(
             {
                 "key": item["key"],
@@ -418,10 +540,13 @@ def scan(config) -> list[dict]:
                 "present": present,
                 "complete": present and not missing,
                 "bytes": dir_size(path) if present else 0,
+                "expected_bytes": int(item.get("bytes") or 0),
                 "missing": missing,
                 "license": item["license"],
                 "commercial_use": item["commercial_use"],
                 "license_gate": item["license_gate"],
+                "hf_repo": item.get("hf_repo"),
+                "hf_repo_origin": item.get("hf_repo_origin"),
                 "note": item.get("note"),
             }
         )
@@ -611,6 +736,19 @@ def remote_size(key: str, mirrors: list[str] | None = None) -> dict:
     entry = catalog_entry(key)
     if entry is None:
         raise ValueError(f"未知模型目录键：{key}。用 `ndw models list` 查看可选键")
+    if entry.get("direct_files"):
+        # 直链模型：体积以清单为准，不做 HF 仓库探测（镜像小文件不稳定）
+        files = [{"name": item["path"], "bytes": int(item.get("bytes") or 0)} for item in entry["direct_files"]]
+        files.sort(key=lambda item: item["bytes"], reverse=True)
+        return {
+            "ok": True,
+            "repo": entry.get("hf_repo"),
+            "mirror_used": "direct",
+            "attempts": [],
+            "total_bytes": sum(item["bytes"] for item in files),
+            "unknown": False,
+            "files": files,
+        }
     repo = entry.get("hf_repo")
     chain = list(mirrors) if mirrors else list(DEFAULT_MIRRORS)
     attempts: list[dict] = []
@@ -651,6 +789,96 @@ def remote_size(key: str, mirrors: list[str] | None = None) -> dict:
     }
 
 
+def _download_one(url: str, dest: Path, expected: int, sha256: str | None = None) -> None:
+    """从直链下载单个文件（支持断点续传与大小/哈希校验）。
+
+    参数:
+        url: 下载地址。
+        dest: 目标路径（先写 `.part`，校验通过再原子改名）。
+        expected: 期望字节数；0 表示不校验。
+        sha256: 期望 sha256；None 表示不校验。
+
+    异常:
+        Exception: 网络错误、大小不符或哈希不符。
+    """
+    import hashlib
+    import urllib.request
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_name(dest.name + ".part")
+    have = tmp.stat().st_size if tmp.exists() else 0
+    if expected and have > expected:
+        tmp.unlink()
+        have = 0
+    if expected and have == expected:
+        os.replace(tmp, dest)
+        return
+
+    headers = {"User-Agent": "ndw-model-store/1"}
+    if have:
+        headers["Range"] = f"bytes={have}-"
+    request = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(request, timeout=60) as response:
+        # 服务端不支持 Range 时会回 200，必须从头覆盖写
+        mode = "ab" if have and getattr(response, "status", 200) == 206 else "wb"
+        with open(tmp, mode) as handle:
+            while True:
+                chunk = response.read(1 << 20)
+                if not chunk:
+                    break
+                handle.write(chunk)
+
+    size = tmp.stat().st_size
+    if expected and size != expected:
+        tmp.unlink(missing_ok=True)
+        raise ValueError(f"大小不符：{size}/{expected}（{url}）")
+    if sha256:
+        digest = hashlib.sha256()
+        with open(tmp, "rb") as handle:
+            for block in iter(lambda: handle.read(8 << 20), b""):
+                digest.update(block)
+        if digest.hexdigest() != sha256:
+            tmp.unlink(missing_ok=True)
+            raise ValueError(f"sha256 不符：{digest.hexdigest()} != {sha256}（{url}）")
+    os.replace(tmp, dest)
+
+
+def _download_direct_files(entry: dict, staging: Path) -> tuple[list[dict], str | None, str | None]:
+    """按清单逐文件直链下载（每个文件按 urls 顺序尝试，最多重试 3 次）。
+
+    参数:
+        entry: 清单项（含 `direct_files`）。
+        staging: 暂存目录。
+
+    返回:
+        `(逐文件尝试记录, 成功标记, 失败摘要)`；成功标记为 `"direct"` 表示全部完成。
+    """
+    attempts: list[dict] = []
+    for item in entry.get("direct_files") or []:
+        dest = staging / item["path"]
+        expected = int(item.get("bytes") or 0)
+        if dest.exists() and (not expected or dest.stat().st_size == expected):
+            attempts.append({"file": item["path"], "ok": True, "url": "cached", "error": None})
+            continue
+        errors: list[str] = []
+        done = False
+        for url in item.get("urls") or []:
+            for attempt in range(3):
+                try:
+                    _download_one(url, dest, expected, item.get("sha256"))
+                    done = True
+                    break
+                except Exception as exc:  # noqa: BLE001 - 单个地址失败换下一个
+                    errors.append(f"{url}（第 {attempt + 1} 次）：{exc}")
+            if done:
+                attempts.append({"file": item["path"], "ok": True, "url": url, "error": None})
+                break
+        if not done:
+            attempts.append({"file": item["path"], "ok": False, "url": None, "error": "；".join(errors[-3:])})
+            return attempts, None, f"{item['path']} 下载失败：{errors[-1] if errors else '无可用地址'}"
+    return attempts, "direct", None
+
+
 def install(
     config,
     key: str,
@@ -658,6 +886,7 @@ def install(
     accept_license: bool = False,
     dry_run: bool = False,
     mirrors: list[str] | None = None,
+    progress: dict | None = None,
 ) -> dict:
     """下载一个模型到模型根目录（按镜像链逐个尝试，先落暂存，校验通过再 mv）。
 
@@ -672,6 +901,8 @@ def install(
         accept_license: 已确认非商用/需授权许可。
         dry_run: 只报体积与许可门禁，不下载。
         mirrors: 覆盖默认镜像链；None 或空列表时读配置 `models.download_mirrors`。
+        progress: 可选进度字典；下载阶段写入 `stage/staging/total_bytes`，
+            由调用方（Web 后台任务）轮询暂存目录大小算百分比。
 
     返回:
         `{"status": ..., "mirrors": [...], ...}`；status 取值：
@@ -690,7 +921,7 @@ def install(
     root = models_root(config)
     target = root / key
     if target.exists() and any(target.iterdir()):
-        missing = required_missing(target)
+        missing = required_missing(target, entry.get("required_files"))
         if missing:
             return {
                 "status": "target_incomplete",
@@ -745,38 +976,61 @@ def install(
     staging = root / f".staging-{key.replace('/', '_')}"
     root.mkdir(parents=True, exist_ok=True)
     staging.mkdir(parents=True, exist_ok=True)
-
-    # 探测成功的镜像排到最前，其余镜像按原顺序作为降级
-    mirror_used = size.get("mirror_used")
-    order = ([mirror_used] + [item for item in chain if item != mirror_used]
-             if mirror_used else list(chain))
-    from huggingface_hub import snapshot_download
+    if progress is not None:
+        progress.update(
+            {
+                "stage": "downloading",
+                "staging": str(staging),
+                "total_bytes": int(size.get("total_bytes") or 0),
+            }
+        )
 
     download_attempts: list[dict] = []
     used = None
-    for mirror in order:
-        os.environ["HF_ENDPOINT"] = mirror
-        try:
-            snapshot_download(repo_id=size["repo"], local_dir=str(staging))
-        except Exception as exc:
-            download_attempts.append({"mirror": mirror, "ok": False, "error": str(exc)})
-            # 清掉本次残留，避免下一个镜像续传时拿到半截/不匹配文件
-            _clear_staging(staging)
-            continue
-        download_attempts.append({"mirror": mirror, "ok": True, "error": None})
-        used = mirror
-        break
-    if used is None:
-        return {
-            "status": "error",
-            "key": key,
-            "repo": size["repo"],
-            "error": f"下载失败（{_attempts_digest(download_attempts)}）",
-            "mirror_used": None,
-            "attempts": download_attempts,
-            "mirrors": chain,
-            "staging": str(staging),
-        }
+    if entry.get("direct_files"):
+        # 直链模型：逐文件下载，失败信息按文件回报，保留暂存目录便于重试
+        download_attempts, used, error = _download_direct_files(entry, staging)
+        if used is None:
+            return {
+                "status": "error",
+                "key": key,
+                "repo": entry.get("hf_repo"),
+                "error": f"下载失败（{error}）",
+                "mirror_used": None,
+                "attempts": download_attempts,
+                "mirrors": chain,
+                "staging": str(staging),
+            }
+    else:
+        # 探测成功的镜像排到最前，其余镜像按原顺序作为降级
+        mirror_used = size.get("mirror_used")
+        order = ([mirror_used] + [item for item in chain if item != mirror_used]
+                 if mirror_used else list(chain))
+        from huggingface_hub import snapshot_download
+
+        for mirror in order:
+            os.environ["HF_ENDPOINT"] = mirror
+            try:
+                snapshot_download(repo_id=size["repo"], local_dir=str(staging))
+            except Exception as exc:
+                download_attempts.append({"mirror": mirror, "ok": False, "error": str(exc)})
+                # 清掉本次残留，避免下一个镜像续传时拿到半截/不匹配文件
+                _clear_staging(staging)
+                continue
+            download_attempts.append({"mirror": mirror, "ok": True, "error": None})
+            used = mirror
+            break
+        if used is None:
+            return {
+                "status": "error",
+                "key": key,
+                "repo": size["repo"],
+                "error": f"下载失败（{_attempts_digest(download_attempts)}）",
+                "mirror_used": None,
+                "attempts": download_attempts,
+                "mirrors": chain,
+                "staging": str(staging),
+            }
 
     hub_cache = staging / ".cache"
     if hub_cache.exists():
@@ -795,7 +1049,7 @@ def install(
             "mirrors": chain,
             "staging": str(staging),
         }
-    missing = required_missing(staging)
+    missing = required_missing(staging, entry.get("required_files"))
     if missing:
         return {
             "status": "incomplete",

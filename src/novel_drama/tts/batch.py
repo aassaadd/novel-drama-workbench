@@ -116,6 +116,79 @@ def _line_voice(store, characters_table: dict, line: dict, service, chapter: dic
     }
 
 
+def line_group_key(line: dict, chapter: dict, characters_table: dict, service, store) -> tuple:
+    """计算一行在常驻 worker 上的复用分组键（`tts run` 与 `tts batch` 共用）。
+
+    一级键 `(provider_id, model_dir, use_qwen_emo)` 决定是否重启 worker；
+    二级键 `(ref_audio, emo_audio_prompt)` 决定组内聚簇，减少参考音频重复编码。
+
+    参数:
+        line: 台词行。
+        chapter: 所在章节（章节覆盖/旁白切换点需要）。
+        characters_table: `{"characters": [...]}`。
+        service: TtsService。
+        store: 工程。
+
+    返回:
+        排序键元组。
+    """
+    from .types import Requirement
+
+    voice_info = _line_voice(store, characters_table, line, service, chapter)
+    character = next(
+        (item for item in characters_table.get("characters") or [] if item.get("id") == line.get("speaker_id")),
+        {},
+    )
+    binding = character.get("voice_binding") or {}
+    adapter = binding.get("adapter")
+    character_provider = adapter if adapter and adapter != "placeholder" else None
+    line_provider = (line.get("voice") or {}).get("provider_id")
+    requirement = Requirement(
+        text=line.get("text") or "",
+        emotion=line.get("emotion"),
+        emotion_intensity=max(0, min(3, round(float(line.get("emotion_intensity") or 0) * 3))),
+        clone_required=True,
+        target_duration_ms=line.get("target_duration_ms"),
+        character_id=line.get("speaker_id"),
+        line_id=line.get("id"),
+    )
+    decision = service.decide(requirement, line_provider, character_provider)
+    pid = decision["selected"]["provider_id"]
+    provider = service.providers.get(pid)
+    model_dir = (provider.spec.weights_path if provider else None) or ""
+    # 文字情绪需要 qwen，进程内切换模式会重启，故按开关分组
+    use_qwen = 1 if (line.get("delivery_note") or "").strip() else 0
+    ref_audio = voice_info.get("ref_audio") or ""
+    emo_audio = ref_audio if voice_info.get("source") == "emotion_ref" else ""
+    return (str(pid), str(model_dir), use_qwen, str(ref_audio), str(emo_audio))
+
+
+def sort_rows_by_group(rows: list[dict], chapter: dict, characters: list[dict], service, store) -> list[dict]:
+    """按 worker 复用键对本章待合成行做稳定排序（只改执行顺序，不改产物与命名）。
+
+    参数:
+        rows: `plan_batch` 的结果。
+        chapter: 章节 dict。
+        characters: 角色列表。
+        service: TtsService。
+        store: 工程。
+
+    返回:
+        排序后的行列表；预解析失败时原样返回，保证不会漏排或错排。
+    """
+    if len(rows) <= 1:
+        return rows
+    try:
+        characters_table = {"characters": characters}
+        return sorted(
+            rows,
+            key=lambda row: line_group_key(row.get("line") or {}, chapter, characters_table, service, store),
+        )
+    except Exception as exc:  # noqa: BLE001 - 分组只是优化，失败必须退回原顺序
+        print(f"[warn] 配音分组预解析失败，按原顺序执行：{exc}")
+        return rows
+
+
 def _relative(store, path: Path) -> str:
     """把绝对路径转成相对工程根目录的路径（失败则原样返回）。"""
     try:
@@ -676,6 +749,8 @@ def run_chapters(
         if not rows:
             per_chapter.append({"chapter_id": chapter.get("id"), "title": chapter.get("title"), "rows": 0, "stats": None})
             continue
+        # 与 `tts run` 共用分组逻辑：同章内先按 worker 模式、再按参考音聚簇，减少重启与重复编码
+        rows = sort_rows_by_group(rows, chapter, characters, service, store)
 
         def _cb(batch_no: int, batch_results: list[dict], stats: dict, _chapter=chapter, _index=index) -> None:
             """章节内批次进度回调。"""

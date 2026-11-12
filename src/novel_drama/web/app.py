@@ -2653,6 +2653,21 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
             raise HTTPException(status_code=404, detail={"code": 3, "message": "批次不存在", "batch_id": batch_id})
         return meta
 
+    @app.get("/api/ui/voices/design/history")
+    def ui_voices_design_history(path: str = Query(...), character_id: str = Query(...)) -> dict:
+        """从磁盘恢复某角色的历史候选批次（页面刷新后使用）。
+
+        参数:
+            path: 工程目录。
+            character_id: 人物 ID。
+
+        返回:
+            `{batches: [...]}`，倒序；含批次 ID、生成时间、候选是否仍在、已采用序号。
+        """
+        from ..tts import voice_design
+
+        return {"batches": voice_design.list_batches(_store(path), character_id)}
+
     @app.get("/api/ui/voices/design/audio")
     def ui_voices_design_audio(path: str = Query(...), batch_id: str = Query(...), index: int = Query(...)):
         """返回候选音频，供页面逐条试听。

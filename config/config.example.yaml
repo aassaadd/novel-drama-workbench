@@ -43,6 +43,38 @@ omlx:
     path: /v1/models/{model_id}/unload   # 实测可用；管理页另有 /admin/api/models/{id}/unload
     policy: after_text_task              # after_text_task | before_media | never
 
+# 音效：本地 Stable Audio 3 small-sfx（独立 venv + 常驻 worker，与配音同构）
+# 依赖：官方仓库 + 独立 3.11 环境（torch 2.7.1），权重放 paths.models_root 下
+sfx:
+  default_provider_id: stable_audio3_small_sfx
+  # 常驻 worker 空闲多久自动退出并释放模型内存（秒）；provider.runtime.idle_timeout_s 可单独覆盖
+  idle_timeout_s: 300
+  # 中文描述改写：auto=LLM 可达就改写、失败降级词典；llm=只用 LLM；dict=只用词典
+  prompt:
+    rewrite: auto
+    llm_timeout_s: 20
+  providers:
+    - provider_id: stable_audio3_small_sfx
+      model: stable-audio-3-small-sfx
+      model_version: small-sfx
+      backend: torch-mps
+      weights_path: sa3_small_sfx      # 相对 paths.models_root
+      enabled: true
+      license: stability-ai-community
+      license_gate: none               # 社区许可：年收入 <100 万美元可商用
+      commercial_use: true
+      defaults:
+        steps: 8
+        cfg: 1.0
+        device: mps
+      runtime:
+        python: /Volumes/other/ndw_venvs/stable-audio-3/.venv/bin/python
+        repo: /Volumes/other/ndw_venvs/stable-audio-3
+        timeout_s: 900
+        idle_timeout_s: 300
+        request_timeout_s: 300
+        max_restarts: 2
+
 # TTS：多 provider + 自动路由（完整字段见 config/config.yaml 与本机 design-v2 §5）
 tts:
   default_provider_id: indextts_25
@@ -90,9 +122,39 @@ comfyui:
     video_i2v: minimax_h3_accel         # MiniMax-H3 图生视频（首帧来自关键图）
     music: ace_step_1_5                 # ACE-Step 1.5 turbo 背景音乐（AIO 三合一，48kHz）
 
-# 配乐生成（ACE-Step）；叙事档只做 loudnorm，铺底档始终归一
+# 配乐生成：默认项目内 Stable Audio Open 1.0（≤47 秒），配置可切回 ComfyUI / ACE-Step（10~180 秒）
 bgm:
+  provider: local                       # local=项目内 Stable Audio Open；comfyui=ACE-Step 长曲
+  default_provider_id: stable_audio_open_10
+  # 常驻 worker 空闲多久自动退出并释放模型内存（秒）；provider.runtime.idle_timeout_s 可单独覆盖
+  idle_timeout_s: 300
   normalize_narrative: true             # 叙事档是否归一；条目 normalize=false 或 --no-normalize 可单独关
+  trim_narrative_edges: true            # 叙事档裁首尾近静音 + 结尾 0.4s 淡出；条目或 --no-trim-edges 可关
+  # 中文描述改写：auto=LLM 可达就改写、失败降级词典；llm=只用 LLM；dict=只用词典
+  prompt:
+    rewrite: auto
+    llm_timeout_s: 20
+  providers:
+    - provider_id: stable_audio_open_10
+      model: stable-audio-open-1.0
+      backend: torch-mps
+      weights_path: stable_audio_open_10   # 相对 paths.models_root，含 model_config.json / t5-base
+      enabled: true
+      license: stability-ai-community      # 年收入 <100 万美元可商用
+      license_gate: none
+      commercial_use: true
+      defaults:                            # 官方推荐：100 步 / cfg 7.0；MPS 上限约 47 秒
+        steps: 100
+        cfg: 7.0
+        device: mps
+        max_seconds: 47
+        min_seconds: 5
+      runtime:
+        python: /Volumes/other/ndw_venvs/stable-audio-open/.venv/bin/python
+        timeout_s: 1800                    # 一次性兜底进程总超时
+        idle_timeout_s: 300                # 常驻 worker 空闲自动退出
+        request_timeout_s: 900             # 单条生成超时（47 秒实测约 108s，留足余量）
+        max_restarts: 2                    # 连续崩溃达到该次数后降级为逐条起进程
 
 # 模型下载（音频 / ComfyUI 模型共用）
 models:

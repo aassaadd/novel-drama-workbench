@@ -113,6 +113,19 @@ def main() -> int:
         check(done is not None and done["status"] == "failed", "占位适配器执行失败而非假成功")
         check(done["error"]["code"] == "NOT_IMPLEMENTED", "失败错误码为 NOT_IMPLEMENTED")
 
+        # BGM 短素材按时间槽循环填充：loop=true 时 end_ms 取槽时长，而不是补静音
+        from novel_drama.media.mixer import plan_mix
+
+        dummy_asset = Path(tmp) / "loop_asset.wav"
+        dummy_asset.write_bytes(b"placeholder")
+        bgm_plan = plan_mix(
+            {"chapter_id": "loop", "duration_ms": 30000, "sample_rate": 48000, "channels": 2, "tracks": []},
+            tmp,
+            [{"id": "bgm_test", "asset_id": "loop_asset.wav", "loop": True, "gain_db": -18}],
+        )
+        music_item = bgm_plan["tracks"]["music"][0]
+        check(music_item["loop"] is True and music_item["end_ms"] == 30000, "BGM 短素材按时间槽循环填充")
+
         # 时间轴文件落盘
         timeline_path = store.timeline_path(chapter["id"])
         store._write_json(timeline_path, timeline)

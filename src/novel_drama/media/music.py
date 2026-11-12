@@ -1,13 +1,11 @@
-"""背景音乐生成：ACE-Step 1.5 + 按用途分档（叙事 / 铺底）。
+"""背景音乐生成：项目内 Stable Audio Open 1.0 / ComfyUI 的 ACE-Step 1.5。
 
-两档差异只落在两处：
-- 叙事（narrative）：`generate_audio_codes=true`，保持模型原生细节与层次，不做后处理；
-- 铺底（bed）：`generate_audio_codes=false` 换取速度，并补一条后处理链
-  （裁开头静音 → 淡入 → loudnorm 到 -16 LUFS / -1.5 dBTP），
-  避免出现「整体低 15dB + 开头数秒空白」的旧问题。
+两条路径的差异只在「怎么拿到一条原始 wav」：
+- `local`（默认）：项目内 provider（独立 venv + 常驻 worker，MPS），最长约 47 秒；
+- `comfyui`：ACE-Step 1.5，支持 10~180 秒长曲。
 
-档位来源优先级：条目显式指定 > 页面/CLI 传参 > 按场景特征推断；
-推断规则见 `resolve_mode` 的中文注释。
+两档（叙事 / 铺底）、响度归一、首尾裁剪、循环填充与生成记录完全共用，
+见 `render_bgm` 里的后处理段；provider 选择读 `bgm.provider`，CLI 可显式覆盖。
 """
 
 from __future__ import annotations
@@ -44,6 +42,12 @@ TRUE_PEAK_DBTP = -1.5
 
 #: 长镜头阈值：没有台词但时长达到该值，同样按铺底处理
 LONG_BED_SECONDS = 60.0
+
+#: 叙事档首尾处理参数（只处理静音与断点，不改变中段节奏）
+NARRATIVE_TRIM_THRESHOLD_DBFS = -50.0  # 低于该电平判为近静音
+NARRATIVE_TRIM_KEEP_HEAD_S = 0.15  # 开头保留的自然起音/混响
+NARRATIVE_TRIM_KEEP_TAIL_S = 0.2  # 结尾保留的余韵
+NARRATIVE_TAIL_FADE_S = 0.4  # 结尾短淡出，避免循环/衔接断感
 
 _PLACEHOLDER = re.compile(r"\{\{(\w+)\}\}")
 _RECORD_LIMIT = 200
@@ -304,16 +308,95 @@ def _bed_postprocess(src: Path, dst: Path) -> dict:
 
 
 def _narrative_normalize(src: Path, dst: Path) -> dict:
-    """叙事档后处理：只做 loudnorm，不裁静音、不加淡入。
+    """叙事档响度归一：只做 loudnorm，首尾处理由 `_trim_narrative_edges` 单独完成。
 
     参数:
-        src: 原始 wav。
+        src: 输入 wav。
         dst: 归一后 wav。
 
     返回:
         `{"target_lufs", "target_true_peak", "measured_lufs"}`。
     """
     return _apply_loudnorm(src, dst, "")
+
+
+def _silence_profile(path: Path) -> dict:
+    """测量音频首尾近静音时长与有效时长（阈值 -50 dBFS）。
+
+    参数:
+        path: 音频文件。
+
+    返回:
+        `{"duration_s", "head_silence_s", "tail_silence_s", "effective_s"}`；
+        无法解析时各项为 None。
+    """
+    result = ffmpeg_run(
+        [
+            "ffmpeg", "-hide_banner", "-nostats", "-nostdin", "-i", str(path),
+            "-af", f"silencedetect=noise={NARRATIVE_TRIM_THRESHOLD_DBFS}dB:d=0.05",
+            "-f", "null", "-",
+        ],
+        timeout_s=300,
+    )
+    duration = probe_duration_ms(path) / 1000
+    head = 0.0
+    tail = 0.0
+    current_start = None
+    for line in result.stderr.splitlines():
+        if "silence_start:" in line:
+            current_start = float(line.split("silence_start:")[1].strip())
+        elif "silence_end:" in line and current_start is not None:
+            end = float(line.split("silence_end:")[1].split("|")[0].strip())
+            if current_start <= 0.01:
+                head = end
+            if end >= duration - 0.05:
+                tail = max(0.0, duration - current_start)
+            current_start = None
+    return {
+        "duration_s": round(duration, 2),
+        "head_silence_s": round(head, 2),
+        "tail_silence_s": round(tail, 2),
+        "effective_s": round(max(0.0, duration - head - tail), 2),
+    }
+
+
+def _trim_narrative_edges(src: Path, dst: Path) -> dict:
+    """叙事档首尾处理：裁近静音（保留极短起音/余韵）+ 结尾短淡出。
+
+    结尾选择短淡出而不是与开头环形交叉淡化，原因：
+    环形交叉淡化会叠加开头素材、改变长度和听感，只适合确定要循环的片段；
+    短淡出对循环和普通衔接都安全，也不改动中段节奏。
+
+    参数:
+        src: 输入 wav。
+        dst: 处理后 wav。
+
+    返回:
+        处理参数（阈值、保留时长、淡出时长）。
+    """
+    trim = (
+        f"silenceremove=start_periods=1:start_duration=0.05"
+        f":start_threshold={NARRATIVE_TRIM_THRESHOLD_DBFS}dB:start_silence={NARRATIVE_TRIM_KEEP_HEAD_S},"
+        "areverse,"
+        f"silenceremove=start_periods=1:start_duration=0.05"
+        f":start_threshold={NARRATIVE_TRIM_THRESHOLD_DBFS}dB:start_silence={NARRATIVE_TRIM_KEEP_TAIL_S},"
+        "areverse,"
+        f"areverse,afade=t=in:st=0:d={NARRATIVE_TAIL_FADE_S},areverse"
+    )
+    ffmpeg_run(
+        [
+            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-nostdin",
+            "-i", str(src), "-af", trim, "-ar", "48000", "-ac", "2", "-c:a", "pcm_s24le", str(dst),
+        ],
+        timeout_s=600,
+    )
+    return {
+        "method": "trim_silence+fade_out",
+        "threshold_dbfs": NARRATIVE_TRIM_THRESHOLD_DBFS,
+        "keep_head_s": NARRATIVE_TRIM_KEEP_HEAD_S,
+        "keep_tail_s": NARRATIVE_TRIM_KEEP_TAIL_S,
+        "tail_fade_s": NARRATIVE_TAIL_FADE_S,
+    }
 
 
 def _records_path(root: str | Path, chapter_id: str) -> Path:
@@ -382,15 +465,24 @@ def _upsert_cue(
     name: str,
     start_ms: int,
     normalize: bool,
+    trim_edges: bool,
 ) -> dict:
     """把生成结果写回 cue：有计划时更新原 cue，否则追加一条手工 cue。
 
-    `normalize` 一并落盘，作为下次同一条目生成的条目级开关。
+    `normalize` 与 `trim_edges` 一并落盘，作为下次同一条目生成的条目级开关。
     """
     cues = load_cues(root, chapter_id)
     existing = _find_plan_cue(cues, plan_id)
     if existing is not None:
-        existing.update({"asset_id": asset_id, "mode": mode, "status": "asset_ready", "normalize": normalize})
+        existing.update(
+            {
+                "asset_id": asset_id,
+                "mode": mode,
+                "status": "asset_ready",
+                "normalize": normalize,
+                "trim_edges": trim_edges,
+            }
+        )
         if name:
             existing["name"] = name
         save_cues(root, chapter_id, cues)
@@ -401,12 +493,182 @@ def _upsert_cue(
         if item.get("id") != cue["id"]:
             continue
         item["normalize"] = normalize
+        item["trim_edges"] = trim_edges
         if plan_id:
             # 关联计划的 cue 必须带 plan_ref，后续 sync 才会按计划更新而不是再建一条
             item["plan_ref"] = {"plan_id": plan_id, "shot_id": None, "segment_index": None}
         break
     save_cues(root, chapter_id, cues)
     return next(item for item in cues if item.get("id") == cue["id"])
+
+
+def _generate_comfy(
+    config: AppConfig,
+    chapter_id: str,
+    mode: str,
+    text: str,
+    duration: float,
+    seed: int,
+    item_id: str,
+    bgm_dir: Path,
+) -> tuple[Path, dict]:
+    """走 ComfyUI / ACE-Step 生成一条原始音频。
+
+    参数:
+        config: 本机配置。
+        chapter_id: 章节 ID。
+        mode: 叙事 / 铺底。
+        text: 中文音乐描述（ACE-Step 本身支持中文）。
+        duration: 时长（秒）。
+        seed: 实际种子。
+        item_id: 文件前缀。
+        bgm_dir: 输出目录。
+
+    返回:
+        `(原始音频路径, 生成元信息)`。
+
+    异常:
+        AdapterError: ComfyUI 不可达、模板/模型缺失或生成失败。
+    """
+    gateway = _comfy_gateway(config)
+    status = gateway.health()
+    if not status.ok:
+        raise AdapterError(
+            ErrorCode.UNAVAILABLE,
+            f"ComfyUI 未连接：{status.detail or '请确认服务已启动、地址正确'}",
+            retryable=True,
+        )
+
+    template_id = str(config.get("comfyui.templates.music") or "ace_step_1_5")
+    manifest = load_manifest(templates_dir(config))
+    resolved = resolve_template(template_id, "music", manifest)
+    _check_models(config, resolved["template"], resolved["template_id"])
+
+    params = {
+        "prompt": text,
+        "lyrics": "",
+        "duration": duration,
+        "bpm": 70,
+        "seed": seed,
+        "timesignature": "4",
+        "language": "zh",
+        "keyscale": "D minor",
+        "filename_prefix": f"ndw_bgm/{item_id}",
+    }
+    workflow, actual_template = _music_workflow(config, template_id, params, mode == MODE_NARRATIVE)
+
+    started = time.perf_counter()
+    try:
+        produced, prompt_id = _submit_and_fetch(gateway, config, "audio", workflow, item_id, 1, bgm_dir)
+    finally:
+        # 音乐生成结束（含失败）都走官方 /free 卸载模型，避免 ACE-Step 权重常驻
+        _release_comfy(gateway, config, f"music-{chapter_id}")
+    return produced, {
+        "provider": "comfyui",
+        "model": "ACE-Step 1.5",
+        "template_id": actual_template,
+        "prompt_id": prompt_id,
+        "seed": seed,
+        "steps": None,
+        "cfg": None,
+        "latency_ms": None,
+        "load_s": None,
+        "peak_mib": None,
+        "generation_s": time.perf_counter() - started,
+    }
+
+
+def _generate_local(
+    config: AppConfig,
+    mode: str,
+    text: str,
+    duration: float,
+    seed: int,
+    item_id: str,
+    bgm_dir: Path,
+    *,
+    prompt_en: str | None,
+    allow_llm: bool,
+    steps: int | None,
+    cfg: float | None,
+) -> tuple[Path, dict]:
+    """走项目内 Stable Audio Open 1.0 生成一条原始音频。
+
+    中文描述会先改写成英文（LLM 优先、词典兜底），再交给常驻 worker。
+    产物落到 `<item_id>_s<seed>.src.wav`，后处理阶段会把它转成最终 wav 并删除。
+
+    参数:
+        config: 本机配置。
+        mode: 叙事 / 铺底（当前只影响后处理，提示词相同）。
+        text: 中文音乐描述。
+        duration: 时长（秒）。
+        seed: 实际种子。
+        item_id: 文件前缀。
+        bgm_dir: 输出目录。
+        prompt_en: 直接给英文描述，跳过改写。
+        allow_llm: 是否允许 LLM 参与改写。
+        steps: 采样步数；None 用配置默认。
+        cfg: cfg；None 用配置默认。
+
+    返回:
+        `(原始音频路径, 生成元信息)`。
+
+    异常:
+        AdapterError: provider 不可用、模型缺失、时长越界或生成失败。
+    """
+    from ..bgm.prompting import rewrite_prompt
+    from ..bgm.registry import build_providers, pick_provider
+    from ..bgm.types import BAD_REQUEST as BGM_BAD_REQUEST
+    from ..bgm.types import BgmError, BgmRequest
+
+    # 英文描述原样透传；中文描述按 bgm.prompt.rewrite 策略改写
+    outcome = rewrite_prompt(prompt_en or text, config=config, allow_llm=allow_llm)
+
+    providers = build_providers(config)
+    pid, provider = pick_provider(config, providers)
+    health = provider.health()
+    if not health.ok:
+        raise AdapterError(ErrorCode.UNAVAILABLE, f"本地配乐 provider 不可用：{health.detail}", retryable=False)
+
+    source = bgm_dir / f"{item_id}_s{seed}.src.wav"
+    started = time.perf_counter()
+    try:
+        result = provider.generate(
+            BgmRequest(
+                prompt=outcome.prompt,
+                output_path=str(source),
+                duration_s=duration,
+                steps=steps,
+                cfg=cfg,
+                seed=seed,
+            )
+        )
+    except BgmError as exc:
+        code = ErrorCode.INVALID_INPUT if exc.code == BGM_BAD_REQUEST else ErrorCode.UNAVAILABLE
+        message = f"本地配乐生成失败：{exc.message}"
+        if exc.hint:
+            message += f"（{exc.hint}）"
+        raise AdapterError(code, message, retryable=code != ErrorCode.INVALID_INPUT) from exc
+    finally:
+        provider.close()
+
+    return source, {
+        "provider": "local",
+        "provider_id": pid,
+        "model": result.model,
+        "prompt_en": outcome.prompt,
+        "rewrite_mode": outcome.mode,
+        "rewrite_note": outcome.note,
+        "seed": result.seed,
+        "steps": result.steps,
+        "cfg": result.cfg,
+        "latency_ms": result.latency_ms,
+        "load_s": result.load_s,
+        "peak_mib": result.peak_mib,
+        "sample_rate": result.sample_rate,
+        "channels": result.channels,
+        "generation_s": time.perf_counter() - started,
+    }
 
 
 def render_bgm(
@@ -420,38 +682,55 @@ def render_bgm(
     item_mode: str | None = None,
     requested_normalize: bool | None = None,
     item_normalize: bool | None = None,
+    requested_trim: bool | None = None,
+    item_trim: bool | None = None,
     plan_id: str | None = None,
     seed: int | None = None,
     name: str | None = None,
     start_ms: int = 0,
     add_to_cue: bool = True,
+    provider: str | None = None,
+    prompt_en: str | None = None,
+    allow_llm: bool = True,
+    steps: int | None = None,
+    cfg: float | None = None,
 ) -> dict:
-    """用 ACE-Step 生成一段配乐并按档位处理、记账、写 cue。
+    """生成一段配乐并按档位处理、记账、写 cue。
 
     参数:
         store: 工程。
         config: 本机配置。
         chapter_id: 章节 ID。
         prompt: 中文音乐描述。
-        duration_s: 生成时长（秒），10~180。
+        duration_s: 生成时长（秒）；local 5~47，comfyui 10~180。
         requested_mode: 页面/CLI 传入的档位（auto 视为未指定）。
         item_mode: 条目上显式指定的档位（优先级最高）。
         requested_normalize: 页面/CLI 传入的归一开关；None 表示未指定。
         item_normalize: 条目（cue）上保存的归一开关；只在未显式传参时生效。
+        requested_trim: 页面/CLI 传入的首尾处理开关；None 表示未指定。
+        item_trim: 条目（cue）上保存的首尾处理开关；只在未显式传参时生效。
         plan_id: 关联的 BGM 计划 ID（用于自动推断与回写 cue）。
         seed: 指定随机种子；为空时按章节 + 档位派生，保证同参数可复现。
         name: cue 名称；为空时取计划名称或描述前 16 字。
         start_ms: 新 cue 的起始时间。
         add_to_cue: 是否写回章节 cue 表。
+        provider: `local` / `comfyui`；为空时读 `bgm.provider`，再缺省 `local`。
+        prompt_en: 直接给英文描述（本地 provider 用，跳过中文改写）。
+        allow_llm: 中文改写是否允许调用 LLM（CLI `--no-llm`）。
+        steps: 本地 provider 的采样步数；为空用配置默认。
+        cfg: 本地 provider 的 cfg；为空用配置默认。
 
     返回:
-        `{"asset_id","mode","mode_label","mode_source","mode_reason","generation_s",
-        "postprocess_s","lufs","true_peak","cue","record","template_id","prompt_id"}`。
+        `{"asset_id","mode","mode_label","mode_source","mode_reason","provider",
+        "generation_s","postprocess_s","lufs","true_peak","cue","record",...}`。
 
     异常:
-        AdapterError: 参数非法、ComfyUI 不可达、模板/模型缺失或生成失败。
+        AdapterError: 参数非法、provider 不可用、模型缺失或生成失败。
     """
     text = str(prompt or "").strip()
+    if not text and prompt_en:
+        # 只给英文描述时，用它充当记录里的原始提示词
+        text = str(prompt_en).strip()
     if not text:
         raise AdapterError(ErrorCode.INVALID_INPUT, "配乐描述不能为空")
     context = plan_context(store, chapter_id, plan_id)
@@ -463,8 +742,18 @@ def render_bgm(
             duration = float(duration_s if duration_s is not None else 40.0)
         except (TypeError, ValueError):
             duration = 40.0
-    if duration < 10 or duration > 180:
-        raise AdapterError(ErrorCode.INVALID_INPUT, "配乐时长需在 10~180 秒之间")
+    provider_mode = str(provider or config.get("bgm.provider") or "local").strip().lower()
+    if provider_mode not in ("local", "comfyui"):
+        raise AdapterError(ErrorCode.INVALID_INPUT, f"未知配乐 provider：{provider_mode}（可选 local / comfyui）")
+    if provider_mode == "comfyui":
+        if duration < 10 or duration > 180:
+            raise AdapterError(ErrorCode.INVALID_INPUT, "ACE-Step 配乐时长需在 10~180 秒之间")
+    elif duration < 5 or duration > 47:
+        raise AdapterError(
+            ErrorCode.INVALID_INPUT,
+            f"本地 Stable Audio Open 1.0 最长约 47 秒、最短 5 秒，请求 {duration:g} 秒；"
+            "超过 47 秒请改用 --provider comfyui（ACE-Step）生成更长配乐",
+        )
     has_dialogue = context.get("has_dialogue") if context else None
     decision = resolve_mode(item_mode, requested_mode, has_dialogue, duration)
     mode = decision["mode"]
@@ -482,69 +771,86 @@ def render_bgm(
     else:
         do_normalize = bool(config.get("bgm.normalize_narrative", True))
 
-    gateway = _comfy_gateway(config)
-    status = gateway.health()
-    if not status.ok:
-        raise AdapterError(
-            ErrorCode.UNAVAILABLE,
-            f"ComfyUI 未连接：{status.detail or '请确认服务已启动、地址正确'}",
-            retryable=True,
-        )
-
-    template_id = str(config.get("comfyui.templates.music") or "ace_step_1_5")
-    manifest = load_manifest(templates_dir(config))
-    resolved = resolve_template(template_id, "music", manifest)
-    _check_models(config, resolved["template"], resolved["template_id"])
+    # 首尾处理只属于叙事档（铺底已有裁静音 + 淡入），优先级与归一一致
+    if item_trim is None and isinstance((existing_cue or {}).get("trim_edges"), bool):
+        item_trim = existing_cue["trim_edges"]
+    if requested_trim is not None:
+        do_trim = bool(requested_trim)
+    elif item_trim is not None:
+        do_trim = bool(item_trim)
+    else:
+        do_trim = bool(config.get("bgm.trim_narrative_edges", True))
+    do_trim = do_trim and mode == MODE_NARRATIVE
 
     actual_seed = int(seed) if seed is not None else seed_for(f"bgm_{chapter_id}_{mode}", 1)
     item_id = f"bgm_{chapter_id}_{mode}"
-    params = {
-        "prompt": text,
-        "lyrics": "",
-        "duration": duration,
-        "bpm": 70,
-        "seed": actual_seed,
-        "timesignature": "4",
-        "language": "zh",
-        "keyscale": "D minor",
-        "filename_prefix": f"ndw_bgm/{item_id}",
-    }
-    workflow, actual_template = _music_workflow(config, template_id, params, mode == MODE_NARRATIVE)
 
     bgm_dir = store.root / "assets" / "audio" / "bgm"
     bgm_dir.mkdir(parents=True, exist_ok=True)
-    started = time.perf_counter()
-    try:
-        produced, prompt_id = _submit_and_fetch(gateway, config, "audio", workflow, item_id, 1, bgm_dir)
-    finally:
-        # 音乐生成结束（含失败）都走官方 /free 卸载模型，避免 ACE-Step 权重常驻
-        _release_comfy(gateway, config, f"music-{chapter_id}")
-    generation_s = time.perf_counter() - started
+    if provider_mode == "local":
+        produced, gen_meta = _generate_local(
+            config,
+            mode,
+            text,
+            duration,
+            actual_seed,
+            item_id,
+            bgm_dir,
+            prompt_en=prompt_en,
+            allow_llm=allow_llm,
+            steps=steps,
+            cfg=cfg,
+        )
+    else:
+        produced, gen_meta = _generate_comfy(config, chapter_id, mode, text, duration, actual_seed, item_id, bgm_dir)
+    generation_s = gen_meta["generation_s"]
 
     post_started = time.perf_counter()
     final_path = bgm_dir / f"{item_id}_s{actual_seed}.wav"
     ffmpeg_binary = str(config.get("ffmpeg.binary", "ffmpeg"))
     normalize_info: dict | None = None
+    edge_trim_info: dict | None = None
+    notes: list[str] = []
     if mode == MODE_BED:
         pre_loudness = measure_loudness(produced, ffmpeg_binary)
         _bed_postprocess(produced, final_path)
         produced.unlink(missing_ok=True)
         normalize_info = {"target_lufs": LOUDNESS_TARGET_LUFS, "target_true_peak": TRUE_PEAK_DBTP}
-        post_note = f"裁静音（阈值 {BED_SILENCE_THRESHOLD_DBFS:g} dBFS，保留 {BED_LEAD_KEEP_S:g}s）+ 淡入 {BED_FADE_IN_S:g}s + loudnorm {LOUDNESS_TARGET_LUFS:g} LUFS"
+        notes.append(
+            f"裁静音（阈值 {BED_SILENCE_THRESHOLD_DBFS:g} dBFS，保留 {BED_LEAD_KEEP_S:g}s）"
+            f"+ 淡入 {BED_FADE_IN_S:g}s + loudnorm {LOUDNESS_TARGET_LUFS:g} LUFS"
+        )
     else:
         _convert_wav(produced, final_path)
         produced.unlink(missing_ok=True)
         pre_loudness = measure_loudness(final_path, ffmpeg_binary)
+        pre_silence = _silence_profile(final_path)
+        trim_settings: dict | None = None
+        if do_trim:
+            temp_trim = final_path.with_name(final_path.stem + ".trim.wav")
+            trim_settings = _trim_narrative_edges(final_path, temp_trim)
+            os.replace(temp_trim, final_path)
+            notes.append(
+                f"裁首尾近静音（阈值 {NARRATIVE_TRIM_THRESHOLD_DBFS:g} dBFS，保留 {NARRATIVE_TRIM_KEEP_HEAD_S:g}s 起音）"
+                f"+ 结尾淡出 {NARRATIVE_TAIL_FADE_S:g}s"
+            )
         if do_normalize:
-            # 叙事档只做 loudnorm：不裁开头静音、不加淡入，保留原有结构
             temp_norm = final_path.with_name(final_path.stem + ".norm.wav")
             info = _narrative_normalize(final_path, temp_norm)
             os.replace(temp_norm, final_path)
             normalize_info = {"target_lufs": info["target_lufs"], "target_true_peak": info["target_true_peak"]}
-            post_note = f"仅 loudnorm {LOUDNESS_TARGET_LUFS:g} LUFS / {TRUE_PEAK_DBTP:g} dBTP（不裁静音、不淡入）"
-        else:
-            post_note = "已关闭响度归一，保留模型原生动态"
+            notes.append(f"loudnorm {LOUDNESS_TARGET_LUFS:g} LUFS / {TRUE_PEAK_DBTP:g} dBTP")
+        if not do_normalize:
+            notes.append("已关闭响度归一，保留模型原生动态")
+        edge_trim_info = {
+            "enabled": bool(do_trim),
+            "method": "trim_silence+fade_out",
+            "settings": trim_settings,
+            "before": pre_silence,
+            "after": _silence_profile(final_path),
+        }
     postprocess_s = time.perf_counter() - post_started
+    post_note = "；".join(notes) or "无后处理"
 
     asset_id = str(final_path.relative_to(store.root))
     loudness = measure_loudness(final_path, ffmpeg_binary)
@@ -552,11 +858,22 @@ def render_bgm(
     cue = None
     if add_to_cue:
         cue = _upsert_cue(
-            store.root, chapter_id, plan_id, asset_id, mode, cue_name, int(start_ms or 0), do_normalize
+            store.root,
+            chapter_id,
+            plan_id,
+            asset_id,
+            mode,
+            cue_name,
+            int(start_ms or 0),
+            do_normalize,
+            do_trim,
         )
 
     record = {
         "created_at": now_iso(),
+        "provider": gen_meta["provider"],
+        "provider_id": gen_meta.get("provider_id"),
+        "model": gen_meta.get("model"),
         "mode": mode,
         "mode_label": decision["label"],
         "mode_source": decision["source"],
@@ -565,23 +882,46 @@ def render_bgm(
         "postprocess_s": round(postprocess_s, 2),
         "normalize": bool(do_normalize),
         "normalize_target": normalize_info,
+        "trim_edges": bool(do_trim),
+        "edge_trim": edge_trim_info,
         "pre_lufs": (pre_loudness or {}).get("lufs"),
         "pre_true_peak": (pre_loudness or {}).get("true_peak"),
         "lufs": loudness.get("lufs"),
         "true_peak": loudness.get("true_peak"),
         "duration_s": round(probe_duration_ms(final_path) / 1000, 2),
         "prompt": text,
-        "seed": actual_seed,
-        "template_id": actual_template,
-        "prompt_id": prompt_id,
+        "prompt_en": gen_meta.get("prompt_en"),
+        "rewrite_mode": gen_meta.get("rewrite_mode"),
+        "rewrite_note": gen_meta.get("rewrite_note"),
+        "seed": gen_meta.get("seed", actual_seed),
+        "steps": gen_meta.get("steps"),
+        "cfg": gen_meta.get("cfg"),
+        "latency_ms": gen_meta.get("latency_ms"),
+        "load_s": gen_meta.get("load_s"),
+        "peak_mib": gen_meta.get("peak_mib"),
+        "template_id": gen_meta.get("template_id"),
+        "prompt_id": gen_meta.get("prompt_id"),
         "asset_id": asset_id,
         "postprocess": post_note,
         "cue_id": (cue or {}).get("id"),
         "plan_id": plan_id,
     }
+
+    # 同名侧车：把「用的什么描述、什么参数、实测指标」和音频绑在一起，便于追溯
+    sidecar = final_path.with_suffix(".json")
+    sidecar_tmp = sidecar.with_name(sidecar.name + ".tmp")
+    sidecar_tmp.write_text(
+        json.dumps({**record, "audio_file": final_path.name}, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    os.replace(sidecar_tmp, sidecar)
+
     record_path = _append_record(store.root, chapter_id, record)
     return {
         "asset_id": asset_id,
+        "provider": record["provider"],
+        "provider_id": record["provider_id"],
+        "model": record["model"],
         "mode": mode,
         "mode_label": decision["label"],
         "mode_source": decision["source"],
@@ -590,13 +930,22 @@ def render_bgm(
         "postprocess_s": record["postprocess_s"],
         "normalize": record["normalize"],
         "normalize_target": record["normalize_target"],
+        "trim_edges": record["trim_edges"],
+        "edge_trim": record["edge_trim"],
         "pre_lufs": record["pre_lufs"],
         "pre_true_peak": record["pre_true_peak"],
         "lufs": record["lufs"],
         "true_peak": record["true_peak"],
+        "duration_s": record["duration_s"],
+        "steps": record["steps"],
+        "cfg": record["cfg"],
+        "load_s": record["load_s"],
+        "peak_mib": record["peak_mib"],
+        "prompt_en": record["prompt_en"],
+        "sidecar": str(sidecar),
         "cue": cue,
         "record": record,
         "record_path": str(record_path),
-        "template_id": actual_template,
-        "prompt_id": prompt_id,
+        "template_id": record["template_id"],
+        "prompt_id": record["prompt_id"],
     }

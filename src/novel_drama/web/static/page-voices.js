@@ -461,6 +461,102 @@
     return `/api/ui/voices/design/audio?${buildQuery({ path: projectPath(), batch_id: batchId, index })}`;
   }
 
+  /* 批次时间显示：ISO 转本地可读格式。 */
+  function batchTime(value) {
+    if (!value) return "时间未知";
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+  }
+
+  /* 从磁盘恢复当前角色的历史候选批次；没有正在查看的批次时自动打开最近一条。 */
+  async function loadDesignHistory(autoRestore = true) {
+    const path = projectPath();
+    const select = el("voiceDesignCharacter");
+    const characterId = select ? select.value : "";
+    const box = el("voiceDesignHistory");
+    if (!box) return;
+    if (!path || !characterId) {
+      box.innerHTML = "";
+      return;
+    }
+    try {
+      const data = await api(
+        `/api/ui/voices/design/history?${buildQuery({ path, character_id: characterId })}`
+      );
+      const batches = data.batches || [];
+      renderDesignHistory(batches);
+      if (autoRestore && !design.batchId) {
+        const latest = batches.find((item) => item.status === "ready" && (item.candidates || []).some((cand) => cand.available))
+          || batches.find((item) => item.status === "running");
+        if (latest) restoreDesignBatch(latest);
+      }
+    } catch (error) {
+      // 历史恢复失败不影响正常抽卡流程，静默留空
+      box.innerHTML = "";
+    }
+  }
+
+  /* 渲染历史批次按钮（含批次 ID、生成时间、进度与是否已采用）。 */
+  function renderDesignHistory(batches) {
+    const box = el("voiceDesignHistory");
+    if (!box) return;
+    if (!batches.length) {
+      box.innerHTML = '<p class="muted">该角色还没有历史候选批次。</p>';
+      return;
+    }
+    box.innerHTML = batches
+      .map((item) => {
+        const active = item.batch_id === design.batchId;
+        const statusText = item.status === "ready"
+          ? "已完成"
+          : item.status === "running"
+            ? `生成中 ${item.done || 0}/${item.total || 0}`
+            : "失败";
+        const adopted = item.adopted ? '<span class="tag">已采用</span>' : "";
+        return `<div class="voice-row">
+          <button class="btn small${active ? " primary" : ""}" type="button" data-design-batch="${esc(item.batch_id)}">${esc(item.batch_id)}</button>
+          <span class="muted">${esc(batchTime(item.created_at))} · ${esc(statusText)}</span>
+          ${adopted}
+        </div>`;
+      })
+      .join("");
+  }
+
+  /* 打开一个历史批次：把候选重新渲染到卡片区，可继续试听或采用。 */
+  async function loadDesignBatch(batchId) {
+    const path = projectPath();
+    const characterId = el("voiceDesignCharacter") ? el("voiceDesignCharacter").value : "";
+    if (!path || !batchId) return;
+    try {
+      // 摘要里带「文件是否仍在 / 已采用序号」，优先用摘要；缺失时退回原始批次元数据
+      const [meta, history] = await Promise.all([
+        api(`/api/ui/voices/design/batches/${encodeURIComponent(batchId)}?${buildQuery({ path })}`),
+        api(`/api/ui/voices/design/history?${buildQuery({ path, character_id: characterId })}`),
+      ]);
+      const summary = (history.batches || []).find((item) => item.batch_id === batchId);
+      restoreDesignBatch(summary || meta);
+      await loadDesignHistory();
+    } catch (error) {
+      toast(error.message);
+    }
+  }
+
+  /* 把批次数据恢复到候选区；运行中的批次继续轮询。 */
+  function restoreDesignBatch(meta) {
+    design.batchId = meta.batch_id;
+    if (meta.status === "running") {
+      design.running = true;
+      setDesignStatus(`已恢复批次 ${meta.batch_id}，正在继续生成…`);
+      pollDesignBatch();
+      return;
+    }
+    design.running = false;
+    renderDesignCandidates(meta);
+    const adopted = (meta.adopted_indices || []).length ? "，含已采用候选" : "";
+    setDesignStatus(`已从磁盘恢复批次 ${meta.batch_id}（${(meta.candidates || []).length} 条候选${adopted}）`);
+  }
+
+
   /* 填充「选择角色」下拉；保留当前选中项。 */
   function fillDesignCharacters() {
     const select = el("voiceDesignCharacter");
@@ -468,6 +564,7 @@
     const current = select.value;
     select.innerHTML = state.characters.map((item) => `<option value="${esc(item.id)}">${esc(item.name)}</option>`).join("");
     if (current && state.characters.some((item) => item.id === current)) select.value = current;
+    loadDesignHistory();
   }
 
   /* 更新设计区状态文案。 */
@@ -603,22 +700,33 @@
     }
   }
 
-  /* 渲染候选卡片（含基频提示）。 */
+  /* 渲染候选卡片（含基频提示、文件是否仍在、是否已被采用）。 */
   function renderDesignCandidates(meta) {
     const box = el("voiceDesignCandidates");
     if (!box) return;
+    const adoptedIndices = meta.adopted_indices || [];
     box.innerHTML = (meta.candidates || [])
       .map((item) => {
         const hint = item.hint || {};
-        const warn = hint.mismatch ? '<span class="tag">听感可能与设定不符</span>' : "";
+        const adopted = adoptedIndices.indexOf(item.index) >= 0;
+        const missing = item.available === false;
+        const warn = adopted
+          ? '<span class="tag">已采用</span>'
+          : hint.mismatch
+            ? '<span class="tag">听感可能与设定不符</span>'
+            : "";
         const f0 = hint.f0_median ? `基频 ${hint.f0_median}Hz` : "基频未测";
+        const audio = missing
+          ? '<p class="muted">候选音频已被清理，无法试听</p>'
+          : `<audio controls preload="none" src="${designAudioUrl(meta.batch_id, item.index)}"></audio>`;
+        const action = adopted
+          ? '<button class="btn small" type="button" disabled>已采用</button>'
+          : `<button class="btn small primary" type="button" data-design-select="${item.index}" ${missing ? "disabled" : ""}>采用这个音色</button>`;
         return `<div class="voice-card">
           <div class="voice-title"><span class="voice-name">候选 ${item.index}</span>${warn}</div>
           <div class="voice-meta">${(item.duration_ms / 1000).toFixed(1)}s · ${f0} · seed ${item.seed ?? "-"}</div>
-          <audio controls preload="none" src="${designAudioUrl(meta.batch_id, item.index)}"></audio>
-          <div class="voice-actions">
-            <button class="btn small primary" type="button" data-design-select="${item.index}">采用这个音色</button>
-          </div>
+          ${audio}
+          <div class="voice-actions">${action}</div>
         </div>`;
       })
       .join("");
@@ -663,6 +771,7 @@
       if (el("voiceDesignCandidates")) el("voiceDesignCandidates").innerHTML = "";
       design.batchId = "";
       setDesignStatus("候选已清理");
+      await loadDesignHistory(false);
     } catch (error) {
       toast(error.message);
     }
@@ -701,6 +810,23 @@
       el("voiceDesignCandidates").addEventListener("click", (event) => {
         const trigger = event.target.closest("[data-design-select]");
         if (trigger) selectDesignCandidate(Number(trigger.dataset.designSelect));
+      });
+    }
+    if (el("voiceDesignHistory")) {
+      el("voiceDesignHistory").addEventListener("click", (event) => {
+        const trigger = event.target.closest("[data-design-batch]");
+        if (trigger) loadDesignBatch(trigger.dataset.designBatch);
+      });
+    }
+    if (el("voiceDesignCharacter")) {
+      el("voiceDesignCharacter").addEventListener("change", () => {
+        // 换角色时清掉上一角色的批次状态，再从磁盘恢复该角色自己的候选
+        design.batchId = "";
+        design.running = false;
+        clearTimeout(design.timer);
+        if (el("voiceDesignCandidates")) el("voiceDesignCandidates").innerHTML = "";
+        setDesignStatus("");
+        loadDesignHistory();
       });
     }
     if (window.NW && NW.onProject) {

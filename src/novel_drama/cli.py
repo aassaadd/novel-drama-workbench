@@ -47,6 +47,7 @@ from .cli_models import cmd_models_import, cmd_models_install, cmd_models_list, 
 from .cli_outline import cmd_outline_bind, cmd_outline_check
 from .cli_produce import cmd_produce, cmd_run_show
 from .cli_setting import cmd_setting
+from .cli_sfx import cmd_sfx_generate, cmd_sfx_providers
 from .cli_voice import cmd_script, cmd_voice, cmd_voice_builtin, cmd_voice_design
 from .cli_world import (
     cmd_world_apply,
@@ -145,45 +146,20 @@ def _sort_jobs_by_group(jobs: list[dict], chapter: dict, characters: list[dict],
     if len(jobs) <= 1:
         return jobs
     try:
-        from .tts.batch import _line_voice
-        from .tts.types import Requirement
+        from .tts.batch import line_group_key
 
         line_index = {}
         for scene in chapter.get("scenes") or []:
             for line in scene.get("lines") or []:
                 line_index[line.get("id")] = line
-        char_index = {item.get("id"): item for item in characters}
         characters_table = {"characters": characters}
 
         def group_key(job: dict) -> tuple:
-            """计算一条任务的 (一级键 + 二级键)，用于稳定排序。"""
+            """把任务映射到行后复用 batch 的分组键。"""
             line = line_index.get((job.get("target") or {}).get("line_id"))
             if line is None:
                 return ("~", "", 1, "", "")
-            voice_info = _line_voice(store, characters_table, line, service)
-            character = char_index.get(line.get("speaker_id")) or {}
-            binding = character.get("voice_binding") or {}
-            adapter = binding.get("adapter")
-            character_provider = adapter if adapter and adapter != "placeholder" else None
-            line_provider = (line.get("voice") or {}).get("provider_id")
-            requirement = Requirement(
-                text=line.get("text") or "",
-                emotion=line.get("emotion"),
-                emotion_intensity=max(0, min(3, round(float(line.get("emotion_intensity") or 0) * 3))),
-                clone_required=True,
-                target_duration_ms=line.get("target_duration_ms"),
-                character_id=line.get("speaker_id"),
-                line_id=line.get("id"),
-            )
-            decision = service.decide(requirement, line_provider, character_provider)
-            pid = decision["selected"]["provider_id"]
-            provider = service.providers.get(pid)
-            model_dir = (provider.spec.weights_path if provider else None) or ""
-            # 文字情绪需要 qwen，进程内切换模式会重启，故按开关分组
-            use_qwen = 1 if (line.get("delivery_note") or "").strip() else 0
-            ref_audio = voice_info.get("ref_audio") or ""
-            emo_audio = ref_audio if voice_info.get("source") == "emotion_ref" else ""
-            return (str(pid), str(model_dir), use_qwen, str(ref_audio), str(emo_audio))
+            return line_group_key(line, chapter, characters_table, service, store)
 
         return sorted(jobs, key=group_key)
     except Exception as exc:  # noqa: BLE001 - 分组只是优化，失败必须退回原顺序
@@ -1519,9 +1495,11 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--out-dir", help="对比产物目录")
     q.set_defaults(func=cmd_tts_compare)
 
+    media_subs: dict = {}
     for kind in ("sfx", "image", "video"):
         p = sub.add_parser(kind, help={"sfx": "音效", "image": "关键图", "video": "5 秒短视频"}[kind])
         p_sub = p.add_subparsers(dest="action", required=True)
+        media_subs[kind] = p_sub
         q = p_sub.add_parser("plan")
         q.add_argument("--chapter", required=True)
         q.set_defaults(func=cmd_media, media_kind=kind)
@@ -1531,6 +1509,23 @@ def build_parser() -> argparse.ArgumentParser:
         q.add_argument("--limit", type=int, help="本次最多处理条数")
         q.add_argument("--dry-run", action="store_true", help="只统计待生成条目，不写盘")
         q.set_defaults(func=cmd_media, media_kind=kind)
+
+    # 音效：模型生成（Stable Audio 3）+ provider 自检，挂在已有的 sfx 命令下
+    p_sub = media_subs["sfx"]
+    q = p_sub.add_parser("generate", help="按中文描述生成音效并落盘到 assets/audio/sfx/")
+    q.add_argument("--prompt", help="中文（或英文）音效描述；与 --prompt-en 至少给一个")
+    q.add_argument("--prompt-en", dest="prompt_en", help="直接给英文描述，跳过中→英改写")
+    q.add_argument("--duration", type=float, required=True, help="时长秒数（1~120；10 秒内热推理约 1 秒）")
+    q.add_argument("--negative", help="负面描述（避免出现的内容）")
+    q.add_argument("--name", help="文件名标签；缺省取英文描述前几个词")
+    q.add_argument("--steps", type=int, help="扩散步数；缺省用 provider 配置（8）")
+    q.add_argument("--cfg", type=float, help="CFG 值；缺省用 provider 配置（1.0）")
+    q.add_argument("--seed", type=int, help="随机种子；缺省随机并写回元数据")
+    q.add_argument("--provider", help="指定音效 provider；缺省取 sfx.default_provider_id")
+    q.add_argument("--no-llm", action="store_true", help="跳过 LLM，直接用词典改写中文描述")
+    q.set_defaults(func=cmd_sfx_generate)
+    q = p_sub.add_parser("providers", help="列出音效 provider 与可用性")
+    q.set_defaults(func=cmd_sfx_providers)
 
     p = sub.add_parser("timeline", help="时间轴")
     p_sub = p.add_subparsers(dest="action", required=True)
@@ -1555,16 +1550,24 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("bgm", help="背景音乐轨（生成 / 导入现成音频、按时间轴放置）")
     p_sub = p.add_subparsers(dest="action", required=True)
-    q = p_sub.add_parser("generate", help="用 ACE-Step 生成配乐（叙事 / 铺底两档）")
+    q = p_sub.add_parser("generate", help="生成配乐（默认本地 Stable Audio Open，可切 ACE-Step）")
     q.add_argument("--chapter", required=True)
-    q.add_argument("--prompt", required=True, help="中文音乐描述（风格 / 情绪 / 配器）")
-    q.add_argument("--duration", type=float, help="时长秒数（10~180；缺省取计划时长，否则 40）")
+    q.add_argument("--prompt", help="中文音乐描述（风格 / 情绪 / 配器）；给 --prompt-en 时可省略")
+    q.add_argument("--prompt-en", dest="prompt_en", help="直接给英文描述，跳过中文改写（本地 provider）")
+    q.add_argument("--provider", choices=["local", "comfyui"],
+                   help="生成后端：local=项目内 Stable Audio Open（≤47 秒），comfyui=ACE-Step（10~180 秒）；缺省读配置")
+    q.add_argument("--duration", type=float, help="时长秒数（local 5~47；comfyui 10~180；缺省取计划时长，否则 40）")
     q.add_argument("--mode", choices=["auto", "narrative", "bed"], default="auto",
                    help="用途档位：auto=按场景推断，narrative=叙事，bed=铺底")
     q.add_argument("--normalize", action=argparse.BooleanOptionalAction, default=None,
                    help="叙事档是否做 loudnorm（默认跟随配置；铺底档始终归一）")
+    q.add_argument("--trim-edges", action=argparse.BooleanOptionalAction, default=None, dest="trim_edges",
+                   help="叙事档是否裁首尾近静音并做结尾淡出（默认跟随配置）")
     q.add_argument("--plan", help="关联导演脚本里的 BGM 计划 ID（用于自动推断档位）")
     q.add_argument("--seed", type=int, help="随机种子；为空时按章节 + 档位派生")
+    q.add_argument("--steps", type=int, help="本地 provider 采样步数（缺省读配置，默认 100）")
+    q.add_argument("--cfg", type=float, help="本地 provider 的 cfg（缺省读配置，默认 7.0）")
+    q.add_argument("--no-llm", action="store_true", dest="no_llm", help="中文描述只用词典改写，不调用 LLM")
     q.add_argument("--name", help="cue 展示名称；为空时取计划名或描述前 16 字")
     q.add_argument("--start-ms", type=int, default=0, dest="start_ms")
     q.add_argument("--no-cue", action="store_true", dest="no_cue", help="只生成文件，不写 cue")

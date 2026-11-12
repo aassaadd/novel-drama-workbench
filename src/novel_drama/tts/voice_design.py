@@ -405,6 +405,100 @@ def delete_batch(store, batch_id: str) -> bool:
     return True
 
 
+def _adopted_indices(store, meta: dict, target: Path) -> list[int]:
+    """找出该批次里已被采用（已固化为正式参考音）的候选序号。
+
+    参数:
+        store: 工程。
+        meta: 批次元数据。
+        target: 批次目录。
+
+    返回:
+        候选序号列表；旧数据没有 candidate_index 时按参考音 sha256 回退匹配。
+    """
+    batch_id = meta.get("batch_id")
+    variants = []
+    for voice in store.load_voices().get("voices") or []:
+        for variant in voice.get("variants") or []:
+            if (variant.get("generation") or {}).get("batch_id") == batch_id:
+                variants.append(variant)
+    adopted: set[int] = set()
+    for variant in variants:
+        index = (variant.get("generation") or {}).get("candidate_index")
+        if index:
+            adopted.add(int(index))
+    if adopted:
+        return sorted(adopted)
+    # 兼容旧批次：参考音与候选文件逐字节一致即视为已采用
+    ref_hashes = {
+        (variant.get("reference") or {}).get("sha256")
+        for variant in variants
+        if (variant.get("reference") or {}).get("sha256")
+    }
+    if not ref_hashes:
+        return []
+    for candidate in meta.get("candidates") or []:
+        path = target / str(candidate.get("file") or "")
+        if path.is_file() and _sha256(path) in ref_hashes:
+            adopted.add(int(candidate.get("index") or 0))
+    return sorted(index for index in adopted if index > 0)
+
+
+def list_batches(store, character_id: str | None = None) -> list[dict]:
+    """列出磁盘上仍可用的候选批次，供页面刷新后恢复。
+
+    参数:
+        store: 工程。
+        character_id: 只返回该角色的批次；为空时返回全部。
+
+    返回:
+        批次摘要列表（按生成时间倒序），含候选文件是否仍在、哪些候选已被采用。
+    """
+    root = store.voice_asset_dir("candidates")
+    if not root.exists():
+        return []
+    items: list[dict] = []
+    for target in root.iterdir():
+        if not target.is_dir():
+            continue
+        meta = _read_json(target / "batch.json")
+        if not meta.get("batch_id"):
+            continue
+        if character_id and meta.get("character_id") != character_id:
+            continue
+        candidates = []
+        for candidate in meta.get("candidates") or []:
+            path = target / str(candidate.get("file") or "")
+            candidates.append({**candidate, "available": path.is_file()})
+        if meta.get("status") == "ready" and not any(item["available"] for item in candidates):
+            # 候选文件已被手动清理：不把空壳批次恢复回页面
+            continue
+        adopted = _adopted_indices(store, meta, target)
+        created = meta.get("created_at") or datetime.fromtimestamp(
+            target.stat().st_mtime, tz=timezone.utc
+        ).strftime("%Y-%m-%dT%H:%M:%SZ")
+        items.append(
+            {
+                "batch_id": meta.get("batch_id"),
+                "status": meta.get("status"),
+                "stage": meta.get("stage"),
+                "done": int(meta.get("done") or 0),
+                "total": int(meta.get("total") or 0),
+                "character_id": meta.get("character_id"),
+                "character_name": meta.get("character_name"),
+                "prompt": meta.get("prompt"),
+                "created_at": created,
+                "generated_at": meta.get("generated_at"),
+                "error": meta.get("error"),
+                "candidates": candidates,
+                "adopted": bool(adopted),
+                "adopted_indices": adopted,
+            }
+        )
+    items.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
+    return items
+
+
 def _sha256(path: Path) -> str:
     """计算文件 sha256。"""
     digest = hashlib.sha256()
@@ -493,6 +587,7 @@ def select_candidate(store, batch_id: str, index: int, name: str, gender: str, g
             "prompt": str(meta.get("prompt") or "")[:2000],
             "profile": meta.get("profile"),
             "seed": candidate.get("seed"),
+            "candidate_index": int(index),
             "params": meta.get("params") or {},
             "batch_id": batch_id,
             "license": "Apache-2.0",

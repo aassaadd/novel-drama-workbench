@@ -51,6 +51,25 @@ _FALLBACK = {
     },
     "models": {"download_mirrors": list(_DEFAULT_DOWNLOAD_MIRRORS)},
     "gpu": {"lock_path": "/Volumes/other/gpu.lock", "max_concurrent": 1, "poll_interval_s": 2},
+    # 音效：本地 Stable Audio 3（独立 venv + 常驻 worker），与 TTS 同构
+    "sfx": {
+        "default_provider_id": "stable_audio3_small_sfx",
+        "providers": [],
+        # 常驻 worker 空闲多久自动退出并释放模型内存（秒）；provider.runtime 可单独覆盖
+        "idle_timeout_s": 300,
+        # auto：LLM 可达就改写，失败降级词典；llm：只用 LLM；dict：只用词典
+        "prompt": {"rewrite": "auto", "llm_timeout_s": 20},
+    },
+    # 配乐：默认项目内 Stable Audio Open 1.0，可切回 ComfyUI / ACE-Step
+    "bgm": {
+        "provider": "local",
+        "default_provider_id": "stable_audio_open_10",
+        "providers": [],
+        "idle_timeout_s": 300,
+        "normalize_narrative": True,
+        "trim_narrative_edges": True,
+        "prompt": {"rewrite": "auto", "llm_timeout_s": 20},
+    },
     "tts": {
         "segmentation": {
             "max_chars": 24,

@@ -46,6 +46,10 @@
           "normalize": {
             "type": ["boolean", "null"],
             "description": "R19 条目级响度归一开关；叙事档未指定时跟随全局配置，铺底档始终归一"
+          },
+          "trim_edges": {
+            "type": ["boolean", "null"],
+            "description": "R19 条目级首尾处理开关（叙事档裁近静音 + 结尾短淡出）；未指定时跟随全局配置"
           }
         }
       }

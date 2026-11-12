@@ -19,6 +19,17 @@
 
   //: 配乐档位文案：页面只暴露「叙事 / 铺底」，不出现 audio codes 等实现词
   const BGM_MODE_LABELS = { narrative: "叙事", bed: "铺底", auto: "自动推断" };
+  //: 配乐后端文案（表格里用短名）
+  const BGM_PROVIDER_LABELS = { local: "本地 SAO", comfyui: "ACE-Step" };
+  //: 后端清单与默认值缓存，由 `/api/ui/bgm` 填充
+  let bgmSpec = { providers: [], defaults: { provider: "local", normalize_narrative: true, trim_narrative_edges: true }, cues: [] };
+  let bgmPlanCache = [];
+  let bgmTimer = null;
+
+  /* 去设置页的入口：沿用现有模型页，不新开导航。 */
+  function settingsLinkHtml() {
+    return "<a class='btn small' href='#/settings'>去设置页下载 / 检查模型</a>";
+  }
 
   /* 把配乐生成面板注入媒体页网格（不改 index.html，避免和并行任务冲突）。
    * 放在四类媒体的最前面：配乐和音效/配图/视频属于同一类「生成」操作，不单独沉底。
@@ -34,21 +45,160 @@
     card.innerHTML =
       "<h3>配乐（BGM）<span class='muted'>叙事 / 铺底</span></h3>" +
       "<div style='display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:8px'>" +
+      "  <label class='muted'>后端 <select id='bgmProvider'>" +
+      "    <option value='local'>本地 Stable Audio Open（5~47 秒）</option>" +
+      "    <option value='comfyui'>ComfyUI ACE-Step（10~180 秒）</option>" +
+      "  </select></label>" +
       "  <label class='muted'>关联计划 <select id='bgmPlan' style='min-width:180px'><option value=''>自由描述</option></select></label>" +
       "  <label class='muted'>用途 <select id='bgmMode'>" +
       "    <option value='auto'>自动推断</option><option value='narrative'>叙事</option><option value='bed'>铺底</option>" +
       "  </select></label>" +
-      "  <label class='muted'>时长 <input id='bgmDuration' type='number' min='10' max='180' step='5' value='40' style='width:72px'> 秒</label>" +
+      "  <label class='muted'>时长 <input id='bgmDuration' type='number' min='5' max='47' step='5' value='40' style='width:72px'> 秒</label>" +
+      "  <label class='muted'>响度归一 <select id='bgmNormalize'>" +
+      "    <option value='auto'>跟随默认</option><option value='true'>开</option><option value='false'>关</option>" +
+      "  </select></label>" +
+      "  <label class='muted'>首尾裁剪 <select id='bgmTrim'>" +
+      "    <option value='auto'>跟随默认</option><option value='true'>开</option><option value='false'>关</option>" +
+      "  </select></label>" +
       "  <button id='bgmGenerate' class='btn small'>生成配乐</button>" +
       "  <span id='bgmHint' class='muted'></span>" +
       "</div>" +
+      "<div id='bgmProviderHint' class='muted' style='margin-bottom:4px'></div>" +
+      "<div id='bgmParamSource' class='muted' style='margin-bottom:6px'></div>" +
+      "<div id='bgmLocalWarn' class='muted' style='margin-bottom:6px' hidden></div>" +
       "<textarea id='bgmPrompt' rows='2' placeholder='中文描述：风格 / 情绪 / 配器，如「电影感悬疑铺底，低沉弦乐与钟表滴答，暗色小调」' " +
       "style='width:100%;box-sizing:border-box;margin-bottom:8px'></textarea>" +
+      "<div id='bgmStatus' style='display:none;margin-bottom:8px'>" +
+      "  <div style='height:6px;background:#e5e7eb;border-radius:3px;overflow:hidden'>" +
+      "    <div id='bgmProgressBar' style='height:100%;width:0;background:#3b82f6;transition:width .4s'></div>" +
+      "  </div>" +
+      "  <span id='bgmStatusText' class='muted'></span>" +
+      "</div>" +
+      "<div id='bgmError' class='error-box' style='margin-bottom:8px' hidden></div>" +
       "<div id='mdBgmList' class='media-table'>填写描述后点「生成配乐」</div>" +
       "<p id='mdBgmRecord' class='muted'></p>";
     grid.insertBefore(card, grid.firstChild);
     el("bgmPlan").addEventListener("change", onPlanChange);
     el("bgmGenerate").addEventListener("click", generateBgm);
+    el("bgmProvider").addEventListener("change", syncBgmProviderUi);
+    el("bgmDuration").addEventListener("input", onDurationChange);
+    el("bgmMode").addEventListener("change", updateBgmParamSource);
+    el("bgmNormalize").addEventListener("change", updateBgmParamSource);
+    el("bgmTrim").addEventListener("change", updateBgmParamSource);
+  }
+
+  /* 取某个后端的能力描述（时长上下限、可用性）。参数：id local/comfyui。返回：对象或 null。 */
+  function bgmProviderInfo(id) {
+    return (bgmSpec.providers || []).find((item) => item.id === id) || null;
+  }
+
+  /* 刷新后端相关 UI：时长边界、上限差异说明、本地不可用告警。参数：无。返回：无。 */
+  function syncBgmProviderUi() {
+    const select = el("bgmProvider");
+    if (!select) return;
+    const info = bgmProviderInfo(select.value);
+    const duration = el("bgmDuration");
+    if (info) {
+      duration.min = info.min_seconds;
+      duration.max = info.max_seconds;
+    }
+    let hint = info ? `${info.label}：可用 ${info.min_seconds}~${info.max_seconds} 秒` : "未读取到后端信息";
+    if (select.value === "local") {
+      if (info) hint += `；超过 ${info.max_seconds} 秒会自动改用 ACE-Step`;
+    } else {
+      hint += "；本地模型最长约 47 秒，长曲请保持 ACE-Step";
+    }
+    el("bgmProviderHint").textContent = hint;
+    const warn = el("bgmLocalWarn");
+    if (select.value === "local" && info && !info.available) {
+      warn.hidden = false;
+      warn.innerHTML = `<span class="err">本地 provider 不可用：${esc(info.detail || "权重或环境缺失")}</span> ${settingsLinkHtml()}`;
+    } else {
+      warn.hidden = true;
+      warn.innerHTML = "";
+    }
+  }
+
+  /* 当前关联计划已有的 cue（用于显示开关来源）。返回：cue 对象或 null。 */
+  function currentPlanCue() {
+    const planId = el("bgmPlan") ? el("bgmPlan").value : "";
+    if (!planId) return null;
+    return (
+      (bgmSpec.cues || []).find(
+        (cue) => (cue.plan_ref && cue.plan_ref.plan_id === planId) || cue.plan_id === planId
+      ) || null
+    );
+  }
+
+  /* 显示归一 / 首尾裁剪的当前生效值与来源（默认值 / 条目设置 / 页面选择）。参数：无。返回：无。 */
+  function updateBgmParamSource() {
+    if (!el("bgmParamSource")) return;
+    const cue = currentPlanCue();
+    const defaults = bgmSpec.defaults || {};
+    const baseNormalize = cue && typeof cue.normalize === "boolean" ? cue.normalize : defaults.normalize_narrative !== false;
+    const baseTrim = cue && typeof cue.trim_edges === "boolean" ? cue.trim_edges : defaults.trim_narrative_edges !== false;
+    const normalizeChoice = el("bgmNormalize").value;
+    const trimChoice = el("bgmTrim").value;
+    const normalize = normalizeChoice === "auto" ? baseNormalize : normalizeChoice === "true";
+    const trim = trimChoice === "auto" ? baseTrim : trimChoice === "true";
+    let source = "默认值";
+    if (cue) source = "条目设置";
+    if (normalizeChoice !== "auto" || trimChoice !== "auto") source = "页面选择";
+    const bedNote = el("bgmMode").value === "bed" ? "（铺底档生成时始终归一）" : "";
+    el("bgmParamSource").textContent =
+      `当前生效：响度归一 ${normalize ? "开" : "关"}${bedNote}、首尾裁剪 ${trim ? "开" : "关"} · 来源：${source}`;
+  }
+
+  /* 时长超过本地上限时自动改选 ACE-Step，并说明原因。参数：无。返回：无。 */
+  function onDurationChange() {
+    const select = el("bgmProvider");
+    if (!select) return;
+    const local = bgmProviderInfo("local");
+    const duration = Number(el("bgmDuration").value) || 0;
+    if (select.value === "local" && local && duration > local.max_seconds) {
+      select.value = "comfyui";
+      syncBgmProviderUi();
+      el("bgmProviderHint").textContent =
+        `已自动切换 ACE-Step：本地模型最长 ${local.max_seconds} 秒，当前 ${duration} 秒`;
+    }
+  }
+
+  /* 按后端与时长粗估生成耗时（秒），只用于进度条的“预计”参考。 */
+  function estimateBgmSeconds(provider, duration) {
+    if (provider === "local") return Math.round(6 + duration * 2.35);
+    return Math.round(20 + duration * 3);
+  }
+
+  /* 更新内联进度条。参数：text 文案；percent 进度 0~100。返回：无。 */
+  function bgmStatusShow(text, percent) {
+    const box = el("bgmStatus");
+    if (!box) return;
+    box.style.display = "block";
+    el("bgmStatusText").textContent = text;
+    el("bgmProgressBar").style.width = `${Math.max(0, Math.min(100, percent))}%`;
+  }
+
+  /* 隐藏内联进度条。参数：无。返回：无。 */
+  function bgmStatusHide() {
+    const box = el("bgmStatus");
+    if (!box) return;
+    box.style.display = "none";
+    el("bgmProgressBar").style.width = "0";
+    el("bgmStatusText").textContent = "";
+  }
+
+  /* 显示内联错误；本地 provider 不可用时附「去设置页」入口。 */
+  function showBgmError(message, withSettings) {
+    const box = el("bgmError");
+    if (!box) return;
+    box.hidden = false;
+    box.innerHTML = `<span class="err">${esc(message)}</span>` + (withSettings ? ` ${settingsLinkHtml()}` : "");
+  }
+
+  /* 判断错误是否属于「本地 provider 不可用」，需要引导去设置页。 */
+  function isLocalUnavailable(error) {
+    const code = String((error && error.code) || "");
+    return ["UNAVAILABLE", "MODEL_MISSING", "PROVIDER_DISABLED", "PROVIDER_UNREACHABLE"].includes(code);
   }
 
   /* 切换关联计划：带出推断档位、时长与提示，不覆盖用户手选的用途。
@@ -56,43 +206,74 @@
    */
   function onPlanChange(event) {
     const plan = (bgmPlanCache || []).find((item) => item.id === event.target.value);
+    const cue = currentPlanCue();
+    // 条目已保存过开关时，控件直接带出条目设置，避免“显示默认值、实际用条目值”的歧义
+    el("bgmNormalize").value = cue && typeof cue.normalize === "boolean" ? String(cue.normalize) : "auto";
+    el("bgmTrim").value = cue && typeof cue.trim_edges === "boolean" ? String(cue.trim_edges) : "auto";
     if (!plan) {
       el("bgmHint").textContent = "";
+      updateBgmParamSource();
       return;
     }
     el("bgmDuration").value = Math.round(plan.duration_s || 40);
     el("bgmHint").textContent = `推断为「${plan.mode_label}」：${plan.reason}`;
+    // 计划时长超过本地上限时，切到 ACE-Step 并说明原因
+    onDurationChange();
+    updateBgmParamSource();
   }
 
-  let bgmPlanCache = [];
-
-  /* 渲染章节配乐清单：可试听、标出档位与生成耗时。
-   * 参数：data 接口返回的 {cues, records, plans}。返回：无。
+  /* 渲染章节配乐清单：可试听、标出用途 / 后端与生成耗时。
+   * 参数：data 接口返回的 {cues, records, plans, providers, defaults}。返回：无。
    */
   function renderBgm(data) {
     bgmPlanCache = data.plans || [];
+    bgmSpec = {
+      providers: data.providers || [],
+      defaults: data.defaults || {},
+      cues: data.cues || [],
+    };
     const select = el("bgmPlan");
     if (select) {
+      const current = select.value;
       select.innerHTML =
         "<option value=''>自由描述</option>" +
         bgmPlanCache
           .map((plan) => `<option value="${esc(plan.id)}">${esc(plan.name)}（推断：${esc(plan.mode_label)}）</option>`)
           .join("");
+      select.value = bgmPlanCache.some((plan) => plan.id === current) ? current : "";
     }
+    const providerSelect = el("bgmProvider");
+    if (providerSelect) {
+      const current = providerSelect.value || bgmSpec.defaults.provider || "local";
+      providerSelect.innerHTML = (bgmSpec.providers || [])
+        .map(
+          (item) =>
+            `<option value="${esc(item.id)}">${esc(item.label)}（${item.min_seconds}~${item.max_seconds} 秒）` +
+            `${item.id === "local" && !item.available ? " · 不可用" : ""}</option>`
+        )
+        .join("");
+      providerSelect.value = (bgmSpec.providers || []).some((item) => item.id === current) ? current : "local";
+      syncBgmProviderUi();
+    }
+    // 从生成记录反查每条成品用的后端，cue 本身不存 provider
+    const recordByAsset = new Map((data.records || []).map((item) => [item.asset_id, item]));
     const cues = (data.cues || []).filter((cue) => cue.asset_id || cue.mode);
     const list = el("mdBgmList");
     if (!cues.length) {
       list.innerHTML = "<p class='muted'>本章还没有配乐：填写上面的描述后点「生成配乐」。</p>";
     } else {
       list.innerHTML =
-        "<table class='grid'><thead><tr><th>名称</th><th>用途</th><th>试听</th><th>起点</th></tr></thead><tbody>" +
+        "<table class='grid'><thead><tr><th>名称</th><th>用途</th><th>后端</th><th>试听</th><th>起点</th></tr></thead><tbody>" +
         cues
           .map((cue) => {
             const url = uiFileUrl(cue.asset_id || "");
             const audio = url ? `<audio class='md-audio' preload='none' controls src='${esc(url)}'></audio>` : "<span class='muted'>无产物</span>";
+            const record = recordByAsset.get(cue.asset_id);
+            const providerText = record ? BGM_PROVIDER_LABELS[record.provider] || record.provider || "—" : "—";
             return (
               `<tr><td>${esc(cue.name || cue.id)}</td>` +
               `<td>${esc(BGM_MODE_LABELS[cue.mode] || "—")}</td>` +
+              `<td>${esc(providerText)}</td>` +
               `<td>${audio}</td><td>${msText(cue.start_ms)}</td></tr>`
             );
           })
@@ -101,9 +282,11 @@
     }
     const last = (data.records || [])[(data.records || []).length - 1];
     el("mdBgmRecord").textContent = last
-      ? `最近一次：${last.mode_label || BGM_MODE_LABELS[last.mode] || "—"} · 生成 ${last.generation_s}s · 后处理 ${last.postprocess_s}s · ` +
+      ? `最近一次：${last.mode_label || BGM_MODE_LABELS[last.mode] || "—"} · ` +
+        `${BGM_PROVIDER_LABELS[last.provider] || last.provider || "—"} · 生成 ${last.generation_s}s · 后处理 ${last.postprocess_s}s · ` +
         `${typeof last.lufs === "number" ? last.lufs.toFixed(2) + " LUFS" : "响度未测得"}`
       : "";
+    updateBgmParamSource();
   }
 
   /* 拉取并渲染配乐区。返回：Promise，无。 */
@@ -120,7 +303,10 @@
     }
   }
 
-  /* 生成一段配乐：档位按「关联计划 > 页面下拉 > 场景推断」在后端解析。返回：Promise，无。 */
+  /* 生成一段配乐：档位按「关联计划 > 页面下拉 > 场景推断」在后端解析。
+   * 不弹全屏蒙版，只在面板内显示进度与预计时间，生成期间可继续操作其它页面。
+   * 返回：Promise，无。
+   */
   async function generateBgm() {
     if (busy || !NW.state.path || !NW.state.chapter) return;
     const prompt = el("bgmPrompt").value.trim();
@@ -128,29 +314,66 @@
       NW.toast("请先填写配乐描述");
       return;
     }
+    const provider = el("bgmProvider").value;
+    const info = bgmProviderInfo(provider);
+    if (provider === "local" && info && !info.available) {
+      showBgmError(`本地 provider 不可用：${info.detail || "权重或环境缺失"}`, true);
+      return;
+    }
+    const duration = Number(el("bgmDuration").value) || 40;
+    if (info && (duration < info.min_seconds || duration > info.max_seconds)) {
+      showBgmError(`${info.label} 的时长范围是 ${info.min_seconds}~${info.max_seconds} 秒，当前 ${duration} 秒`, false);
+      return;
+    }
+    const normalizeChoice = el("bgmNormalize").value;
+    const trimChoice = el("bgmTrim").value;
     busy = true;
     const button = el("bgmGenerate");
     button.disabled = true;
+    el("bgmError").hidden = true;
+    const estimate = estimateBgmSeconds(provider, duration);
+    const startedAt = Date.now();
+    bgmStatusShow("正在生成配乐…", 2);
+    clearInterval(bgmTimer);
+    bgmTimer = setInterval(() => {
+      const elapsed = (Date.now() - startedAt) / 1000;
+      const percent = Math.min(95, Math.max(2, (elapsed / estimate) * 100));
+      bgmStatusShow(`正在生成配乐… 已用 ${elapsed.toFixed(0)}s / 预计约 ${estimate}s`, percent);
+    }, 500);
     try {
+      const body = {
+        path: NW.state.path,
+        chapter: NW.state.chapter,
+        prompt,
+        provider,
+        duration,
+        mode: el("bgmMode").value,
+        plan_id: el("bgmPlan").value || null,
+      };
+      // auto 表示跟随默认/条目，不传布尔，让后端按现有优先级解析
+      if (normalizeChoice !== "auto") body.normalize = normalizeChoice === "true";
+      if (trimChoice !== "auto") body.trim_edges = trimChoice === "true";
       const result = await NW.api("/api/ui/bgm/generate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          path: NW.state.path,
-          chapter: NW.state.chapter,
-          prompt,
-          duration: Number(el("bgmDuration").value) || 40,
-          mode: el("bgmMode").value,
-          plan_id: el("bgmPlan").value || null,
-        }),
-        busy: "正在生成配乐…",
-        busyDetail: "叙事档约 1 分钟，铺底档约 5 秒；完成后自动写回本章 cue",
+        body: JSON.stringify(body),
       });
+      clearInterval(bgmTimer);
+      bgmTimer = null;
+      bgmStatusShow(
+        `完成：${result.mode_label} · 生成 ${result.generation_s}s + 后处理 ${result.postprocess_s}s`,
+        100
+      );
       const lufs = typeof result.lufs === "number" ? ` · ${result.lufs.toFixed(2)} LUFS` : "";
-      NW.toast(`配乐完成：${result.mode_label} · 生成 ${result.generation_s}s + 后处理 ${result.postprocess_s}s${lufs}`, true);
+      const providerLabel = BGM_PROVIDER_LABELS[result.provider] || result.provider || "";
+      const switched = result.auto_switched ? "（已按 47 秒上限自动改用 ACE-Step）" : "";
+      NW.toast(`配乐完成：${result.mode_label} · ${providerLabel}${switched}${lufs}`, true);
       await loadBgm();
     } catch (error) {
-      NW.toast(`配乐生成失败：${error.message}`);
+      clearInterval(bgmTimer);
+      bgmTimer = null;
+      bgmStatusHide();
+      showBgmError(error.message || "配乐生成失败", provider === "local" && isLocalUnavailable(error));
     } finally {
       busy = false;
       button.disabled = false;

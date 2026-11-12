@@ -304,6 +304,27 @@ def _result_lines(result: dict) -> list[str]:
     return lines
 
 
+def _progress_loop(job: dict, stop: threading.Event) -> None:
+    """后台轮询暂存目录体积，把下载百分比写回任务进度。
+
+    参数:
+        job: 任务字典（含 `progress`）。
+        stop: 停止信号。
+
+    返回:
+        无。
+    """
+    while not stop.wait(1.0):
+        progress = job.get("progress") or {}
+        staging = progress.get("staging")
+        total = int(progress.get("total_bytes") or 0)
+        if not staging or total <= 0:
+            continue
+        done = model_store.dir_size(Path(staging))
+        progress["done_bytes"] = done
+        progress["percent"] = round(min(99.9, done * 100.0 / total), 1)
+
+
 def _run_job(job_id: str, config_path: str | None, group: str, key: str,
              accept_license: bool, yes: bool) -> None:
     """后台线程入口：执行一次模型下载并把结果写回任务表。
@@ -320,6 +341,9 @@ def _run_job(job_id: str, config_path: str | None, group: str, key: str,
         无（结果与日志写进 `_JOBS[job_id]`）。
     """
     job = _JOBS[job_id]
+    stop = threading.Event()
+    watcher = threading.Thread(target=_progress_loop, args=(job, stop), daemon=True, name=f"ndw-model-progress-{job_id}")
+    watcher.start()
     try:
         config = load_config(config_path)
         mirrors = model_store.download_mirrors(config)
@@ -332,6 +356,7 @@ def _run_job(job_id: str, config_path: str | None, group: str, key: str,
                 yes=yes,
                 accept_license=accept_license,
                 mirrors=mirrors,
+                progress=job.get("progress"),
             )
         else:
             result = comfy_models.install(
@@ -350,6 +375,13 @@ def _run_job(job_id: str, config_path: str | None, group: str, key: str,
         job["result"] = {"status": "error", "key": key, "error": _err_message(exc)}
         job["status"] = "failed"
     finally:
+        stop.set()
+        watcher.join(timeout=2)
+        progress = job.get("progress") or {}
+        if job.get("status") == "done":
+            progress.update({"stage": "done", "percent": 100.0})
+        elif job.get("status") == "failed":
+            progress["stage"] = "failed"
         job["finished_at"] = _now()
 
 
@@ -470,6 +502,7 @@ def register_models_routes(app, config_path: str | None = None) -> None:
                 "finished_at": None,
                 "result": None,
                 "logs": [],
+                "progress": {"stage": "preparing", "done_bytes": 0, "total_bytes": 0, "percent": None},
             }
         thread = threading.Thread(
             target=_run_job,
@@ -505,6 +538,7 @@ def register_models_routes(app, config_path: str | None = None) -> None:
             "finished_at": job["finished_at"],
             "logs": list(job["logs"][-40:]),
             "result": job["result"],
+            "progress": job.get("progress"),
         }
 
     @app.post("/api/ui/models/resolve")
