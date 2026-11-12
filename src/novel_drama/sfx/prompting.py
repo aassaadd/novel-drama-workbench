@@ -1,15 +1,14 @@
-"""中文提示词适配层：LLM 优先、词典兜底，并统一追加时长后缀。
+"""提示词适配层：运行时只补时长后缀，不再做中→英翻译。
 
 Stable Audio 3 的文本编码器（t5gemma）以英文语料为主，官方示例与
 ComfyUI 蓝图都要求英文描述，并在末尾显式写 `Length: N seconds`。
 
-改写策略（`sfx.prompt.rewrite`）：
-- `auto`（默认）：LLM 可达就用 LLM 改写；不可达/超时/返回不可用则降级词典；
-- `llm`：只用 LLM，失败直接报错；
-- `dict`：不调用 LLM，只用最长匹配词典。
+双语在**生成阶段**完成：标注链路（`!sfx ... 中文 || English prompt`）同时产出
+中文描述与英文提示词，分别存进 `prompt` / `prompt_en`。运行时只读取
+`prompt_en` 并追加时长后缀（`finalize_prompt`），缺英文直接报错。
 
-词典路线只覆盖常用音效类别，长尾描述会漏词；漏词不影响可读性但会丢细节，
-必要时用 `--prompt-en` 直接给英文。
+`rewrite_prompt` 与字典仅保留为显式调试选项（CLI `--rewrite-prompt`），
+不参与页面与常规生成链路。
 """
 
 from __future__ import annotations
@@ -325,6 +324,25 @@ def _llm_rewrite(prompt: str, duration_s: float, settings: dict) -> str:
         raise ValueError(f"LLM 返回内容仍是中文：{text[:80]!r}")
     if len(text) > 400:
         text = text[:400]
+    return _ensure_length(text, duration_s)
+
+
+def finalize_prompt(prompt: str, duration_s: float) -> str:
+    """给已存英文提示词补上项目统一的时长后缀（不做翻译或改写）。
+
+    参数:
+        prompt: 标注阶段已落盘的英文提示词。
+        duration_s: 目标时长（秒）。
+
+    返回:
+        以 `Length: N seconds` 结尾的提示词。
+
+    异常:
+        SfxError(BAD_REQUEST): 提示词为空。
+    """
+    text = (prompt or "").strip()
+    if not text:
+        raise SfxError(BAD_REQUEST, "英文提示词为空：请在标注里重新生成描述，或在媒体页手动填写英文")
     return _ensure_length(text, duration_s)
 
 

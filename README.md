@@ -216,7 +216,9 @@ $PY -m novel_drama.cli -p ~/novels/changan video run --chapter chp_xxx --dry-run
 $PY -m novel_drama.cli -p ~/novels/changan mux --chapter chp_xxx
 
 # 7.0 配乐：ACE-Step 两档（auto 按场景推断 / narrative 叙事 / bed 铺底）
-$PY -m novel_drama.cli -p ~/novels/changan bgm generate --chapter chp_xxx --prompt "悬疑弦乐铺底" --duration 40 --mode auto
+#    英文提示词来自标注阶段（!bgm ... en=...）；--prompt 仅用于记录，调试可加 --rewrite-prompt
+$PY -m novel_drama.cli -p ~/novels/changan bgm generate --chapter chp_xxx --plan bgp_xxx --duration 40 --mode auto
+$PY -m novel_drama.cli -p ~/novels/changan bgm generate --chapter chp_xxx --prompt-en "tense low strings, sparse piano, slow ticks" --duration 40 --mode auto
 $PY -m novel_drama.cli -p ~/novels/changan bgm sync --chapter chp_xxx   # 按导演脚本 BGM 描述重建 cue
 
 # 7.1 ComfyUI 模板与模型（不需要工程）

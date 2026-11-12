@@ -35,6 +35,8 @@ from .comfy_media import (
     templates_dir,
 )
 from .generate import probe_duration_ms, render_image, render_sfx, render_video
+from .sfx import generate_sfx_item, get_provider, sfx_engine
+from ..sfx import SfxError
 from .references import appearance_digest, collect_references, reference_options, scene_characters, slot_hint
 from .styles import with_style
 
@@ -970,82 +972,111 @@ def run_media(
         return _run_comfy(store, config, chapter, kind, force, limit, stats)
 
     processed = 0
-    for scene, item in _iter_items(chapter, kind):
-        stats["total"] += 1
-        asset = item.setdefault("asset", {"status": "pending"})
-        asset_path = store.root / f"{rel_dir}/{item['id']}{ext}"
-        already = asset.get("status") == "ready" and asset_path.exists()
-        if already and not force:
-            stats["skipped"] += 1
-            continue
-        if limit is not None and processed >= limit:
-            stats["skipped"] += 1
-            continue
-        processed += 1
-        if dry_run:
-            stats["items"].append({"id": item["id"], "status": "pending", "path": _rel(store, asset_path), "error": None})
-            continue
+    # 音效走 provider 时整批复用同一个常驻 worker，跑完再关闭
+    sfx_provider = None
+    sfx_provider_id = None
+    if kind == "sfx" and not dry_run and sfx_engine(config) == "model":
         try:
-            if kind == "sfx":
-                result = render_sfx(item, asset_path, binary=ffmpeg, sample_rate=sample_rate)
-                asset.update(
-                    {
-                        "status": "ready",
-                        "asset_id": _rel(store, asset_path),
-                        "actual_duration_ms": result["duration_ms"],
-                        "adapter": "offline-sfx",
-                        "cache_key": result["sha256"],
-                        "error": None,
-                    }
-                )
-            elif kind == "image":
-                # 离线占位图同样只认工程画幅，避免沿用条目里的旧尺寸
-                aspect = resolve_aspect(settings, "image")
-                item["aspect_ratio"] = aspect["ratio"]
-                item["width"], item["height"] = aspect["width"], aspect["height"]
-                result = render_image(item, asset_path)
-                asset.update(
-                    {
-                        "status": "ready",
-                        "asset_id": _rel(store, asset_path),
-                        "job_id": None,
-                        "width": result["width"],
-                        "height": result["height"],
-                        "error": None,
-                    }
-                )
-                item["width"], item["height"] = result["width"], result["height"]
-            else:
-                # 离线视频同样按工程画幅出片
-                aspect = resolve_aspect(settings, "video")
-                item["aspect_ratio"] = aspect["ratio"]
-                item["width"], item["height"] = aspect["width"], aspect["height"]
-                source = _source_image(store, chapter, item)
-                result = render_video(
-                    item,
-                    asset_path,
-                    source,
-                    binary=ffmpeg,
-                    width=aspect["width"],
-                    height=aspect["height"],
-                )
-                asset.update(
-                    {
-                        "status": "ready",
-                        "asset_id": _rel(store, asset_path),
-                        "job_id": None,
-                        "actual_duration_ms": probe_duration_ms(asset_path) or result["duration_ms"],
-                        "width": result["width"],
-                        "height": result["height"],
-                        "error": None,
-                    }
-                )
-            stats["ready"] += 1
-            stats["items"].append({"id": item["id"], "status": "ready", "path": _rel(store, asset_path), "error": None})
-        except Exception as exc:  # 单条失败不影响整批
-            asset.update({"status": "failed", "error": {"code": "RENDER_FAILED", "message": str(exc)}})
-            stats["failed"] += 1
-            stats["items"].append({"id": item["id"], "status": "failed", "path": None, "error": str(exc)})
+            sfx_provider_id, sfx_provider = get_provider(config, cached=False)
+        except SfxError as exc:
+            stats["error"] = exc.message
+            return stats
+    try:
+        for scene, item in _iter_items(chapter, kind):
+            stats["total"] += 1
+            asset = item.setdefault("asset", {"status": "pending"})
+            asset_path = store.root / f"{rel_dir}/{item['id']}{ext}"
+            already = asset.get("status") == "ready" and asset_path.exists()
+            if already and not force:
+                stats["skipped"] += 1
+                continue
+            if limit is not None and processed >= limit:
+                stats["skipped"] += 1
+                continue
+            processed += 1
+            if dry_run:
+                stats["items"].append({"id": item["id"], "status": "pending", "path": _rel(store, asset_path), "error": None})
+                continue
+            try:
+                if kind == "sfx":
+                    if sfx_provider is not None:
+                        produced = generate_sfx_item(
+                            store, config, item, provider=sfx_provider, provider_id=sfx_provider_id
+                        )
+                        stats["ready"] += 1
+                        stats["items"].append(
+                            {
+                                "id": item["id"],
+                                "status": "ready",
+                                "path": produced["asset_id"],
+                                "error": None,
+                                "elapsed_ms": produced.get("latency_ms"),
+                                "warning": produced.get("warning"),
+                            }
+                        )
+                        continue
+                    result = render_sfx(item, asset_path, binary=ffmpeg, sample_rate=sample_rate)
+                    asset.update(
+                        {
+                            "status": "ready",
+                            "asset_id": _rel(store, asset_path),
+                            "actual_duration_ms": result["duration_ms"],
+                            "adapter": "offline-sfx",
+                            "cache_key": result["sha256"],
+                            "error": None,
+                        }
+                    )
+                elif kind == "image":
+                    # 离线占位图同样只认工程画幅，避免沿用条目里的旧尺寸
+                    aspect = resolve_aspect(settings, "image")
+                    item["aspect_ratio"] = aspect["ratio"]
+                    item["width"], item["height"] = aspect["width"], aspect["height"]
+                    result = render_image(item, asset_path)
+                    asset.update(
+                        {
+                            "status": "ready",
+                            "asset_id": _rel(store, asset_path),
+                            "job_id": None,
+                            "width": result["width"],
+                            "height": result["height"],
+                            "error": None,
+                        }
+                    )
+                    item["width"], item["height"] = result["width"], result["height"]
+                else:
+                    # 离线视频同样按工程画幅出片
+                    aspect = resolve_aspect(settings, "video")
+                    item["aspect_ratio"] = aspect["ratio"]
+                    item["width"], item["height"] = aspect["width"], aspect["height"]
+                    source = _source_image(store, chapter, item)
+                    result = render_video(
+                        item,
+                        asset_path,
+                        source,
+                        binary=ffmpeg,
+                        width=aspect["width"],
+                        height=aspect["height"],
+                    )
+                    asset.update(
+                        {
+                            "status": "ready",
+                            "asset_id": _rel(store, asset_path),
+                            "job_id": None,
+                            "actual_duration_ms": probe_duration_ms(asset_path) or result["duration_ms"],
+                            "width": result["width"],
+                            "height": result["height"],
+                            "error": None,
+                        }
+                    )
+                stats["ready"] += 1
+                stats["items"].append({"id": item["id"], "status": "ready", "path": _rel(store, asset_path), "error": None})
+            except Exception as exc:  # 单条失败不影响整批
+                asset.update({"status": "failed", "error": {"code": "RENDER_FAILED", "message": str(exc)}})
+                stats["failed"] += 1
+                stats["items"].append({"id": item["id"], "status": "failed", "path": None, "error": str(exc)})
+    finally:
+        if sfx_provider is not None:
+            sfx_provider.close()
 
     if not dry_run and processed:
         chapter["revision"] = int(chapter.get("revision") or 1) + 1

@@ -536,6 +536,7 @@
   "index": 1,
   "kind": "ambience",                 // ambience|foley|impact|transition|music_sting
   "prompt": "深夜警局走廊，日光灯电流声，远处键盘声",
+  "prompt_en": "Late-night police station corridor, fluorescent hum, distant keyboard clicks",
   "duration_ms": 12000,
   "loop": true,
   "gain_db": -12.0,

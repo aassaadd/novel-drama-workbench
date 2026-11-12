@@ -94,11 +94,12 @@
       "type": "object",
       "description": "R18：结构化 BGM 描述（叙事单位级），cue 只承载音频与毫秒位置",
       "additionalProperties": false,
-      "required": ["id", "scope", "mood_family", "status", "revision"],
+      "required": ["id", "scope", "mood_family", "prompt_en", "status", "revision"],
       "properties": {
         "id": { "type": "string", "pattern": "^bgp_[0-9A-Za-z]{6,32}$" },
         "scope": { "type": "string", "enum": ["chapter", "shot"] },
         "name": { "type": ["string", "null"], "maxLength": 200 },
+        "prompt_en": { "type": "string", "minLength": 1, "maxLength": 1000, "description": "英文配乐提示词（标注阶段产出；含风格/情绪/配器，不只是直译）" },
         "narrative_function": { "type": ["string", "null"], "maxLength": 300 },
         "mood_family": {
           "type": "string",
@@ -331,13 +332,14 @@
     },
     "sfx_event": {
       "type": "object",
-      "required": ["id", "index", "kind", "prompt", "duration_ms", "position", "anchor", "asset", "revision"],
+      "required": ["id", "index", "kind", "prompt", "prompt_en", "duration_ms", "position", "anchor", "asset", "revision"],
       "additionalProperties": false,
       "properties": {
         "id": { "type": "string", "pattern": "^sfx_[0-9A-Za-z]{6,32}$" },
         "index": { "type": "integer", "minimum": 1 },
         "kind": { "type": "string", "enum": ["ambience", "foley", "impact", "transition", "music_sting"] },
-        "prompt": { "type": "string", "minLength": 1, "maxLength": 1000 },
+        "prompt": { "type": "string", "minLength": 1, "maxLength": 1000, "description": "中文音效描述" },
+        "prompt_en": { "type": "string", "minLength": 1, "maxLength": 1000, "description": "英文音效提示词（与中文同源产出，不含时长后缀）" },
         "duration_ms": { "type": "integer", "minimum": 100, "maximum": 600000 },
         "loop": { "type": "boolean" },
         "gain_db": { "type": "number", "minimum": -60, "maximum": 12 },

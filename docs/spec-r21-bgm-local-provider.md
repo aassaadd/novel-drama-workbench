@@ -21,7 +21,7 @@ ACE-Step 保留为长曲回落路径。默认 `local`，配置可切回 `comfyui
 src/novel_drama/bgm/
   types.py                      BgmSpec / BgmRequest / BgmResult / BgmHealth / BgmError
   base.py                       BgmProvider 协议
-  prompting.py                  中文→英文配乐描述（LLM 优先、词典兜底；不含时长后缀）
+  prompting.py                  运行时不再翻译；LLM/词典改写仅作 CLI 调试选项
   registry.py                   配置 → provider 实例；weights_path 只允许落在 models_root
   providers/stable_audio_open.py         客户端：常驻 NDJSON worker、懒加载、超时/重试/降级
   providers/stable_audio_open_worker.py  独立环境内推理，直接写 44.1kHz PCM24 wav
@@ -44,7 +44,10 @@ src/novel_drama/bgm/
 - 循环填充仍由 `media/mixer.py` 的 `-stream_loop -1` + `atrim` 负责，本次未改。
 - 落盘：`assets/audio/bgm/<item>_s<seed>.wav` + 同名 `.json` 侧车（提示词、参数、耗时、内存、响度）；
   生成记录继续写 `<chapter>.records.json`，字段保留 `mode / normalize / trim_edges / edge_trim`，
-  新增 `provider / model / steps / cfg / latency_ms / load_s / peak_mib / prompt_en`。
+  新增 `provider / model / steps / cfg / latency_ms / load_s / peak_mib / prompt_en / prompt_source`。
+- **双语落盘**：导演标注 `!bgm ... en=english+prompt` 生成时把英文存进 `director-script.schema.json#/$defs/bgm_plan.prompt_en`（必填）；
+  运行时优先用页面手填 `prompt_en`，否则读取关联计划的 `prompt_en`；两者都没有直接报中文错误，
+  不再做中→英改写。`--rewrite-prompt` 仅作临时调试。
 - 超时长：请求 > 47s 时直接返回中文提示，并说明可 `--provider comfyui`（ACE-Step，10~180s）。
 
 ## 4. 模型登记与设置页

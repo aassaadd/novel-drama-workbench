@@ -753,7 +753,7 @@ def suggest_script(
     prompt_parts = [context] if context else []
     prompt_parts.append(f"作品《{chapter.get('title')}》待标注台词：")
     prompt_parts.append("\n".join(scene_lines))
-    prompt_parts.append(f"任务：为以上 {len(scenes_payload)} 个镜头生成 NDW 标注文本（@shot / !sfx / !visual / !anim），保留台词原文与顺序，不要解释。")
+    prompt_parts.append(f"任务：为以上 {len(scenes_payload)} 个镜头生成 NDW 标注文本（@shot / !sfx / !visual / !anim），保留台词原文与顺序；每条 !sfx 必须用「||」附英文提示词，不要解释。")
     req = TextGenRequest(
         task="script",
         system=(
@@ -762,16 +762,18 @@ def suggest_script(
             "@shot 1 镜头名 location=验尸房 time=night mood=压抑\n"
             "旁白：夜色渐深。\n"
             "沈砚秋|calm：执照可以收，尸体不能白躺。\n"
-            "!sfx ambience 8000 after-line=1 雨声敲窗\n"
+            "!sfx ambience 8000 after-line=1 雨声敲窗 || Gentle rain tapping a window, close perspective, wet glass resonance\n"
             "!visual 画面描述\n"
-            "!bgm mood=tense energy=0.4 intensity=0.6 loop=1 name=夜雨独行 style=低音弦乐+稀疏钢琴 function=铺垫危机\n"
+            "!bgm mood=tense energy=0.4 intensity=0.6 loop=1 name=夜雨独行 style=低音弦乐+稀疏钢琴 function=铺垫危机 en=tense+low+strings+sparse+piano+slow+clock+ticks+dark+minor\n"
             "!anim i2v 5000 slow_push_in 镜头运动\n"
             "规则：@shot 后必须是整数序号与镜头名，序号与提示中的【镜头 N】一致；"
             "time 取 dawn/morning/day/dusk/night/unknown；"
             "!sfx 的 kind 只能是 ambience/foley/impact/transition/music_sting，第二个参数是毫秒数，位置写 after-line=N；"
+            "!sfx 的中文描述后必须用「||」跟一段英文提示词：写清声源、材质、动作、空间感与音色，不是逐字直译，也不要写时长；"
             "!visual 直接跟画面提示词，不写画幅；"
             "!bgm 每个镜头最多一条，mood 只能是 calm/tense/sad/romantic/mysterious/action/comedic/epic/horror，"
-            "energy/intensity 取 0~1，style 与 function 里的空格用 + 代替；"
+            "energy/intensity 取 0~1，style 与 function 与 en 里的空格用 + 代替；"
+            "!bgm 必须带 en= 英文提示词：包含风格、情绪、配器、节奏与制作质感，不是逐字直译；"
             "同一镜头内情绪有明显变化时，追加 !bgm-seg mood=... anchor=镜头内台词序号 style=...；"
             "!silence 写成「!silence 800 after-line=N 原因」；"
             "!anim 的 mode 只能是 i2v/t2v，第二个参数是 500~5000 的毫秒数，第三个参数只能是 "
@@ -811,7 +813,7 @@ def suggest_script(
             ]
             if markup_parts:
                 body.append(f"上一批输出结尾（供衔接，不要重复）：{markup_parts[-1][-200:]}")
-            body.append(f"任务：仅为本批 {len(batch)} 个镜头生成 NDW 标注文本（@shot <序号> <镜头名> / !sfx / !visual / !anim），序号沿用提示中的镜头编号，保留台词原文与顺序，不要解释。")
+            body.append(f"任务：仅为本批 {len(batch)} 个镜头生成 NDW 标注文本（@shot <序号> <镜头名> / !sfx / !visual / !anim），序号沿用提示中的镜头编号，保留台词原文与顺序；每条 !sfx 必须带「|| 英文提示词」，不要解释。")
             request = replace(req, messages=list(req.messages) + [Message("user", "\n\n".join(body))])
             # 离线适配器按 metadata.scenes 产出标注，这里同步收窄为本批
             request.metadata = {"scenes": batch, "style": bible.get("style") or {}}

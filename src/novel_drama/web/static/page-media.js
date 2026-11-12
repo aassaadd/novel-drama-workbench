@@ -13,6 +13,8 @@
   let rowsById = new Map(); // `${kind}:${id}` → 媒体条目，供右栏取原始字段
   let selected = "";
   let lastMedia = { sfx: [], image: [], video: [] }; // 最近一次清单，生成前据此提示范围
+  let sfxHealth = null; // /api/ui/sfx/health 结果：引擎、provider 可用性与冷热状态
+  const sfxJobs = new Map(); // itemId → {jobId,status,percent,elapsed,estimate,error}
 
   const el = (id) => document.getElementById(id);
   const RUN_BUTTON = { sfx: "mdRunSfx", image: "mdRunImage", video: "mdRunVideo" };
@@ -67,6 +69,8 @@
       "<div id='bgmParamSource' class='muted' style='margin-bottom:6px'></div>" +
       "<div id='bgmLocalWarn' class='muted' style='margin-bottom:6px' hidden></div>" +
       "<textarea id='bgmPrompt' rows='2' placeholder='中文描述：风格 / 情绪 / 配器，如「电影感悬疑铺底，低沉弦乐与钟表滴答，暗色小调」' " +
+      "style='width:100%;box-sizing:border-box;margin-bottom:8px'></textarea>" +
+      "<textarea id='bgmPromptEn' rows='2' placeholder='英文提示词：留空则用所选计划的英文（标注阶段产出）' " +
       "style='width:100%;box-sizing:border-box;margin-bottom:8px'></textarea>" +
       "<div id='bgmStatus' style='display:none;margin-bottom:8px'>" +
       "  <div style='height:6px;background:#e5e7eb;border-radius:3px;overflow:hidden'>" +
@@ -217,6 +221,10 @@
     }
     el("bgmDuration").value = Math.round(plan.duration_s || 40);
     el("bgmHint").textContent = `推断为「${plan.mode_label}」：${plan.reason}`;
+    // 计划已带英文提示词时直接带出，允许用户手动覆盖
+    el("bgmPromptEn").value = plan.prompt_en || "";
+    // 中文描述仅用于记录/展示，计划名可直接作为默认值
+    if (!el("bgmPrompt").value.trim() && plan.name) el("bgmPrompt").value = plan.name;
     // 计划时长超过本地上限时，切到 ACE-Step 并说明原因
     onDurationChange();
     updateBgmParamSource();
@@ -310,8 +318,10 @@
   async function generateBgm() {
     if (busy || !NW.state.path || !NW.state.chapter) return;
     const prompt = el("bgmPrompt").value.trim();
-    if (!prompt) {
-      NW.toast("请先填写配乐描述");
+    const promptEn = el("bgmPromptEn").value.trim();
+    const planId = el("bgmPlan").value || null;
+    if (!prompt && !promptEn && !planId) {
+      NW.toast("请填写配乐描述、英文提示词，或先选择 BGM 计划");
       return;
     }
     const provider = el("bgmProvider").value;
@@ -345,10 +355,11 @@
         path: NW.state.path,
         chapter: NW.state.chapter,
         prompt,
+        prompt_en: promptEn || undefined,
         provider,
         duration,
         mode: el("bgmMode").value,
-        plan_id: el("bgmPlan").value || null,
+        plan_id: planId,
       };
       // auto 表示跟随默认/条目，不传布尔，让后端按现有优先级解析
       if (normalizeChoice !== "auto") body.normalize = normalizeChoice === "true";
@@ -399,6 +410,164 @@
     return `<audio class="md-audio" preload="none" controls data-preview data-rel="${esc(rel)}" src="${esc(url)}"></audio>`;
   }
 
+  /* 音效行内生成控件：英文提示词覆盖 + 生成按钮 + 进度位。
+   * 时长低于 1 秒直接拦截（模型会退化成噪声），1~2 秒提示冲击类可能削波。
+   * 参数：item 音效条目。返回：HTML 字符串。
+   */
+  function sfxGenCell(item) {
+    const ms = Number(item.duration_ms || 0);
+    if (ms && ms < 1000) {
+      return `<td class="wrap"><span class="err">时长 ${ms}ms 低于模型下限 1 秒：生成会退化成噪声，请先改标注时长</span></td>`;
+    }
+    const warn = ms && ms < 2000 ? `<div class="settings-hint">极短时长，冲击类可能削波</div>` : "";
+    return (
+      `<td class="wrap">` +
+      `<input class="md-sfx-prompt" data-sfx-prompt="${esc(item.id)}" value="${esc(item.prompt_en || "")}" placeholder="${item.prompt_en ? "英文提示词（可覆盖）" : "缺少英文提示词，请手动填写"}" />` +
+      `<button class="btn small" type="button" data-sfx-gen="${esc(item.id)}">生成音效</button>` +
+      warn +
+      `<div class="settings-hint" data-sfx-progress="${esc(item.id)}"></div></td>`
+    );
+  }
+
+  /* 引擎状态提示：不可用时给设置页入口，而不是让用户猜。
+   * 返回：HTML 字符串（离线引擎或健康时返回一行说明）。
+   */
+  function sfxHealthHtml() {
+    if (!sfxHealth) return "";
+    if (sfxHealth.engine === "offline") {
+      return `<div class="settings-hint">音效引擎：ffmpeg 离线合成（配置 sfx.engine 可切回模型）</div>`;
+    }
+    if (sfxHealth.ok) {
+      const warm = sfxHealth.warm ? "常驻 worker 已就绪" : "首次生成会加载模型约 4 秒";
+      return `<div class="settings-hint">音效引擎：Stable Audio 3 small-sfx（${esc(sfxHealth.provider_id || "")}，${warm}）</div>`;
+    }
+    return (
+      `<div class="settings-warn">音效模型不可用：${esc(sfxHealth.detail || "未知原因")} ` +
+      `${settingsLinkHtml()}</div>`
+    );
+  }
+
+  /* 拉取音效引擎健康状态；失败时保留空态（页面照常显示表格）。
+   * 返回：Promise，无。
+   */
+  async function loadSfxHealth() {
+    try {
+      sfxHealth = await NW.api("/api/ui/sfx/health");
+    } catch (error) {
+      sfxHealth = null;
+    }
+  }
+
+  /* 渲染某个条目的生成进度（找不到节点时静默）。
+   * 参数：itemId 音效条目 ID。返回：无。
+   */
+  function renderSfxProgress(itemId) {
+    const box = el("mdSfx");
+    if (!box) return;
+    const node = box.querySelector(`[data-sfx-progress="${itemId}"]`);
+    const button = box.querySelector(`[data-sfx-gen="${itemId}"]`);
+    const rec = sfxJobs.get(itemId);
+    if (!rec) {
+      if (node) node.textContent = "";
+      if (button) button.disabled = false;
+      return;
+    }
+    if (button) button.disabled = rec.status === "running";
+    if (!node) return;
+    if (rec.status === "running") {
+      const estimate = rec.estimate ? `，预计 ~${rec.estimate}s` : "";
+      node.textContent = `生成中… 已 ${Number(rec.elapsed || 0).toFixed(1)}s${estimate}（${Number(rec.percent || 0).toFixed(0)}%）`;
+    } else if (rec.status === "done") {
+      node.textContent = "已生成，正在刷新…";
+    } else {
+      node.textContent = `失败：${rec.error?.message || "未知错误"}`;
+    }
+  }
+
+  /* 轮询音效任务，完成后刷新媒体表（不弹全屏蒙版，只更新行内进度）。
+   * 参数：itemId 音效条目 ID。返回：Promise，无。
+   */
+  async function pollSfxJob(itemId) {
+    const rec = sfxJobs.get(itemId);
+    if (!rec) return;
+    try {
+      const job = await NW.api(`/api/ui/sfx/job?${NW.qs({ job_id: rec.jobId })}`);
+      rec.status = job.status;
+      rec.percent = job.percent;
+      rec.elapsed = job.elapsed_s;
+      rec.estimate = job.estimate_s;
+      rec.error = job.error;
+      if (job.status === "running") {
+        renderSfxProgress(itemId);
+        setTimeout(() => pollSfxJob(itemId), 800);
+        return;
+      }
+      renderSfxProgress(itemId);
+      if (job.status === "done") {
+        const result = job.result || {};
+        const note = result.note ? `；${result.note}` : "";
+        NW.toast(`音效已生成：${result.duration_ms}ms / ${result.sample_rate}Hz${note}`, true);
+        await load();
+        if (window.NWInspector) NWInspector.refreshMedia();
+      } else {
+        NW.toast(`音效生成失败：${job.error?.message || "未知错误"}`);
+        if (["MODEL_MISSING", "PROVIDER_DISABLED"].includes(job.error?.code)) await loadSfxHealth();
+      }
+      // 成功提示保留几秒再清掉行内状态
+      setTimeout(() => {
+        sfxJobs.delete(itemId);
+        renderSfxProgress(itemId);
+      }, 4000);
+    } catch (error) {
+      rec.status = "failed";
+      rec.error = { message: error.message };
+      renderSfxProgress(itemId);
+    }
+  }
+
+  /* 提交一条音效生成任务。
+   * 参数：itemId 音效条目 ID。返回：Promise，无。
+   */
+  async function startSfxGen(itemId) {
+    if (!NW.state.path || !NW.state.chapter) {
+      NW.toast("先打开工程并选择章节");
+      return;
+    }
+    const box = el("mdSfx");
+    const input = box.querySelector(`[data-sfx-prompt="${itemId}"]`);
+    const promptEn = (input?.value || "").trim();
+    try {
+      const data = await NW.api("/api/ui/sfx/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          path: NW.state.path,
+          chapter: NW.state.chapter,
+          id: itemId,
+          prompt_en: promptEn || undefined,
+        }),
+      });
+      sfxJobs.set(itemId, { jobId: data.job_id, status: "running", percent: 0, elapsed: 0, estimate: null });
+      renderSfxProgress(itemId);
+      pollSfxJob(itemId);
+    } catch (error) {
+      NW.toast(`提交失败：${error.message}`);
+    }
+  }
+
+  /* 绑定音效行内控件（按钮/进度恢复）。
+   * 参数：box 音效表容器。返回：无。
+   */
+  function bindSfxActions(box) {
+    box.querySelectorAll("[data-sfx-gen]").forEach((node) => {
+      node.addEventListener("click", (event) => {
+        event.stopPropagation();
+        startSfxGen(node.dataset.sfxGen);
+      });
+    });
+    sfxJobs.forEach((_, itemId) => renderSfxProgress(itemId));
+  }
+
   /* 渲染一张媒体表；行上带 kind / id，便于点选。
    * 参数：rows 条目数组；kind 媒体类型（sfx / image / video）。
    * 返回：HTML 字符串。
@@ -409,13 +578,14 @@
     }
     const head =
       kind === "sfx"
-        ? "<tr><th>#</th><th>类型</th><th>预览</th><th>提示词</th><th>状态</th><th>时长</th><th>产物 / 错误</th></tr>"
+        ? "<tr><th>#</th><th>类型</th><th>预览</th><th>提示词</th><th>状态</th><th>时长</th><th>产物 / 错误</th><th>生成</th></tr>"
         : "<tr><th>#</th><th>模式</th><th>模板</th><th>画幅</th><th>宽高</th><th>参考图</th><th>预览</th><th>提示词</th><th>状态</th><th>时长</th><th>产物 / 错误</th></tr>";
     const body = rows
       .map((item) => {
         const extra = item.error
           ? `<span class="err">${esc(typeof item.error === "string" ? item.error : item.error.message || JSON.stringify(item.error))}</span>`
           : esc(item.asset_id || "—");
+        const genCell = kind === "sfx" ? sfxGenCell(item) : "";
         const kindText =
           kind === "sfx"
             ? SFX_KIND_LABELS[item.kind] || item.kind || ""
@@ -451,7 +621,7 @@
           `<td class="md-preview">${previewHtml(item, kind)}</td>` +
           `<td class="wrap">${esc(item.prompt || "")}</td>` +
           `<td><span class="state-badge s-${esc(item.status)}"><span class="dot"></span>${esc(NW.statusLabel(item.status))}</span></td>` +
-          `<td>${msText(item.duration_ms)}</td><td class="wrap">${extra}</td></tr>`
+          `<td>${msText(item.duration_ms)}</td><td class="wrap">${extra}</td>${genCell}</tr>`
         );
       })
       .join("");
@@ -544,13 +714,15 @@
       return;
     }
     try {
+      await loadSfxHealth();
       const data = await NW.api(`/api/ui/media?${NW.qs({ path: NW.state.path, chapter: NW.state.chapter })}`);
       lastMedia = { sfx: data.sfx || [], image: data.image || [], video: data.video || [] };
-      el("mdSfx").innerHTML = table(lastMedia.sfx, "sfx");
+      el("mdSfx").innerHTML = sfxHealthHtml() + table(lastMedia.sfx, "sfx");
       el("mdImage").innerHTML = table(lastMedia.image, "image");
       el("mdVideo").innerHTML = table(lastMedia.video, "video");
       syncRunButtons(lastMedia);
       ["mdSfx", "mdImage", "mdVideo"].forEach((id) => bindPreviewErrors(el(id)));
+      bindSfxActions(el("mdSfx"));
     } catch (error) {
       NW.toast(`读取媒体失败：${error.message}`);
     }

@@ -1,15 +1,13 @@
-"""中文配乐描述适配层：LLM 优先、词典兜底。
+"""配乐提示词调试改写：LLM 优先、词典兜底（仅显式调试时使用）。
 
-Stable Audio Open 1.0 的文本编码器是 t5-base（英文语料），官方示例都用
-英文描述，因此本地 provider 需要先把中文音乐描述改写成英文短句。
+双语在生成阶段完成：导演标注 `!bgm ... en=english+prompt` 把英文写进
+`bgm_plan.prompt_en`，运行时优先读页面手填值，其次读计划值，缺英文直接报错。
+本模块的 `rewrite_prompt` 只服务 CLI `--rewrite-prompt` 调试场景，不参与页面与
+常规生成链路。
 
-改写策略（`bgm.prompt.rewrite`）：
 - `auto`（默认）：LLM 可达就用 LLM，不可达/超时/内容不合格则降级词典；
 - `llm`：只用 LLM，失败直接报错；
 - `dict`：不调用 LLM，只用最长匹配词典。
-
-词典只覆盖常用配乐词（风格 / 情绪 / 乐器 / 织体），长尾描述会漏词；
-漏词不影响可读性但会丢细节，必要时用 `--prompt-en` 直接给英文。
 """
 
 from __future__ import annotations

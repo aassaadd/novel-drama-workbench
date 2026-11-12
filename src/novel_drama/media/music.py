@@ -466,10 +466,12 @@ def _upsert_cue(
     start_ms: int,
     normalize: bool,
     trim_edges: bool,
+    prompt_en: str | None = None,
 ) -> dict:
     """把生成结果写回 cue：有计划时更新原 cue，否则追加一条手工 cue。
 
-    `normalize` 与 `trim_edges` 一并落盘，作为下次同一条目生成的条目级开关。
+    `normalize` 与 `trim_edges` 一并落盘，作为下次同一条目生成的条目级开关；
+    关联计划时把英文提示词也记到 cue 上，便于追溯。
     """
     cues = load_cues(root, chapter_id)
     existing = _find_plan_cue(cues, plan_id)
@@ -483,6 +485,8 @@ def _upsert_cue(
                 "trim_edges": trim_edges,
             }
         )
+        if prompt_en:
+            existing["prompt_en"] = prompt_en
         if name:
             existing["name"] = name
         save_cues(root, chapter_id, cues)
@@ -494,6 +498,8 @@ def _upsert_cue(
             continue
         item["normalize"] = normalize
         item["trim_edges"] = trim_edges
+        if prompt_en:
+            item["prompt_en"] = prompt_en
         if plan_id:
             # 关联计划的 cue 必须带 plan_ref，后续 sync 才会按计划更新而不是再建一条
             item["plan_ref"] = {"plan_id": plan_id, "shot_id": None, "segment_index": None}
@@ -518,7 +524,7 @@ def _generate_comfy(
         config: 本机配置。
         chapter_id: 章节 ID。
         mode: 叙事 / 铺底。
-        text: 中文音乐描述（ACE-Step 本身支持中文）。
+        text: 英文音乐提示词（标注阶段产出）。
         duration: 时长（秒）。
         seed: 实际种子。
         item_id: 文件前缀。
@@ -551,7 +557,7 @@ def _generate_comfy(
         "bpm": 70,
         "seed": seed,
         "timesignature": "4",
-        "language": "zh",
+        "language": "en",
         "keyscale": "D minor",
         "filename_prefix": f"ndw_bgm/{item_id}",
     }
@@ -581,32 +587,28 @@ def _generate_comfy(
 def _generate_local(
     config: AppConfig,
     mode: str,
-    text: str,
+    prompt_en: str,
     duration: float,
     seed: int,
     item_id: str,
     bgm_dir: Path,
     *,
-    prompt_en: str | None,
-    allow_llm: bool,
     steps: int | None,
     cfg: float | None,
 ) -> tuple[Path, dict]:
     """走项目内 Stable Audio Open 1.0 生成一条原始音频。
 
-    中文描述会先改写成英文（LLM 优先、词典兜底），再交给常驻 worker。
+    运行时只读取已存英文提示词（标注阶段产出），不再做中→英改写。
     产物落到 `<item_id>_s<seed>.src.wav`，后处理阶段会把它转成最终 wav 并删除。
 
     参数:
         config: 本机配置。
         mode: 叙事 / 铺底（当前只影响后处理，提示词相同）。
-        text: 中文音乐描述。
+        prompt_en: 英文音乐提示词（已由生成阶段落盘）。
         duration: 时长（秒）。
         seed: 实际种子。
         item_id: 文件前缀。
         bgm_dir: 输出目录。
-        prompt_en: 直接给英文描述，跳过改写。
-        allow_llm: 是否允许 LLM 参与改写。
         steps: 采样步数；None 用配置默认。
         cfg: cfg；None 用配置默认。
 
@@ -616,13 +618,9 @@ def _generate_local(
     异常:
         AdapterError: provider 不可用、模型缺失、时长越界或生成失败。
     """
-    from ..bgm.prompting import rewrite_prompt
     from ..bgm.registry import build_providers, pick_provider
     from ..bgm.types import BAD_REQUEST as BGM_BAD_REQUEST
     from ..bgm.types import BgmError, BgmRequest
-
-    # 英文描述原样透传；中文描述按 bgm.prompt.rewrite 策略改写
-    outcome = rewrite_prompt(prompt_en or text, config=config, allow_llm=allow_llm)
 
     providers = build_providers(config)
     pid, provider = pick_provider(config, providers)
@@ -635,7 +633,7 @@ def _generate_local(
     try:
         result = provider.generate(
             BgmRequest(
-                prompt=outcome.prompt,
+                prompt=prompt_en,
                 output_path=str(source),
                 duration_s=duration,
                 steps=steps,
@@ -656,9 +654,9 @@ def _generate_local(
         "provider": "local",
         "provider_id": pid,
         "model": result.model,
-        "prompt_en": outcome.prompt,
-        "rewrite_mode": outcome.mode,
-        "rewrite_note": outcome.note,
+        "prompt_en": prompt_en,
+        "rewrite_mode": None,
+        "rewrite_note": None,
         "seed": result.seed,
         "steps": result.steps,
         "cfg": result.cfg,
@@ -692,6 +690,7 @@ def render_bgm(
     provider: str | None = None,
     prompt_en: str | None = None,
     allow_llm: bool = True,
+    allow_rewrite: bool = False,
     steps: int | None = None,
     cfg: float | None = None,
 ) -> dict:
@@ -701,7 +700,7 @@ def render_bgm(
         store: 工程。
         config: 本机配置。
         chapter_id: 章节 ID。
-        prompt: 中文音乐描述。
+        prompt: 中文音乐描述（仅用于记录/展示；生成只用英文提示词）。
         duration_s: 生成时长（秒）；local 5~47，comfyui 10~180。
         requested_mode: 页面/CLI 传入的档位（auto 视为未指定）。
         item_mode: 条目上显式指定的档位（优先级最高）。
@@ -715,8 +714,9 @@ def render_bgm(
         start_ms: 新 cue 的起始时间。
         add_to_cue: 是否写回章节 cue 表。
         provider: `local` / `comfyui`；为空时读 `bgm.provider`，再缺省 `local`。
-        prompt_en: 直接给英文描述（本地 provider 用，跳过中文改写）。
-        allow_llm: 中文改写是否允许调用 LLM（CLI `--no-llm`）。
+        prompt_en: 页面手填的英文提示词；为空时读关联计划的 `prompt_en`。
+        allow_llm: 调试改写时是否允许调用 LLM。
+        allow_rewrite: 调试开关：缺英文时临时把中文改写成英文（不参与常规链路）。
         steps: 本地 provider 的采样步数；为空用配置默认。
         cfg: 本地 provider 的 cfg；为空用配置默认。
 
@@ -725,15 +725,34 @@ def render_bgm(
         "generation_s","postprocess_s","lufs","true_peak","cue","record",...}`。
 
     异常:
-        AdapterError: 参数非法、provider 不可用、模型缺失或生成失败。
+        AdapterError: 参数非法、缺英文提示词、provider 不可用、模型缺失或生成失败。
     """
-    text = str(prompt or "").strip()
-    if not text and prompt_en:
-        # 只给英文描述时，用它充当记录里的原始提示词
-        text = str(prompt_en).strip()
-    if not text:
-        raise AdapterError(ErrorCode.INVALID_INPUT, "配乐描述不能为空")
     context = plan_context(store, chapter_id, plan_id)
+    plan = (context or {}).get("plan") or {}
+    text = str(prompt or "").strip()
+    if not text:
+        # 只给计划时，用计划里的中文语义字段作记录描述
+        text = str(plan.get("narrative_function") or plan.get("name") or "").strip()
+    stored_en = str(prompt_en or "").strip() or str(plan.get("prompt_en") or "").strip()
+    rewrite_used = False
+    rewrite_note: str | None = None
+    if not stored_en:
+        if not allow_rewrite:
+            raise AdapterError(
+                ErrorCode.INVALID_INPUT,
+                "缺少英文提示词（prompt_en）：请重新生成标注描述，或在页面填写英文提示词",
+            )
+        if not text:
+            raise AdapterError(ErrorCode.INVALID_INPUT, "配乐描述不能为空")
+        # 显式调试选项：临时把中文改写成英文；不参与页面与常规链路
+        from ..bgm.prompting import rewrite_prompt
+
+        outcome = rewrite_prompt(text, config=config, allow_llm=allow_llm)
+        stored_en = outcome.prompt
+        rewrite_used = True
+        rewrite_note = outcome.note
+    if not text:
+        text = stored_en
     if duration_s is None and context and context.get("duration_s"):
         # 未显式给时长时，优先采用 BGM 计划里的时长提示
         duration = float(context["duration_s"])
@@ -791,18 +810,16 @@ def render_bgm(
         produced, gen_meta = _generate_local(
             config,
             mode,
-            text,
+            stored_en,
             duration,
             actual_seed,
             item_id,
             bgm_dir,
-            prompt_en=prompt_en,
-            allow_llm=allow_llm,
             steps=steps,
             cfg=cfg,
         )
     else:
-        produced, gen_meta = _generate_comfy(config, chapter_id, mode, text, duration, actual_seed, item_id, bgm_dir)
+        produced, gen_meta = _generate_comfy(config, chapter_id, mode, stored_en, duration, actual_seed, item_id, bgm_dir)
     generation_s = gen_meta["generation_s"]
 
     post_started = time.perf_counter()
@@ -867,6 +884,7 @@ def render_bgm(
             int(start_ms or 0),
             do_normalize,
             do_trim,
+            stored_en,
         )
 
     record = {
@@ -890,9 +908,10 @@ def render_bgm(
         "true_peak": loudness.get("true_peak"),
         "duration_s": round(probe_duration_ms(final_path) / 1000, 2),
         "prompt": text,
-        "prompt_en": gen_meta.get("prompt_en"),
-        "rewrite_mode": gen_meta.get("rewrite_mode"),
-        "rewrite_note": gen_meta.get("rewrite_note"),
+        "prompt_en": gen_meta.get("prompt_en") or stored_en,
+        "prompt_source": "debug-rewrite" if rewrite_used else ("manual" if str(prompt_en or "").strip() else "plan"),
+        "rewrite_mode": "debug" if rewrite_used else None,
+        "rewrite_note": rewrite_note,
         "seed": gen_meta.get("seed", actual_seed),
         "steps": gen_meta.get("steps"),
         "cfg": gen_meta.get("cfg"),

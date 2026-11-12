@@ -34,6 +34,7 @@ from .models_api import register_models_routes
 from .voice_tools_api import register_voice_tools_routes
 from .continue_api import register_continue_routes
 from .bgm_api import register_bgm_routes
+from .sfx_api import register_sfx_routes
 
 STATIC_DIR = Path(__file__).with_name("static")
 
@@ -1526,6 +1527,7 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
                             "scene_id": scene.get("id"),
                             "index": item.get("index"),
                             "prompt": item.get("prompt") or "",
+                            "prompt_en": item.get("prompt_en") or "",
                             "kind": item.get("kind"),
                             "mode": item.get("mode"),
                             "duration_ms": item.get("duration_ms") or asset.get("actual_duration_ms"),
@@ -2899,6 +2901,8 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
     register_continue_routes(app, config_path)
     # 配乐生成：叙事 / 铺底两档（独立模块）
     register_bgm_routes(app, config_path)
+    # 媒体页音效生成：Stable Audio 3 provider + 进度轮询（独立模块）
+    register_sfx_routes(app, config_path)
 
     if STATIC_DIR.exists():
         from fastapi.responses import FileResponse

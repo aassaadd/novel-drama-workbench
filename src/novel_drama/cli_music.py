@@ -11,16 +11,16 @@ def cmd_bgm_generate(args, config: AppConfig) -> int:
     """生成一段配乐并按档位处理后写回章节 cue。
 
     参数:
-        args: 已解析参数（chapter / prompt / prompt_en / provider / duration / mode /
-            plan / seed / steps / cfg / no_llm / name / start_ms / no_cue）。
+        args: 已解析参数（chapter / prompt / prompt_en / rewrite_prompt / provider /
+            duration / mode / plan / seed / steps / cfg / no_llm / name / start_ms / no_cue）。
         config: 本机配置。
 
     返回:
         退出码。
     """
     store = _resolve_store(args, config)
-    if not (getattr(args, "prompt", None) or getattr(args, "prompt_en", None)):
-        raise ValueError("必须提供 --prompt（中文描述）或 --prompt-en（英文描述）")
+    if not (getattr(args, "prompt", None) or getattr(args, "prompt_en", None) or getattr(args, "plan", None)):
+        raise ValueError("必须提供 --prompt-en（英文提示词）、--plan（读取计划英文）或调试用 --rewrite-prompt + --prompt")
     result = render_bgm(
         store,
         config,
@@ -38,6 +38,7 @@ def cmd_bgm_generate(args, config: AppConfig) -> int:
         provider=args.provider,
         prompt_en=args.prompt_en,
         allow_llm=not getattr(args, "no_llm", False),
+        allow_rewrite=bool(getattr(args, "rewrite_prompt", False)),
         steps=getattr(args, "steps", None),
         cfg=getattr(args, "cfg", None),
     )

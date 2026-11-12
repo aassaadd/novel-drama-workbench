@@ -234,14 +234,23 @@ def new_chapter(work_id: str, index: int, title: str, content: str = "", outline
     }
 
 
-def new_sfx_event(scene_id: str, index: int, kind: str, prompt: str, duration_ms: int, line_id: str | None = None) -> dict:
+def new_sfx_event(
+    scene_id: str,
+    index: int,
+    kind: str,
+    prompt: str,
+    prompt_en: str,
+    duration_ms: int,
+    line_id: str | None = None,
+) -> dict:
     """构造音效事件。
 
     参数:
         scene_id: 所属场景 ID。
         index: 场景内序号。
         kind: ambience/foley/impact/transition/music_sting。
-        prompt: 音效描述。
+        prompt: 中文音效描述。
+        prompt_en: 英文音效提示词（标注阶段双语产出，缺失时调用方应先报错）。
         duration_ms: 期望时长。
         line_id: 锚定台词行；为空则默认锚定场景起点。
 
@@ -254,6 +263,7 @@ def new_sfx_event(scene_id: str, index: int, kind: str, prompt: str, duration_ms
         "index": index,
         "kind": kind,
         "prompt": prompt,
+        "prompt_en": prompt_en,
         "duration_ms": duration_ms,
         "loop": kind == "ambience",
         "gain_db": -12.0,

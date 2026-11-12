@@ -32,7 +32,7 @@ def _merge_items(scene: dict, key: str, incoming: list[dict]) -> tuple[int, int]
             added += 1
             continue
         # 保留资产状态与 revisions，仅同步提示词/位置等描述字段
-        for field in ("prompt", "kind", "duration_ms", "position", "loop", "anchor", "width", "height", "aspect_ratio", "mode", "source_image_id", "audio_policy"):
+        for field in ("prompt", "prompt_en", "kind", "duration_ms", "position", "loop", "anchor", "width", "height", "aspect_ratio", "mode", "source_image_id", "audio_policy"):
             if field in item:
                 old[field] = item[field]
         if old.get("revision") is None:
@@ -87,6 +87,7 @@ def materialize_media(chapter: dict, script: dict, settings: dict | None = None)
                 int(event.get("index") or len(sfx_items) + 1),
                 event.get("kind") or "ambience",
                 event.get("prompt") or "",
+                event.get("prompt_en") or "",
                 int(event.get("duration_ms") or 3000),
                 line_id=(event.get("position") or {}).get("line_id") or anchor_line_id,
             )

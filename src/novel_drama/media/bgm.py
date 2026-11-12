@@ -164,6 +164,7 @@ def sync_cues_from_plans(
                         "segment_index": int(segment.get("index") or 0) or None,
                     },
                     "mood_family": segment.get("mood_family") or plan.get("mood_family"),
+                    "prompt_en": plan.get("prompt_en"),
                     "narrative_function": segment.get("narrative_function") or plan.get("narrative_function"),
                     "status": "asset_ready" if asset_id else "planned",
                 }

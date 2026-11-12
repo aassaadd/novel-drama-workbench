@@ -6,13 +6,16 @@
     旁白：夜色渐深，雨点敲在窗上。
     林晚|angry：你为什么要骗我？
     林晚|whisper|inner_monologue：别出声。
-    !sfx ambience 8000 after-line=2 雨声敲窗
+    !sfx ambience 8000 after-line=2 雨声敲窗 || Gentle rain tapping a window, close perspective
+    !bgm mood=tense energy=0.4 name=夜雨独行 style=低音弦乐+稀疏钢琴 en=tense+low+strings+sparse+piano
     !silence 800  after-line=2  情绪留白
     !visual 书房内景，暖黄台灯，雨夜，人物背对镜头
     !anim i2v 5000 slow_push_in 镜头缓慢推近，雨丝划过窗
 
 约定：
 - 台词行格式 `说话人|情绪|类型：文本`，后两项可省略；没有冒号视为旁白；
+- `!sfx` 必须用 `||` 在中文描述后附英文提示词；英文与中文同源产出，生成时只补时长后缀；
+- `!bgm` 必须带 `en=` 英文提示词（空格用 `+` 代替），缺失直接报错；
 - `before-line=N` / `after-line=N` 的 N 是当前镜头内的台词序号（从 1 开始）；
 - 锚点按正文段落块规则计算，文本在正文中找不到时标记 `orphan` 并告警；
 - 同文本的章节台词行会被自动挂接，配音状态随之带入。
@@ -305,11 +308,22 @@ def parse_markup(markup: str, chapter: dict, characters: list[dict], settings: d
             head = head.lower()
             parts = payload.split()
             if head == "sfx":
+                # 双语语法：`!sfx kind 时长 位置 中文描述 || English prompt`
+                # 英文提示词由标注阶段与中文同源产出，缺失直接报错，不做运行时翻译兜底。
+                zh_payload, _, en_payload = payload.partition("||")
+                parts = zh_payload.split()
                 if len(parts) < 4:
-                    raise ValueError(f"音效需要「kind 时长 位置 描述」：{raw}")
+                    raise ValueError(f"音效需要「kind 时长 位置 中文描述 || 英文提示词」：{raw}")
                 kind, duration = parts[0], int(parts[1])
                 if kind not in SFX_KINDS:
                     raise ValueError(f"音效 kind 非法：{kind}（可选 {', '.join(SFX_KINDS)}）")
+                prompt_zh = " ".join(parts[3:]).strip()
+                prompt_en = en_payload.strip()
+                if not prompt_en:
+                    raise ValueError(
+                        f"音效缺少英文提示词（!sfx ... 中文描述 || English prompt）：{raw}；"
+                        "请重新生成标注描述"
+                    )
                 line_ids = [item["id"] for item in shot["lines"]]
                 position = _parse_position(parts[2], line_ids, warnings, f"镜头 {shot['index']} 音效")
                 anchor = shot["anchor"]
@@ -318,7 +332,8 @@ def parse_markup(markup: str, chapter: dict, characters: list[dict], settings: d
                         "id": new_id("sfx"),
                         "index": len(shot["sfx_events"]) + 1,
                         "kind": kind,
-                        "prompt": " ".join(parts[3:]),
+                        "prompt": prompt_zh,
+                        "prompt_en": prompt_en,
                         "duration_ms": duration,
                         "loop": kind == "ambience",
                         "gain_db": -12.0,
@@ -350,10 +365,16 @@ def parse_markup(markup: str, chapter: dict, characters: list[dict], settings: d
                         return default
 
                 if head == "bgm":
+                    prompt_en = (options.get("en") or "").replace("+", " ").strip()
+                    if not prompt_en:
+                        raise ValueError(
+                            f"配乐缺少英文提示词（!bgm ... en=english+prompt）：{raw}；请重新生成标注描述"
+                        )
                     shot["bgm"] = {
                         "id": new_id("bgp"),
                         "scope": "shot",
                         "name": (options.get("name") or f"镜头{shot['index']} BGM").replace("+", " ")[:200],
+                        "prompt_en": prompt_en[:1000],
                         "narrative_function": (options.get("function") or "").replace("+", " ")[:300] or None,
                         "mood_family": mood,
                         "mood_text": (options.get("mood_text") or "").replace("+", " ")[:200] or None,

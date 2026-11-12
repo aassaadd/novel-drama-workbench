@@ -25,7 +25,7 @@
 src/novel_drama/sfx/
 ├── types.py                       # SfxSpec / SfxRequest / SfxResult / SfxHealth / SfxError
 ├── base.py                        # SfxProvider 协议 + BaseSfxProvider
-├── prompting.py                   # 中文描述 → 英文 + `Length: N seconds`（最长匹配词典）
+├── prompting.py                   # 运行时只补 `Length: N seconds`；LLM/词典改写仅作调试选项
 ├── registry.py                    # 从 config.sfx.providers 组装实例、选默认 provider
 └── providers/
     ├── stable_audio3.py           # 客户端：起常驻 worker、NDJSON 收发、懒启动、空闲退出、close()
@@ -35,14 +35,16 @@ src/novel_drama/sfx/
 CLI：`src/novel_drama/cli_sfx.py`，挂在既有 `sfx` 命令下（与 `sfx plan/run` 并存）：
 
 ```bash
-ndw --project <工程目录> sfx generate --prompt "沉重的木门被猛地关上，发出低沉的撞击声" --duration 2
-ndw --project <工程目录> sfx generate --prompt "雨点密集地打在铁皮屋顶上" --duration 8 \
-    --prompt-en "continuous heavy rain drumming on a tin roof, dense raindrops, steady ambience"
+# 常规：英文提示词来自标注阶段的双语产出（!sfx ... 中文 || English prompt）
+ndw --project <工程目录> sfx generate \
+    --prompt-en "heavy wooden door slams shut, deep low-frequency impact, tight hallway resonance" --duration 2
 ndw sfx providers      # 环境/权重自检
+# 调试：临时把中文改写成英文（不参与页面与常规链路）
+ndw --project <工程目录> sfx generate --prompt "沉重的木门被猛地关上" --duration 2 --rewrite-prompt
 ```
 
 产物：`<工程>/assets/audio/sfx/sfx_<时间戳>_<标签>_<请求哈希8>.wav` + 同名 `.json` 侧车
-（原始描述、改写后提示词、steps/cfg/seed、实测时长/采样率/耗时/峰值内存）。
+（原始英文提示词、`prompt_source`、steps/cfg/seed、实测时长/采样率/耗时/峰值内存）。
 
 ## 4. 环境与权重
 
@@ -95,13 +97,15 @@ worker 启动时也会再覆写一次，保证**完全离线**（`HF_HUB_OFFLINE
 空闲超时是配置项：全局 `sfx.idle_timeout_s`（默认 300），单个 provider 可用
 `sfx.providers[].runtime.idle_timeout_s` 覆盖（runtime 优先）。
 
-**中文改写实测（LLM 优先、词典兜底）**
+**双语落盘与运行时读取（2026-11-12 起）**
 
-- LLM 可达（本地 OpenAI 兼容 stub 验证协议）：返回 `mode=llm`，提示词为
-  `heavy wooden door slams shut with a deep low-frequency thud. Length: 8 seconds`，不再走词典。
-- LLM 不可达（本机 omlx 未启动）：`mode=dict`，输出词典结果并附中文提示
-  「LLM 改写不可用（AdapterError: omlx 不可达…），已降级为词典改写」。
-- 配置 `sfx.prompt.rewrite=dict` 或 CLI `--no-llm`：直接词典，不发网络请求。
+- 生成阶段（导演标注 `script suggest` / 手写标注解析）同时产出中文 `prompt` 与英文 `prompt_en`：
+  语法 `!sfx <kind> <ms> <position> 中文描述 || English prompt`；英文要求写清声源、材质、动作、空间感与音色，不是逐字直译。
+- `sfx-event.schema.json` 与 `director-script.schema.json#/$defs/sfx_event` 都把 `prompt_en` 列为必填；
+  缺英文时解析直接报中文错误「音效缺少英文提示词…请重新生成标注描述」，不做运行时翻译兜底。
+- 运行时 `media/sfx.py` 只读取条目 `prompt_en`（页面手填可覆盖），再用 `finalize_prompt` 追加 `Length: N seconds`；
+  侧车记录 `prompt_source=stored|manual`。
+- `rewrite_prompt`（LLM 优先、词典兜底）保留为显式调试选项：CLI `--rewrite-prompt`，页面不调用。
 
 两条已交付样例（`/Volumes/other/ndw_sfx_verify/samples/sa3_provider/`）：
 
@@ -112,12 +116,12 @@ worker 启动时也会再覆写一次，保证**完全离线**（`HF_HUB_OFFLINE
 
 ## 6. 已知限制
 
-1. **中文改写默认依赖本地 LLM（omlx）**：LLM 不可达时自动降级词典，氛围类长描述仍可能被改写得单薄，
-   此时建议用 `--prompt-en` 给完整英文；`rewrite_prompt` 已把路线与降级原因写进 CLI 输出和侧车 JSON。
+1. **英文提示词由生成阶段保证**：旧测试工程（缺 `prompt_en`）会直接报中文错误，需重新生成标注；
+   调试可用 `--rewrite-prompt` 临时改写，但氛围类长描述仍可能被改写单薄，正式链路请让标注阶段产出英文。
 2. 常驻 worker 每个 CLI 进程各起一次，模型会重复加载（约 4 s）。批量化时应复用同一 provider 实例。
 3. 尚未做 loop/seam 拼接；长环境音靠单次生成（最长 120 s）。
 4. 采样率固定 44.1 kHz，与工程 `output.sample_rate`（48 kHz）不同；接入时间轴/混音时需转码。
-5. 尚未接页面生成，`adapters/sfx.py` 仍是占位实现；下载已在设置页可用。
+5. 媒体页已接入生成（可试听、可手填英文覆盖）；`adapters/sfx.py` 仍是占位实现。
 
 ## 7. 复现步骤
 

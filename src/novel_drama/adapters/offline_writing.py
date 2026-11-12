@@ -623,7 +623,12 @@ class OfflineWritingAdapter:
                     head += "|inner_monologue"
                 lines_out.append(f"{head}：{text}")
             # 每个镜头一条环境音 + 一张关键图 + 一段动画位
-            lines_out.append(f"!sfx ambience 6000 after-line=1 {title}环境底噪")
+            # 离线实现没有 LLM 可做双语改写，这里直接给一段通用英文提示词（与中文同源产出）
+            sfx_en = (
+                "Ambient room tone background, soft air movement, distant city detail, "
+                "subtle low-frequency bed, natural stereo width"
+            )
+            lines_out.append(f"!sfx ambience 6000 after-line=1 {title}环境底噪 || {sfx_en}")
             lines_out.append(f"!visual {self._visual_prompt(scene, style)}")
             lines_out.append("!anim i2v 3000 slow_push_in 镜头缓慢推近，强化情绪")
         return "\n".join(lines_out) + "\n"

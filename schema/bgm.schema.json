@@ -36,6 +36,7 @@
             }
           },
           "mood_family": { "type": ["string", "null"], "maxLength": 30 },
+          "prompt_en": { "type": ["string", "null"], "maxLength": 1000, "description": "从 BGM 计划派生的英文提示词；手工 cue（无 plan_ref）可为空" },
           "narrative_function": { "type": ["string", "null"], "maxLength": 300 },
           "status": { "type": "string", "enum": ["planned", "asset_ready", "rendered", "missing"] },
           "mode": {

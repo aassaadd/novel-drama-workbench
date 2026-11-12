@@ -106,6 +106,7 @@ def _plans(store: ProjectStore, chapter_id: str) -> list[dict]:
             {
                 "id": plan.get("id"),
                 "name": plan.get("name") or plan.get("id"),
+                "prompt_en": plan.get("prompt_en"),
                 "duration_s": round(duration, 1),
                 "has_dialogue": has_dialogue,
                 "mode": decision["mode"],
@@ -184,7 +185,8 @@ def register_bgm_routes(app, config_path: str | None = None) -> None:
         """生成一段配乐并按档位处理。
 
         参数:
-            body: `{path, chapter, prompt, duration?, mode?, plan_id?, seed?, name?, start_ms?}`；
+            body: `{path, chapter, prompt, prompt_en?, duration?, mode?, plan_id?, seed?, name?, start_ms?}`；
+            prompt_en 为页面手填英文覆盖；为空时读取关联计划的 prompt_en；
             mode 取值 auto / narrative / bed。
 
         返回:
@@ -219,6 +221,7 @@ def register_bgm_routes(app, config_path: str | None = None) -> None:
                 requested_normalize=body.get("normalize") if isinstance(body.get("normalize"), bool) else None,
                 requested_trim=body.get("trim_edges") if isinstance(body.get("trim_edges"), bool) else None,
                 plan_id=body.get("plan_id"),
+                prompt_en=body.get("prompt_en"),
                 seed=body.get("seed"),
                 name=body.get("name"),
                 start_ms=int(body.get("start_ms") or 0),

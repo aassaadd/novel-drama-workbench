@@ -1512,9 +1512,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     # 音效：模型生成（Stable Audio 3）+ provider 自检，挂在已有的 sfx 命令下
     p_sub = media_subs["sfx"]
-    q = p_sub.add_parser("generate", help="按中文描述生成音效并落盘到 assets/audio/sfx/")
-    q.add_argument("--prompt", help="中文（或英文）音效描述；与 --prompt-en 至少给一个")
-    q.add_argument("--prompt-en", dest="prompt_en", help="直接给英文描述，跳过中→英改写")
+    q = p_sub.add_parser("generate", help="按英文提示词生成音效并落盘到 assets/audio/sfx/")
+    q.add_argument("--prompt-en", dest="prompt_en", help="英文提示词（标注阶段产出；常规路径必填）")
+    q.add_argument("--prompt", help="中文描述；仅与 --rewrite-prompt 搭配做临时调试")
+    q.add_argument("--rewrite-prompt", action="store_true", dest="rewrite_prompt",
+                   help="调试选项：把 --prompt 中文临时改写成英文（不参与常规链路）")
     q.add_argument("--duration", type=float, required=True, help="时长秒数（1~120；10 秒内热推理约 1 秒）")
     q.add_argument("--negative", help="负面描述（避免出现的内容）")
     q.add_argument("--name", help="文件名标签；缺省取英文描述前几个词")
@@ -1522,7 +1524,7 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--cfg", type=float, help="CFG 值；缺省用 provider 配置（1.0）")
     q.add_argument("--seed", type=int, help="随机种子；缺省随机并写回元数据")
     q.add_argument("--provider", help="指定音效 provider；缺省取 sfx.default_provider_id")
-    q.add_argument("--no-llm", action="store_true", help="跳过 LLM，直接用词典改写中文描述")
+    q.add_argument("--no-llm", action="store_true", help="仅与 --rewrite-prompt 搭配：跳过 LLM，直接用词典改写")
     q.set_defaults(func=cmd_sfx_generate)
     q = p_sub.add_parser("providers", help="列出音效 provider 与可用性")
     q.set_defaults(func=cmd_sfx_providers)
@@ -1552,8 +1554,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_sub = p.add_subparsers(dest="action", required=True)
     q = p_sub.add_parser("generate", help="生成配乐（默认本地 Stable Audio Open，可切 ACE-Step）")
     q.add_argument("--chapter", required=True)
-    q.add_argument("--prompt", help="中文音乐描述（风格 / 情绪 / 配器）；给 --prompt-en 时可省略")
-    q.add_argument("--prompt-en", dest="prompt_en", help="直接给英文描述，跳过中文改写（本地 provider）")
+    q.add_argument("--prompt", help="中文音乐描述；仅与 --rewrite-prompt 搭配做临时调试")
+    q.add_argument("--prompt-en", dest="prompt_en", help="英文提示词（标注阶段产出；本地 provider 常规路径用它）")
+    q.add_argument("--rewrite-prompt", action="store_true", dest="rewrite_prompt",
+                   help="调试选项：把 --prompt 中文临时改写成英文（不参与常规链路）")
     q.add_argument("--provider", choices=["local", "comfyui"],
                    help="生成后端：local=项目内 Stable Audio Open（≤47 秒），comfyui=ACE-Step（10~180 秒）；缺省读配置")
     q.add_argument("--duration", type=float, help="时长秒数（local 5~47；comfyui 10~180；缺省取计划时长，否则 40）")
@@ -1567,7 +1571,7 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--seed", type=int, help="随机种子；为空时按章节 + 档位派生")
     q.add_argument("--steps", type=int, help="本地 provider 采样步数（缺省读配置，默认 100）")
     q.add_argument("--cfg", type=float, help="本地 provider 的 cfg（缺省读配置，默认 7.0）")
-    q.add_argument("--no-llm", action="store_true", dest="no_llm", help="中文描述只用词典改写，不调用 LLM")
+    q.add_argument("--no-llm", action="store_true", dest="no_llm", help="仅与 --rewrite-prompt 搭配：跳过 LLM，只用词典改写")
     q.add_argument("--name", help="cue 展示名称；为空时取计划名或描述前 16 字")
     q.add_argument("--start-ms", type=int, default=0, dest="start_ms")
     q.add_argument("--no-cue", action="store_true", dest="no_cue", help="只生成文件，不写 cue")

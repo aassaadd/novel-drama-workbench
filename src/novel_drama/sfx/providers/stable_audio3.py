@@ -127,6 +127,10 @@ class StableAudio3Provider(BaseSfxProvider):
 
     # ---------- 生成 ----------
 
+    def is_loaded(self) -> bool:
+        """常驻 worker 是否还活着（用于页面估算冷/热启动耗时）。"""
+        return self._proc is not None and self._proc.poll() is None
+
     def generate(self, request: SfxRequest) -> SfxResult:
         """生成一段音效并原子落盘。
 

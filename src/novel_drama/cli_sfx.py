@@ -10,7 +10,7 @@ from pathlib import Path
 
 from .cli_common import EXIT_OK, _emit, _resolve_store
 from .config import AppConfig
-from .sfx.prompting import rewrite_prompt
+from .sfx.prompting import finalize_prompt, rewrite_prompt
 from .sfx.registry import build_providers, pick_provider
 from .sfx.types import SfxRequest
 
@@ -37,27 +37,36 @@ def _slug(text: str, fallback: str = "sfx") -> str:
 
 
 def cmd_sfx_generate(args, config: AppConfig) -> int:
-    """按中文/英文描述生成一条音效，落盘到工程 `assets/audio/sfx/`。
+    """按英文提示词生成一条音效，落盘到工程 `assets/audio/sfx/`。
 
     参数:
-        args: 已解析参数（prompt / prompt_en / duration / steps / cfg / seed / provider / name）。
+        args: 已解析参数（prompt / prompt_en / rewrite_prompt / duration / steps /
+            cfg / seed / provider / name）。
         config: 本机配置。
 
     返回:
         退出码。
     """
     store = _resolve_store(args, config)
-    if not (args.prompt or args.prompt_en):
-        raise ValueError("必须提供 --prompt（中文描述）或 --prompt-en（英文描述）")
     duration = float(args.duration)
     if not (MIN_SECONDS <= duration <= MAX_SECONDS):
         raise ValueError(f"时长必须在 {MIN_SECONDS}~{MAX_SECONDS} 秒之间：{duration}")
 
+    outcome = None
     if args.prompt_en:
-        outcome = rewrite_prompt(args.prompt_en, duration)
-    else:
+        # 常规路径：直接用标注阶段落盘的英文提示词，只补时长后缀
+        final_prompt = finalize_prompt(args.prompt_en, duration)
+    elif getattr(args, "rewrite_prompt", False):
+        if not args.prompt:
+            raise ValueError("--rewrite-prompt 需要同时给 --prompt（中文描述）")
+        # 显式调试选项：临时把中文改写成英文；不参与页面与常规链路
         outcome = rewrite_prompt(args.prompt, duration, config=config, allow_llm=not args.no_llm)
-    final_prompt = outcome.prompt
+        final_prompt = outcome.prompt
+    else:
+        raise ValueError(
+            "缺少 --prompt-en：英文提示词应在标注阶段与中文同源产出；"
+            "临时调试可加 --rewrite-prompt 用中文改写"
+        )
 
     providers = build_providers(config)
     pid, provider = pick_provider(config, providers, args.provider)
@@ -92,9 +101,10 @@ def cmd_sfx_generate(args, config: AppConfig) -> int:
         "provider_id": pid,
         "raw_prompt": args.prompt or args.prompt_en,
         "prompt": final_prompt,
-        "rewritten": outcome.changed,
-        "rewrite_mode": outcome.mode,
-        "rewrite_note": outcome.note,
+        "prompt_source": "prompt_en" if args.prompt_en else "debug-rewrite",
+        "rewritten": bool(outcome.changed) if outcome else False,
+        "rewrite_mode": outcome.mode if outcome else None,
+        "rewrite_note": outcome.note if outcome else None,
         "requested_duration_s": duration,
         "negative_prompt": args.negative,
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
@@ -102,12 +112,17 @@ def cmd_sfx_generate(args, config: AppConfig) -> int:
     meta_path = audio_path.with_suffix(".json")
     meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    mode_text = {"llm": "LLM 改写", "dict": "词典改写", "passthrough": "原样透传"}.get(outcome.mode, outcome.mode)
+    if outcome is None:
+        mode_text = "已存英文提示词"
+    else:
+        mode_text = {"llm": "LLM 改写（调试）", "dict": "词典改写（调试）", "passthrough": "原样透传"}.get(
+            outcome.mode, outcome.mode
+        )
     lines = [
         f"音效已生成：{audio_path.name}",
         f"提示词（{mode_text}）：{final_prompt}",
     ]
-    if outcome.note:
+    if outcome and outcome.note:
         lines.append(f"提示：{outcome.note}")
     lines += [
         f"参数：{result.steps} 步 / cfg {result.cfg} / seed {result.seed} / device {provider.spec.defaults.get('device', 'mps')}",
