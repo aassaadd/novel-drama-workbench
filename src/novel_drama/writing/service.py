@@ -125,6 +125,7 @@ def generate_outline(
     binding: str = "auto",
     multi_turn: bool = False,
     acts_per_round: int = 1,
+    on_progress=None,
 ) -> dict:
     """生成幕/章/节拍大纲并写入设定库。
 
@@ -139,6 +140,7 @@ def generate_outline(
         binding: auto=把节拍绑定到已有人物；none=不改动角色引用。
         multi_turn: True 时按幕分批调用 `emit_act`，False 走原单轮 `emit_outline`。
         acts_per_round: 每轮计划生成的幕数（默认 1）；每次工具调用产出一幕。
+        on_progress: 进度回调（batch/chars 事件）；仅页面流式接口传入。
 
     返回:
         {"acts": [...], "chapters": N, "beats": M, "provider": name, "settings_revision": r,
@@ -184,11 +186,20 @@ def generate_outline(
         },
     )
     outline_rounds = 1
+    progress_state = {"chars": 0}
     if multi_turn:
-        raw_acts = _generate_outline_acts(adapter, req, acts, chapters_per_act, acts_per_round)
+        raw_acts = _generate_outline_acts(
+            adapter, req, acts, chapters_per_act, acts_per_round, on_progress=on_progress
+        )
         outline_rounds = (max(1, int(acts)) + max(1, int(acts_per_round)) - 1) // max(1, int(acts_per_round))
     else:
-        payload = _generate_json(adapter, req, "outline")
+        _progress(on_progress, {"type": "batch", "index": 1, "total": 1})
+        payload = _generate_json(
+            adapter,
+            req,
+            "outline",
+            on_delta=_char_delta(progress_state, on_progress, 1, 1),
+        )
         raw_acts = payload.get("acts")
     if not isinstance(raw_acts, list) or not raw_acts:
         raise AdapterError(ErrorCode.INVALID_INPUT, "写作适配器返回的大纲为空：acts 必须是非空数组")
@@ -251,7 +262,9 @@ def generate_outline(
     }
 
 
-def _generate_outline_acts(adapter, req: TextGenRequest, acts: int, chapters_per_act: int, acts_per_round: int) -> list[dict]:
+def _generate_outline_acts(
+    adapter, req: TextGenRequest, acts: int, chapters_per_act: int, acts_per_round: int, on_progress=None
+) -> list[dict]:
     """按幕分批调用 `emit_act`，合并为完整幕列表。
 
     每轮的 user 消息追加在固定首条 user 之后：先说明本轮要生成第几幕，
@@ -275,9 +288,11 @@ def _generate_outline_acts(adapter, req: TextGenRequest, acts: int, chapters_per
     base_messages = list(req.messages)
     base_metadata = dict(req.metadata or {})
     collected: list[dict] = []
+    progress_state = {"chars": 0}
     for act_index in range(total):
         start = act_index + 1
         end = min(total, (act_index // per_round + 1) * per_round)
+        _progress(on_progress, {"type": "batch", "index": start, "total": total})
         lines = []
         if end > start:
             lines.append(f"请生成第 {start}–{end} 幕中的第 {start} 幕（共 {total} 幕，每幕 {chapters_per_act} 章）。")
@@ -295,7 +310,12 @@ def _generate_outline_acts(adapter, req: TextGenRequest, acts: int, chapters_per
         request.max_tokens = _tool_max_tokens(config, "act", chapters_per_act * beats_per_chapter)
         # 离线适配器据此从确定性整本大纲里挑出对应幕
         request.metadata = dict(base_metadata, act_offset=act_index)
-        payload = _generate_json(adapter, request, "act")
+        payload = _generate_json(
+            adapter,
+            request,
+            "act",
+            on_delta=_char_delta(progress_state, on_progress, start, total),
+        )
         act = payload.get("act") if isinstance(payload, dict) else None
         if not isinstance(act, dict) and isinstance(payload, dict):
             # 最小兼容：模型仍按整本大纲返回 {"acts": [...]}
@@ -1377,13 +1397,14 @@ def _gen_tool(step: str | None) -> dict | None:
     return None
 
 
-def _generate_json(adapter, req: TextGenRequest, step: str) -> dict:
+def _generate_json(adapter, req: TextGenRequest, step: str, on_delta=None) -> dict:
     """用 LLM 工具调用产出结构化参数（不再解析自由文本）。
 
     参数:
         adapter: 写作适配器（需实现 generate_tool）。
         req: 文本生成请求。
         step: 生成步骤（premise/style/world/worlds/character/characters），决定工具 schema。
+        on_delta: 接收工具调用增量文本的回调（用于页面进度），可为 None。
 
     返回:
         工具参数解析后的 dict。
@@ -1398,7 +1419,50 @@ def _generate_json(adapter, req: TextGenRequest, step: str) -> dict:
     generate_tool = getattr(adapter, "generate_tool", None)
     if generate_tool is None:
         raise ValueError(f"写作适配器不支持工具调用: {type(adapter).__name__}")
-    return generate_tool(req, tool)
+    if on_delta is None:
+        return generate_tool(req, tool)
+    return generate_tool(req, tool, on_delta=on_delta)
+
+
+def _progress(on_progress, event: dict) -> None:
+    """安全地上报生成进度（进度通道异常不影响生成本身）。
+
+    参数:
+        on_progress: 进度回调，可为 None。
+        event: 事件字典，`type` 取 batch/chars。
+
+    返回:
+        无。
+    """
+    if on_progress is None:
+        return
+    try:
+        on_progress(event)
+    except Exception:  # 进度是旁路信息，不允许打断生成
+        return
+
+
+def _char_delta(state: dict, on_progress, index: int, total: int):
+    """构造统计接收字数的增量回调。
+
+    参数:
+        state: 累积状态 `{"chars": n}`。
+        on_progress: 进度回调。
+        index: 当前批次序号（从 1 开始）。
+        total: 批次总数。
+
+    返回:
+        `(text) -> None` 回调。
+    """
+
+    def on_delta(text):
+        """累计增量并上报 chars 事件。"""
+        if not text:
+            return
+        state["chars"] = int(state.get("chars") or 0) + len(str(text))
+        _progress(on_progress, {"type": "chars", "chars": state["chars"], "batch": index, "total": total})
+
+    return on_delta
 
 
 def _check_text(value, limit: int, label: str, required: bool = False) -> str:
@@ -1771,6 +1835,7 @@ def generate_worlds(
     overwrite: bool = False,
     brief: str | None = None,
     batch_size: int | None = None,
+    on_progress=None,
 ) -> dict:
     """一次生成 1..6 条世界条目（只返回预览，不落盘）。
 
@@ -1781,6 +1846,7 @@ def generate_worlds(
         overwrite: True 表示调用方打算覆盖已有世界；本函数仍只预览，仅在返回值里标记。
         brief: 用户补充要求（拼进提示词与请求元信息）。
         batch_size: 每批条数；None 时取 `writing.multi_turn.batch_size_worlds`（默认 2）。
+        on_progress: 进度回调（batch/chars 事件）；仅页面流式接口传入。
 
     返回:
         {"step": "worlds", "worlds": [...], "count", "brief", "overwrite", "provider", "batches"}；
@@ -1844,6 +1910,7 @@ def generate_worlds(
 
     rows: list = []
     batches = 1
+    progress_state = {"chars": 0}
     if wanted and wanted > batch:
         # 数量超过单批上限：按批生成，每批在固定前缀后追加本批要求与已生成名单
         batches = (wanted + batch - 1) // batch
@@ -1852,13 +1919,20 @@ def generate_worlds(
             take = min(batch, wanted - len(rows))
             if take <= 0:
                 break
+            progress_index = index + 1
+            _progress(on_progress, {"type": "batch", "index": progress_index, "total": batches})
             lines = [f"本批生成 {take} 条世界（第 {index + 1}/{batches} 批）。"]
             if names:
                 lines.append("已生成世界（不要重复名称）：" + "、".join(names))
             batch_req = replace(req, messages=list(req.messages) + [Message("user", "\n".join(lines))])
             batch_req.max_tokens = _tool_max_tokens(config, "worlds", take)
             batch_req.metadata = dict(req.metadata or {}, count=take)
-            batch_payload = _generate_json(adapter, batch_req, "worlds")
+            batch_payload = _generate_json(
+                adapter,
+                batch_req,
+                "worlds",
+                on_delta=_char_delta(progress_state, on_progress, progress_index, batches),
+            )
             batch_rows = batch_payload.get("worlds")
             if isinstance(batch_rows, dict):
                 batch_rows = [batch_rows]
@@ -1874,7 +1948,13 @@ def generate_worlds(
                     names.append(name)
                 rows.append(row)
     else:
-        payload = _generate_json(adapter, req, "worlds")
+        _progress(on_progress, {"type": "batch", "index": 1, "total": 1})
+        payload = _generate_json(
+            adapter,
+            req,
+            "worlds",
+            on_delta=_char_delta(progress_state, on_progress, 1, 1),
+        )
         rows = payload.get("worlds")
         if isinstance(rows, dict):
             rows = [rows]
@@ -1974,6 +2054,7 @@ def generate_characters(
     count: int | None = None,
     brief: str | None = None,
     batch_size: int | None = None,
+    on_progress=None,
 ) -> dict:
     """生成人物设定（只返回结果，不写盘）。
 
@@ -1983,6 +2064,7 @@ def generate_characters(
         count: 期望人物总数；为空时由模型按需求自行判断需要几个角色。
         brief: 用户补充要求（拼进提示词，离线实现会写进人物小传/性格）。
         batch_size: 每批条数；None 时取 `writing.multi_turn.batch_size_characters`（默认 5）。
+        on_progress: 进度回调（batch/chars 事件）；仅页面流式接口传入。
 
     返回:
         {"characters": [{name, role, gender, age_range, personality, background,
@@ -2040,6 +2122,7 @@ def generate_characters(
     stock_rows: list[dict] = []
     narrator_profile_raw: dict | None = None
     last_payload: dict = {}
+    progress_state = {"chars": 0}
     if total > batch:
         # 数量超过单批上限：按批生成，每批在固定前缀后追加本批要求与已生成名单
         batches = (total + batch - 1) // batch
@@ -2049,13 +2132,20 @@ def generate_characters(
             take = min(batch, total - len(rows))
             if take <= 0:
                 break
+            progress_index = index + 1
+            _progress(on_progress, {"type": "batch", "index": progress_index, "total": batches})
             lines = [f"本批生成 {take} 条人物（第 {index + 1}/{batches} 批）。"]
             if names:
                 lines.append("已生成人物（不要重复姓名）：" + "、".join(names))
             batch_req = replace(req, messages=list(req.messages) + [Message("user", "\n".join(lines))])
             batch_req.max_tokens = _tool_max_tokens(config, "characters", take)
             batch_req.metadata = dict(req.metadata or {}, count=take)
-            batch_payload = _generate_json(adapter, batch_req, "characters")
+            batch_payload = _generate_json(
+                adapter,
+                batch_req,
+                "characters",
+                on_delta=_char_delta(progress_state, on_progress, progress_index, batches),
+            )
             last_payload = batch_payload
             if not stock_rows and isinstance(batch_payload.get("stock_characters"), list):
                 stock_rows = [row for row in batch_payload["stock_characters"] if isinstance(row, dict)]
@@ -2074,7 +2164,13 @@ def generate_characters(
                     names.append(name)
                 rows.append(row)
     else:
-        payload = _generate_json(adapter, req, "characters")
+        _progress(on_progress, {"type": "batch", "index": 1, "total": 1})
+        payload = _generate_json(
+            adapter,
+            req,
+            "characters",
+            on_delta=_char_delta(progress_state, on_progress, 1, 1),
+        )
         last_payload = payload
         rows = payload.get("characters")
         if isinstance(payload.get("stock_characters"), list):

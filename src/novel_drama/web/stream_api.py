@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import queue
 import threading
+import time
 
 from fastapi import HTTPException
 from fastapi.responses import StreamingResponse
@@ -26,7 +27,13 @@ from ..adapters.base import AdapterError
 from ..config import load_config
 from ..store import ProjectStore
 from ..writing.continuation import continue_chapter
-from ..writing.service import generate_chapter
+from ..writing.service import (
+    DEFAULT_CHAPTER_WORDS,
+    generate_chapter,
+    generate_characters,
+    generate_outline,
+    generate_worlds,
+)
 
 #: SSE 响应头：禁用缓存与反向代理缓冲，保证逐条到达浏览器
 _SSE_HEADERS = {
@@ -139,6 +146,72 @@ def _stream_response(task) -> StreamingResponse:
     return StreamingResponse(events_iter(), media_type="text/event-stream", headers=_SSE_HEADERS)
 
 
+def _progress_response(task) -> StreamingResponse:
+    """在后台线程执行结构化生成，把 batch/chars 进度与最终结果转成 SSE。
+
+    与 `_stream_response` 的区别：任务通过 `on_progress(event)` 上报批次与
+    已接收字数，页面据此显示「第 k/N 批 · 已接收 X 字」。
+
+    参数:
+        task: `task(on_progress) -> dict`。
+
+    返回:
+        StreamingResponse（text/event-stream）。
+    """
+    events: queue.Queue = queue.Queue()
+    stop = threading.Event()
+    throttle = {"chars": 0, "at": 0.0}
+
+    def on_progress(event: dict) -> None:
+        """接收进度事件；chars 做轻量合并，避免刷屏。"""
+        if stop.is_set():
+            raise _Cancelled()
+        if not isinstance(event, dict):
+            return
+        kind = str(event.get("type") or "progress")
+        if kind == "chars":
+            chars = int(event.get("chars") or 0)
+            now = time.monotonic()
+            # 字数增长不足 32 且距上次不足 0.2 秒时丢弃，页面仍能保持 5 次/秒左右
+            if chars - throttle["chars"] < 32 and now - throttle["at"] < 0.2:
+                return
+            throttle["chars"] = chars
+            throttle["at"] = now
+        events.put((kind, event))
+
+    def worker() -> None:
+        """后台生成线程。"""
+        try:
+            result = task(on_progress)
+            events.put(("done", {"result": result}))
+        except _Cancelled:
+            pass
+        except AdapterError as exc:
+            events.put(("error", {"message": f"生成失败：{exc.message}"}))
+        except Exception as exc:  # 其它异常统一转成中文可读错误
+            events.put(("error", {"message": f"生成失败：{_error_message(exc)}"}))
+        finally:
+            events.put(None)
+
+    thread = threading.Thread(target=worker, name="ndw-sse-progress", daemon=True)
+    thread.start()
+
+    def events_iter():
+        """按队列顺序产出 SSE 事件。"""
+        try:
+            yield _sse("start", {"ok": True})
+            while True:
+                item = events.get()
+                if item is None:
+                    return
+                event, data = item
+                yield _sse(event, data)
+        finally:
+            stop.set()
+
+    return StreamingResponse(events_iter(), media_type="text/event-stream", headers=_SSE_HEADERS)
+
+
 def register_stream_routes(app, config_path: str | None = None) -> None:
     """挂载页面实时流接口。
 
@@ -213,3 +286,86 @@ def register_stream_routes(app, config_path: str | None = None) -> None:
             )
 
         return _stream_response(task)
+
+    @app.post("/api/ui/characters/generate/stream")
+    def ui_characters_generate_stream(body: dict) -> StreamingResponse:
+        """人物生成（流式进度）：batch/chars/done，不改动原有批量与合并逻辑。
+
+        参数:
+            body: `{path, count?, brief?}`。
+
+        返回:
+            SSE：start → batch/chars* → done(result) / error(message)。
+        """
+        store = _store(body.get("path"))
+        config = load_config(config_path)
+
+        def task(on_progress):
+            """调用 generate_characters 并透出批次与接收字数。"""
+            return generate_characters(
+                store,
+                config,
+                count=body.get("count"),
+                brief=body.get("brief"),
+                on_progress=on_progress,
+            )
+
+        return _progress_response(task)
+
+    @app.post("/api/ui/worlds/generate/stream")
+    def ui_worlds_generate_stream(body: dict) -> StreamingResponse:
+        """世界设定生成（流式进度）：batch/chars/done。
+
+        参数:
+            body: `{path, count?, brief?, overwrite?}`。
+
+        返回:
+            SSE：start → batch/chars* → done(result) / error(message)。
+        """
+        store = _store(body.get("path"))
+        config = load_config(config_path)
+
+        def task(on_progress):
+            """调用 generate_worlds 并透出批次与接收字数。"""
+            return generate_worlds(
+                store,
+                config,
+                count=body.get("count"),
+                overwrite=bool(body.get("overwrite")),
+                brief=body.get("brief"),
+                on_progress=on_progress,
+            )
+
+        return _progress_response(task)
+
+    @app.post("/api/ui/outline/generate/stream")
+    def ui_outline_generate_stream(body: dict) -> StreamingResponse:
+        """大纲生成（流式进度）：batch/chars/done。
+
+        参数:
+            body: `{path, acts?, chapters_per_act?, beats_per_chapter?, words?, binding?,
+                multi_turn?, acts_per_round?, dry_run?}`。
+
+        返回:
+            SSE：start → batch/chars* → done(result) / error(message)。
+        """
+        store = _store(body.get("path"))
+        config = load_config(config_path)
+
+        def task(on_progress):
+            """调用 generate_outline 并透出批次与接收字数。"""
+            return generate_outline(
+                store,
+                config,
+                acts=int(body.get("acts") or 3),
+                chapters_per_act=int(body.get("chapters_per_act") or 3),
+                beats_per_chapter=int(body.get("beats_per_chapter") or 3),
+                chapter_words=int(body.get("words") or DEFAULT_CHAPTER_WORDS),
+                dry_run=bool(body.get("dry_run")),
+                binding=str(body.get("binding") or "auto"),
+                multi_turn=bool(body.get("multi_turn")),
+                acts_per_round=int(body.get("acts_per_round") or 1),
+                on_progress=on_progress,
+            )
+
+        return _progress_response(task)

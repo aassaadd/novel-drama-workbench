@@ -1054,7 +1054,13 @@ class OmlxWritingAdapter:
                 finish = str(choices[0]["finish_reason"])
         return TextGenResult(text="".join(parts), finish_reason=finish, model=model, usage=usage, raw={"stream": True})
 
-    def generate_tool(self, req: TextGenRequest, tool: dict, timeout_s: float | None = None) -> dict:
+    def generate_tool(
+        self,
+        req: TextGenRequest,
+        tool: dict,
+        timeout_s: float | None = None,
+        on_delta=None,
+    ) -> dict:
         """以工具调用（function calling）方式生成结构化结果。
 
         用 `tool_choice` 强制模型只调用指定函数，模型参数即结构化结果，
@@ -1065,6 +1071,8 @@ class OmlxWritingAdapter:
             tool: 单个工具定义，形如
                 {"type": "function", "function": {"name", "description", "parameters"}}。
             timeout_s: 覆盖默认超时；结构化输出较长可放宽。
+            on_delta: 接收增量文本的回调 `(text) -> None`；用于页面显示「已接收 N 字」，
+                流式时为 content/arguments 分片，非流式时一次给出全文。
 
         返回:
             工具参数解析后的 dict（等同 tool_calls[0].function.arguments）。
@@ -1092,12 +1100,36 @@ class OmlxWritingAdapter:
 
         if req.stream:
             # 流式：tool_calls 会按 index 分片下发，先拼接 name/arguments 再交给同一套解析逻辑
-            data = self._aggregate_tool_stream(payload)
+            data = self._aggregate_tool_stream(payload, on_delta=on_delta)
         else:
             data = self._request_json("POST", "/v1/chat/completions", payload, timeout_s=timeout_s)
+            if on_delta is not None:
+                self._emit_tool_text(data, on_delta)
         return self._tool_result(data, name, stream=bool(req.stream), required=required)
 
-    def _aggregate_tool_stream(self, payload: dict) -> dict:
+    @staticmethod
+    def _emit_tool_text(data: dict, on_delta) -> None:
+        """非流式响应一次性把 content 与 tool_calls 参数交给进度回调。
+
+        参数:
+            data: 非流式响应。
+            on_delta: 增量回调。
+
+        返回:
+            无。
+        """
+        choices = data.get("choices") or []
+        if not choices:
+            return
+        message = choices[0].get("message") or {}
+        pieces = [str(message.get("content") or "")]
+        for call in message.get("tool_calls") or []:
+            pieces.append(str(((call or {}).get("function") or {}).get("arguments") or ""))
+        text = "".join(pieces)
+        if text:
+            on_delta(text)
+
+    def _aggregate_tool_stream(self, payload: dict, on_delta=None) -> dict:
         """把流式 tool_calls 分片拼接成非流式响应结构。
 
         不同实现会把 `function.name` 与 `function.arguments` 拆成多片，
@@ -1128,6 +1160,8 @@ class OmlxWritingAdapter:
                 # 不支持的模型会把 JSON 写在 content 里，必须累计下来供兜底解析
                 if delta.get("content"):
                     contents.append(str(delta["content"]))
+                    if on_delta is not None:
+                        on_delta(str(delta["content"]))
                 for shard in delta.get("tool_calls") or []:
                     if not isinstance(shard, dict):
                         continue
@@ -1156,6 +1190,8 @@ class OmlxWritingAdapter:
                         if isinstance(current, dict):
                             current = json.dumps(current, ensure_ascii=False)
                         slot["function"]["arguments"] = current + str(arguments)
+                        if on_delta is not None:
+                            on_delta(str(arguments))
         message: dict = {"role": "assistant", "content": "".join(contents)}
         if slots:
             message["tool_calls"] = [slots[key] for key in sorted(slots)]
