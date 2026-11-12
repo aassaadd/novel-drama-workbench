@@ -1216,6 +1216,32 @@ _STOCK_CHARACTER_TOOL_SCHEMA = {
     "required": ["name", "stock"],
 }
 
+#: 人物名单参数 schema（两阶段生成的第一阶段：只出名单，不写详情）
+_CHARACTER_PLAN_TOOL_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "characters": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "姓名，60 字以内；不要与已有角色重名"},
+                    "role": {
+                        "type": "string",
+                        "enum": list(ROLE_OPTIONS),
+                        "description": "protagonist=主角，antagonist=反派，supporting=配角，minor=龙套",
+                    },
+                    "one_line": {"type": "string", "description": "一句话定位（身份 + 在故事里的作用），40 字以内"},
+                    "main": {"type": "boolean", "description": "是否主要角色（主要角色会进入候选列表）"},
+                },
+                "required": ["name", "role", "one_line"],
+            },
+        },
+        "basis": {"type": "string", "description": "名单依据：篇幅、章节量、已有角色与题材需要"},
+    },
+    "required": ["characters"],
+}
+
 #: 梗概参数 schema
 _PREMISE_TOOL_SCHEMA = {
     "type": "object",
@@ -1367,6 +1393,15 @@ def _gen_tool(step: str | None) -> dict | None:
         return {
             "type": "function",
             "function": {"name": "emit_character", "description": "输出一个完整人物设定", "parameters": _CHARACTER_TOOL_SCHEMA},
+        }
+    if step == "character_plan":
+        return {
+            "type": "function",
+            "function": {
+                "name": "emit_character_plan",
+                "description": "输出人物名单：每人姓名、定位与一句话简介，不写详细设定",
+                "parameters": _CHARACTER_PLAN_TOOL_SCHEMA,
+            },
         }
     if step == "characters":
         return {
@@ -2189,38 +2224,11 @@ def generate_characters(
     characters: list[dict] = []
     seen: set[str] = set()
     for index, row in enumerate(rows):
-        if not isinstance(row, dict):
-            raise ValueError(f"第 {index + 1} 个人物必须是对象")
-        name = _check_text(row.get("name"), 60, f"第 {index + 1} 个人物姓名", required=True)
+        entry = _clean_character_row(row, index)
+        name = entry["name"]
         if name in seen:
             raise ValueError(f"人物姓名重复: {name}")
         seen.add(name)
-        role = _normalize_choice(row.get("role"), ROLE_OPTIONS) or "supporting"
-        gender = _normalize_choice(row.get("gender"), GENDER_OPTIONS) or "unknown"
-        relationships = row.get("relationships") or {}
-        if not isinstance(relationships, dict):
-            relationships = {}
-        entry = {
-            "name": name,
-            "role": role,
-            "gender": gender,
-            "age_range": _check_text(row.get("age_range"), 40, f"人物 {name} 的年龄区间") or None,
-            "personality": _clean_str_list(row.get("personality"), 120, f"人物 {name} 的性格"),
-            "background": _check_text(row.get("background"), 2000, f"人物 {name} 的背景"),
-            "appearance_prompt": _check_text(row.get("appearance_prompt"), 2000, f"人物 {name} 的外貌提示词"),
-            "negative_prompt": _check_text(row.get("negative_prompt"), 1000, f"人物 {name} 的负向提示词"),
-            "relationships": {
-                _check_text(key, 60, f"人物 {name} 的关系对象", required=True): _check_text(note, 500, f"人物 {name} 的关系备注")
-                for key, note in relationships.items()
-            },
-        }
-        profile = _clean_voice_profile(row.get("voice_profile"))
-        if profile:
-            entry["voice_profile"] = _attach_profile_source(entry, profile)
-        stock = _clean_stock(row.get("stock")) if role == "minor" else None
-        if stock:
-            entry["stock"] = stock
-            entry["name"] = _stock_display_name(entry["name"], stock["label"])
         characters.append(entry)
 
     stock_characters = _build_stock_characters(stock_rows, seen)
@@ -2243,9 +2251,53 @@ def generate_characters(
     }
 
 
+def _clean_character_row(row, index: int) -> dict:
+    """清洗单个 LLM 人物条目（重名由调用方判断）。
+
+    参数:
+        row: 模型返回的单个角色对象。
+        index: 该角色在本次结果中的序号（从 0 开始，用于错误提示）。
+
+    返回:
+        清洗后的角色 dict（字段与 characters.json 对齐）。
+
+    异常:
+        ValueError: 条目不是对象或必填字段缺失。
+    """
+    if not isinstance(row, dict):
+        raise ValueError(f"第 {index + 1} 个人物必须是对象")
+    name = _check_text(row.get("name"), 60, f"第 {index + 1} 个人物姓名", required=True)
+    role = _normalize_choice(row.get("role"), ROLE_OPTIONS) or "supporting"
+    gender = _normalize_choice(row.get("gender"), GENDER_OPTIONS) or "unknown"
+    relationships = row.get("relationships") or {}
+    if not isinstance(relationships, dict):
+        relationships = {}
+    entry = {
+        "name": name,
+        "role": role,
+        "gender": gender,
+        "age_range": _check_text(row.get("age_range"), 40, f"人物 {name} 的年龄区间") or None,
+        "personality": _clean_str_list(row.get("personality"), 120, f"人物 {name} 的性格"),
+        "background": _check_text(row.get("background"), 2000, f"人物 {name} 的背景"),
+        "appearance_prompt": _check_text(row.get("appearance_prompt"), 2000, f"人物 {name} 的外貌提示词"),
+        "negative_prompt": _check_text(row.get("negative_prompt"), 1000, f"人物 {name} 的负向提示词"),
+        "relationships": {
+            _check_text(key, 60, f"人物 {name} 的关系对象", required=True): _check_text(note, 500, f"人物 {name} 的关系备注")
+            for key, note in relationships.items()
+        },
+    }
+    profile = _clean_voice_profile(row.get("voice_profile"))
+    if profile:
+        entry["voice_profile"] = _attach_profile_source(entry, profile)
+    stock = _clean_stock(row.get("stock")) if role == "minor" else None
+    if stock:
+        entry["stock"] = stock
+        entry["name"] = _stock_display_name(entry["name"], stock["label"])
+    return entry
+
+
 _VOICE_PROFILE_TEXT_LIMITS = {
     "voice_summary": 300,
-    "summary": 300,
     "age_range": 40,
     "age_feel": 20,
     "pitch": 20,

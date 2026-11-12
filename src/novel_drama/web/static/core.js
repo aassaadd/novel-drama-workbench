@@ -268,30 +268,34 @@ function formatChars(n) {
 }
 
 /* 新建一轮生成进度状态（批次与已接收字数）。
- * 返回：{batch, total, chars}。
+ * 返回：{batch, total, chars, name}。
  */
 function progressInit() {
-  return { batch: 0, total: 0, chars: 0 };
+  return { batch: 0, total: 0, chars: 0, name: "" };
 }
 
 /* 应用一条进度事件并生成文案；不含「已用时」，由蒙版统一追加。
  * 参数：state progressInit() 返回的状态（就地更新）；event 事件对象
- *       （batch: {index,total}，chars: {chars,batch,total}）。
- * 返回：文案，如「第 2/3 批 · 已接收 1.2k 字」；无可用信息时为空串。
+ *       （batch: {index,total,name?}，chars: {chars,index|batch,total,name?}）。
+ * 返回：文案，如「第 2/3 批 · 已接收 1.2k 字」或「第 3/9 个：林墨 · 已接收 420 字」。
  */
 function progressApply(state, event) {
   const data = event || {};
   const current = state || progressInit();
   if (data.type === "batch") {
-    current.batch = Number(data.index) || 0;
+    current.batch = Number(data.index || data.batch) || 0;
     current.total = Number(data.total) || 0;
+    current.name = data.name ? String(data.name) : "";
   } else if (data.type === "chars") {
     current.chars = Number(data.chars) || current.chars;
-    if (data.batch) current.batch = Number(data.batch) || current.batch;
+    if (data.index || data.batch) current.batch = Number(data.index || data.batch) || current.batch;
     if (data.total) current.total = Number(data.total) || current.total;
+    if (data.name) current.name = String(data.name);
   }
   const parts = [];
-  if (current.batch && current.total) parts.push(`第 ${current.batch}/${current.total} 批`);
+  if (current.batch && current.total) {
+    parts.push(current.name ? `第 ${current.batch}/${current.total} 个：${current.name}` : `第 ${current.batch}/${current.total} 批`);
+  }
   if (current.chars) parts.push(`已接收 ${formatChars(current.chars)} 字`);
   return parts.join(" · ");
 }

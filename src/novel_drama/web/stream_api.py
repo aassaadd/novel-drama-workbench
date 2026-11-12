@@ -26,6 +26,7 @@ from fastapi.responses import StreamingResponse
 from ..adapters.base import AdapterError
 from ..config import load_config
 from ..store import ProjectStore
+from ..writing.character_plan import generate_from_plan, load_plan, plan_characters
 from ..writing.continuation import continue_chapter
 from ..writing.service import (
     DEFAULT_CHAPTER_WORDS,
@@ -177,6 +178,10 @@ def _progress_response(task) -> StreamingResponse:
                 return
             throttle["chars"] = chars
             throttle["at"] = now
+        elif kind == "batch":
+            # 新批次 / 新角色的字数从头累计，重置节流基线，保证首个 chars 事件不被吞
+            throttle["chars"] = 0
+            throttle["at"] = 0.0
         events.put((kind, event))
 
     def worker() -> None:
@@ -309,6 +314,40 @@ def register_stream_routes(app, config_path: str | None = None) -> None:
                 brief=body.get("brief"),
                 on_progress=on_progress,
             )
+
+        return _progress_response(task)
+
+    @app.post("/api/ui/characters/plan/stream")
+    def ui_characters_plan_stream(body: dict) -> StreamingResponse:
+        """人物两阶段生成（流式进度）：先规划名单，再逐个生成详情。
+
+        阶段 1 产出名单并落盘到 `<工程>/.ndw/character_plan.json`；
+        阶段 2 逐个调用 `emit_character`，单个失败不影响其他角色。
+
+        参数:
+            body: `{path, count?, brief?, retry_failed?, resume?}`；
+                retry_failed=True 只重试上次失败的角色，resume=True 继续未完成的角色。
+
+        返回:
+            SSE：start → plan → (batch/chars)* → done(result) / error(message)。
+        """
+        store = _store(body.get("path"))
+        config = load_config(config_path)
+        retry_failed = bool(body.get("retry_failed"))
+        resume = bool(body.get("resume"))
+
+        def task(on_progress):
+            """规划（或读取已有名单）后逐个生成。"""
+            if retry_failed or resume:
+                plan = load_plan(store)
+                if plan is None:
+                    raise ValueError("没有可继续的人物名单：先执行一次批量生成")
+                statuses = ("failed",) if retry_failed else ("pending", "failed")
+            else:
+                plan = plan_characters(store, config, count=body.get("count"), brief=body.get("brief"))
+                statuses = ("pending",)
+            on_progress({"type": "plan", "total": len(plan.get("items") or []), "basis": plan.get("basis")})
+            return generate_from_plan(store, config, plan, statuses=statuses, on_progress=on_progress)
 
         return _progress_response(task)
 

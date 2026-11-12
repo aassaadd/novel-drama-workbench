@@ -793,8 +793,11 @@ class OfflineWritingAdapter:
         """
         rng = self._rng(meta, "character")
         brief = str(meta.get("brief") or "").strip()
+        plan = meta.get("plan") or {}
         if meta.get("mode") == "single":
-            name = rng.choice(CHARACTER_NAME_POOL)
+            # 两阶段生成：姓名与定位以名单为准，规则层只负责补足详情
+            name = str(plan.get("name") or "").strip() or rng.choice(CHARACTER_NAME_POOL)
+            role = str(plan.get("role") or "").strip() or "protagonist"
             personality = list(rng.sample(PERSONALITY_POOL, 3))
             if brief:
                 personality = [brief[:40]] + personality[:2]
@@ -811,7 +814,7 @@ class OfflineWritingAdapter:
                     "characters": [
                         {
                             "name": name,
-                            "role": "protagonist",
+                            "role": role,
                             "gender": ("male", "female", "other")[rng.randint(0, 2)],
                             "age_range": age_range,
                             "personality": personality,

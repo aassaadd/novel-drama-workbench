@@ -761,7 +761,27 @@
     document.addEventListener("keydown", onWizardKeydown, true);
   }
 
-  /* 生成人物：先收需求，再预览候选（不落盘）。
+  /* 跑一次两阶段生成（先规划名单，再逐个生成详情），期间只更新蒙版进度。
+   * 参数：body 请求体；busyTitle 蒙版主文案；initialDetail 初始明细。
+   * 返回：Promise<done 的 result>。
+   */
+  async function runPlanStream(body, busyTitle, initialDetail) {
+    const progress = NW.progressInit();
+    NW.busyShow(busyTitle, initialDetail);
+    try {
+      return await NW.streamPost("/api/ui/characters/plan/stream", body, (event, data) => {
+        if (event === "plan") {
+          NW.busyDetail(`已规划 ${data.total} 个角色（${data.basis || "逐个生成中"}）`);
+        } else if (event === "batch" || event === "chars") {
+          NW.busyDetail(NW.progressApply(progress, data));
+        }
+      });
+    } finally {
+      NW.busyHide();
+    }
+  }
+
+  /* 生成人物：先规划名单（可续跑），再逐个生成详情；失败可按名单只重试失败的。
    * 参数：button 触发按钮。
    * 返回：Promise，无。
    */
@@ -776,25 +796,38 @@
       placeholder: "如：主角是失忆的法医，配角包含一名旧警察与一名记者",
       onSave: async (brief) => {
         setLoading(button, true, "生成中…");
-        const progress = NW.progressInit();
-        NW.busyShow("正在生成人物…", "正在准备提示词…");
+        const collected = [];
+        let result = null;
         try {
-          /* 走流式进度接口：工具调用本身没有正文字数，改为统计模型返回的 JSON 增量长度 */
-          const result = await NW.streamPost(
-            "/api/ui/characters/generate/stream",
+          result = await runPlanStream(
             { path: NW.state.path, brief },
-            (event, data) => {
-              if (event === "batch" || event === "chars") NW.busyDetail(NW.progressApply(progress, data));
-            }
+            "正在批量生成人物…",
+            "正在规划人物名单…"
           );
-          const main = (result.characters || []).length;
-          const stock = (result.stock_characters || []).length;
-          NW.toast(`共生成 ${main + stock} 个角色（主要 ${main}、候选 ${stock}）`, true);
-          openWizard([...(result.characters || []), ...(result.stock_characters || [])]);
+          collected.push(...(result.characters || []));
+          if ((result.failures || []).length) {
+            const detail = result.failures.map((item) => `${item.name}：${item.message}`).join("；");
+            if (window.confirm(`有 ${result.failures.length} 个角色生成失败：${detail}\n是否只重试这些角色？`)) {
+              result = await runPlanStream(
+                { path: NW.state.path, retry_failed: true },
+                "正在重试失败人物…",
+                "按上次名单逐个重试"
+              );
+              collected.push(...(result.characters || []));
+            }
+          }
+          const failures = result.failures || [];
+          const skipped = result.skipped || [];
+          let message = `共生成 ${collected.length} 个角色`;
+          if (failures.length) {
+            message += `，失败 ${failures.length}（${failures.map((item) => `${item.name}：${item.message}`).join("；")}）`;
+          }
+          if (skipped.length) message += `，跳过 ${skipped.length}（已存在）`;
+          NW.toast(message || "没有可生成的角色", collected.length > 0 && failures.length === 0);
+          if (collected.length) openWizard(collected);
         } catch (error) {
           NW.toast(`生成人物失败：${error.message}`);
         } finally {
-          NW.busyHide();
           setLoading(button, false);
         }
       },
