@@ -776,18 +776,25 @@
       placeholder: "如：主角是失忆的法医，配角包含一名旧警察与一名记者",
       onSave: async (brief) => {
         setLoading(button, true, "生成中…");
+        const progress = NW.progressInit();
+        NW.busyShow("正在生成人物…", "正在准备提示词…");
         try {
-          const result = await NW.api("/api/ui/characters/generate", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ path: NW.state.path, brief }),
-            busy: "正在生成人物…",
-            busyDetail: "数量较多时分批生成",
-          });
+          /* 走流式进度接口：工具调用本身没有正文字数，改为统计模型返回的 JSON 增量长度 */
+          const result = await NW.streamPost(
+            "/api/ui/characters/generate/stream",
+            { path: NW.state.path, brief },
+            (event, data) => {
+              if (event === "batch" || event === "chars") NW.busyDetail(NW.progressApply(progress, data));
+            }
+          );
+          const main = (result.characters || []).length;
+          const stock = (result.stock_characters || []).length;
+          NW.toast(`共生成 ${main + stock} 个角色（主要 ${main}、候选 ${stock}）`, true);
           openWizard([...(result.characters || []), ...(result.stock_characters || [])]);
         } catch (error) {
           NW.toast(`生成人物失败：${error.message}`);
         } finally {
+          NW.busyHide();
           setLoading(button, false);
         }
       },

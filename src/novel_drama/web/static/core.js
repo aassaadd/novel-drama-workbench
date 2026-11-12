@@ -247,6 +247,127 @@ function busyHide() {
   if (mask) mask.hidden = true;
 }
 
+/* 更新生成蒙版的明细文案（主文案与嵌套计数不变）。
+ * 参数：text 明细文案（如「第 2/3 批 · 已接收 1.2k 字」）。
+ * 返回：无。
+ */
+function busyDetail(text) {
+  busyState.baseDetail = text || "";
+  busyRender();
+}
+
+/* 字数紧凑展示：1000 以上按 k、10000 以上按「万」，各保留一位小数。
+ * 参数：n 字数。
+ * 返回：展示字符串。
+ */
+function formatChars(n) {
+  const value = Math.max(0, Number(n) || 0);
+  if (value < 1000) return String(value);
+  if (value < 10000) return `${(value / 1000).toFixed(1).replace(/\.0$/, "")}k`;
+  return `${(value / 10000).toFixed(1).replace(/\.0$/, "")}万`;
+}
+
+/* 新建一轮生成进度状态（批次与已接收字数）。
+ * 返回：{batch, total, chars}。
+ */
+function progressInit() {
+  return { batch: 0, total: 0, chars: 0 };
+}
+
+/* 应用一条进度事件并生成文案；不含「已用时」，由蒙版统一追加。
+ * 参数：state progressInit() 返回的状态（就地更新）；event 事件对象
+ *       （batch: {index,total}，chars: {chars,batch,total}）。
+ * 返回：文案，如「第 2/3 批 · 已接收 1.2k 字」；无可用信息时为空串。
+ */
+function progressApply(state, event) {
+  const data = event || {};
+  const current = state || progressInit();
+  if (data.type === "batch") {
+    current.batch = Number(data.index) || 0;
+    current.total = Number(data.total) || 0;
+  } else if (data.type === "chars") {
+    current.chars = Number(data.chars) || current.chars;
+    if (data.batch) current.batch = Number(data.batch) || current.batch;
+    if (data.total) current.total = Number(data.total) || current.total;
+  }
+  const parts = [];
+  if (current.batch && current.total) parts.push(`第 ${current.batch}/${current.total} 批`);
+  if (current.chars) parts.push(`已接收 ${formatChars(current.chars)} 字`);
+  return parts.join(" · ");
+}
+
+/* 解析一段 SSE 文本（以空行分帧），按事件名回调。
+ * 参数：block 原始块；onEvent(event, data) 回调。
+ * 返回：无。
+ */
+function dispatchSse(block, onEvent) {
+  let event = "message";
+  const dataLines = [];
+  block.split("\n").forEach((line) => {
+    if (line.startsWith("event:")) event = line.slice(6).trim();
+    else if (line.startsWith("data:")) dataLines.push(line.slice(5).trim());
+  });
+  if (!dataLines.length) return;
+  let data = null;
+  try {
+    data = JSON.parse(dataLines.join("\n"));
+  } catch (error) {
+    return;
+  }
+  onEvent(event, data || {});
+}
+
+/* 用 fetch + ReadableStream 读取 SSE（EventSource 不能带 POST body）。
+ * 参数：url 接口地址；body 请求体；onEvent(event, data) 事件回调；signal 取消信号。
+ * 返回：Promise，done 事件的 result；error 事件或连接失败时 reject。
+ */
+async function streamPost(url, body, onEvent, signal) {
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    signal,
+  });
+  if (!response.ok || !response.body) {
+    let message = `HTTP ${response.status}`;
+    try {
+      const detail = await response.json();
+      message = (detail && (detail.detail || detail.message)) || message;
+    } catch (error) {
+      // 非 JSON 错误体：保留 HTTP 状态码
+    }
+    throw new Error(message);
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder("utf-8");
+  let buffer = "";
+  let result = null;
+  let failure = "";
+  const handle = (event, data) => {
+    if (event === "error") {
+      failure = data.message || "生成失败";
+      return;
+    }
+    if (event === "done") result = data.result || null;
+    onEvent(event, data);
+  };
+  while (true) {
+    const chunk = await reader.read();
+    if (chunk.done) break;
+    buffer += decoder.decode(chunk.value, { stream: true });
+    let index = buffer.indexOf("\n\n");
+    while (index >= 0) {
+      dispatchSse(buffer.slice(0, index), handle);
+      buffer = buffer.slice(index + 2);
+      index = buffer.indexOf("\n\n");
+    }
+  }
+  if (buffer.trim()) dispatchSse(buffer, handle);
+  if (failure) throw new Error(failure);
+  if (!result && signal && signal.aborted) throw new Error("已停止生成");
+  return result;
+}
+
 /* 统一取数：把非 2xx 的 detail 翻译成人能读的文本，并带上接口给的退出码。
  * 参数：url 请求地址；options fetch 选项，额外支持 busy（主文案）与 busyDetail（明细）。
  *       传了 busy 时，请求超过 200ms 仍未返回就弹出全屏生成蒙版，结束后自动收起。

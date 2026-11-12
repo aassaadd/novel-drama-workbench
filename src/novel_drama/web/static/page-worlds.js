@@ -692,18 +692,24 @@
       placeholder: "如：末日后的浮空城，蒸汽机械与旧神并存",
       onSave: async (brief) => {
         setLoading(button, true, "生成中…");
+        const progress = NW.progressInit();
+        NW.busyShow("正在生成世界设定…", "正在准备提示词…");
         try {
-          const result = await NW.api("/api/ui/worlds/generate", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ path: NW.state.path, brief }),
-            busy: "正在生成世界设定…",
-            busyDetail: "数量较多时分批生成",
-          });
-          openWizard(result.worlds || []);
+          /* 走流式进度接口：显示批次与模型已返回的 JSON 增量字数 */
+          const result = await NW.streamPost(
+            "/api/ui/worlds/generate/stream",
+            { path: NW.state.path, brief },
+            (event, data) => {
+              if (event === "batch" || event === "chars") NW.busyDetail(NW.progressApply(progress, data));
+            }
+          );
+          const worlds = result.worlds || [];
+          NW.toast(`共生成 ${worlds.length} 条世界设定`, true);
+          openWizard(worlds);
         } catch (error) {
           NW.toast(`生成世界失败：${error.message}`);
         } finally {
+          NW.busyHide();
           setLoading(button, false);
         }
       },

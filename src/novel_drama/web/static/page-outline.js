@@ -378,20 +378,23 @@
     }
     busy = true;
     el("olGenerate").disabled = true;
+    const progress = NW.progressInit();
+    NW.busyShow("正在生成大纲…", "正在准备提示词…");
     try {
-      const result = await NW.api("/api/ui/outline/generate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
+      /* 走流式进度接口：显示批次与模型已返回的 JSON 增量字数 */
+      const result = await NW.streamPost(
+        "/api/ui/outline/generate/stream",
+        {
           path: NW.state.path,
           acts: Number(el("olActs").value),
           chapters_per_act: Number(el("olChapters").value),
           beats_per_chapter: Number(el("olBeats").value),
           words: Number(el("olWords").value),
-        }),
-        busy: "正在生成大纲…",
-        busyDetail: "按幕分批生成，幕数越多耗时越长",
-      });
+        },
+        (event, data) => {
+          if (event === "batch" || event === "chars") NW.busyDetail(NW.progressApply(progress, data));
+        }
+      );
       NW.toast(`大纲已生成：${result.chapters} 章 / ${result.beats} 个节拍`, true);
       /* 重新拉取大纲与候选，保证绑定信息一并刷新 */
       await load();
@@ -400,6 +403,7 @@
     } catch (error) {
       NW.toast(`生成失败（退出码 ${error.code}）：${error.message}`);
     } finally {
+      NW.busyHide();
       busy = false;
       el("olGenerate").disabled = false;
     }
