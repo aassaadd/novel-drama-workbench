@@ -204,17 +204,47 @@
     return rows.find((item) => item.id === modelId) || null;
   }
 
-  /* 输入/输出上限只读区：优先用该模型自己的上限，其次用当前配置值。
-   * 参数：writing 配置段（页面未渲染完成时用于回落）。
+  /* 上限来源的中文标签（后端只会给 server / unknown）。
+   * 参数：source 来源标记。
+   * 返回：中文标签。
+   */
+  function limitSourceLabel(source) {
+    return source === "server" ? "服务端字段" : "未获取";
+  }
+
+  /* 最大输出检测提示：已检测 / 未提供 / 未检测三种文案。
+   * 参数：无。
+   * 返回：纯文本。
+   */
+  function llmOutputHintHtml() {
+    if (!llm) return "点「检测连接」可按当前模型读取最大输出；取不到时保持手填。";
+    if (!llm.connected) return `未获取到上限：${llm.message || "服务不可达"}；可手动填写。`;
+    const value = llm.max_output_tokens;
+    if (!value) return `服务端未返回 ${llm.model || "当前模型"} 的最大输出，可手动填写。`;
+    return `已按 ${llm.model} 检测：${value} tokens（来源：${limitSourceLabel(llm.max_output_source)}）。`;
+  }
+
+  /* 输入/输出上限只读区：只展示服务端接口给的值，未取到就显示「未获取」。
+   * 参数：writing 配置段（页面未渲染完成时用于回落模型名）。
    * 返回：HTML 字符串。
    */
   function llmLimitsHtml(writing) {
     const input = el("setLlmModel");
     const current = String((input ? input.value : writing.model) || "").trim();
     const entry = llmModelEntry(current);
-    const context = (entry && entry.context_length) || (llm && llm.context_window) || writing.context_window;
-    const output = (entry && entry.max_output_tokens) || (llm && llm.max_output_tokens) || writing.max_tokens;
-    return `${readRow("输入上限（上下文窗口）", context ? `${context} tokens` : "—")}${readRow("输出上限（max_tokens）", output ? `${output} tokens` : "—")}`;
+    const context = (entry && entry.context_length) || (llm && llm.context_window);
+    const contextSource = (entry && entry.context_source) || (llm && llm.context_source);
+    const output = (entry && entry.max_output_tokens) || (llm && llm.max_output_tokens);
+    const outputSource = (entry && entry.max_output_source) || (llm && llm.max_output_source);
+    const rows =
+      readRow("输入上限（上下文窗口）", context ? `${context} tokens · ${limitSourceLabel(contextSource)}` : "未获取") +
+      readRow("输出上限（检测值）", output ? `${output} tokens · ${limitSourceLabel(outputSource)}` : "未获取");
+    const business = llm && llm.business_budget;
+    const warn =
+      business && output && output < business
+        ? `<div class="settings-warn">该模型输出上限 ${output} 小于业务估算 ${business} tokens：长内容可能被截断，建议分批生成或调小单批数量。</div>`
+        : "";
+    return rows + warn;
   }
 
   /* 渲染写作模型卡片（接口地址 / 模型 / API Key / 采样参数 / 上限）。
@@ -226,6 +256,7 @@
       <h3>写作模型（LLM）</h3>
       <div class="health-slot">
         <button class="btn small" type="button" id="setLlmCheck">检测连接</button>
+        <button class="btn small" type="button" id="setLlmLimitCheck">检测上限</button>
         <span id="setLlmBadge">${llmBadge()}</span>
       </div>
       <div id="setLlmWarn">${llmWarnHtml()}</div>
@@ -255,10 +286,11 @@
         )}
         ${fieldBlock(
           "omlx.max_tokens",
-          "max_tokens",
+          "最大输出（max_tokens）",
           `<input data-key="omlx.max_tokens" type="number" min="1" value="${esc(writing.max_tokens ?? "")}" />`
         )}
       </div>
+      <div class="settings-hint" id="setLlmOutHint">${esc(llmOutputHintHtml())}</div>
       <div class="kv settings-readonly" id="setLlmLimits">${llmLimitsHtml(writing)}</div>
     </section>`;
   }
@@ -838,13 +870,28 @@
     refreshLlmLimits();
   }
 
-  /* 只刷新输入/输出上限只读区（模型改动或检测完成时用）。
+  /* 检测到最大输出时自动填入输入框（用户已手改过则保留）。
+   * 参数：无。
+   * 返回：无。
+   */
+  function applyDetectedOutput() {
+    const input = document.querySelector('#setBody [data-key="omlx.max_tokens"]');
+    if (!input || !llm || !llm.ok || !llm.max_output_tokens) return;
+    const current = String(input.value || "").trim();
+    const initial = String(input.dataset.init ?? "").trim();
+    if (!current || current === initial) input.value = llm.max_output_tokens;
+  }
+
+  /* 只刷新输入/输出上限只读区与最大输出提示（模型改动或检测完成时用）。
    * 参数：无。
    * 返回：无。
    */
   function refreshLlmLimits() {
+    applyDetectedOutput();
     const limits = el("setLlmLimits");
     if (limits && data && data.writing) limits.innerHTML = llmLimitsHtml(data.writing);
+    const hint = el("setLlmOutHint");
+    if (hint) hint.textContent = llmOutputHintHtml();
   }
 
   /* 手动检测写作模型：带表单当前值，检测期间禁用按钮。
@@ -867,6 +914,51 @@
         button.textContent = "检测连接";
       }
       renderLlm();
+    }
+  }
+
+  /* 手动检测上下限：只调用 /api/ui/settings/model-limits，短超时，失败不阻塞页面。
+   * 参数：无。
+   * 返回：Promise，无。
+   */
+  async function testLlmLimits() {
+    const button = el("setLlmLimitCheck");
+    if (button) {
+      button.disabled = true;
+      button.textContent = "检测中…";
+    }
+    const payload = {};
+    const endpoint = document.querySelector('#setBody [data-key="omlx.endpoint"]');
+    const model = document.querySelector('#setBody [data-key="omlx.model"]');
+    const apiKey = document.querySelector('#setBody [data-key="omlx.api_key"]');
+    if (endpoint) payload.endpoint = String(endpoint.value || "").trim();
+    if (model) payload.model = String(model.value || "").trim();
+    if (apiKey) payload.api_key = String(apiKey.value || "").trim();
+    try {
+      const limits = await NW.api("/api/ui/settings/model-limits", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      llm = Object.assign(llm || {}, {
+        ok: Boolean(llm && llm.ok) || Boolean(limits.ok),
+        connected: Boolean(limits.connected),
+        model: limits.model || (llm && llm.model) || "",
+        context_window: limits.context_length,
+        context_source: limits.context_source,
+        max_output_tokens: limits.max_output_tokens,
+        max_output_source: limits.max_output_source,
+        business_budget: limits.business_budget,
+        message: limits.message,
+      });
+    } catch (error) {
+      NW.toast(`检测上限失败：${error.message}`);
+    } finally {
+      if (button) {
+        button.disabled = false;
+        button.textContent = "检测上限";
+      }
+      refreshLlmLimits();
     }
   }
 
@@ -1218,6 +1310,7 @@
     }
     if (event.target.closest("#setHealthCheck")) testHealth();
     else if (event.target.closest("#setLlmCheck")) testLlm();
+    else if (event.target.closest("#setLlmLimitCheck")) testLlmLimits();
     else if (event.target.closest("#setSave")) save();
     else if (event.target.closest("#setReset")) load();
   }

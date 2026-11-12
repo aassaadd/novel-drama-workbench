@@ -96,7 +96,7 @@ class TextGenRequest:
     task: str  # outline|chapter|scene|dialogue_split|emotion_tag|image_prompt|freeform
     system: str
     messages: list[Message]
-    max_tokens: int = 2048
+    max_tokens: int = 0  # 0 表示用配置里的 omlx.max_tokens（未配置时适配器按 2048）
     temperature: float = 0.8
     stop: list[str] = field(default_factory=list)
     stream: bool = True

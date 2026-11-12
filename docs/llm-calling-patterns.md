@@ -30,7 +30,7 @@
 ### 2.1 位置与协议
 
 - 唯一实现：[writing.py](file:///Users/zhaohaochen/git/novel-drama-workbench/src/novel_drama/adapters/writing.py#L33-L52) 中的 `OmlxWritingAdapter`，OpenAI 兼容 HTTP（`/v1/chat/completions`、`/v1/models`、`/v1/models/{id}/unload`），Bearer 鉴权，`urllib.request` 直连，无 SDK 依赖。
-- 统一请求结构：[base.py](file:///Users/zhaohaochen/git/novel-drama-workbench/src/novel_drama/adapters/base.py#L92-L106) 的 `TextGenRequest`，默认值 `max_tokens=2048`、`temperature=0.8`、`stream=True`（字段存在但业务不读）、`context_budget_tokens=32768`。
+- 统一请求结构：[base.py](file:///Users/zhaohaochen/git/novel-drama-workbench/src/novel_drama/adapters/base.py#L92-L106) 的 `TextGenRequest`，默认值 `max_tokens=0`（沿用配置）、`temperature=0.8`、`stream=True`（字段存在但业务不读）、`context_budget_tokens=32768`。
 - 装配入口有两个，行为不同：
   - [service.py `build_writing_adapter`](file:///Users/zhaohaochen/git/novel-drama-workbench/src/novel_drama/writing/service.py#L64-L85)：`omlx` 分支只传 `config.get("omlx")`，**不合并工程级 `settings.writing`**。
   - [adapters/__init__.py `build_adapters`](file:///Users/zhaohaochen/git/novel-drama-workbench/src/novel_drama/adapters/__init__.py#L37-L68)：会把工程设置里非空的 `writing.*` 合并进 `omlx`（音色设计 CLI/页面走这条）。
@@ -38,7 +38,7 @@
 
 ### 2.2 请求体构造
 
-[writing.py `_build_payload`](file:///Users/zhaohaochen/git/novel-drama-workbench/src/novel_drama/adapters/writing.py#L294-L329)：
+[writing.py `_build_payload`](file:///Users/zhaohaochen/git/novel-drama-workbench/src/novel_drama/adapters/writing.py#L572-L607)：
 
 ```python
 payload = {
@@ -50,15 +50,17 @@ payload = {
 }
 ```
 
-- `max_tokens`：请求值优先；由于 `TextGenRequest.max_tokens` 默认就是 2048（非空），`omlx.max_tokens` 实际上只在显式传 0 时才生效。
+- `max_tokens`：请求值优先；`TextGenRequest.max_tokens` 默认 0，表示沿用配置 `omlx.max_tokens`（再回落到 2048），因此设置页的「最大输出」对未显式传参的调用生效；工具调用由业务层取 `max(配置值, 条目估算)`。
+- 上下文守卫：`_build_payload` 会估算 prompt tokens，`prompt + max_tokens` 超过上下文上限时自动下调 max_tokens；连 256 输出都放不下时返回中文错误「输入超过模型上下文上限」。
+- 上限探测：设置页 `/api/ui/settings/model-limits` 只读 OpenAI 兼容接口（`/v1/models` → `/v1/models/{id}` → `/v1/models/status` → `/props` 等），来源只标 server / unknown，不读本机文件、不伪造默认值。
 - `temperature`：请求值优先；`TextGenRequest.temperature` 默认 0.8 且永不为 `None`，所以 `omlx.temperature` 对业务调用同样不生效。
-- 工具调用额外抬预算：[`generate_tool`](file:///Users/zhaohaochen/git/novel-drama-workbench/src/novel_drama/adapters/writing.py#L417-L423) 把 `max_tokens` 抬到 `max(当前值, 4096)`（`TOOL_MIN_MAX_TOKENS`），注释明确说明 reasoning tokens 也计入该预算。
+- 工具调用额外抬预算：[`generate_tool`](file:///Users/zhaohaochen/git/novel-drama-workbench/src/novel_drama/adapters/writing.py#L699-L703) 把 `max_tokens` 抬到 `max(当前值, 4096)`（`TOOL_MIN_MAX_TOKENS`），注释明确说明 reasoning tokens 也计入该预算。
 - `stop` / `prompt_cache_key`：`stop` 来自请求或 `omlx.stop`；`prompt_cache_key` 非空且 `omlx.cache_prompt=true` 时才加 `cache_prompt: true` 与 `prompt_cache_key`（多轮正文/续写/编辑在用）。
 - `metadata.extra_body`：若调用方在 metadata 里塞了 dict，会整体 `payload.update(extra_body)`——这是一个预留的覆盖口，但当前**没有任何调用点使用**。
 
 ### 2.3 超时与重试
 
-- 默认超时 300s，连接超时 5s（[writing.py](file:///Users/zhaohaochen/git/novel-drama-workbench/src/novel_drama/adapters/writing.py#L25-L30)），可由 `omlx.request_timeout_s` / `omlx.connect_timeout_s` 覆盖；单次调用可覆盖（音色描述 90s、音效/BGM 改写 20s）。
+- 默认超时 300s，连接超时 5s（[writing.py](file:///Users/zhaohaochen/git/novel-drama-workbench/src/novel_drama/adapters/writing.py#L26-L37)），可由 `omlx.request_timeout_s` / `omlx.connect_timeout_s` 覆盖；单次调用可覆盖（音色描述 90s、音效/BGM 改写 20s）。
 - HTTP 重试在 [`_request_json`](file:///Users/zhaohaochen/git/novel-drama-workbench/src/novel_drama/adapters/writing.py#L180-L209)：仅对 `retryable=True` 的错误（429、5xx、超时、不可达）重试，次数上限 `omlx.max_retries`（默认 2），退避 `sleep(min(2.0*attempt, 5.0))`（即 2s、4s）。
 - 非 JSON 响应、401/403/404、空 `choices`、未返回 `tool_calls`、`arguments` 非法——都直接抛 `AdapterError`，**不重试、不自动纠错、不二次追问**。
 - 流式接口的建连重试是另一套循环（[`stream`](file:///Users/zhaohaochen/git/novel-drama-workbench/src/novel_drama/adapters/writing.py#L472-L482)），但业务未使用。
@@ -101,10 +103,10 @@ payload = {
 
 ## 4. 工具调用（function calling）
 
-- 入口：[`generate_tool`](file:///Users/zhaohaochen/git/novel-drama-workbench/src/novel_drama/adapters/writing.py#L393-L489)，一次请求内置 `tools=[tool]` 且 `tool_choice` 强制指定该函数。
+- 入口：[`generate_tool`](file:///Users/zhaohaochen/git/novel-drama-workbench/src/novel_drama/adapters/writing.py#L672-L768)，一次请求内置 `tools=[tool]` 且 `tool_choice` 强制指定该函数。
 - 一轮只取**第一个** `tool_calls[0].function.arguments`；同一响应里若有多个调用，其余被忽略。
 - 参数必须是 JSON 对象：dict 直接用；字符串则 `json.loads`，失败或不是对象都抛 `UPSTREAM_ERROR`。
-- 输出预算：适配器保证不低于 4096（`TOOL_MIN_MAX_TOKENS`）；业务层再用 [`_tool_max_tokens`](file:///Users/zhaohaochen/git/novel-drama-workbench/src/novel_drama/writing/service.py#L28-L61) 按「固定开销 + 条目数」估算，上限 16384（人物 1600/条、世界 1800/条、大纲/单幕 2600/2200 每节拍）。
+- 输出预算：适配器保证不低于 4096（`TOOL_MIN_MAX_TOKENS`）；业务层再用 [`_tool_max_tokens`](file:///Users/zhaohaochen/git/novel-drama-workbench/src/novel_drama/writing/service.py#L50-L73) 按「固定开销 + 条目数」估算（人物 1600/条、世界 1800/条、大纲/单幕 2600/2200 每节拍），最终取 `max(配置值 omlx.max_tokens, 估算值)`；估算上限 16384、配置兜底上限 32768。
 - 思考模式：`generate_tool` 默认强制 `enable_thinking=false`（结构化输出优先保证参数完整），调用方可传 `metadata.enable_thinking` 显式覆盖。
 - 截断：`finish_reason=length` 且没有 `tool_calls` 时返回中文错误「模型输出被截断…可重试，或减少本次生成数量后分批生成」，`retryable=True`，detail 保留 `finish_reason`、工具名、prompt/completion tokens 与响应片段；参数 JSON 被截断时给同样提示。
 - 失败策略：除此之外不重试、不追问、不降级到文本 JSON 解析（项目记忆里的「不再保留文本 JSON 兜底」与代码一致）。
@@ -114,10 +116,10 @@ payload = {
 ## 5. 思考模式（reasoning / thinking）
 
 - 开关只有一个：`omlx.enable_thinking`，默认 `false`（[config.py](file:///Users/zhaohaochen/git/novel-drama-workbench/src/novel_drama/config.py#L22-L40)、[config/config.yaml](file:///Users/zhaohaochen/git/novel-drama-workbench/config/config.yaml#L24-L46)），设置页可改（[web/app.py](file:///Users/zhaohaochen/git/novel-drama-workbench/src/novel_drama/web/app.py#L80)）。
-- 表达方式：只要该键不是 `None`，每次请求都带 `chat_template_kwargs: {"enable_thinking": bool(...)}`（[writing.py](file:///Users/zhaohaochen/git/novel-drama-workbench/src/novel_drama/adapters/writing.py#L319-L321)）。服务端不认这个字段时会被忽略。
+- 表达方式：只要该键不是 `None`，每次请求都带 `chat_template_kwargs: {"enable_thinking": bool(...)}`（[writing.py](file:///Users/zhaohaochen/git/novel-drama-workbench/src/novel_drama/adapters/writing.py#L598-L600)）。服务端不认这个字段时会被忽略。
 - 显式关闭的两个调用点：音效改写与 BGM 改写各自构造 omlx 设置时写死 `enable_thinking=False`（[sfx/prompting.py](file:///Users/zhaohaochen/git/novel-drama-workbench/src/novel_drama/sfx/prompting.py#L278-L288)、[bgm/prompting.py](file:///Users/zhaohaochen/git/novel-drama-workbench/src/novel_drama/bgm/prompting.py#L224-L233)），并在同一处把温度压到 0.2、max_tokens 压到 220/200。
 - 其余调用点（service / continuation / summarize / editing / voice_design）全部**继承全局配置**，没有单独打开 thinking 的地方；唯一的例外是工具调用：`generate_tool` 无论全局开关如何都默认按 `enable_thinking=false` 下发，可用 `metadata.enable_thinking` 覆盖。
-- 响应侧：`generate` 在 `content` 为空时回退 `reasoning_content`（[writing.py](file:///Users/zhaohaochen/git/novel-drama-workbench/src/novel_drama/adapters/writing.py#L384)），流式同理（同文件 L507）。开启 thinking 且输出被 `max_tokens` 截断时，存在把推理文本当正文返回的路径。
+- 响应侧：`generate` 在 `content` 为空时回退 `reasoning_content`（[writing.py](file:///Users/zhaohaochen/git/novel-drama-workbench/src/novel_drama/adapters/writing.py#L663)），流式同理（同文件 L818）。开启 thinking 且输出被 `max_tokens` 截断时，存在把推理文本当正文返回的路径。
 
 ## 6. 业务调用点逐项
 
@@ -141,7 +143,7 @@ payload = {
 
 ### 6.4 人物（`generate_characters` / `generate_section` character）
 
-- 批量 [L1912-L2075](file:///Users/zhaohaochen/git/novel-drama-workbench/src/novel_drama/writing/service.py#L1912-L2075)：工具 `emit_characters`（同时产出 `stock_characters`、`narrator_profile`），`temperature=0.8`，每批 `batch_size_characters`（默认 5）；输出预算 `_tool_max_tokens("characters", 本批人数)`（未指定数量时按 8 人预留，5 人约 14.7k，上限 16k）。
+- 批量 [L1912-L2075](file:///Users/zhaohaochen/git/novel-drama-workbench/src/novel_drama/writing/service.py#L1912-L2075)：工具 `emit_characters`（同时产出 `stock_characters`、`narrator_profile`），`temperature=0.8`，每批 `batch_size_characters`（默认 5）；输出预算 `_tool_max_tokens(config, "characters", 本批人数)`（未指定数量时按 8 人预留，5 人约 14.7k，估算上限 16k）。
 - 校验：姓名必填且不许重复、至少 1 个 `protagonist`；`voice_profile` 有长度上限；不满足直接抛中文错误。
 - 单个人物 [L2408-L2453](file:///Users/zhaohaochen/git/novel-drama-workbench/src/novel_drama/writing/service.py#L2408-L2453)：兼容模型平铺返回（不包 `character` 键）。
 
@@ -182,7 +184,7 @@ payload = {
 
 - [L2456-L2530](file:///Users/zhaohaochen/git/novel-drama-workbench/src/novel_drama/writing/service.py#L2456-L2530)。
 - 非工具调用：system 要求「只输出 JSON（键为 text）」，实际用 `_extract_json_object` 宽松提取；解析失败则把原文当纯文本接受；结果按 `SCALAR_LIMITS` 截断。
-- `temperature=0.6`，未设 `max_tokens`（2048）；注入 `_project_context`（作品/梗概/文风/世界摘要）+ 调用方给的字段上下文。
+- `temperature=0.6`，未设 `max_tokens`（沿用配置，默认 2048）；注入 `_project_context`（作品/梗概/文风/世界摘要）+ 调用方给的字段上下文。
 
 ### 6.11 章节改写与反向总结
 
@@ -217,7 +219,7 @@ payload = {
 
 ## 8. 已知问题与风险（代码可见）
 
-1. **`omlx.temperature` / `omlx.max_tokens` 对多数业务调用无效**：`TextGenRequest` 的默认值 0.8 / 2048 永远非空，`_build_payload` 优先用请求值；设置页改这两项只影响显式传参的调用（工具调用改由业务层 `_tool_max_tokens` 估算，音效/BGM 改写自己写死 220/200）。
+1. **`omlx.temperature` 对多数业务调用无效，`omlx.max_tokens` 现在生效**：`TextGenRequest.temperature` 默认 0.8 永远非空，请求值优先；`max_tokens` 默认改为 0 后会回落到配置值，工具调用则取 `max(配置值, 业务估算)`（估算上限 16384，配置兜底 32768）。
 2. **工程级 `settings.writing` 只对 `build_adapters` 生效**：`build_writing_adapter` 的 omlx 分支只读 `config.omlx`，因此工程内覆盖 endpoint/model/temperature 等对 service 层写作调用不生效（`build_adapters` 在音色设计、`cli_cast` 链路生效）。
 3. **工具调用没有纠错闭环**：未返回 `tool_calls`、参数非法 JSON、缺 `function.name` 都直接抛错；上层不重问，用户只能手动重试。截断（`finish_reason=length`）现在会转成可读中文提示并保留 token 用量，但**不会自动重发**。批量场景（人物/世界/导演标注/章节编辑/总结分块）中任一批失败会中断整个动作，已完成的批次结果不落盘（大纲续写例外：已生成的幕会保留）。
 4. **多轮历史无二次裁剪**：章节正文/续写每轮把已生成文本整段追加进 `messages`，`context_budget_tokens` 只约束首轮；长轮次时请求体持续增长，只能靠服务端上下文窗口兜底，没有超限保护。
@@ -232,12 +234,13 @@ payload = {
 
 | 主题 | 位置 |
 | --- | --- |
-| 适配器默认常量 / 请求体 | [adapters/writing.py L25-L30、L294-L329](file:///Users/zhaohaochen/git/novel-drama-workbench/src/novel_drama/adapters/writing.py#L25-L30) |
-| 非流式生成 / 工具调用 / 流式 | [adapters/writing.py L365-L546](file:///Users/zhaohaochen/git/novel-drama-workbench/src/novel_drama/adapters/writing.py#L365-L546) |
+| 适配器默认常量 / 请求体 | [adapters/writing.py L26-L37、L572-L607](file:///Users/zhaohaochen/git/novel-drama-workbench/src/novel_drama/adapters/writing.py#L26-L37) |
+| 非流式生成 / 工具调用 / 流式 | [adapters/writing.py L644-L824](file:///Users/zhaohaochen/git/novel-drama-workbench/src/novel_drama/adapters/writing.py#L644-L824) |
+| 上下限探测 / 上下文守卫 | [adapters/writing.py L311-L462、L521-L570](file:///Users/zhaohaochen/git/novel-drama-workbench/src/novel_drama/adapters/writing.py#L311-L462) |
 | 统一请求结构默认值 | [adapters/base.py L92-L106](file:///Users/zhaohaochen/git/novel-drama-workbench/src/novel_drama/adapters/base.py#L92-L106) |
 | 本机默认配置 | [config.py L18-L40](file:///Users/zhaohaochen/git/novel-drama-workbench/src/novel_drama/config.py#L18-L40)、[config/config.yaml L23-L61](file:///Users/zhaohaochen/git/novel-drama-workbench/config/config.yaml#L23-L61) |
 | 适配器装配（两套） | [writing/service.py L64-L85](file:///Users/zhaohaochen/git/novel-drama-workbench/src/novel_drama/writing/service.py#L64-L85)、[adapters/__init__.py L37-L68](file:///Users/zhaohaochen/git/novel-drama-workbench/src/novel_drama/adapters/__init__.py#L37-L68) |
 | 上下文装配与降级 | [text/context.py L400-L510](file:///Users/zhaohaochen/git/novel-drama-workbench/src/novel_drama/text/context.py#L400-L510) |
 | 章节多轮停止条件 | [writing/service.py L672-L716](file:///Users/zhaohaochen/git/novel-drama-workbench/src/novel_drama/writing/service.py#L672-L716) |
 | 续写默认值与停止条件 | [writing/continuation.py L37-L60](file:///Users/zhaohaochen/git/novel-drama-workbench/src/novel_drama/writing/continuation.py#L37-L60)、[L578-L663](file:///Users/zhaohaochen/git/novel-drama-workbench/src/novel_drama/writing/continuation.py#L578-L663) |
-| 思考模式下发 | [adapters/writing.py L319-L321](file:///Users/zhaohaochen/git/novel-drama-workbench/src/novel_drama/adapters/writing.py#L319-L321) |
+| 思考模式下发 | [adapters/writing.py L598-L600](file:///Users/zhaohaochen/git/novel-drama-workbench/src/novel_drama/adapters/writing.py#L598-L600) |

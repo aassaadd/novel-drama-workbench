@@ -41,24 +41,36 @@ _TOOL_PER_ITEM_TOKENS = {
 }
 #: 固定附加开销（旁白音色、龙套池等与条目数无关的内容）
 _TOOL_EXTRA_TOKENS = {"characters": 2600, "worlds": 1600}
-#: 单次工具调用的输出预算上限
+#: 单次工具调用的业务估算上限
 _TOOL_MAX_TOKENS_CAP = 16384
+#: 配置兜底允许的输出上限（与常见 OpenAI 兼容服务的最大输出对齐）
+_TOOL_FLOOR_CAP = 32768
 
 
-def _tool_max_tokens(step: str, items: int = 1) -> int:
+def _tool_max_tokens(config, step: str, items: int = 1) -> int:
     """估算一次工具调用需要的输出预算。
 
+    预算取 `max(配置值 omlx.max_tokens, 业务估算值)`：配置值作为兜底下限，
+    估算值按条目数量增长；配置值高于估算时以配置为准（上限 32768）。
+
     参数:
+        config: AppConfig 或 dict，用于读取 `omlx.max_tokens`。
         step: 工具步骤（characters/worlds/outline/act/world/character/premise/style）。
         items: 预估条目数（人物数、世界数、节拍数等），至少按 1 计算。
 
     返回:
-        建议的 max_tokens；低于适配器下限时由适配器抬到 4096，上限 16384。
+        建议的 max_tokens；低于适配器下限时由适配器抬到 4096。
     """
     per_item = _TOOL_PER_ITEM_TOKENS.get(step, 800)
     extra = _TOOL_EXTRA_TOKENS.get(step, 1200)
-    budget = _TOOL_BASE_MAX_TOKENS + extra + per_item * max(1, int(items))
-    return max(_TOOL_BASE_MAX_TOKENS, min(_TOOL_MAX_TOKENS_CAP, budget))
+    estimate = min(_TOOL_MAX_TOKENS_CAP, _TOOL_BASE_MAX_TOKENS + extra + per_item * max(1, int(items)))
+    floor = 0
+    if config is not None:
+        try:
+            floor = int(config.get("omlx.max_tokens") or 0)
+        except (AttributeError, TypeError, ValueError):
+            floor = 0
+    return max(estimate, min(_TOOL_FLOOR_CAP, floor))
 
 
 def build_writing_adapter(config: AppConfig, settings: dict | None = None):
@@ -158,7 +170,7 @@ def generate_outline(
         system="你是长篇小说的结构编辑，按工具参数输出大纲，不要解释。",
         messages=[Message("user", "\n".join(context_parts))],
         stream=False,
-        max_tokens=_tool_max_tokens("outline", acts * chapters_per_act * beats_per_chapter),
+        max_tokens=_tool_max_tokens(config, "outline", acts * chapters_per_act * beats_per_chapter),
         metadata={
             "acts": acts,
             "chapters_per_act": chapters_per_act,
@@ -279,7 +291,7 @@ def _generate_outline_acts(adapter, req: TextGenRequest, acts: int, chapters_per
             lines.append("已完成幕（不要重复）：\n" + "\n".join(done))
         request = replace(req, messages=base_messages + [Message("user", "\n".join(lines))])
         # 单幕输出预算按本幕章数 × 每章节拍数估算，避免多轮时沿用整本预算或默认 2048
-        request.max_tokens = _tool_max_tokens("act", chapters_per_act * beats_per_chapter)
+        request.max_tokens = _tool_max_tokens(config, "act", chapters_per_act * beats_per_chapter)
         # 离线适配器据此从确定性整本大纲里挑出对应幕
         request.metadata = dict(base_metadata, act_offset=act_index)
         payload = _generate_json(adapter, request, "act")
@@ -1764,7 +1776,7 @@ def generate_worlds(
         messages=[Message("user", prompt)],
         stream=False,
         temperature=0.7,
-        max_tokens=_tool_max_tokens("worlds", wanted or 6),
+        max_tokens=_tool_max_tokens(config, "worlds", wanted or 6),
         metadata={
             "step": "worlds",
             "work": {"title": work.get("title"), "author": work.get("author"), "genre": work.get("genre") or []},
@@ -1797,7 +1809,7 @@ def generate_worlds(
             if names:
                 lines.append("已生成世界（不要重复名称）：" + "、".join(names))
             batch_req = replace(req, messages=list(req.messages) + [Message("user", "\n".join(lines))])
-            batch_req.max_tokens = _tool_max_tokens("worlds", take)
+            batch_req.max_tokens = _tool_max_tokens(config, "worlds", take)
             batch_req.metadata = dict(req.metadata or {}, count=take)
             batch_payload = _generate_json(adapter, batch_req, "worlds")
             batch_rows = batch_payload.get("worlds")
@@ -1880,7 +1892,7 @@ def generate_settings(store: ProjectStore, config: AppConfig, step: str, overwri
         messages=[Message("user", prompt)],
         stream=False,
         temperature=0.7,
-        max_tokens=_tool_max_tokens(step, 1),
+        max_tokens=_tool_max_tokens(config, step, 1),
         metadata={
             "step": step,
             "work": {"title": work.get("title"), "author": work.get("author"), "genre": work.get("genre") or []},
@@ -1966,7 +1978,7 @@ def generate_characters(
         stream=False,
         temperature=0.8,
         # 未指定数量时按一屏 8 个角色的规模预留；人物卡含背景/外貌/关系/音色，单条开销明显高于普通字段
-        max_tokens=_tool_max_tokens("characters", min(total, batch) if total else max(batch, 8)),
+        max_tokens=_tool_max_tokens(config, "characters", min(total, batch) if total else max(batch, 8)),
         metadata={
             "work": {"title": work.get("title"), "author": work.get("author"), "genre": work.get("genre") or []},
             "premise": bible.get("premise") or {},
@@ -1993,7 +2005,7 @@ def generate_characters(
             if names:
                 lines.append("已生成人物（不要重复姓名）：" + "、".join(names))
             batch_req = replace(req, messages=list(req.messages) + [Message("user", "\n".join(lines))])
-            batch_req.max_tokens = _tool_max_tokens("characters", take)
+            batch_req.max_tokens = _tool_max_tokens(config, "characters", take)
             batch_req.metadata = dict(req.metadata or {}, count=take)
             batch_payload = _generate_json(adapter, batch_req, "characters")
             if not stock_rows and isinstance(batch_payload.get("stock_characters"), list):
@@ -2384,7 +2396,7 @@ def generate_section(
             messages=[Message("user", prompt)],
             stream=False,
             temperature=0.7,
-            max_tokens=_tool_max_tokens("world", 1),
+            max_tokens=_tool_max_tokens(config, "world", 1),
             metadata={
                 "step": "world",
                 "work": work_payload,
@@ -2425,7 +2437,7 @@ def generate_section(
         messages=[Message("user", prompt)],
         stream=False,
         temperature=0.8,
-        max_tokens=_tool_max_tokens("character", 1),
+        max_tokens=_tool_max_tokens(config, "character", 1),
         metadata={
             "mode": "single",
             "work": work_payload,

@@ -28,6 +28,13 @@ DEFAULT_TIMEOUT_S = 300.0
 CONNECT_TIMEOUT_S = 5.0
 # 工具调用时的最小输出预算；thinking 模型的 reasoning_tokens 也计入 max_tokens，给少了参数会被截断
 TOOL_MIN_MAX_TOKENS = 4096
+# 检测到的上下文上限缓存：`(endpoint, model) -> tokens`，供请求体预算校验复用，避免每次请求再发 HTTP
+_LIMIT_CACHE: dict[tuple[str, str], int] = {}
+#: 各 OpenAI 兼容实现可能使用的候选字段名（上下文 / 最大输出）
+_CONTEXT_FIELDS = ("max_model_len", "context_length", "context_window", "model_context_length", "max_context_window", "n_ctx")
+_OUTPUT_FIELDS = ("max_output_tokens", "max_completion_tokens", "max_tokens", "max_new_tokens")
+#: 探测上限时额外尝试的非标准端点（没有的会记录 404 / 非 JSON，不抛错）
+_LIMIT_PROBE_PATHS = ("/props", "/v1/internal/model/info", "/v1/model/info", "/health")
 
 
 class OmlxWritingAdapter:
@@ -234,6 +241,226 @@ class OmlxWritingAdapter:
         """返回模型 ID 列表。"""
         return [str(item.get("id")) for item in self.list_models() if item.get("id")]
 
+    def _probe(self, path: str, timeout_s: float) -> tuple[int | None, dict | None, str | None]:
+        """快速 GET 一个端点，用于上限探测。
+
+        参数:
+            path: 以 / 开头的接口路径。
+            timeout_s: 超时秒数（设置页检测用 2 秒级）。
+
+        返回:
+            `(HTTP 状态, JSON dict 或 None, 错误文本)`；404、非 JSON、网络错误都不抛异常。
+        """
+        request = urllib.request.Request(self._url(path), headers=self._headers(), method="GET")
+        try:
+            with urllib.request.urlopen(request, timeout=timeout_s) as resp:
+                raw = resp.read().decode("utf-8", errors="replace")
+                try:
+                    data = json.loads(raw) if raw.strip() else {}
+                except json.JSONDecodeError:
+                    data = None
+                return int(getattr(resp, "status", 200)), data if isinstance(data, dict) else None, None
+        except urllib.error.HTTPError as exc:
+            return int(exc.code), None, None
+        except (urllib.error.URLError, socket.timeout, TimeoutError, OSError) as exc:
+            return None, None, str(getattr(exc, "reason", exc) or exc)
+
+    @staticmethod
+    def _pick_limits(data: dict) -> tuple[int | None, int | None, list[str]]:
+        """从任意字典里挑选上下文/输出上限字段（兼容不同实现的命名）。
+
+        参数:
+            data: 接口返回的模型对象或详情 dict。
+
+        返回:
+            `(上下文上限, 最大输出, 命中字段名列表)`；取不到时为 None。
+        """
+
+        def first(fields: tuple[str, ...]) -> int | None:
+            for key in fields:
+                value = data.get(key)
+                if isinstance(value, (int, float)) and int(value) > 0:
+                    return int(value)
+            return None
+
+        context = first(_CONTEXT_FIELDS)
+        output = first(_OUTPUT_FIELDS)
+        hits = [
+            key
+            for key in _CONTEXT_FIELDS + _OUTPUT_FIELDS
+            if isinstance(data.get(key), (int, float)) and int(data[key]) > 0
+        ]
+        return context, output, hits
+
+    @staticmethod
+    def _merge_limits(entry: dict, context: int | None, output: int | None) -> None:
+        """把探测到的上限合并进模型条目，只补缺失值，来源记为 server。
+
+        参数:
+            entry: 模型条目 dict（会被原地修改）。
+            context: 探测到的上下文上限。
+            output: 探测到的最大输出。
+        """
+        if context and not entry.get("context_length"):
+            entry["context_length"] = context
+            entry["context_source"] = "server"
+        if output and not entry.get("max_output_tokens"):
+            entry["max_output_tokens"] = output
+            entry["max_output_source"] = "server"
+
+    def fetch_model_limits(self, model: str | None = None, timeout_s: float = 2.0) -> dict:
+        """探测模型的上下文与最大输出上限（只读 OpenAI 兼容接口，不读本机文件）。
+
+        探测顺序：`/v1/models` 列表项候选字段 → `/v1/models/{id}` 详情 →
+        `/v1/models/status` 等服务特有端点 → `/props` 等通用候选端点。
+
+        参数:
+            model: 目标模型；缺省用配置里的 model。
+            timeout_s: 单个端点的超时秒数（设置页检测用 2 秒级，失败快速返回）。
+
+        返回:
+            dict：`{model, context_length, context_source, max_output_tokens,
+            max_output_source, models, probes, message}`；
+            来源只有 `server`（接口字段）与 `unknown`（未取到）两种。
+        """
+        target = str(model or self.model or "").strip()
+        probes: list[dict] = []
+        result = {
+            "model": target,
+            "context_length": None,
+            "context_source": "unknown",
+            "max_output_tokens": None,
+            "max_output_source": "unknown",
+            "models": [],
+            "probes": probes,
+        }
+        if not self.endpoint:
+            result["message"] = "未配置接口地址：请先填写 omlx.endpoint 后再检测"
+            return result
+
+        # 1) 列表接口：不同实现的候选字段都试一遍
+        status, data, error = self._probe("/v1/models", timeout_s)
+        fields: list[str] = []
+        models: list[dict] = []
+        rows = (data or {}).get("data") if isinstance(data, dict) else None
+        if isinstance(rows, list):
+            for item in rows:
+                if not isinstance(item, dict) or not item.get("id"):
+                    continue
+                context, output, hits = self._pick_limits(item)
+                fields.extend(hits)
+                models.append(
+                    {
+                        "id": str(item.get("id")),
+                        "owned_by": item.get("owned_by"),
+                        "context_length": context,
+                        "context_source": "server" if context else "unknown",
+                        "max_output_tokens": output,
+                        "max_output_source": "server" if output else "unknown",
+                    }
+                )
+        probes.append({"path": "/v1/models", "status": status, "fields": sorted(set(fields)), "error": error})
+        if not isinstance(rows, list):
+            result["message"] = (
+                f"读取 /v1/models 失败（{error or status or '无响应'}）："
+                "接口不可达或返回非 JSON；可稍后重试，或手动填写最大输出"
+            )
+            return result
+
+        selected = next((item for item in models if item["id"] == target), None)
+        if selected is None and target:
+            result["message"] = f"服务可达，但模型 {target} 不在 /v1/models 列表中"
+        # 2) 单模型详情（有的实现支持）
+        if target:
+            path = f"/v1/models/{urllib.parse.quote(target, safe='')}"
+            status, data, error = self._probe(path, timeout_s)
+            fields = []
+            context = output = None
+            if isinstance(data, dict):
+                context, output, fields = self._pick_limits(data)
+                for key in ("model", "data"):
+                    nested = data.get(key)
+                    if isinstance(nested, dict):
+                        nested_context, nested_output, nested_fields = self._pick_limits(nested)
+                        context = context or nested_context
+                        output = output or nested_output
+                        fields.extend(nested_fields)
+            probes.append({"path": path, "status": status, "fields": sorted(set(fields)), "error": error})
+            if selected is not None:
+                self._merge_limits(selected, context, output)
+        # 3) 服务特有端点（omlx 有 /v1/models/status；换服务时可能 404，忽略即可）
+        status, data, error = self._probe("/v1/models/status", timeout_s)
+        fields = []
+        if isinstance(data, dict) and isinstance(data.get("models"), list):
+            for item in data["models"]:
+                if not isinstance(item, dict) or not item.get("id"):
+                    continue
+                context, output, hits = self._pick_limits(item)
+                fields.extend(hits)
+                entry = next((row for row in models if row["id"] == str(item["id"])), None)
+                if entry is None:
+                    entry = {
+                        "id": str(item["id"]),
+                        "owned_by": None,
+                        "context_length": None,
+                        "context_source": "unknown",
+                        "max_output_tokens": None,
+                        "max_output_source": "unknown",
+                    }
+                    models.append(entry)
+                self._merge_limits(entry, context, output)
+                if target and entry["id"] == target:
+                    selected = entry
+        probes.append({"path": "/v1/models/status", "status": status, "fields": sorted(set(fields)), "error": error})
+        # 4) 通用候选端点：能识别就识别，识别不到只记录 404
+        for path in _LIMIT_PROBE_PATHS:
+            status, data, error = self._probe(path, timeout_s)
+            fields = []
+            context = output = None
+            if isinstance(data, dict):
+                context, output, fields = self._pick_limits(data)
+                for key in ("model", "data"):
+                    nested = data.get(key)
+                    if isinstance(nested, dict):
+                        nested_context, nested_output, nested_fields = self._pick_limits(nested)
+                        context = context or nested_context
+                        output = output or nested_output
+                        fields.extend(nested_fields)
+            probes.append({"path": path, "status": status, "fields": sorted(set(fields)), "error": error})
+            if selected is not None:
+                self._merge_limits(selected, context, output)
+
+        if selected is not None:
+            result["context_length"] = selected["context_length"]
+            result["context_source"] = selected["context_source"]
+            result["max_output_tokens"] = selected["max_output_tokens"]
+            result["max_output_source"] = selected["max_output_source"]
+        if result["context_length"]:
+            # 缓存供请求体预算校验使用（不落盘，进程内共享）
+            _LIMIT_CACHE[(self.endpoint, target)] = int(result["context_length"])
+        result["models"] = models
+        if result["context_length"] and result["max_output_tokens"]:
+            result["message"] = (
+                f"已按 {target} 检测：上下文 {result['context_length']} tokens / "
+                f"最大输出 {result['max_output_tokens']} tokens（来源：服务端字段）"
+            )
+        elif result["context_length"]:
+            result["message"] = (
+                f"已按 {target} 检测到上下文 {result['context_length']} tokens（来源：服务端字段）；"
+                "服务端未返回最大输出，可手动填写"
+            )
+        elif result["max_output_tokens"]:
+            result["message"] = (
+                f"已按 {target} 检测到最大输出 {result['max_output_tokens']} tokens（来源：服务端字段）；"
+                "服务端未返回上下文上限"
+            )
+        elif not result.get("message"):
+            result["message"] = (
+                f"服务端未返回 {target or '所选模型'} 的上下文/输出上限"
+                "（已尝试 /v1/models、/v1/models/{id}、/v1/models/status 等）：可手动填写最大输出"
+            )
+        return result
+
     def model_status(self) -> dict:
         """获取模型加载状态（GET /v1/models/status）。
 
@@ -291,6 +518,57 @@ class OmlxWritingAdapter:
             )
         return HealthStatus(ok=True, detail=f"omlx 可达，模型 {self.model} 存在（共 {len(ids)} 个）", latency_ms=latency, extra=extra)
 
+    def _context_limit(self) -> int | None:
+        """返回请求预算可用的上下文上限（检测缓存与配置取较小值，避免超限）。
+
+        返回:
+            tokens；都没有时为 None（不做裁剪）。
+        """
+        cached = _LIMIT_CACHE.get((self.endpoint, self.model))
+        configured = self.settings.get("context_window")
+        values = [int(value) for value in (cached, configured) if isinstance(value, (int, float)) and int(value) > 0]
+        return min(values) if values else None
+
+    @staticmethod
+    def _estimate_prompt_tokens(messages: list[dict]) -> int:
+        """粗略估算 prompt 的 token 数（中文按 1 字≈1 token 保守计）。
+
+        参数:
+            messages: 已拼好的 OpenAI messages 列表。
+
+        返回:
+            估算 token 数（含 256 的固定开销）。
+        """
+        chars = sum(len(str(item.get("content") or "")) for item in messages)
+        return chars + 256
+
+    def _fit_output_budget(self, messages: list[dict], max_tokens: int) -> int:
+        """按上下文上限约束输出预算：超限时自动下调，完全放不下时报中文错误。
+
+        参数:
+            messages: 已拼好的 OpenAI messages 列表。
+            max_tokens: 请求期望的输出预算。
+
+        返回:
+            调整后的 max_tokens。
+
+        异常:
+            AdapterError(INVALID_INPUT): prompt 已占满上下文，无法再留出输出空间。
+        """
+        limit = self._context_limit()
+        if not limit:
+            return max_tokens
+        prompt_tokens = self._estimate_prompt_tokens(messages)
+        available = limit - prompt_tokens
+        if available < 256:
+            raise AdapterError(
+                ErrorCode.INVALID_INPUT,
+                f"输入约 {prompt_tokens} tokens，超过模型上下文上限 {limit} tokens："
+                "请缩短输入或减少单次生成数量后重试",
+                detail={"prompt_tokens": prompt_tokens, "context_limit": limit},
+            )
+        return min(max_tokens, available)
+
     def _build_payload(self, req: TextGenRequest, stream: bool) -> dict:
         """把统一请求映射为 OpenAI 兼容请求体。
 
@@ -306,10 +584,11 @@ class OmlxWritingAdapter:
             messages.append({"role": "system", "content": req.system})
         for msg in req.messages:
             messages.append({"role": msg.role, "content": msg.content})
+        max_tokens = self._fit_output_budget(messages, int(req.max_tokens or self.settings.get("max_tokens") or 2048))
         payload = {
             "model": self.model,
             "messages": messages,
-            "max_tokens": int(req.max_tokens or self.settings.get("max_tokens") or 2048),
+            "max_tokens": max_tokens,
             "temperature": float(req.temperature if req.temperature is not None else self.settings.get("temperature", 0.8)),
             "stream": stream,
         }

@@ -21,12 +21,12 @@ from pathlib import Path
 
 from fastapi import HTTPException
 
-from ..adapters.base import AdapterError
 from ..adapters.comfyui import LocalComfyGateway
 from ..adapters.writing import OmlxWritingAdapter
 from ..config import load_config
 from ..media import comfy_media, comfy_models
 from ..tts import model_store
+from ..writing.service import _tool_max_tokens
 
 #: 后台下载任务表：`job_id -> {status, group, key, started_at, finished_at, result, logs}`
 _JOBS: dict[str, dict] = {}
@@ -750,9 +750,40 @@ def register_models_routes(app, config_path: str | None = None) -> None:
             "message": message,
         }
 
+    def _llm_settings(config, body: dict | None) -> tuple[dict, str]:
+        """按表单覆盖项装配 omlx 设置。
+
+        参数:
+            config: 本机配置。
+            body: 可选的 `{endpoint, api_key, model}` 覆盖值。
+
+        返回:
+            `(settings, model)`；未保存的新地址 / 新模型也能直接检测。
+        """
+        settings = dict(config.get("omlx", {}) or {})
+        for key in ("endpoint", "api_key", "model"):
+            value = str((body or {}).get(key) or "").strip()
+            if value:
+                settings[key] = value
+        return settings, str(settings.get("model") or "").strip()
+
+    def _business_budget(config) -> int:
+        """返回当前业务侧最常用的工具调用预算（用于提示「上限小于估算会截断」）。
+
+        参数:
+            config: 本机配置。
+
+        返回:
+            人物 8 人与整本大纲两种估算中的较大值。
+        """
+        try:
+            return max(_tool_max_tokens(config, "characters", 8), _tool_max_tokens(config, "outline", 27))
+        except Exception:
+            return 16384
+
     @app.post("/api/ui/llm/status")
     def ui_llm_status(body: dict | None = None) -> dict:
-        """检测写作 LLM（OpenAI 兼容服务）并返回可用模型与上下文上限。
+        """检测写作 LLM（OpenAI 兼容服务）并返回可用模型与上下限。
 
         参数:
             body: 可选 `{endpoint, api_key, model}`；传了就先按表单值探测，
@@ -760,56 +791,21 @@ def register_models_routes(app, config_path: str | None = None) -> None:
 
         返回:
             `{ok, connected, endpoint, model, model_found, models, context_window,
-            max_output_tokens, latency_ms, message}`；
-            `ok` 表示「连得上且所选模型存在」，连不上时 `connected=false`，HTTP 仍为 200，
-            由页面显示红色状态；`models[].context_length` 来自 `/v1/models` 的
-            `max_model_len`，服务端没给输出上限时用配置里的 `omlx.max_tokens`。
+            context_source, max_output_tokens, max_output_source, business_budget,
+            probes, latency_ms, message}`；上限只来自服务端接口字段（server）或
+            未取到（unknown），不读本机文件、不伪造默认值。
         """
         config = load_config(config_path)
-        settings = dict(config.get("omlx", {}) or {})
-        override = body or {}
-        for key in ("endpoint", "api_key", "model"):
-            value = str(override.get(key) or "").strip()
-            if value:
-                settings[key] = value
-        model = str(settings.get("model") or "").strip()
+        settings, model = _llm_settings(config, body)
         adapter = OmlxWritingAdapter(settings)
-
         started = time.monotonic()
-        try:
-            rows = adapter.list_models(timeout_s=5)
-        except AdapterError as exc:
-            return {
-                "ok": False,
-                "connected": False,
-                "endpoint": adapter.endpoint,
-                "model": model,
-                "model_found": False,
-                "models": [],
-                "context_window": settings.get("context_window"),
-                "max_output_tokens": settings.get("max_tokens"),
-                "latency_ms": None,
-                "message": exc.message,
-            }
+        limits = adapter.fetch_model_limits(model or None, timeout_s=2.0)
         latency = int((time.monotonic() - started) * 1000)
-
-        models: list[dict] = []
-        selected: dict | None = None
-        for item in rows:
-            model_id = str(item.get("id") or "")
-            if not model_id:
-                continue
-            entry = {
-                "id": model_id,
-                "owned_by": item.get("owned_by"),
-                # 不同服务叫法不同：omlx 给 max_model_len，其它兼容服务可能给 context_length
-                "context_length": item.get("max_model_len") or item.get("context_length"),
-                "max_output_tokens": item.get("max_output_tokens") or item.get("max_completion_tokens"),
-            }
-            models.append(entry)
-            if model_id == model:
-                selected = entry
+        models = limits.get("models") or []
         ids = [item["id"] for item in models]
+        probes = limits.get("probes") or []
+        connected = any(item.get("status") == 200 for item in probes)
+        selected = next((item for item in models if item["id"] == model), None)
         if selected:
             message = f"omlx 可达，模型 {model} 存在（共 {len(ids)} 个）"
         elif model:
@@ -818,13 +814,65 @@ def register_models_routes(app, config_path: str | None = None) -> None:
             message = f"服务可达，请选择模型：可用 {'、'.join(ids)}" if ids else "服务可达，但模型列表为空"
         return {
             "ok": selected is not None,
-            "connected": True,
+            "connected": connected,
             "endpoint": adapter.endpoint,
             "model": model,
             "model_found": selected is not None,
             "models": models,
-            "context_window": (selected or {}).get("context_length") or settings.get("context_window"),
-            "max_output_tokens": (selected or {}).get("max_output_tokens") or settings.get("max_tokens"),
+            "context_window": (selected or {}).get("context_length"),
+            "context_source": (selected or {}).get("context_source") or "unknown",
+            "max_output_tokens": (selected or {}).get("max_output_tokens"),
+            "max_output_source": (selected or {}).get("max_output_source") or "unknown",
+            "business_budget": _business_budget(config),
+            "probes": probes,
             "latency_ms": latency,
-            "message": message,
+            "message": message if selected else (limits.get("message") or message),
+        }
+
+    @app.post("/api/ui/settings/model-limits")
+    def ui_model_limits(body: dict | None = None) -> dict:
+        """探测当前模型的上下文与最大输出上限（只读 OpenAI 兼容接口）。
+
+        参数:
+            body: 可选 `{endpoint, api_key, model}` 覆盖值；不传则用已保存配置。
+
+        返回:
+            `{ok, connected, model, context_length, context_source,
+            max_output_tokens, max_output_source, models, probes, latency_ms, message}`；
+            单个端点超时 2 秒，失败快速返回，不影响页面其他操作。
+        """
+        config = load_config(config_path)
+        settings, model = _llm_settings(config, body)
+        adapter = OmlxWritingAdapter(settings)
+        started = time.monotonic()
+        try:
+            limits = adapter.fetch_model_limits(model or None, timeout_s=2.0)
+            error = None
+        except Exception as exc:  # 探测内部已兜底，这里再保一层，保证接口不 500
+            limits = {
+                "model": model,
+                "context_length": None,
+                "context_source": "unknown",
+                "max_output_tokens": None,
+                "max_output_source": "unknown",
+                "models": [],
+                "probes": [],
+            }
+            error = _err_message(exc)
+        latency = int((time.monotonic() - started) * 1000)
+        probes = limits.get("probes") or []
+        return {
+            "ok": bool(limits.get("context_length") or limits.get("max_output_tokens")),
+            "connected": any(item.get("status") == 200 for item in probes),
+            "endpoint": adapter.endpoint,
+            "model": limits.get("model") or model,
+            "context_length": limits.get("context_length"),
+            "context_source": limits.get("context_source") or "unknown",
+            "max_output_tokens": limits.get("max_output_tokens"),
+            "max_output_source": limits.get("max_output_source") or "unknown",
+            "business_budget": _business_budget(config),
+            "models": limits.get("models") or [],
+            "probes": probes,
+            "latency_ms": latency,
+            "message": limits.get("message") or (f"检测失败：{error}" if error else "未获取到上下限"),
         }

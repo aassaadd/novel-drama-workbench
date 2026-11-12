@@ -895,7 +895,7 @@ def continue_outline(
             lines.append(f"补充要求：{brief}")
         request = replace(req, messages=list(req.messages) + [Message("user", "\n".join(lines))])
         # 单幕输出预算按本幕章数 × 每章节拍数估算，避免沿用默认 2048 导致参数被截断
-        request.max_tokens = _tool_max_tokens("act", per_act * beats_per_chapter)
+        request.max_tokens = _tool_max_tokens(config, "act", per_act * beats_per_chapter)
         request.metadata = dict(req.metadata or {}, act_offset=act_offset)
         try:
             payload = _generate_json(adapter, request, "act")
