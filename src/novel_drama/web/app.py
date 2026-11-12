@@ -34,6 +34,7 @@ from .actions import fail_body, run
 from .models_api import register_models_routes, resolve_llm_settings
 from .voice_tools_api import register_voice_tools_routes
 from .continue_api import register_continue_routes
+from .stream_api import register_stream_routes
 from .bgm_api import register_bgm_routes
 from .sfx_api import register_sfx_routes
 
@@ -2943,6 +2944,8 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
     register_voice_tools_routes(app, config_path)
     # 章节/大纲续写（独立模块）
     register_continue_routes(app, config_path)
+    # 页面实时流：章节正文生成 / 续写（SSE，独立模块）
+    register_stream_routes(app, config_path)
     # 配乐生成：叙事 / 铺底两档（独立模块）
     register_bgm_routes(app, config_path)
     # 媒体页音效生成：Stable Audio 3 provider + 进度轮询（独立模块）

@@ -10,7 +10,7 @@ import json
 import re
 from dataclasses import replace
 
-from ..adapters.base import AdapterError, ErrorCode, Message, TextGenRequest
+from ..adapters.base import AdapterError, ErrorCode, Message, TextGenRequest, TextGenResult
 from ..adapters.offline_writing import OfflineWritingAdapter
 from ..config import AppConfig
 from ..director.markup import parse_markup
@@ -479,6 +479,45 @@ def build_chapter_context(store: ProjectStore, config: AppConfig, chapter: dict)
     }
 
 
+def stream_text(adapter, request: TextGenRequest, on_delta) -> TextGenResult:
+    """流式调用写作适配器，逐段回调增量文本并聚合为 TextGenResult。
+
+    适配器不支持流式（抛 NotImplementedError）时回落到一次性生成，
+    并把整段文本作为一次增量回调，保证调用方逻辑一致。
+
+    参数:
+        adapter: 写作适配器。
+        request: 统一文本请求。
+        on_delta: 增量回调 `(text) -> None`；可为 None。
+
+    返回:
+        聚合后的 TextGenResult。
+    """
+    parts: list[str] = []
+    usage = None
+    try:
+        for chunk in adapter.stream(request):
+            if chunk.delta:
+                parts.append(chunk.delta)
+                if on_delta is not None:
+                    on_delta(chunk.delta)
+            if chunk.usage is not None:
+                usage = chunk.usage
+            if chunk.done:
+                break
+    except NotImplementedError:
+        result = adapter.generate(request)
+        if result.text and on_delta is not None:
+            on_delta(result.text)
+        return result
+    return TextGenResult(
+        text="".join(parts),
+        finish_reason="stop",
+        model=str(getattr(adapter, "model", "") or ""),
+        usage=usage,
+    )
+
+
 def generate_chapter(
     store: ProjectStore,
     config: AppConfig,
@@ -488,6 +527,7 @@ def generate_chapter(
     multi_turn: bool | None = None,
     segment_words: int | None = None,
     max_rounds: int | None = None,
+    on_delta=None,
 ) -> dict:
     """生成章节正文并落盘；长章节按目标字数拆成多轮续写。
 
@@ -500,6 +540,7 @@ def generate_chapter(
         multi_turn: 显式多轮开关；None 时按目标字数与 `writing.multi_turn.enabled` 自动判断。
         segment_words: 每段目标字数；None 时取 `writing.multi_turn.segment_words`（默认 800）。
         max_rounds: 最大轮数；None 时取 `writing.multi_turn.max_rounds`（默认 8）。
+        on_delta: 流式增量回调 `(text) -> None`；传入时改为流式生成，仅用于页面实时预览。
 
     返回:
         {"chapter_id", "status", "words", "provider", "content",
@@ -581,13 +622,15 @@ def generate_chapter(
         work_id = str(context["work"].get("id") or "").strip()
         if work_id:
             req.prompt_cache_key = f"{work_id}:{chapter_id}"
-        outcome = _generate_chapter_rounds(context["adapter"], req, target_words, seg_words, rounds_cap)
+        outcome = _generate_chapter_rounds(
+            context["adapter"], req, target_words, seg_words, rounds_cap, on_delta=on_delta
+        )
         content = outcome["content"].strip()
         provider = outcome["provider"]
         rounds = outcome["rounds"]
         stop_reason = outcome["stop_reason"]
     else:
-        result = context["adapter"].generate(req)
+        result = stream_text(context["adapter"], req, on_delta) if on_delta else context["adapter"].generate(req)
         content = (result.text or "").strip()
         provider = result.model
         rounds = 1
@@ -682,7 +725,9 @@ def _continue_instruction(segment_words: int) -> str:
     return f"继续写下一段，紧接上文，不要重复已写内容，保持人物人设与文风。本段目标约 {segment_words} 字，只输出新增正文。"
 
 
-def _generate_chapter_rounds(adapter, req: TextGenRequest, target_words: int, segment_words: int, max_rounds: int) -> dict:
+def _generate_chapter_rounds(
+    adapter, req: TextGenRequest, target_words: int, segment_words: int, max_rounds: int, on_delta=None
+) -> dict:
     """按轮续写章节正文。
 
     前缀（system、首条 user、temperature、stop）全程不变，仅在末尾追加
@@ -694,6 +739,7 @@ def _generate_chapter_rounds(adapter, req: TextGenRequest, target_words: int, se
         target_words: 目标字数。
         segment_words: 每段目标字数。
         max_rounds: 最大轮数。
+        on_delta: 流式增量回调；传入时每轮改为流式生成。
 
     返回:
         {"content", "rounds", "stop_reason", "provider"}；stop_reason 取
@@ -711,7 +757,7 @@ def _generate_chapter_rounds(adapter, req: TextGenRequest, target_words: int, se
                 req,
                 messages=list(req.messages) + [Message("assistant", content), Message("user", _continue_instruction(segment_words))],
             )
-        result = adapter.generate(request)
+        result = stream_text(adapter, request, on_delta) if on_delta else adapter.generate(request)
         provider = result.model or provider
         segment = (result.text or "").strip()
         rounds = index

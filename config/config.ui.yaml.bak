@@ -3,5 +3,6 @@
 omlx:
   endpoint: http://127.0.0.1:9000
   model: Qwen3.8-27B-oQ4e-mtp
+  max_tokens: 32768
 tts:
   default_provider_id: indextts_25

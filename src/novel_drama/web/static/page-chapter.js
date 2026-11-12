@@ -29,6 +29,163 @@
 
   const el = (id) => document.getElementById(id);
 
+  /* ---------------- 页面实时流（SSE） ---------------- */
+
+  let streamAbort = null;   // 当前流式请求的 AbortController（取消时中断连接）
+  let streamBox = null;     // 正文区里的实时输出容器
+  let streamText = "";      // 已收到的增量全文
+  let streamStartedAt = 0;  // 开始时间（算「已用 X 秒」）
+  let streamTimer = null;   // 计时器（没有新内容时秒数也要走）
+
+  /* 解析一段 SSE 文本（到空行为止），按事件名分发。
+   * 参数：block 原始块；onEvent(event, data) 回调。
+   * 返回：无。
+   */
+  function dispatchSse(block, onEvent) {
+    let event = "message";
+    const dataLines = [];
+    block.split("\n").forEach((line) => {
+      if (line.startsWith("event:")) event = line.slice(6).trim();
+      else if (line.startsWith("data:")) dataLines.push(line.slice(5).trim());
+    });
+    if (!dataLines.length) return;
+    let data = null;
+    try {
+      data = JSON.parse(dataLines.join("\n"));
+    } catch (error) {
+      return;
+    }
+    onEvent(event, data || {});
+  }
+
+  /* 用 fetch + ReadableStream 读取 SSE（EventSource 不能带 POST body）。
+   * 参数：url 接口地址；body 请求体；onEvent 事件回调；signal 取消信号。
+   * 返回：Promise，done 事件的 result；error 事件或连接失败时 reject。
+   */
+  async function streamPost(url, body, onEvent, signal) {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal,
+    });
+    if (!response.ok || !response.body) {
+      let message = `HTTP ${response.status}`;
+      try {
+        const detail = await response.json();
+        message = (detail && (detail.detail || detail.message)) || message;
+      } catch (error) {
+        // 非 JSON 错误体：保留 HTTP 状态码
+      }
+      throw new Error(message);
+    }
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder("utf-8");
+    let buffer = "";
+    let result = null;
+    let failure = "";
+    const handle = (event, data) => {
+      if (event === "delta" && data.text) onEvent("delta", data);
+      else if (event === "done") {
+        result = data.result || null;
+        onEvent("done", data);
+      } else if (event === "error") {
+        failure = data.message || "生成失败";
+      } else if (event === "start") {
+        onEvent("start", data);
+      }
+    };
+    while (true) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      buffer += decoder.decode(chunk.value, { stream: true });
+      let index = buffer.indexOf("\n\n");
+      while (index >= 0) {
+        dispatchSse(buffer.slice(0, index), handle);
+        buffer = buffer.slice(index + 2);
+        index = buffer.indexOf("\n\n");
+      }
+    }
+    if (buffer.trim()) dispatchSse(buffer, handle);
+    if (failure) throw new Error(failure);
+    if (!result && signal && signal.aborted) throw new Error("已停止生成");
+    return result;
+  }
+
+  /* 统计正文有效字数（与后端一致：去掉空白后的字符数）。
+   * 参数：text 文本。
+   * 返回：字数。
+   */
+  function streamWordCount(text) {
+    return String(text || "").replace(/\s/g, "").length;
+  }
+
+  /* 刷新「已生成 N 字 / 已用 X 秒」。
+   * 参数：无。
+   * 返回：无。
+   */
+  function refreshStreamStatus() {
+    if (!streamStartedAt) return;
+    const seconds = ((Date.now() - streamStartedAt) / 1000).toFixed(1);
+    el("chInfo").innerHTML =
+      `<div class="kv-row"><span class="kv-key">生成中</span>` +
+      `<span class="kv-val">已生成 ${streamWordCount(streamText)} 字 / 已用 ${seconds} 秒</span></div>`;
+  }
+
+  /* 开始流式输出：清空正文区并挂一个实时文本容器。
+   * 参数：无。
+   * 返回：无。
+   */
+  function beginStream() {
+    streamText = "";
+    streamStartedAt = Date.now();
+    streamBox = document.createElement("div");
+    streamBox.style.cssText = "white-space:pre-wrap;line-height:1.85";
+    el("chContent").innerHTML = "";
+    el("chContent").appendChild(streamBox);
+    refreshStreamStatus();
+    streamTimer = window.setInterval(refreshStreamStatus, 250);
+  }
+
+  /* 追加一段增量文本。
+   * 参数：text 增量文本。
+   * 返回：无。
+   */
+  function appendStream(text) {
+    streamText += String(text || "");
+    if (streamBox) streamBox.textContent = streamText;
+    refreshStreamStatus();
+  }
+
+  /* 结束流式输出（清计时器并恢复按钮）。
+   * 参数：无。
+   * 返回：无。
+   */
+  function endStream() {
+    if (streamTimer) window.clearInterval(streamTimer);
+    streamTimer = null;
+    streamStartedAt = 0;
+    streamBox = null;
+    streamAbort = null;
+    const stop = el("chStreamStop");
+    if (stop) stop.hidden = true;
+    const generateBtn = el("chGenerate");
+    const previewBtn = el("chPreview");
+    const continueBtn = el("chContinuePreview");
+    if (generateBtn) generateBtn.disabled = false;
+    if (previewBtn) previewBtn.disabled = false;
+    if (continueBtn) continueBtn.disabled = false;
+    busy = false;
+  }
+
+  /* 取消当前流式请求：中断 fetch，后台会在下一个增量处停止。
+   * 参数：无。
+   * 返回：无。
+   */
+  function stopStream() {
+    if (streamAbort) streamAbort.abort();
+  }
+
   /* 把正文按空行切段，并记录每段在原文里的字符起止。
    * 参数：text 章节正文。
    * 返回：数组，元素为 { index, start, end, text }。
@@ -393,6 +550,7 @@
   }
 
   /* 生成正文（regen 由勾选框决定）。
+   * 流式请求：正文区实时追加，状态显示「已生成 N 字 / 已用 X 秒」。
    * 勾选「覆盖已有正文」且本章已有正文时，先二次确认，避免一次误点覆盖全文。 */
   async function generate() {
     if (busy || !NW.state.path || !NW.state.chapter) return;
@@ -408,52 +566,78 @@
     }
     busy = true;
     el("chGenerate").disabled = true;
+    el("chPreview").disabled = true;
+    el("chContinuePreview").disabled = true;
+    el("chStreamStop").hidden = false;
+    streamAbort = new AbortController();
+    beginStream();
     try {
-      const result = await NW.api("/api/ui/chapter/generate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path: NW.state.path, chapter: NW.state.chapter, regen }),
-        busy: "正在生成正文…",
-        busyDetail: "多轮续写，长章节需要较长时间",
-      });
+      const result = await streamPost(
+        "/api/ui/chapter/generate/stream",
+        { path: NW.state.path, chapter: NW.state.chapter, regen },
+        (event, payload) => {
+          if (event === "delta") appendStream(payload.text);
+        },
+        streamAbort.signal
+      );
+      if (!result) throw new Error("生成中断：未收到完成事件");
+      refreshStreamStatus();
       // 多轮生成会带回 rounds：优先展示轮次与字数，旧版无 rounds 时回落到原提示
-      if (result.rounds) {
+      if (result && result.rounds) {
         NW.toast(`生成完成（${result.rounds} 轮，${result.words} 字）${regen ? "，请重新切分场景与台词" : ""}`, true);
       } else {
-        NW.toast(`正文已生成：${result.words} 字${regen ? "，请重新切分场景与台词" : ""}`, true);
+        NW.toast(`正文已生成：${(result && result.words) || streamWordCount(streamText)} 字${regen ? "，请重新切分场景与台词" : ""}`, true);
       }
       await load();
       if (NW.openProject) await NW.openProject();
     } catch (error) {
-      NW.toast(`生成失败（退出码 ${error.code}）：${error.message}`);
+      if (streamAbort && streamAbort.signal.aborted) {
+        NW.toast("已停止生成");
+      } else {
+        NW.toast(`生成失败：${error.message}`);
+      }
+      await load();
     } finally {
-      busy = false;
-      el("chGenerate").disabled = false;
+      endStream();
     }
   }
 
-  /* 只预览不写盘：预览文本按同样的段落规则渲染，但清掉定位映射（不是落盘正文）。 */
+  /* 只预览不写盘：流式输出，结束后按同样的段落规则渲染预览（不落盘正文）。 */
   async function preview() {
     if (busy || !NW.state.path || !NW.state.chapter) return;
     if (blockWhileEditing()) return;
     busy = true;
+    el("chGenerate").disabled = true;
+    el("chPreview").disabled = true;
+    el("chContinuePreview").disabled = true;
+    el("chStreamStop").hidden = false;
+    streamAbort = new AbortController();
+    beginStream();
     try {
-      const result = await NW.api("/api/ui/chapter/generate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path: NW.state.path, chapter: NW.state.chapter, regen: true, dry_run: true }),
-        busy: "正在生成正文预览…",
-        busyDetail: "多轮续写，长章节需要较长时间",
-      });
-      blocks = paragraphsOf(result.preview || "");
+      const result = await streamPost(
+        "/api/ui/chapter/generate/stream",
+        { path: NW.state.path, chapter: NW.state.chapter, regen: true, dry_run: true },
+        (event, payload) => {
+          if (event === "delta") appendStream(payload.text);
+        },
+        streamAbort.signal
+      );
+      if (!result) throw new Error("生成中断：未收到完成事件");
+      const text = String((result && result.content) || streamText || "");
+      blocks = paragraphsOf(text);
       lineMap = new Map();
       renderDoc(blocks, new Map());
       el("chInfo").innerHTML = `<div class="kv-row"><span class="kv-key">预览</span><span class="kv-val">未写盘（${blocks.length} 段）</span></div>`;
       NW.toast("预览已生成，未写盘", true);
     } catch (error) {
-      NW.toast(`预览失败（退出码 ${error.code}）：${error.message}`);
+      if (streamAbort && streamAbort.signal.aborted) {
+        NW.toast("已停止生成");
+      } else {
+        NW.toast(`预览失败：${error.message}`);
+      }
+      await load();
     } finally {
-      busy = false;
+      endStream();
     }
   }
 
@@ -1011,6 +1195,7 @@
   }
 
   /* 请求续写预览（结果先落成未应用草稿，不写正文）。
+   * 流式请求：正文区实时追加新增段落，状态显示「已生成 N 字 / 已用 X 秒」。
    * 参数：retry 是否重抽（忽略已有草稿重新生成）。
    * 返回：Promise<void>。
    */
@@ -1021,28 +1206,40 @@
     const intent = String((el("chContinueIntent") || {}).value || "").trim();
     busy = true;
     el("chContinuePreview").disabled = true;
+    el("chGenerate").disabled = true;
+    el("chPreview").disabled = true;
+    el("chStreamStop").hidden = false;
+    streamAbort = new AbortController();
+    beginStream();
     try {
-      const result = await NW.api("/api/ui/chapter/continue", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
+      const result = await streamPost(
+        "/api/ui/chapter/continue/stream",
+        {
           path: NW.state.path,
           chapter: NW.state.chapter,
           words,
           intent,
           retry: Boolean(retry),
-        }),
-        busy: retry ? "正在重抽续写…" : "正在续写…",
-        busyDetail: "从正文末尾接着写，完成后先预览",
-      });
+        },
+        (event, payload) => {
+          if (event === "delta") appendStream(payload.text);
+        },
+        streamAbort.signal
+      );
+      if (!result) throw new Error("生成中断：未收到完成事件");
       continueDraft = result;
+      await load();
       showContinueDialog(result, words);
       await refreshContinueDraft();
     } catch (error) {
-      NW.toast(`续写失败（${error.code || "-"}）：${error.message}`);
+      if (streamAbort && streamAbort.signal.aborted) {
+        NW.toast("已停止续写");
+      } else {
+        NW.toast(`续写失败：${error.message}`);
+      }
+      await load();
     } finally {
-      busy = false;
-      el("chContinuePreview").disabled = false;
+      endStream();
     }
   }
 
@@ -1141,6 +1338,7 @@
     if (bound) return;
     bound = true;
     el("chContinuePreview").addEventListener("click", () => requestContinue(false));
+    el("chStreamStop").addEventListener("click", stopStream);
     el("chContinueApply").addEventListener("click", applyContinueDraft);
     el("chGenerate").addEventListener("click", generate);
     el("chEdit").addEventListener("click", startEdit);

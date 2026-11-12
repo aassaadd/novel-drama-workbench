@@ -31,6 +31,7 @@ from .service import (
     _tool_max_tokens,
     build_chapter_context,
     build_writing_adapter,
+    stream_text,
 )
 
 #: 正文每轮目标字数（默认）
@@ -456,6 +457,7 @@ def continue_chapter(
     from_beat: int | None = None,
     dry_run: bool = True,
     retry: bool = False,
+    on_delta=None,
 ) -> dict:
     """在已有正文末尾续写；默认只预览并把结果存为未应用草稿。
 
@@ -470,6 +472,7 @@ def continue_chapter(
         from_beat: 起始节拍（1 起）；None 时按已写字数比例估算。
         dry_run: True 只生成预览并保存草稿；False 写正文。
         retry: True 忽略已有草稿重新生成（重抽）；False 时 `--apply` 优先应用已有草稿。
+        on_delta: 流式增量回调 `(text) -> None`；传入时改为流式生成，仅用于页面实时预览。
 
     返回:
         {"chapter_id", "mode", "dry_run", "added_words", "before_words", "after_words",
@@ -583,7 +586,7 @@ def continue_chapter(
                 + [Message("assistant", added_text), Message("user", _continue_instruction(seg_words))],
             )
         try:
-            result = context["adapter"].generate(request)
+            result = stream_text(context["adapter"], request, on_delta) if on_delta else context["adapter"].generate(request)
         except AdapterError as exc:
             error_note = f"第 {index} 轮续写失败：{exc}"
             record["status"] = "failed"
