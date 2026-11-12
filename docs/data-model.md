@@ -142,14 +142,14 @@
     "writing": {
       "adapter": "omlx",
       "protocol": "openai_compatible",     // omlx 实测：OpenAI 兼容本地 HTTP
-      "endpoint": "http://127.0.0.1:9000",
+      "endpoint": "http://127.0.0.1:9000", // 示例：无内置默认，用户在设置页填写
       "api_key": null,                     // 按 Authorization: Bearer <key> 传递；真实值只写在本地 config/config.yaml，不随工程落盘
-      "model": "Qwen3.8-27B-oQ4e-mtp",     // 实测 /v1/models 返回的可用 ID
-      "available_models": [
-        "Qwen3.8-27B-oQ4e-mtp",            // 约 16 GB
-        "Qwen3.8-27B-Uncensored-OptiQ-4bit" // 约 19 GB
+      "model": "Qwen3.8-27B-oQ4e-mtp",     // 示例：运行时以 /v1/models 返回为准，由用户在设置页选择
+      "available_models": [                 // 旧字段，仅兼容保留；页面下拉不再使用它
+        "Qwen3.8-27B-oQ4e-mtp",            // 示例 ID
+        "Qwen3.8-27B-Uncensored-OptiQ-4bit" // 示例 ID
       ],
-      "context_window": 262144,            // 262K
+      "context_window": null,              // 留空：由检测结果提供；填写才作为上限
       "memory_ceiling_gb": 29.48,          // 内存天花板，超出会 OOM
       "idle_timeout_s": null,              // null = 不自动卸载，必须显式卸载
       "max_concurrency": 8,                // 服务端能力上限；工作台仍串行使用
@@ -237,10 +237,10 @@
 | `work.style_guide` | 否 | 全局文风约定，写作模型每次调用都会带上 |
 | `work.target_duration_ms` | 否 | 目标成片时长，用于进度估算 |
 | `settings.writing.protocol` | 是 | 实测为 `openai_compatible`；适配器据此选择 HTTP 客户端 |
-| `settings.writing.endpoint` | 是 | omlx 本地地址 `http://127.0.0.1:9000` |
+| `settings.writing.endpoint` | 是 | omlx 地址（示例 `http://127.0.0.1:9000`，无内置默认） |
 | `settings.writing.api_key` | 否 | 非空时按 `Authorization: Bearer <key>` 发送 |
 | `settings.writing.model` | 是 | 请求体 `model` 字段；必须是 `/v1/models` 返回的 ID |
-| `settings.writing.context_window` | 是 | 262144；长文本拼装据此截断 |
+| `settings.writing.context_window` | 否 | 默认留空：由检测结果提供；填写才作为预算上限 |
 | `settings.writing.memory_ceiling_gb` | 否 | 29.48；仅用于告警与调度提示，不参与计算 |
 | `settings.writing.idle_timeout_s` | 是 | `null` 表示不会自动卸载，必须显式调用卸载 |
 | `settings.writing.unload.*` | 是 | 卸载端点路径与策略；路径含 `{model_id}` 占位 |
@@ -388,7 +388,7 @@
   },
   "status": "done",               // pending|running|done|failed|canceled
   "produced": { "char_start": 5200, "char_end": 6800 },
-  "model": "Qwen3.8-27B-oQ4e-mtp",
+  "model": "Qwen3.8-27B-oQ4e-mtp", // 示例：实际为用户在设置页所选模型
   "usage": { "prompt_tokens": 0, "completion_tokens": 0 },
   "created_at": "2026-11-09T12:00:00Z"
 }

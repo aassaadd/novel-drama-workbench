@@ -21,13 +21,11 @@ providers:
 # omlx（写作 LLM）：已实测为 OpenAI 兼容本地 HTTP 服务
 omlx:
   protocol: openai_compatible   # 实测结论：OpenAI 兼容 HTTP（非 CLI）
-  endpoint: http://127.0.0.1:9000
+  endpoint: ""                  # 留空：在设置页填写服务地址（无内置默认地址）
   api_key: "1111"               # Authorization: Bearer <api_key>
-  model: Qwen3.8-27B-oQ4e-mtp   # 以 GET /v1/models 返回的 id 为准
-  available_models:             # 服务端已安装模型（约 16 GB / 19 GB）
-    - Qwen3.8-27B-oQ4e-mtp
-    - Qwen3.8-27B-Uncensored-OptiQ-4bit
-  context_window: 262144        # 262K
+  model: ""                     # 留空：在设置页「检测连接」后从 /v1/models 下拉选择
+  available_models: []          # 仅兼容旧字段；模型列表运行时从 /v1/models 实时获取
+  context_window: null          # 留空：由检测结果提供；填了才作为上限
   memory_ceiling_gb: 29.48      # 内存天花板，超出会 OOM
   idle_timeout_s: null          # 服务端不会自动卸载，必须显式卸载
   max_concurrency: 8            # 服务端上限；工作台仍固定 1 路，与 ComfyUI 串行
@@ -35,7 +33,7 @@ omlx:
   connect_timeout_s: 5          # 连接超时（自检/卸载用）
   max_retries: 2                # 仅对可重试错误（超时/限流/5xx/不可达）重试
   temperature: 0.8
-  max_tokens: 2048
+  max_tokens: null              # 留空：由检测值或手填决定；协议层仅保底 2048
   stop: []
   enable_thinking: false        # 通过 chat_template_kwargs 关闭思考，降低延迟
   unload:
@@ -77,7 +75,7 @@ sfx:
 
 # TTS：多 provider + 自动路由（完整字段见 config/config.yaml 与本机 design-v2 §5）
 tts:
-  default_provider_id: indextts_25
+  default_provider_id: ""      # 留空：请在设置页选择；为空时按 provider_order / 权重路由
   provider_order: [indextts_25, cosyvoice3_mlx]
   # 内置参考音色（IndexTTS 官方 Demo 示例音频），按需下载到外置盘，不入仓库
   builtin_voices:

@@ -103,7 +103,7 @@ cp config/config.example.yaml config/config.yaml
 | 段 | 字段 | 说明 |
 | --- | --- | --- |
 | `adapters` | `writing` / `tts` / `sfx` / `comfyui` | 装配层；实际能力用 `providers.writing`（`offline`/`omlx`）、`providers.image/video`（`offline`/`comfyui`）逐项切换 |
-| `omlx` | `protocol` / `endpoint` / `api_key` / `model` | 已实测为 OpenAI 兼容 HTTP（默认 `http://127.0.0.1:9000`）；模型下拉从 `GET /v1/models` 动态获取，并显示输入/输出上限 |
+| `omlx` | `protocol` / `endpoint` / `api_key` / `model` | 已实测为 OpenAI 兼容 HTTP（地址由用户填写，示例 `http://127.0.0.1:9000`，无内置默认）；模型下拉从 `GET /v1/models` 动态获取，并显示输入/输出上限 |
 | `tts` | `providers[].runtime.worker_mode` | `resident`（默认，整批复用同一进程，模型只加载一次）/ `per_call`（逐行起进程）；另有 `idle_timeout_s`、`max_restarts` |
 | `comfyui` | `base_url` | 本机 ComfyUI 地址，默认 `http://127.0.0.1:8188` |
 | `comfyui` | `templates_dir` / `templates` | 模板目录（默认 `config/comfy`）与四类模板 ID：`qwen_image_accel` / `minimax_h3_accel` / `minimax_h3_accel_t2v` / `ace_step_1_5` |

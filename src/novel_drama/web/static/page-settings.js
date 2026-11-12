@@ -168,7 +168,7 @@
     const count = rows.length;
     const latency = llm && llm.latency_ms ? `（耗时 ${llm.latency_ms}ms）` : "";
     const select = el("setLlmModel");
-    const current = String((select ? select.value : (writing || {}).model) || "").trim();
+    const current = String((select ? select.value : (writing || {}).model) ?? "");
     const entry = llmModelEntry(current);
     const context = (entry && entry.context_length) || (llm && llm.context_window);
     const contextSource = (entry && entry.context_source) || (llm && llm.context_source);
@@ -186,10 +186,17 @@
     }
     let limitsText = "未获取";
     if (llm && count) {
-      limitsText =
-        context && output
-          ? `上下文 ${context} tokens（${limitSourceLabel(contextSource)}） / 输出 ${output} tokens（${limitSourceLabel(outputSource)}）`
-          : "未返回上下限字段";
+      const ids = catalogModelIds();
+      if (!current) {
+        // 未选模型：不再自动用列表第一个模型顶替，保持未选中态并引导用户选择
+        limitsText = "未选择模型，请检测连接后选择";
+      } else if (!ids.includes(current)) {
+        limitsText = "请选择模型后重新检测";
+      } else if (context && output) {
+        limitsText = `上下文 ${context} tokens（${limitSourceLabel(contextSource)}） / 输出 ${output} tokens（${limitSourceLabel(outputSource)}）`;
+      } else {
+        limitsText = "未返回上下限字段";
+      }
     }
     const business = llm && llm.business_budget;
     const warn =
@@ -229,7 +236,7 @@
     if (!ids.length) {
       return '<option value="">请先点「检测连接」</option>';
     }
-    const selected = ids.includes(String(preferred || "").trim()) ? String(preferred).trim() : "";
+    const selected = ids.includes(String(preferred ?? "")) ? String(preferred ?? "") : "";
     const head = selected ? "" : '<option value="" selected>请选择模型</option>';
     return (
       head +
@@ -247,7 +254,7 @@
     const ids = catalogModelIds();
     if (!catalog) return "请先点「检测连接」读取服务端模型列表";
     if (!catalog.ok) return catalog.message || (catalog.connected ? "服务可达但未返回任何模型" : "无法连接服务");
-    const value = String(saved || "").trim();
+    const value = String(saved ?? "");
     if (!value) return `已获取 ${ids.length} 个模型，请选择要使用的模型`;
     if (!ids.includes(value)) return `已保存的模型 ${value} 不在当前服务列表，请重新选择`;
     return `已获取 ${ids.length} 个模型`;
@@ -307,7 +314,7 @@
         ${fieldBlock(
           "omlx.endpoint",
           "接口地址",
-          `<input data-key="omlx.endpoint" value="${esc(writing.endpoint || "")}" placeholder="http://127.0.0.1:9000" spellcheck="false" />`
+          `<input data-key="omlx.endpoint" value="${esc(writing.endpoint || "")}" placeholder="http://主机:端口" spellcheck="false" />`
         )}
         <div class="settings-field">
           <div class="settings-label">
@@ -386,11 +393,13 @@
       current && !providers.some((item) => item.provider_id === current)
         ? `<option value="${esc(current)}" selected>${esc(current)}（未识别）</option>`
         : "";
+    // 未选择时不替用户挑第一个：明确占位，交给用户选择或路由顺序
+    const placeholder = current ? "" : '<option value="" selected>请选择默认 provider</option>';
     const order = (tts.provider_order || []).join(", ");
     return `<section class="settings-card" data-section="tts">
       <h3>音频 TTS</h3>
       <div class="settings-grid">
-        ${fieldBlock("tts.default_provider_id", "默认 provider", `<select data-key="tts.default_provider_id">${extra}${options}</select>`)}
+        ${fieldBlock("tts.default_provider_id", "默认 provider", `<select data-key="tts.default_provider_id">${placeholder}${extra}${options}</select>`, "留空时按优先级顺序与权重路由。")}
         ${fieldBlock(
           "tts.provider_order",
           "优先级顺序",
@@ -1024,7 +1033,7 @@
       const model = document.querySelector('#setBody [data-key="omlx.model"]');
       const apiKey = document.querySelector('#setBody [data-key="omlx.api_key"]');
       if (endpoint) payload.endpoint = String(endpoint.value || "").trim();
-      if (model) payload.model = String(model.value || "").trim();
+      if (model) payload.model = String(model.value || "");
       if (apiKey) payload.api_key = String(apiKey.value || "").trim();
     }
     try {
@@ -1063,12 +1072,12 @@
     const select = el("setLlmModel");
     const saved = String((data && data.writing && data.writing.model) || "");
     if (!select) return;
-    const keep = String(select.value || "").trim();
+    const keep = String(select.value ?? "");
     const ids = catalogModelIds();
     const preferred = ids.includes(keep) ? keep : saved;
     select.innerHTML = modelOptionsHtml(preferred);
     select.disabled = !catalogUsable();
-    const chosen = String(select.value || "").trim();
+    const chosen = String(select.value ?? "");
     select.classList.toggle("is-invalid", catalogUsable() && (!chosen || !ids.includes(chosen)));
     // 保存值有效时把它作为「初始值」，避免仅因重建下拉而被判定为未保存改动
     if (catalogUsable() && chosen && chosen === saved) select.dataset.init = chosen;
@@ -1083,7 +1092,7 @@
   function modelSelectionError() {
     if (!catalogUsable()) return "请先点「检测连接」获取服务端模型列表";
     const select = el("setLlmModel");
-    const value = select ? String(select.value || "").trim() : "";
+    const value = select ? String(select.value ?? "") : "";
     if (!value) return "请选择要使用的模型";
     if (!catalogModelIds().includes(value)) return "所选模型不在服务端列表，请重新选择";
     return "";
@@ -1218,7 +1227,8 @@
       if (!isEditable(key)) return;
       // 没改过的字段不提交，避免把 config.yaml 的取值复制进覆盖层
       if (normalized(node) === (node.dataset.init ?? "")) return;
-      const raw = String(node.value || "").trim();
+      // 模型 id 原样提交（保留 models/ 前缀与 .gguf 后缀），其余字段去掉首尾空格
+      const raw = key === "omlx.model" ? String(node.value || "") : String(node.value || "").trim();
       const type = node.dataset.type || "";
       if (type === "bool") {
         values[key] = Boolean(node.checked);
@@ -1524,7 +1534,14 @@
     const key = event.target && event.target.dataset ? event.target.dataset.key || "" : "";
     if (key.startsWith("comfyui.templates.")) refreshTemplateInfo();
     // 切到另一个模型时，上限区跟着该模型的检测结果变
-    if (event.target && event.target.id === "setLlmModel") refreshLlmLimits();
+    if (event.target && event.target.id === "setLlmModel") {
+      const value = String(event.target.value || "").trim();
+      event.target.classList.toggle(
+        "is-invalid",
+        catalogUsable() && (!value || !catalogModelIds().includes(value))
+      );
+      refreshLlmLimits();
+    }
     const card = event.target && event.target.closest ? event.target.closest("[data-section]") : null;
     if (card) refreshSectionDirty(card);
   }

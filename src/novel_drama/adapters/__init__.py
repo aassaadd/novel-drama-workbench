@@ -61,9 +61,6 @@ def build_adapters(config: AppConfig, project_settings: dict | None = None) -> A
         for key, value in (project_settings.get("writing") or {}).items()
         if value not in (None, "", [])
     }
-    # omlx-local 是早期默认占位模型名，服务端并不存在，视为未定制
-    if project_writing.get("model") == "omlx-local":
-        project_writing.pop("model")
     omlx_settings.update(project_writing)
     writing = OmlxWritingAdapter(omlx_settings)
 

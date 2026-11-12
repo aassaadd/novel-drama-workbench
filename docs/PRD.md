@@ -244,7 +244,7 @@ v2 的核心判断：用户的实际创作顺序是「先设定 → 再写小说
 
 ## 10. 依赖与假设
 
-- 用户本机已有 omlx：OpenAI 兼容 HTTP，`http://127.0.0.1:9000`，`Authorization: Bearer <key>`，提供 `GET /v1/models`、`POST /v1/chat/completions`、`POST /v1/models/{id}/unload`；已装模型约 16 GB / 19 GB，上下文 262K，内存天花板 29.48 GB，不自动卸载。
+- 用户本机已有 omlx：OpenAI 兼容 HTTP（地址由用户在设置页填写，示例 `http://127.0.0.1:9000`），`Authorization: Bearer <key>`，提供 `GET /v1/models`、`POST /v1/chat/completions`、`POST /v1/models/{id}/unload`；已装模型约 16 GB / 19 GB，上下文 262K，内存天花板 29.48 GB，不自动卸载。
 - 用户本机已部署 Qwen3-TTS 1.7B（约 11 GB），提供 9 个预设音色与零样本克隆（3 秒参考音频）；Base 克隆模型不支持自然语言指令控情绪；无语速参数、无 SSML；Apache-2.0。
 - 用户本机已有可用 ComfyUI（HTTP API 默认 `http://127.0.0.1:8188`），并已具备：Qwen-Image 2.1 + Krea2 三阶段出图、MiniMax-H3 GGUF 5 秒带音轨视频、LTX 2.3 i2v。
 - 用户机器为 macOS + 单卡，内存有限，故七类 GPU 任务必须串行，且不能同时加载 omlx 与 ComfyUI 大模型。

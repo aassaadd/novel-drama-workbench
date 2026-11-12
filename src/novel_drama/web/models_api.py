@@ -41,6 +41,34 @@ _MAX_LOG_LINES = 200
 _OK_STATUS = ("installed", "already")
 
 
+def resolve_llm_settings(
+    config: dict, body: dict | None, allow_empty_model: bool = False
+) -> tuple[dict, str]:
+    """按本次提交的参数装配 omlx 设置，供「检测连接」与「保存校验」共用。
+
+    参数:
+        config: 本机配置（`load_config` 的结果）。
+        body: 本次提交的 `{endpoint, api_key, model}`；留空表示沿用已保存值。
+        allow_empty_model: 为 True 时，body 显式传 `model: ""` 表示「未选模型」，
+            不再回落到已保存的模型名。
+
+    返回:
+        `(settings, model)`；endpoint / api_key / model 均保持原样，不做路径规范化。
+    """
+    settings = dict(config.get("omlx", {}) or {})
+    for key in ("endpoint", "api_key"):
+        value = str((body or {}).get(key) or "").strip()
+        if value:
+            settings[key] = value
+    if allow_empty_model and isinstance(body, dict) and "model" in body:
+        settings["model"] = str(body.get("model") or "")
+    else:
+        value = str((body or {}).get("model") or "")
+        if value:
+            settings["model"] = value
+    return settings, str(settings.get("model") or "")
+
+
 def _now() -> str:
     """当前本地时间字符串。
 
@@ -750,23 +778,6 @@ def register_models_routes(app, config_path: str | None = None) -> None:
             "message": message,
         }
 
-    def _llm_settings(config, body: dict | None) -> tuple[dict, str]:
-        """按表单覆盖项装配 omlx 设置。
-
-        参数:
-            config: 本机配置。
-            body: 可选的 `{endpoint, api_key, model}` 覆盖值。
-
-        返回:
-            `(settings, model)`；未保存的新地址 / 新模型也能直接检测。
-        """
-        settings = dict(config.get("omlx", {}) or {})
-        for key in ("endpoint", "api_key", "model"):
-            value = str((body or {}).get(key) or "").strip()
-            if value:
-                settings[key] = value
-        return settings, str(settings.get("model") or "").strip()
-
     def _business_budget(config) -> int:
         """返回当前业务侧最常用的工具调用预算（用于提示「上限小于估算会截断」）。
 
@@ -796,7 +807,7 @@ def register_models_routes(app, config_path: str | None = None) -> None:
             未取到（unknown），不读本机文件、不伪造默认值。
         """
         config = load_config(config_path)
-        settings, model = _llm_settings(config, body)
+        settings, model = resolve_llm_settings(config, body, allow_empty_model=True)
         adapter = OmlxWritingAdapter(settings)
         started = time.monotonic()
         limits = adapter.fetch_model_limits(model or None, timeout_s=2.0)
@@ -821,10 +832,10 @@ def register_models_routes(app, config_path: str | None = None) -> None:
             message = "连接成功，但服务端未返回模型列表"
         elif not model:
             stage = "model"
-            message = f"连接成功，请选择模型：可用 {'、'.join(ids)}"
+            message = f"未选择模型，请在设置页检测连接后选择（可用：{'、'.join(ids)}）"
         elif selected is None:
             stage = "model"
-            message = f"连接成功，但模型 {model} 不在列表中：可用 {'、'.join(ids)}"
+            message = f"已保存的模型 {model} 不在当前服务列表中，请重新选择（可用：{'、'.join(ids)}）"
         elif not (selected.get("context_length") and selected.get("max_output_tokens")):
             stage = "limits"
             message = "连接成功、已取列表，但未返回上下限字段"
@@ -868,7 +879,7 @@ def register_models_routes(app, config_path: str | None = None) -> None:
             鉴权失败时 HTTP 仍为 200，由页面展示中文原因。
         """
         config = load_config(config_path)
-        settings, _model = _llm_settings(config, body)
+        settings, _model = resolve_llm_settings(config, body)
         adapter = OmlxWritingAdapter(settings)
         started = time.monotonic()
         try:
@@ -910,7 +921,7 @@ def register_models_routes(app, config_path: str | None = None) -> None:
             单个端点超时 2 秒，失败快速返回，不影响页面其他操作。
         """
         config = load_config(config_path)
-        settings, model = _llm_settings(config, body)
+        settings, model = resolve_llm_settings(config, body)
         adapter = OmlxWritingAdapter(settings)
         started = time.monotonic()
         try:

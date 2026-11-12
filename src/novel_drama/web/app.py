@@ -31,7 +31,7 @@ from ..store.queue_store import QueueStore
 from ..writing.editing import edit_chapter, save_chapter_content
 from ..writing.summarize import apply_summary, summarize_chapter
 from .actions import fail_body, run
-from .models_api import register_models_routes
+from .models_api import register_models_routes, resolve_llm_settings
 from .voice_tools_api import register_voice_tools_routes
 from .continue_api import register_continue_routes
 from .bgm_api import register_bgm_routes
@@ -443,7 +443,9 @@ def _validate_config_patch(values: dict) -> dict:
                 raise ValueError(f"{key} 只能是 {'、'.join(options)}")
             cleaned[key] = text
         else:  # str / path / password
-            cleaned[key] = str(raw).strip()
+            text = str(raw)
+            # 模型 id 原样存储：保留 models/ 前缀与 .gguf 后缀，不做 trim/规范化
+            cleaned[key] = text if key == "omlx.model" else text.strip()
     return cleaned
 
 
@@ -804,28 +806,35 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         except ValueError as exc:
             raise HTTPException(status_code=400, detail={"code": 2, "message": str(exc)}) from exc
 
-        # 模型名必须来自服务端实时列表：保存前再校验一次，避免写进已失效的模型
+        # 模型名必须来自服务端实时列表：保存前用「本次提交的地址 + 密钥」再校验一次
         model_value = values.get("omlx.model")
-        if isinstance(model_value, str) and model_value.strip():
-            settings = dict((load_config(config_path).get("omlx") or {}))
-            for key in ("endpoint", "api_key"):
-                patch = values.get(key)
-                if isinstance(patch, str) and patch.strip():
-                    settings[key.split(".", 1)[1]] = patch.strip()
-            settings["model"] = model_value.strip()
-            catalog = OmlxWritingAdapter(settings).fetch_model_catalog(timeout_s=2.0)
+        if isinstance(model_value, str) and model_value:
+            body = {
+                "endpoint": values.get("omlx.endpoint") or "",
+                "api_key": values.get("omlx.api_key") or "",
+                "model": model_value,
+            }
+            settings, submitted_model = resolve_llm_settings(
+                load_config(config_path), body, allow_empty_model=True
+            )
+            adapter = OmlxWritingAdapter(settings)
+            catalog = adapter.fetch_model_catalog(timeout_s=2.0)
             ids = [str(item.get("id")) for item in catalog.get("models") or []]
             if not catalog.get("ok"):
                 raise HTTPException(
                     status_code=400,
-                    detail={"code": 2, "message": f"无法校验模型：{catalog.get('message') or '服务未返回模型列表'}"},
+                    detail={
+                        "code": 2,
+                        "message": f"无法在 {adapter.endpoint} 校验模型：{catalog.get('message') or '服务未返回模型列表'}",
+                    },
                 )
-            if model_value.strip() not in ids:
+            if submitted_model not in ids:
                 raise HTTPException(
                     status_code=400,
                     detail={
                         "code": 2,
-                        "message": f"模型 {model_value.strip()} 不在服务端模型列表中，当前可用：{'、'.join(ids)}",
+                        "message": f"在 {adapter.endpoint} 的模型列表中未找到模型 {submitted_model}，"
+                        f"当前可用：{'、'.join(ids)}",
                     },
                 )
 

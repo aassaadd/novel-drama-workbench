@@ -440,7 +440,7 @@ Qwen3-TTS **没有 SSML、没有停顿参数**，停顿只能靠「标点 + 片�
   },
   "status": "done",                // pending|running|done|failed|canceled
   "produced": { "char_start": 5200, "char_end": 6800 },
-  "model": "Qwen3.8-27B-oQ4e-mtp",
+  "model": "Qwen3.8-27B-oQ4e-mtp", // 示例：实际为用户在设置页所选模型
   "usage": { "prompt_tokens": 0, "completion_tokens": 0 },
   "created_at": "2026-11-09T12:00:00Z"
 }

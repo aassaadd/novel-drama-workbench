@@ -1,7 +1,7 @@
 """写作模型适配（omlx，OpenAI 兼容 HTTP）。
 
 实测结论（2026-11-09，服务 v0.7.3）：
-- 形态：OpenAI 兼容本地 HTTP，默认 ``http://127.0.0.1:9000``，鉴权 ``Authorization: Bearer <key>``；
+- 形态：OpenAI 兼容本地 HTTP，地址由配置提供（无内置默认值），鉴权 ``Authorization: Bearer <key>``；
 - 能力：``GET /v1/models``、``POST /v1/chat/completions``（支持 SSE 流式）、
   ``POST /v1/models/{model_id}/unload`` 显式卸载、``GET /health`` 查看显存占用；
 - omlx 不会自动卸载模型（``idle_timeout=null``），必须显式卸载；内存天花板约 29 GB，
@@ -28,6 +28,10 @@ DEFAULT_TIMEOUT_S = 300.0
 CONNECT_TIMEOUT_S = 5.0
 # 工具调用时的最小输出预算；thinking 模型的 reasoning_tokens 也计入 max_tokens，给少了参数会被截断
 TOOL_MIN_MAX_TOKENS = 4096
+#: 用户既未填写 max_tokens、也没有检测值时的协议层兜底：
+#: OpenAI 兼容接口必须给一个正整数，这里只保证请求合法，不代表推荐值或模型上限；
+#: 设置页会优先用「检测连接」返回的最大输出并落盘。
+PROTOCOL_DEFAULT_MAX_TOKENS = 2048
 # 检测到的上下文上限缓存：`(endpoint, model) -> tokens`，供请求体预算校验复用，避免每次请求再发 HTTP
 _LIMIT_CACHE: dict[tuple[str, str], int] = {}
 #: 各 OpenAI 兼容实现可能使用的候选字段名（上下文 / 最大输出）
@@ -75,12 +79,12 @@ class OmlxWritingAdapter:
         if not self.endpoint:
             raise AdapterError(
                 ErrorCode.INVALID_INPUT,
-                "omlx 未配置地址：请在 config/config.yaml 的 omlx.endpoint 填写（例如 http://127.0.0.1:9000）",
+                "omlx 未配置地址：请在设置页填写服务地址（或在 config/config.yaml 的 omlx.endpoint 配置）",
             )
         if not self.model:
             raise AdapterError(
                 ErrorCode.INVALID_INPUT,
-                "omlx 未配置模型：请在 config/config.yaml 的 omlx.model 填写 /v1/models 返回的 id",
+                "未选择模型，请在设置页检测连接后选择（或在 config/config.yaml 的 omlx.model 填写 /v1/models 返回的 id）",
             )
 
     def _headers(self) -> dict:
@@ -275,7 +279,7 @@ class OmlxWritingAdapter:
         if not self.endpoint:
             raise AdapterError(
                 ErrorCode.INVALID_INPUT,
-                "omlx 未配置地址：请在 config/config.yaml 的 omlx.endpoint 填写（例如 http://127.0.0.1:9000）",
+                "omlx 未配置地址：请在设置页填写服务地址（或在 config/config.yaml 的 omlx.endpoint 配置）",
             )
         data = self._request_json("GET", "/v1/models", timeout_s=timeout_s)
         models = data.get("data") if isinstance(data, dict) else None
@@ -306,7 +310,7 @@ class OmlxWritingAdapter:
                 "status": None,
                 "models": [],
                 "count": 0,
-                "message": "未配置接口地址：请先填写 omlx.endpoint（例如 http://127.0.0.1:9000）",
+                "message": "未配置接口地址：请先在设置页填写 omlx.endpoint",
             }
         status, data, error = self._probe("/v1/models", timeout_s)
         if status in (401, 403):
@@ -542,8 +546,16 @@ class OmlxWritingAdapter:
             return result
 
         selected = next((item for item in models if item["id"] == target), None)
-        if selected is None and target:
-            result["message"] = f"服务可达，但模型 {target} 不在 /v1/models 列表中"
+        if not target:
+            # 未选模型：只返回列表供页面下拉使用，绝不自动挑一个模型去探测/请求
+            result["models"] = models
+            result["message"] = "未选择模型，请在设置页检测连接后选择"
+            return result
+        if selected is None:
+            # 已保存的模型不在当前列表：明确报错，不静默换成其他模型
+            result["models"] = models
+            result["message"] = f"已保存的模型 {target} 不在当前服务列表中，请重新选择"
+            return result
         # 2) 单模型详情（有的实现支持）
         if target:
             path = f"/v1/models/{urllib.parse.quote(target, safe='')}"
@@ -661,7 +673,7 @@ class OmlxWritingAdapter:
             HealthStatus；ok=False 时 detail 给出可操作原因。
         """
         if not self.endpoint:
-            return HealthStatus(ok=False, detail="omlx 未配置 endpoint：请在 config/config.yaml 的 omlx.endpoint 填写（例如 http://127.0.0.1:9000）")
+            return HealthStatus(ok=False, detail="omlx 未配置 endpoint：请在设置页填写服务地址（或配置 omlx.endpoint）")
         started = time.monotonic()
         try:
             models = self.list_models() if timeout_s is None else self.list_models(timeout_s)
@@ -673,7 +685,7 @@ class OmlxWritingAdapter:
         if self.model and self.model not in ids:
             return HealthStatus(
                 ok=False,
-                detail=f"模型 {self.model} 不在服务列表中：可用模型 {ids}；请改 config/config.yaml 的 omlx.model",
+                detail=f"模型 {self.model} 不在服务列表中：可用模型 {ids}；请在设置页重新检测并选择模型",
                 latency_ms=latency,
                 extra=extra,
             )
@@ -758,7 +770,10 @@ class OmlxWritingAdapter:
             messages.append({"role": "system", "content": req.system})
         for msg in req.messages:
             messages.append({"role": msg.role, "content": msg.content})
-        max_tokens = self._fit_output_budget(messages, int(req.max_tokens or self.settings.get("max_tokens") or 2048))
+        max_tokens = self._fit_output_budget(
+            messages,
+            int(req.max_tokens or self.settings.get("max_tokens") or PROTOCOL_DEFAULT_MAX_TOKENS),
+        )
         payload = {
             "model": self.model,
             "messages": messages,
