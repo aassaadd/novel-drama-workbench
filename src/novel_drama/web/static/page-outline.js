@@ -13,6 +13,8 @@
   let worlds = [];        // 世界条目，绑定的候选项与名称展示
   let cast = [];          // 人物表（已排除旁白），POV 下拉候选项
   let actsCache = [];     // 当前大纲的幕列表，绑定面板据此查找章节
+  let landedIds = new Set(); // 已落地成章节文件的章节 ID（删除时用于二次确认）
+  let lastContinueRequest = null; // 上次续写预览的入参，写入时复用，避免生成另一份
   let loadedPath = "";    // 上次加载的工程，切工程时关闭面板
   let bindMask = null;    // 绑定面板浮层
 
@@ -85,10 +87,14 @@
 
       actChapters.forEach((chapter, chapterIndex) => {
         const beatList = chapter.beats || [];
+        const landed = landedIds.has(chapter.id);
         parts.push(
           `<details class="chapter-row" ${actIndex === 0 && chapterIndex === 0 ? "open" : ""}>` +
             `<summary><span>${esc(chapter.index)}. ${esc(chapter.title || "")}</span>` +
-            `<span class="muted">${beatList.length} 节拍</span></summary>`
+            `${landed ? "<span class='tag'>已落地</span>" : "<span class='muted'>未落地</span>"}` +
+            `<span class="muted">${beatList.length} 节拍</span>` +
+            `<button class="btn small" type="button" data-del-chapter="${esc(chapter.id || "")}">删除整章</button>` +
+            `</summary>`
         );
         if (chapter.outline) parts.push(`<p class="muted">${esc(chapter.outline)}</p>`);
         parts.push(bindBlockHtml(chapter));
@@ -96,7 +102,8 @@
           .map(
             (beat, beatIndex) =>
               `<li><span class="beat-no">${beatIndex + 1}</span><span>${beat.turning_point ? "<span class='tag'>转折</span>" : ""}` +
-              `${esc(beat.summary || "")}</span><span class="muted">${esc(beat.target_words ?? "?")} 字</span></li>`
+              `${esc(beat.summary || "")}</span><span class="muted">${esc(beat.target_words ?? "?")} 字</span>` +
+              `<button class="btn small" type="button" data-del-beat="${beatIndex + 1}" data-chapter="${esc(chapter.id || "")}">删除</button></li>`
           )
           .join("");
         parts.push(`<ul class="beats">${list || "<li class='muted'>没有节拍</li>"}</ul></details>`);
@@ -118,17 +125,21 @@
     }
     if (loadedPath !== NW.state.path) {
       loadedPath = NW.state.path;
+      lastContinueRequest = null;
       closeBindPanel();
     }
     try {
-      const [outline, worldData, charData] = await Promise.all([
+      const [outline, worldData, charData, chapterList] = await Promise.all([
         NW.api(`/api/ui/outline?${NW.qs({ path: NW.state.path })}`),
         NW.api(`/api/ui/worlds?${NW.qs({ path: NW.state.path })}`).catch(() => ({ worlds: [] })),
         NW.api(`/api/ui/characters?${NW.qs({ path: NW.state.path })}`).catch(() => ({ characters: [] })),
+        NW.api(`/api/ui/chapters?${NW.qs({ path: NW.state.path })}`).catch(() => []),
       ]);
       worlds = worldData.worlds || [];
       cast = (charData.characters || []).filter((item) => item.role !== "narrator" && item.id !== NARRATOR_ID);
       actsCache = outline.acts || [];
+      const rows = Array.isArray(chapterList) ? chapterList : chapterList.chapters || [];
+      landedIds = new Set(rows.map((item) => item.id));
       render(outline);
     } catch (error) {
       el("olBody").innerHTML = `<p class="muted">读取大纲失败：${esc(error.message)}</p>`;
@@ -439,11 +450,99 @@
     }
   }
 
-  /* 大纲列表点击分发：打开某章的绑定面板。
+  /* 删除一个节拍：只改大纲数据，已落地章节的正文不动。
+   * 参数：chapterId 大纲章节 ID；beatIndex 节拍序号（从 1 开始）。
+   * 返回：Promise<void>。
+   */
+  async function deleteBeat(chapterId, beatIndex) {
+    if (!NW.state.path || !chapterId || !beatIndex) return;
+    const chapter = findChapter(chapterId);
+    const beat = chapter && (chapter.beats || [])[beatIndex - 1];
+    const label = beat && beat.summary ? `「${beat.summary}」` : "";
+    if (!window.confirm(`删除第 ${beatIndex} 个节拍${label}？\n只改大纲数据，不影响章节正文。`)) return;
+    try {
+      await NW.api("/api/ui/outline/beat/delete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: NW.state.path, chapter: chapterId, beat: beatIndex }),
+      });
+      NW.toast("节拍已删除，正文未改动", true);
+      await load();
+    } catch (error) {
+      NW.toast(`删除节拍失败：${error.message}`);
+    }
+  }
+
+  /* 删除整章：先取影响做二次确认，再删大纲条目（已落地时连章节文件一起删）。
+   * 参数：chapterId 大纲章节 ID。
+   * 返回：Promise<void>。
+   */
+  async function deleteChapter(chapterId) {
+    if (!NW.state.path || !chapterId) return;
+    let impact = null;
+    try {
+      impact = await NW.api("/api/ui/outline/chapter/delete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: NW.state.path, chapter: chapterId, dry_run: true }),
+      });
+    } catch (error) {
+      NW.toast(`读取章节影响失败：${error.message}`);
+      return;
+    }
+    let message;
+    if (impact.landed) {
+      message =
+        `删除《第 ${impact.index} 章 ${impact.title}》后不可恢复：\n` +
+        `· 已落地内容：正文 ${impact.chars} 字、台词 ${impact.lines} 条、音频 ${impact.audio} 条、图片 ${impact.image} 条、视频 ${impact.video} 条\n` +
+        "· 大纲条目一并删除，后续章节序号自动前移\n" +
+        "· assets 下的素材文件保留，不自动删除\n" +
+        "确定删除？";
+    } else {
+      message =
+        `删除生成区里的《第 ${impact.index} 章 ${impact.title}》？\n` +
+        "只删大纲条目，后续章节序号自动前移；已落地章节不受影响。";
+    }
+    if (!window.confirm(message)) return;
+    try {
+      const result = await NW.api("/api/ui/outline/chapter/delete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: NW.state.path, chapter: chapterId }),
+      });
+      let note = result.deleted.landed ? "已删除章节与大纲条目（素材文件保留）" : "已删除大纲章节";
+      if (result.remaining === 0) note += "；大纲已清空，可重新生成或续写";
+      if ((result.warnings || []).length) note += `；${result.warnings.join("；")}`;
+      NW.toast(note, true);
+      /* 已落地章节删除后左侧目录也要刷新；当前章节被删时由 openProject 兜底切到可用章节 */
+      if (result.deleted.landed && NW.openProject) {
+        await NW.openProject();
+      }
+      await load();
+    } catch (error) {
+      NW.toast(`删除章节失败：${error.message}`);
+    }
+  }
+
+  /* 大纲列表点击分发：删除节拍 / 删除整章 / 打开绑定面板。
    * 参数：event 点击事件。
    * 返回：无。
    */
   function onBodyClick(event) {
+    const delBeat = event.target.closest("[data-del-beat]");
+    if (delBeat) {
+      event.preventDefault();
+      event.stopPropagation();
+      deleteBeat(delBeat.dataset.chapter || "", Number(delBeat.dataset.delBeat));
+      return;
+    }
+    const delChapter = event.target.closest("[data-del-chapter]");
+    if (delChapter) {
+      event.preventDefault();
+      event.stopPropagation();
+      deleteChapter(delChapter.dataset.delChapter || "");
+      return;
+    }
     const trigger = event.target.closest("[data-bind-chapter]");
     if (!trigger) return;
     const chapterId = trigger.dataset.bindChapter || "";
@@ -466,15 +565,17 @@
     if (busy || !NW.state.path) return;
     const chapters = Number((el("olContinueChapters") || {}).value || 3);
     const words = Number((el("olWords") || {}).value || 1200);
+    const intent = String((el("olContinueIntent") || {}).value || "").trim();
+    lastContinueRequest = { chapters, words, intent };
     busy = true;
     el("olContinue").disabled = true;
     try {
       const result = await NW.api("/api/ui/outline/continue", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path: NW.state.path, chapters, words }),
+        body: JSON.stringify({ path: NW.state.path, chapters, words, intent }),
         busy: "正在续写大纲…",
-        busyDetail: "接着已有章节往后排，先预览再写入",
+        busyDetail: intent ? "按填写的续写需求往后排，先预览再写入" : "接着已有章节往后排，先预览再写入",
       });
       showContinueDialog(result);
     } catch (error) {
@@ -506,8 +607,13 @@
       )
       .join("");
     const head = document.createElement("div");
+    const intentLine = result.intent
+      ? `<div style="margin-top:6px;font-size:13px;line-height:1.7">续写需求：<b>${esc(result.intent)}</b></div>` +
+        `<div style="font-size:13px;line-height:1.7">将按这个要求续写 <b>${result.chapters_added}</b> 章</div>`
+      : "";
     head.innerHTML =
       "<b>大纲续写预览（尚未写入）</b>" +
+      intentLine +
       `<div style="margin-top:6px;font-size:13px;line-height:1.7">本次将新增 <b>${result.acts_added}</b> 幕 / ` +
       `<b>${result.chapters_added}</b> 章：第 ${result.start_index} 章起</div>` +
       `<div style="max-height:46vh;overflow:auto;margin-top:8px">${rows || "（模型没有返回可用章节）"}</div>` +
@@ -539,10 +645,17 @@
     const button = mask ? mask.querySelector("button.primary") : null;
     if (button) button.disabled = true;
     try {
+      const request = lastContinueRequest || {};
       const result = await NW.api("/api/ui/outline/continue", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path: NW.state.path, apply: true }),
+        body: JSON.stringify({
+          path: NW.state.path,
+          chapters: request.chapters,
+          words: request.words,
+          intent: request.intent,
+          apply: true,
+        }),
         busy: "正在写入大纲…",
       });
       if (mask) mask.remove();

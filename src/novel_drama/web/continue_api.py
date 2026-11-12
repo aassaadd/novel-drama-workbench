@@ -105,10 +105,11 @@ def register_continue_routes(app, config_path: str | None = None) -> None:
         """大纲续写：在已有章节之后追加新章（跨幕自动建幕）。
 
         参数:
-            body: `{path, chapters?, acts?, chapters_per_act?, beats_per_chapter?, words?, brief?, apply?}`。
+            body: `{path, chapters?, acts?, chapters_per_act?, beats_per_chapter?, words?,
+                brief?, intent?, apply?}`；intent 为本次续写的明确需求（最高优先级，可留空）。
 
         返回:
-            `continue_outline` 的结果（含 new_chapters / start_index / error 等）。
+            `continue_outline` 的结果（含 new_chapters / start_index / intent / error 等）。
 
         异常:
             HTTPException 409: 章节序号空洞或大纲与章节文件冲突。
@@ -126,6 +127,7 @@ def register_continue_routes(app, config_path: str | None = None) -> None:
                 beats_per_chapter=int(body.get("beats_per_chapter") or 3),
                 chapter_words=int(body.get("words") or 1200),
                 brief=body.get("brief"),
+                intent=body.get("intent"),
                 dry_run=not bool(body.get("apply")),
             )
         except ValueError as exc:

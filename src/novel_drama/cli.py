@@ -1140,6 +1140,7 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--beats-per-chapter", dest="beats_per_chapter", type=int, default=3)
     q.add_argument("--words", type=int, default=1200, help="单章目标字数")
     q.add_argument("--brief", help="补充要求，如「进入第二卷，节奏加快」")
+    q.add_argument("--intent", help="续写需求：接下来要写什么（最高优先级，可留空）")
     outline_cont_mode = q.add_mutually_exclusive_group()
     outline_cont_mode.add_argument("--dry-run", action="store_true", help="只预览（默认行为）")
     outline_cont_mode.add_argument("--apply", action="store_true", help="写入设定库大纲（逐幕落盘）")

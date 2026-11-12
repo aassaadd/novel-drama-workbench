@@ -793,6 +793,7 @@ def continue_outline(
     beats_per_chapter: int = 3,
     chapter_words: int = DEFAULT_CHAPTER_WORDS,
     brief: str | None = None,
+    intent: str | None = None,
     dry_run: bool = True,
 ) -> dict:
     """在已有大纲之后追加若干章（跨幕自动建幕），默认只预览。
@@ -806,6 +807,7 @@ def continue_outline(
         beats_per_chapter: 每章节拍数。
         chapter_words: 单章目标字数。
         brief: 补充要求（可选）。
+        intent: 本次续写的明确意图（最高优先级，可留空）；留空时按现有大纲自然续写。
         dry_run: True 只返回预览不写盘；False 逐幕写入设定库。
 
     返回:
@@ -843,6 +845,10 @@ def continue_outline(
         f"为《{work.get('title') or '未命名'}》续写大纲：接着第 {start_index - 1} 章之后新增 {chapters} 章，"
         f"每幕 {per_act} 章，每章 {beats_per_chapter} 个节拍。"
     ]
+    intent_text = str(intent or "").strip()
+    if intent_text:
+        # 用户填写的续写需求优先级最高：后续每轮都带着这条，避免跨幕跑偏
+        context_lines.append(f"本次续写的明确意图（最高优先级，必须照此写）：{intent_text}")
     if logline:
         context_lines.append(f"一句话故事：{logline}")
     if genre:
@@ -945,6 +951,8 @@ def continue_outline(
         "settings_revision": bible.get("settings_revision"),
         "applied": applied,
         "warnings": warnings,
+        "intent": intent_text,
+        "brief": str(brief or "").strip(),
     }
     if error:
         result["error"] = error

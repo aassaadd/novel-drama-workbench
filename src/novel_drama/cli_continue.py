@@ -89,7 +89,7 @@ def cmd_outline_continue(args, config: AppConfig) -> int:
     """在已有大纲之后追加新章（默认预览，`--apply` 才写设定库）。
 
     参数:
-        args: 参数（chapters / acts / chapters_per_act / beats_per_chapter / words / brief / dry-run / apply）。
+        args: 参数（chapters / acts / chapters_per_act / beats_per_chapter / words / brief / intent / dry-run / apply）。
         config: 本机配置。
 
     返回:
@@ -110,6 +110,7 @@ def cmd_outline_continue(args, config: AppConfig) -> int:
             beats_per_chapter=int(getattr(args, "beats_per_chapter", 3) or 3),
             chapter_words=int(getattr(args, "words", 1200) or 1200),
             brief=getattr(args, "brief", None),
+            intent=getattr(args, "intent", None),
             dry_run=not args.apply,
         )
     except ValueError as exc:
