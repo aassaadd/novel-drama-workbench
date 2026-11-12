@@ -791,7 +791,15 @@
     const batchId = design.batchId;
     const characterId = el("voiceDesignCharacter") ? el("voiceDesignCharacter").value : "";
     const character = state.characters.find((item) => item.id === characterId);
-    const gender = el("voiceDesignGender") ? el("voiceDesignGender").value : "unknown";
+    let gender = el("voiceDesignGender") ? el("voiceDesignGender").value : "unknown";
+    let genderSource = "manual";
+    // 兜底不落成「其他」：档案有明确性别就沿用档案，否则记为未知
+    if (gender === "other" && (character || {}).gender !== "other") {
+      const archive = (character || {}).gender;
+      gender = archive === "male" || archive === "female" ? archive : "unknown";
+      genderSource = archive === "male" || archive === "female" ? "character" : "manual";
+      toast(`已按角色档案把音色性别记为「${genderText(gender)}」，不会记录「其他」`);
+    }
     const name = (el("voiceDesignName") && el("voiceDesignName").value.trim()) || (character && character.name) || "生成音色";
     const confirmed = window.confirm(`采用候选 ${index}？\n性别标签将记为「${genderText(gender)}」，请确认与实际听感一致。`);
     if (!confirmed) return;
@@ -801,10 +809,11 @@
       index,
       name,
       gender,
-      gender_source: "manual",
+      gender_source: genderSource,
       bind: true,
     }, "已采用并绑定角色");
     if (!data) return;
+    if (data.gender_note) toast(data.gender_note);
     state.voices = data.voices || state.voices;
     state.characters = data.characters || state.characters;
     design.batchId = "";

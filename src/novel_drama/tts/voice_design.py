@@ -63,7 +63,7 @@ _SYSTEM_PROMPT = """你是拟音导演。根据人物设定，设计一条能用
 1. 只描述「能发出声音的生理与语言习惯」：性别、年龄感、音区、音色质感、语速、气质、口音。
 2. 不写外貌形容词，不写剧情，不写真实人名、明星或主播。
 3. design_prompt 用英文写，一句话，包含性别、年龄、音区、质感、语速、气质、口音；不要出现负面词。
-4. 性别必须服从人物设定的 gender；设定为 unknown 时按背景合理推断并在 evidence 里说明。
+4. 性别必须服从人物设定的 gender；设定为 unknown 时按背景合理推断为 male 或 female，不要返回 other。
 5. timbre 用 2~4 个中文质感词（如：低沉、略带沙哑、清亮）。"""
 
 
@@ -116,7 +116,7 @@ def _character_brief(character: dict) -> str:
 
 def _rule_profile(character: dict) -> dict:
     """LLM 不可用时的规则模板（保证功能可用）。"""
-    gender = character.get("gender") if character.get("gender") in {"male", "female"} else "unknown"
+    gender = character.get("gender") if character.get("gender") in {"male", "female", "other"} else "unknown"
     style = character.get("speech_style") or {}
     pitch_raw = (style.get("pitch") or "").strip()
     pitch = "low" if any(word in pitch_raw for word in ("低", "沉")) else "high" if any(word in pitch_raw for word in ("高", "尖")) else "mid"
@@ -163,17 +163,53 @@ def build_profile(adapter, character: dict) -> dict:
     )
     try:
         raw = adapter.generate_tool(req, _PROFILE_TOOL, timeout_s=90)
-        profile = _normalize_profile(raw, character)
-        return {"profile": profile, "source": "llm", "note": None}
+        profile, gender_note = _normalize_profile(raw, character)
+        return {"profile": profile, "source": "llm", "note": gender_note}
     except Exception as exc:  # noqa: BLE001 - 任何失败都回退模板，不阻断功能
-        return {"profile": _rule_profile(character), "source": "rule", "note": f"LLM 描述生成失败，已用规则模板：{exc}"}
+        return {
+            "profile": _rule_profile(character),
+            "source": "rule",
+            "note": f"LLM 描述生成失败，已用规则模板：{exc}",
+        }
 
 
-def _normalize_profile(raw: dict, character: dict) -> dict:
-    """裁剪并补全 LLM 输出，保证字段完整、长度可控。"""
-    gender = raw.get("gender") if raw.get("gender") in {"male", "female", "other", "unknown"} else (character.get("gender") or "unknown")
-    if gender not in {"male", "female", "other", "unknown"}:
-        gender = "unknown"
+def _resolve_gender(raw_gender: str | None, character: dict) -> tuple[str, str | None]:
+    """确定音色标签性别：优先角色档案，绝不把未知/不一致兜底成「其他」。
+
+    参数:
+        raw_gender: 模型返回或人工选择的性别。
+        character: 角色档案。
+
+    返回:
+        `(gender, note)`；note 非空时由调用方提示用户。
+    """
+    archive = character.get("gender") if character.get("gender") in {"male", "female", "other"} else None
+    raw = raw_gender if raw_gender in {"male", "female", "other", "unknown"} else None
+    if archive in {"male", "female"}:
+        note = None
+        if raw not in (None, archive, "unknown"):
+            note = "模型推断性别与角色档案不一致，已沿用档案性别"
+        return archive, note
+    if archive == "other":
+        note = None
+        if raw not in (None, "other", "unknown"):
+            note = "模型推断性别与角色档案不一致，已沿用档案性别「其他」"
+        return "other", note
+    # 档案未标注或无法识别：只接受明确的男/女，其余保留为未知
+    if raw in {"male", "female"}:
+        return raw, None
+    if raw == "other":
+        return "unknown", "模型返回「其他」，已保留为未知，请人工确认"
+    return "unknown", None
+
+
+def _normalize_profile(raw: dict, character: dict) -> tuple[dict, str | None]:
+    """裁剪并补全 LLM 输出，保证字段完整、长度可控。
+
+    返回:
+        `(profile, note)`；性别只取角色档案或明确枚举，映射不到时保留未知并给出提示。
+    """
+    gender, note = _resolve_gender(raw.get("gender"), character)
     profile = {
         "voice_summary": str(raw.get("voice_summary") or "")[:200],
         "gender": gender,
@@ -190,7 +226,7 @@ def _normalize_profile(raw: dict, character: dict) -> dict:
     }
     if not profile["design_prompt"]:
         raise ValueError("模型未返回 design_prompt")
-    return profile
+    return profile, note
 
 
 def batch_dir(store, batch_id: str) -> Path:
@@ -555,6 +591,24 @@ def select_candidate(store, batch_id: str, index: int, name: str, gender: str, g
         raise ValueError("候选不存在")
     if gender not in {"male", "female", "other", "unknown"}:
         raise ValueError("性别标签不合法")
+    # 性别兜底：只有角色档案明确为「其他」时才保留 other，否则沿用档案或记为未知
+    gender_note = None
+    archive_character = None
+    if meta.get("character_id"):
+        archive_character = next(
+            (item for item in store.load_characters()["characters"] if item["id"] == meta["character_id"]),
+            None,
+        )
+    archive_gender = (archive_character or {}).get("gender")
+    if gender == "other":
+        if archive_gender in {"male", "female", "other"}:
+            gender = archive_gender
+            gender_source = "character"
+            if archive_gender != "other":
+                gender_note = "已按角色档案把音色性别记为「男声/女声」，未使用「其他」"
+        else:
+            gender = "unknown"
+            gender_note = "角色档案未标注可用的性别，音色标签已记为「未知」，未使用「其他」"
     source_path = batch_dir(store, batch_id) / candidate["file"]
     if not source_path.exists():
         raise ValueError("候选音频已过期或被清理")
@@ -646,4 +700,4 @@ def select_candidate(store, batch_id: str, index: int, name: str, gender: str, g
             target["updated_at"] = _now()
             store.save_characters(characters)
             character = target
-    return {"voice": voice, "variant_id": variant["id"], "character": character}
+    return {"voice": voice, "variant_id": variant["id"], "character": character, "gender": gender, "gender_note": gender_note}
