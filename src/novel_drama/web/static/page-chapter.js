@@ -266,8 +266,12 @@
       `<div class="kv-row"><span class="kv-key">字数</span><span class="kv-val">${esc(chapter.word_count || 0)}</span></div>`,
       `<div class="kv-row"><span class="kv-key">场景</span><span class="kv-val">${scenes.length}</span></div>`,
       `<div class="kv-row"><span class="kv-key">台词</span><span class="kv-val">${lineTotal} 行</span></div>`,
+      `<div class="kv-row"><span class="kv-key">切分</span><span class="kv-val">${scenes.length ? `已切分 ${scenes.length} 个场景 / ${lineTotal} 行（重切会覆盖）` : "未切分"}</span></div>`,
       `<div class="kv-row"><span class="kv-key">可定位</span><span class="kv-val">${lineMap.size} 行</span></div>`,
     ].join("");
+    // 未切分时按钮文案保持「切分」，已切分时明确提示这是覆盖操作
+    el("chScenes").textContent = scenes.length ? "重新切分场景" : "切分场景";
+    el("chLines").textContent = lineTotal ? "重新切分台词" : "切分台词";
   }
 
   /* 渲染右侧场景 / 台词紧凑列表：场景一块，台词一行一个按钮。
@@ -588,6 +592,10 @@
       } else {
         NW.toast(`正文已生成：${(result && result.words) || streamWordCount(streamText)} 字${regen ? "，请重新切分场景与台词" : ""}`, true);
       }
+      const dialogueWarnings = (result && result.dialogue_warnings) || [];
+      if (dialogueWarnings.length) {
+        NW.toast(`有 ${dialogueWarnings.length} 行对白可能未加引号，请人工确认：${dialogueWarnings[0]}`);
+      }
       await load();
       if (NW.openProject) await NW.openProject();
     } catch (error) {
@@ -700,24 +708,19 @@
     }
   }
 
-  /* 切分场景或台词。 */
+  /* 切分场景或台词：先出影响清单，确认后再执行（默认保留人工修改）。 */
   async function split(which) {
     if (busy || !NW.state.path || !NW.state.chapter) return;
     if (blockWhileEditing()) return;
     busy = true;
     try {
-      const result = await NW.api(which === "scene" ? "/api/ui/scene/split" : "/api/ui/line/split", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path: NW.state.path, chapter: NW.state.chapter }),
+      await NWResplit.run(which, {
+        keep: el("chKeepEdits").checked,
+        onDone: async () => {
+          await load();
+          if (NW.openProject) await NW.openProject();
+        },
       });
-      const text =
-        which === "scene"
-          ? `已切分场景 ${(result.scenes || []).length} 个`
-          : `已切分台词 ${result.lines} 行（未识别 ${result.unknown}）`;
-      NW.toast(text, true);
-      await load();
-      if (NW.openProject) await NW.openProject();
     } catch (error) {
       NW.toast(`切分失败（退出码 ${error.code}）：${error.message}`);
     } finally {

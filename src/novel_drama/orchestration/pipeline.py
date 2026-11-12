@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+import copy
+
 from ..adapters.base import AdapterError, not_implemented
 from ..models import entities
 from ..models.ids import now_iso
@@ -14,9 +16,17 @@ from ..store import ProjectStore
 from ..text.splitter import split_lines, split_scenes
 from ..tts.line_state import resolve_line_state
 from .jobs import build_idempotency_key
+from .resplit import merge_manual_lines
 
 
-def split_chapter_scenes(store: ProjectStore, chapter: dict, max_chars: int = 1200, force: bool = False, dry_run: bool = False) -> list[dict]:
+def split_chapter_scenes(
+    store: ProjectStore,
+    chapter: dict,
+    max_chars: int = 1200,
+    force: bool = False,
+    dry_run: bool = False,
+    keep_lines: bool = False,
+) -> list[dict]:
     """把章节正文拆成场景并落盘（不切台词）。
 
     参数:
@@ -25,6 +35,7 @@ def split_chapter_scenes(store: ProjectStore, chapter: dict, max_chars: int = 12
         max_chars: 单场景软上限。
         force: 已有场景时是否覆盖。
         dry_run: 只返回草案，不写入。
+        keep_lines: 保留模式；新场景正文与旧场景完全一致时，沿用旧场景（含台词与媒体引用）。
 
     返回:
         场景草案列表 [{title, content}] 或写入后的场景列表。
@@ -38,8 +49,25 @@ def split_chapter_scenes(store: ProjectStore, chapter: dict, max_chars: int = 12
     if chapter.get("scenes") and not force:
         raise ValueError("章节已有场景，若确认覆盖请加 --force")
 
+    # 保留模式：按正文完全相同匹配旧场景，命中就整块沿用（场景/台词 ID 不变，时间轴与配音仍有效）
+    pool = sorted(chapter.get("scenes") or [], key=lambda item: item.get("index") or 0) if keep_lines else []
     scenes = []
     for index, draft in enumerate(drafts):
+        reused = None
+        for at, old in enumerate(pool):
+            if (old.get("source_text") or "").strip() == draft["content"].strip():
+                reused = pool.pop(at)
+                break
+        if reused is not None:
+            scene = copy.deepcopy(reused)
+            scene["index"] = index
+            scene["title"] = scene.get("title") or draft["title"]
+            scene["source_text"] = draft["content"]
+            for line_index, line in enumerate(scene.get("lines") or []):
+                line["index"] = line_index
+                line["scene_id"] = scene["id"]
+            scenes.append(scene)
+            continue
         scene = entities.new_scene(chapter["id"], index, draft["title"])
         scene["source_text"] = draft["content"]
         scenes.append(scene)
@@ -51,7 +79,15 @@ def split_chapter_scenes(store: ProjectStore, chapter: dict, max_chars: int = 12
     return scenes
 
 
-def split_scene_lines(store: ProjectStore, chapter: dict, characters: list[dict], scene_ids: list[str] | None = None, force: bool = False, dry_run: bool = False) -> dict:
+def split_scene_lines(
+    store: ProjectStore,
+    chapter: dict,
+    characters: list[dict],
+    scene_ids: list[str] | None = None,
+    force: bool = False,
+    dry_run: bool = False,
+    keep_manual: bool = False,
+) -> dict:
     """把场景正文切成台词行。
 
     参数:
@@ -61,6 +97,7 @@ def split_scene_lines(store: ProjectStore, chapter: dict, characters: list[dict]
         scene_ids: 指定场景；为空则处理全部场景。
         force: 已有台词行时是否覆盖。
         dry_run: 只统计，不写入。
+        keep_manual: 保留模式；同文本旧行复用，人工改写/新增的行按原位置插回。
 
     返回:
         {"scenes": 处理场景数, "lines": 新增台词行数, "unknown": 未识别说话人行数}。
@@ -82,10 +119,13 @@ def split_scene_lines(store: ProjectStore, chapter: dict, characters: list[dict]
             total_lines += len(drafts)
             unknown += sum(1 for item in drafts if item["speaker_id"] == entities.UNKNOWN_SPEAKER_ID)
             continue
-        lines = [
-            entities.new_line(scene["id"], index, item["text"], kind=item["kind"], speaker_id=item["speaker_id"], confidence=item["confidence"])
-            for index, item in enumerate(drafts)
-        ]
+        if keep_manual and scene.get("lines"):
+            lines = merge_manual_lines(scene["lines"], drafts, scene["id"])
+        else:
+            lines = [
+                entities.new_line(scene["id"], index, item["text"], kind=item["kind"], speaker_id=item["speaker_id"], confidence=item["confidence"])
+                for index, item in enumerate(drafts)
+            ]
         scene["lines"] = lines
         scene["character_ids"] = sorted({line["speaker_id"] for line in lines if line["speaker_id"] not in (entities.NARRATOR_ID, entities.UNKNOWN_SPEAKER_ID)})
         scene["revision"] = int(scene.get("revision") or 1) + 1

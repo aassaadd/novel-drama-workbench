@@ -482,10 +482,11 @@
             </div>
             <div class="toolbar-group">
               <span class="toolbar-label">拆分</span>
-              <button id="chScenes" class="btn">切分场景</button>
-              <button id="chLines" class="btn">切分台词</button>
+              <button id="chScenes" class="btn" title="按规则重新切分场景">切分场景</button>
+              <button id="chLines" class="btn" title="按规则重新切分台词">切分台词</button>
+              <label class="field" title="勾选：正文未变化的场景沿用原台词；台词重切时人工改过/新增的行原样保留"><input id="chKeepEdits" type="checkbox" checked /> 保留人工修改</label>
             </div>
-            <span class="muted toolbar-tip">点右侧台词行可在正文里定位段落</span>
+            <span class="muted toolbar-tip">场景重切后需要重新切台词；已有音频/媒体文件不会删除，但会失去引用</span>
           </div>
 
           <div class="chapter-main">
@@ -510,6 +511,13 @@
               <span class="toolbar-label">生成</span>
               <button id="scSuggest" class="btn primary">生成预览（不写入）</button>
               <button id="scApply" class="btn">生成并应用（同步到台词）</button>
+              <button id="scStop" class="btn" type="button" hidden>停止标注</button>
+            </div>
+            <div class="toolbar-group">
+              <span class="toolbar-label">重新切分</span>
+              <button id="scResplitScene" class="btn" title="重新切分场景会让现有标注失效">重新切分场景</button>
+              <button id="scResplitLine" class="btn" title="重新切分台词会让标注锚点失效">重新切分台词</button>
+              <label class="field" title="勾选：正文未变化的场景沿用原台词；台词重切时人工改过/新增的行原样保留"><input id="scKeepEdits" type="checkbox" checked /> 保留人工修改</label>
             </div>
             <span class="muted toolbar-tip">先预览检查，确认后再应用；应用会更新本章台词、音效、画面与视频位</span>
           </div>

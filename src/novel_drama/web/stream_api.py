@@ -35,6 +35,7 @@ from ..writing.service import (
     generate_characters,
     generate_outline,
     generate_worlds,
+    suggest_script,
 )
 
 #: SSE 响应头：禁用缓存与反向代理缓冲，保证逐条到达浏览器
@@ -439,5 +440,50 @@ def register_stream_routes(app, config_path: str | None = None) -> None:
                 resume=bool(body.get("resume")),
                 on_progress=on_progress,
             )
+
+        return _progress_response(task)
+
+    @app.post("/api/ui/script/suggest/stream")
+    def ui_script_suggest_stream(body: dict) -> StreamingResponse:
+        """导演标注（流式）：逐批生成并透出批次/接收字数，失败批次可续跑。
+
+        参数:
+            body: `{path, chapter, scenes_per_round?, dry_run?, resume?}`。
+
+        返回:
+            SSE：start → batch/chars* → done(result) / error(message)；
+            result.failures 为失败批次（镜头范围与原因），可用 resume=true 只重试失败批次。
+        """
+        store = _store(body.get("path"))
+        chapter_id = str(body.get("chapter") or "")
+        if not chapter_id:
+            raise HTTPException(status_code=400, detail="缺少 chapter 参数（章节 ID）")
+        config = load_config(config_path)
+
+        def task(on_progress):
+            """调用 suggest_script；apply 时再同步到章节，行为与 CLI 一致。"""
+            result = suggest_script(
+                store,
+                config,
+                chapter_id,
+                dry_run=bool(body.get("dry_run")),
+                scenes_per_round=body.get("scenes_per_round"),
+                resume=bool(body.get("resume")),
+                on_progress=on_progress,
+            )
+            if not body.get("dry_run"):
+                out_path = store.root / "scripts" / f"{chapter_id}.markup.txt"
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                out_path.write_text(str(result.get("markup") or "") + "\n", encoding="utf-8")
+                result["markup_path"] = str(out_path)
+            # 有失败批次时不应用，避免把不完整的标注写入章节
+            if body.get("apply") and not result.get("partial"):
+                from ..store.schema_validator import validate
+                from ..cli_voice import _apply_script_to_chapter
+
+                validate(result["script"], "director-script.schema.json")
+                store.save_script(result["script"])
+                result["apply"] = _apply_script_to_chapter(store, store.load_chapter(chapter_id), result["script"])
+            return result
 
         return _progress_response(task)

@@ -20,6 +20,7 @@ from ..models.ids import new_id, now_iso
 from ..store import ProjectStore
 from ..store.settings_store import SettingsStore
 from ..text.context import ContextAssembler
+from ..text.dialogue import normalize_dialogue
 from .editing import INSTRUCTION_LIMIT, STALE_WARNING, _usage_payload
 from .service import (
     DEFAULT_CHAPTER_WORDS,
@@ -327,7 +328,9 @@ def _build_continue_instruction(
     if extra and extra != intent:
         lines.append(f"续写思路：{extra}")
     lines.append(
-        "要求：本轮写到自然段结束就停，不要停在半句；只输出新增正文，不要写章节标题或小标题，不要解释；对白使用中文引号“”。"
+        "要求：本轮写到自然段结束就停，不要停在半句；只输出新增正文，不要写章节标题或小标题，不要解释。"
+        "硬性排版规则：人物对白一律用中文全角双引号“”包裹；禁止使用「」『』【】、英文双引号\"\"与单引号，"
+        "禁止不加引号直接成段写对白；旁白、心理描写不加引号。"
     )
     return "\n".join(lines)
 
@@ -599,6 +602,11 @@ def continue_chapter(
         provider = getattr(result, "model", "") or provider
         record["usage"] = _usage_payload(result) or record.get("usage")
         segment = (result.text or "").strip()
+        # 引号收口：只改引号字符，漏引号的对白只提示不改写
+        segment, dialogue_warnings = normalize_dialogue(
+            segment, [str(item.get("name") or "") for item in context["characters"]]
+        )
+        warnings.extend(dialogue_warnings)
         rounds_used = index
         if not segment:
             stop_reason = "empty_output"

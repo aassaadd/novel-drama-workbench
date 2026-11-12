@@ -1338,6 +1338,7 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--dry-run", action="store_true", help="只预览，不写盘")
     q.add_argument("--out", help="标注文本输出路径，默认 scripts/<chapter>.markup.txt")
     q.add_argument("--scenes-per-round", dest="scenes_per_round", type=int, help="每批镜头数（默认取配置 script_scenes_per_round）")
+    q.add_argument("--resume", action="store_true", help="复用上次结果，只重试失败的标注批次")
     q.set_defaults(func=cmd_script_suggest)
     q = p_sub.add_parser("parse")
     q.add_argument("--chapter", required=True)
@@ -1361,6 +1362,9 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--max-chars", type=int, default=1200)
     q.add_argument("--force", action="store_true")
     q.add_argument("--dry-run", action="store_true")
+    q.add_argument("--impact", action="store_true", help="只输出重切影响清单，不写盘")
+    q.add_argument("--keep-lines", action="store_true", dest="keep_lines",
+                   help="保留模式：正文未变化的场景沿用原场景与台词（含配音/媒体引用）")
     q.set_defaults(func=cmd_scene_split)
 
     p = sub.add_parser("line", help="台词行")
@@ -1370,6 +1374,9 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--scene", action="append")
     q.add_argument("--force", action="store_true")
     q.add_argument("--dry-run", action="store_true")
+    q.add_argument("--impact", action="store_true", help="只输出重切影响清单，不写盘")
+    q.add_argument("--keep-manual", action="store_true", dest="keep_manual",
+                   help="保留模式：人工改过/新增的台词行原样保留并按原位置插回")
     q.set_defaults(func=cmd_line_split)
     q = p_sub.add_parser("list", help="列出派生状态，可按状态/行 ID 筛选")
     q.add_argument("--chapter", required=True)

@@ -351,6 +351,7 @@ def cmd_script_suggest(args, config: AppConfig) -> int:
         args.chapter,
         dry_run=args.dry_run,
         scenes_per_round=getattr(args, "scenes_per_round", None),
+        resume=bool(getattr(args, "resume", False)),
     )
     markup = result["markup"]
     chapter_id = args.chapter
@@ -368,20 +369,31 @@ def cmd_script_suggest(args, config: AppConfig) -> int:
         f"标注文本: {out_path}",
     ]
     lines.extend(f"  ! {item}" for item in result["warnings"])
+    failures = result.get("failures") or []
+    for item in failures:
+        lines.append(
+            f"  x 第 {item['start_scene']}–{item['end_scene']} 个镜头（第 {item['batch']} 批）失败：{item['message']}"
+        )
+    if failures:
+        lines.append("  已保留成功批次；加 --resume 可只重试失败批次")
 
     if args.apply and not args.dry_run:
-        script = result["script"]
-        validate(script, "director-script.schema.json")
-        store.save_script(script)
-        from .cli_voice import _apply_script_to_chapter
+        if failures:
+            lines.append("（有失败批次，本次未同步到章节）")
+            payload = {key: value for key, value in result.items() if key != "markup"} | {"markup_path": str(out_path)}
+        else:
+            script = result["script"]
+            validate(script, "director-script.schema.json")
+            store.save_script(script)
+            from .cli_voice import _apply_script_to_chapter
 
-        chapter = store.load_chapter(chapter_id)
-        summary = _apply_script_to_chapter(store, chapter, script)
-        lines.append(
-            f"已同步到章节：新建场景 {summary['scenes_created']}，新增台词 {summary['lines_added']}，"
-            f"更新台词 {summary['lines_updated']}，音效 {summary['sfx_added']}，画面 {summary['images_added']}，视频位 {summary['videos_added']}"
-        )
-        payload = {**{key: value for key, value in result.items() if key != "markup"}, "apply": summary, "markup_path": str(out_path)}
+            chapter = store.load_chapter(chapter_id)
+            summary = _apply_script_to_chapter(store, chapter, script)
+            lines.append(
+                f"已同步到章节：新建场景 {summary['scenes_created']}，新增台词 {summary['lines_added']}，"
+                f"更新台词 {summary['lines_updated']}，音效 {summary['sfx_added']}，画面 {summary['images_added']}，视频位 {summary['videos_added']}"
+            )
+            payload = {**{key: value for key, value in result.items() if key != "markup"}, "apply": summary, "markup_path": str(out_path)}
     else:
         payload = {key: value for key, value in result.items() if key != "markup"} | {"markup_path": str(out_path)}
         if args.dry_run:

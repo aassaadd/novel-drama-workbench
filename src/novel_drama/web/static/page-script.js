@@ -11,6 +11,7 @@
 (function () {
   let bound = false;
   let busy = false;
+  let streamAbort = null; // 标注流式请求的中断句柄
 
   const el = (id) => document.getElementById(id);
   const KIND_LABEL = { dialogue: "对白", narration: "旁白", inner_monologue: "独白" };
@@ -211,6 +212,9 @@
         hasMarkup ? (data.has_script ? "已生成并应用" : "已生成预览，尚未应用") : "还没有标注"
       )}</span></div>`,
       fileName ? `<div class="kv-row"><span class="kv-key">文件</span><span class="kv-val">${esc(fileName)}</span></div>` : "",
+      hasMarkup
+        ? `<div class="kv-row"><span class="kv-key">重切</span><span class="kv-val">已有标注，重切场景/台词会使其失效，需要重新生成</span></div>`
+        : "",
     ].join("");
     el("scMarkup").innerHTML = markupHtml(data.markup);
   }
@@ -229,7 +233,11 @@
     }
   }
 
-  /* 生成标注；apply=true 时一并应用。 */
+  /* 生成标注（流式）；apply=true 时生成完整后一并同步到章节。
+   * 单批失败会保留已成功批次，并可只重试失败批次。
+   * 参数：apply 是否同步进章节。
+   * 返回：Promise<void>。
+   */
   async function suggest(apply) {
     if (busy) {
       NW.toast("正在生成标注，请稍候…");
@@ -252,20 +260,41 @@
     buttons.forEach((btn) => {
       btn.disabled = true;
     });
-    const hint = apply
-      ? "正在生成并应用标注（长章节会分批调用模型，可能需要 1–2 分钟）…"
-      : "正在生成标注（长章节会分批调用模型，可能需要 1–2 分钟）…";
-    el("scInfo").textContent = hint;
+    if (el("scStop")) el("scStop").hidden = false;
+    const progress = NW.progressInit();
+    NW.busyShow(apply ? "正在生成并应用标注…" : "正在生成导演标注…", "正在规划批次…");
+    el("scInfo").textContent = "生成中，可在弹层里查看批次进度…";
     el("scMarkup").innerHTML = "<p class='muted'>生成中，请稍候…</p>";
-    NW.toast(hint);
+
+    /* 一批流式生成；返回最终结果（含 failures） */
+    const run = async (body) => {
+      streamAbort = new AbortController();
+      return NW.streamPost(
+        "/api/ui/script/suggest/stream",
+        body,
+        (event, data) => {
+          if (event === "batch" || event === "chars") NW.busyDetail(NW.progressApply(progress, data));
+        },
+        streamAbort.signal
+      );
+    };
+
     try {
-      const result = await NW.api("/api/ui/script/suggest", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path: NW.state.path, chapter: NW.state.chapter, apply }),
-        busy: apply ? "正在生成并应用标注…" : "正在生成导演标注…",
-        busyDetail: "分批调用模型，长章节可能需要 1–2 分钟",
-      });
+      let result = await run({ path: NW.state.path, chapter: NW.state.chapter, apply });
+      const failures = result.failures || [];
+      if (failures.length) {
+        const detail = failures
+          .slice(0, 3)
+          .map((item) => `第 ${item.start_scene}–${item.end_scene} 个镜头（第 ${item.batch} 批）：${item.message}`)
+          .join("\n");
+        const retry = window.confirm(
+          `有 ${failures.length} 批没有生成成功：\n${detail}\n\n已成功批次的标注已保留，只重试失败批次？`
+        );
+        if (retry) {
+          NW.busyDetail("正在重试失败批次…");
+          result = await run({ path: NW.state.path, chapter: NW.state.chapter, apply, resume: true });
+        }
+      }
       const warnings = result.warnings || [];
       const box = el("scWarnings");
       if (warnings.length) {
@@ -274,21 +303,47 @@
       } else {
         box.hidden = true;
       }
+      const left = (result.failures || []).length;
       const summary = result.apply
         ? `，已同步：新建场景 ${result.apply.scenes_created}、新增台词 ${result.apply.lines_added}、更新台词 ${result.apply.lines_updated}、音效 ${result.apply.sfx_added}、画面 ${result.apply.images_added}、视频位 ${result.apply.videos_added}`
-        : "";
-      NW.toast(`标注：镜头 ${result.shots} 个 / 台词 ${result.lines} 行${summary}`, true);
+        : apply && left
+          ? "（仍有失败批次，未写入章节）"
+          : "";
+      NW.toast(
+        `标注：镜头 ${result.shots} 个 / 台词 ${result.lines} 行${left ? `（仍有 ${left} 批失败）` : ""}${summary}`,
+        !left
+      );
       await load();
       if (apply && NW.openProject) await NW.openProject();
     } catch (error) {
-      NW.toast(`生成失败（退出码 ${error.code}）：${error.message}`);
+      if (error && error.name === "AbortError") {
+        NW.toast("已停止标注生成");
+      } else {
+        NW.toast(`生成失败（退出码 ${error.code}）：${error.message}`);
+      }
       await load();
     } finally {
       busy = false;
+      streamAbort = null;
       buttons.forEach((btn, index) => {
         btn.disabled = false;
         btn.textContent = labels[index];
       });
+      if (el("scStop")) el("scStop").hidden = true;
+      NW.busyHide();
+      el("scInfo").textContent = "标注预览已更新";
+    }
+  }
+
+  /* 重新切分场景 / 台词：先出影响清单，确认后执行（默认保留人工修改）。 */
+  async function resplit(kind) {
+    try {
+      await NWResplit.run(kind, {
+        keep: el("scKeepEdits").checked,
+        onDone: () => load(),
+      });
+    } catch (error) {
+      NW.toast(`切分失败（退出码 ${error.code}）：${error.message}`);
     }
   }
 
@@ -298,6 +353,13 @@
     bound = true;
     el("scSuggest").addEventListener("click", () => suggest(false));
     el("scApply").addEventListener("click", () => suggest(true));
+    el("scResplitScene").addEventListener("click", () => resplit("scene"));
+    el("scResplitLine").addEventListener("click", () => resplit("line"));
+    if (el("scStop")) {
+      el("scStop").addEventListener("click", () => {
+        if (streamAbort) streamAbort.abort();
+      });
+    }
     NW.onChapter(() => load());
   }
 

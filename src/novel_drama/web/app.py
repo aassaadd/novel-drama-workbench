@@ -1427,18 +1427,38 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
 
     @app.post("/api/ui/scene/split")
     def ui_scene_split(body: dict) -> dict:
-        """切分场景（`scene split`）。"""
+        """切分场景（`scene split`）；force 覆盖，keep_lines 保留未变化场景的台词。"""
         argv = ["--project", body["path"], "--json", "scene", "split", "--chapter", body["chapter"]]
         if body.get("force"):
             argv.append("--force")
+        if body.get("keep_lines"):
+            argv.append("--keep-lines")
+        return _respond(_cli(*argv))
+
+    @app.post("/api/ui/scene/split/impact")
+    def ui_scene_split_impact(body: dict) -> dict:
+        """重切场景的影响清单（`scene split --impact`，只读）。"""
+        argv = ["--project", body["path"], "--json", "scene", "split", "--chapter", body["chapter"], "--impact"]
+        if body.get("keep_lines"):
+            argv.append("--keep-lines")
         return _respond(_cli(*argv))
 
     @app.post("/api/ui/line/split")
     def ui_line_split(body: dict) -> dict:
-        """切分台词（`line split`）。"""
+        """切分台词（`line split`）；force 覆盖，keep_manual 保留人工修改的台词行。"""
         argv = ["--project", body["path"], "--json", "line", "split", "--chapter", body["chapter"]]
         if body.get("force"):
             argv.append("--force")
+        if body.get("keep_manual"):
+            argv.append("--keep-manual")
+        return _respond(_cli(*argv))
+
+    @app.post("/api/ui/line/split/impact")
+    def ui_line_split_impact(body: dict) -> dict:
+        """重切台词的影响清单（`line split --impact`，只读）。"""
+        argv = ["--project", body["path"], "--json", "line", "split", "--chapter", body["chapter"], "--impact"]
+        if body.get("keep_manual"):
+            argv.append("--keep-manual")
         return _respond(_cli(*argv))
 
     @app.get("/api/ui/script")
@@ -1462,6 +1482,8 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
             argv.append("--apply")
         if body.get("dry_run"):
             argv.append("--dry-run")
+        if body.get("resume"):
+            argv.append("--resume")
         return _respond(_cli(*argv))
 
     @app.get("/api/ui/media")

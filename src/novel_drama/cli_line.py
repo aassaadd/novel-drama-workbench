@@ -9,6 +9,7 @@ from .cli_common import EXIT_OK, EXIT_REJECTED, _emit, _resolve_store, cast_hint
 from .config import AppConfig
 from .models import entities
 from .orchestration.pipeline import split_chapter_scenes, split_scene_lines
+from .orchestration.resplit import analyze_line_split, analyze_scene_split
 from .tts import line_state
 
 # 正文与切分数据对不上时的统一提示：宁可拒绝写盘，也不静默改到错误位置
@@ -19,10 +20,31 @@ _CONTENT_MISMATCH = "正文已变更，请先重新切分"
 
 
 def cmd_scene_split(args, config: AppConfig) -> int:
-    """拆分场景。"""
+    """拆分场景；`--impact` 时只输出影响清单（不写盘）。
+
+    参数:
+        args: 参数（chapter/max-chars/force/dry-run/impact/keep-lines）。
+        config: 本机配置。
+
+    返回:
+        退出码。
+    """
     store = _resolve_store(args, config)
     chapter = store.load_chapter(args.chapter)
-    scenes = split_chapter_scenes(store, chapter, max_chars=args.max_chars, force=args.force, dry_run=args.dry_run)
+    keep_lines = bool(getattr(args, "keep_lines", False))
+    if getattr(args, "impact", False):
+        characters = store.load_characters()["characters"]
+        report = analyze_scene_split(store, chapter, characters, max_chars=args.max_chars, keep_lines=keep_lines)
+        _emit(args, report["text"], report)
+        return EXIT_OK
+    scenes = split_chapter_scenes(
+        store,
+        chapter,
+        max_chars=args.max_chars,
+        force=args.force,
+        dry_run=args.dry_run,
+        keep_lines=keep_lines,
+    )
     payload = {"dry_run": args.dry_run, "scenes": scenes}
     if args.dry_run:
         text = "\n".join(f"{index + 1}. {item['title']}（{len(item['content'])} 字）" for index, item in enumerate(scenes)) or "正文为空，未产生场景"
@@ -36,11 +58,32 @@ def cmd_scene_split(args, config: AppConfig) -> int:
 
 
 def cmd_line_split(args, config: AppConfig) -> int:
-    """切分台词行。"""
+    """切分台词行；`--impact` 时只输出影响清单（不写盘）。
+
+    参数:
+        args: 参数（chapter/scene/force/dry-run/impact/keep-manual）。
+        config: 本机配置。
+
+    返回:
+        退出码。
+    """
     store = _resolve_store(args, config)
     chapter = store.load_chapter(args.chapter)
     characters = store.load_characters()["characters"]
-    result = split_scene_lines(store, chapter, characters, scene_ids=args.scene, force=args.force, dry_run=args.dry_run)
+    keep_manual = bool(getattr(args, "keep_manual", False))
+    if getattr(args, "impact", False):
+        report = analyze_line_split(store, chapter, characters, scene_ids=args.scene, keep_manual=keep_manual)
+        _emit(args, report["text"], report)
+        return EXIT_OK
+    result = split_scene_lines(
+        store,
+        chapter,
+        characters,
+        scene_ids=args.scene,
+        force=args.force,
+        dry_run=args.dry_run,
+        keep_manual=keep_manual,
+    )
     _emit(
         args,
         f"{'预览' if args.dry_run else '已切分'}：场景 {result['scenes']} 个，台词行 {result['lines']} 行，未识别说话人 {result['unknown']} 行",

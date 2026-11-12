@@ -180,6 +180,21 @@ class OfflineWritingAdapter:
             raw={"provider": "offline-writing", "task": task},
         )
 
+    def generate_stream(self, req: TextGenRequest, on_delta=None):
+        """离线实现没有真流式：一次性产出后把全文交给 on_delta。
+
+        参数:
+            req: 统一文本请求。
+            on_delta: 增量回调。
+
+        返回:
+            TextGenResult。
+        """
+        result = self.generate(req)
+        if on_delta is not None and result.text:
+            on_delta(result.text)
+        return result
+
     def generate_tool(self, req: TextGenRequest, tool: dict, timeout_s: float | None = None, on_delta=None) -> dict:
         """离线实现工具调用：直接解析自身规则生成的结构化 JSON。
 

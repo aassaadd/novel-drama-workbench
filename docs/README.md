@@ -30,6 +30,9 @@
 | [spec-r21-bgm-local-provider.md](spec-r21-bgm-local-provider.md) | 配乐 provider：本地 Stable Audio Open 1.0（独立 venv + 常驻 worker，可回落 ACE-Step） | 已实现并实测两档样例；媒体页已接入后端选择与本地生成；ACE-Step 出音回归待 ComfyUI 启动 |
 | [spec-r22-hierarchical-outline.md](spec-r22-hierarchical-outline.md) | 三级分层大纲生成（幕 → 章 → 节拍） | 已实现；桩验证层级进度、单幕失败与续跑，未做页面实测 |
 | [spec-r23-chapter-continue-panel.md](spec-r23-chapter-continue-panel.md) | 正文续写参数面板（与大纲续写统一） | 已实现；桩验证面板入参与需求回显，未做页面实测 |
+| [spec-r24-script-annotate-streaming.md](spec-r24-script-annotate-streaming.md) | 导演标注：按批预算、截断报错、批次续跑、流式与提示词切片 | 已实现；桩验证预算/截断/续跑/进度，未做页面实测 |
+| [spec-r25-dialogue-quotes.md](spec-r25-dialogue-quotes.md) | 正文对白统一使用中文全角双引号 “” | 已实现；桩验证引号规范化、漏引号提示与切分兼容 |
+| [spec-r26-resplit-scene-line.md](spec-r26-resplit-scene-line.md) | 重新切分场景 / 台词：影响清单、人工修改保护、章节页与标注页入口 | 已实现；桩验证保留模式与 CLI impact，未做页面实测 |
 
 ## 调研（只作依据，不改生产代码）
 

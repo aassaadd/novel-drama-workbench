@@ -448,3 +448,53 @@ function uiFileUrl(rel, project) {
   if (!root || !path) return "";
   return `/api/ui/file?${new URLSearchParams({ path, project: root }).toString()}`;
 }
+
+/* 重新切分场景 / 台词：先取影响清单确认，再带 --force 执行。
+ * 参数：
+ *   kind  "scene" | "line"
+ *   options.keep  是否保留人工修改（默认 true，安全侧）
+ *   options.onDone 执行成功后的回调（页面自行刷新）
+ * 返回：执行结果；用户取消或未选章节时返回 null。
+ */
+async function resplit(kind, options) {
+  const opts = options || {};
+  const keep = opts.keep !== false;
+  const path = window.NW && NW.state && NW.state.path;
+  const chapter = window.NW && NW.state && NW.state.chapter;
+  if (!path || !chapter) {
+    NW.toast("先打开工程并选择章节");
+    return null;
+  }
+  const impactUrl = kind === "scene" ? "/api/ui/scene/split/impact" : "/api/ui/line/split/impact";
+  const keepField = kind === "scene" ? { keep_lines: keep } : { keep_manual: keep };
+  const impact = await NW.api(impactUrl, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path, chapter, ...keepField }),
+  });
+  const existing = impact.existing || {};
+  const hasExisting = kind === "scene" ? (existing.scenes || 0) > 0 : (existing.lines || 0) > 0;
+  if (hasExisting) {
+    const choice = keep
+      ? "当前选择：保留人工修改（推荐）"
+      : "当前选择：全部按规则重切，人工修改会丢失";
+    if (!window.confirm(`${impact.text}\n\n${choice}\n\n确定执行？`)) return null;
+  }
+  const url = kind === "scene" ? "/api/ui/scene/split" : "/api/ui/line/split";
+  const result = await NW.api(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    busy: kind === "scene" ? "正在重新切分场景…" : "正在重新切分台词…",
+    body: JSON.stringify({ path, chapter, force: true, ...keepField }),
+  });
+  if (kind === "scene") {
+    NW.toast(`已重新切分 ${(result.scenes || []).length} 个场景；记得重新切分台词并重新生成标注`, true);
+  } else {
+    NW.toast(`已重新切分台词：场景 ${result.scenes || 0} 个，台词 ${result.lines || 0} 行（未识别 ${result.unknown || 0}）`, true);
+  }
+  if (typeof opts.onDone === "function") await opts.onDone(result);
+  return result;
+}
+
+window.NWResplit = { run: resplit };
+

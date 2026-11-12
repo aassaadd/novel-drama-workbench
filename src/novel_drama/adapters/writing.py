@@ -1024,11 +1024,26 @@ class OmlxWritingAdapter:
             raw=data,
         )
 
-    def _generate_stream(self, req: TextGenRequest) -> TextGenResult:
+    def generate_stream(self, req: TextGenRequest, on_delta=None) -> TextGenResult:
+        """流式生成文本，边到达边把增量交给 on_delta。
+
+        参数:
+            req: 统一文本请求（内部强制走流式）。
+            on_delta: 增量回调；回调抛异常会中断生成（用于页面取消）。
+
+        返回:
+            与非流式一致的 TextGenResult（text/finish_reason/model/usage）。
+        """
+        if on_delta is None:
+            return self.generate(req)
+        return self._generate_stream(req, on_delta=on_delta)
+
+    def _generate_stream(self, req: TextGenRequest, on_delta=None) -> TextGenResult:
         """用 SSE 增量聚合出与非流式一致的 TextGenResult。
 
         参数:
             req: 统一文本请求。
+            on_delta: 可选增量回调，逐片收到正文文本。
 
         返回:
             TextGenResult；usage 取流中最后出现的用量事件。
@@ -1050,6 +1065,8 @@ class OmlxWritingAdapter:
             text = delta.get("content") or delta.get("reasoning_content") or ""
             if text:
                 parts.append(text)
+                if on_delta is not None:
+                    on_delta(text)
             if choices[0].get("finish_reason"):
                 finish = str(choices[0]["finish_reason"])
         return TextGenResult(text="".join(parts), finish_reason=finish, model=model, usage=usage, raw={"stream": True})
