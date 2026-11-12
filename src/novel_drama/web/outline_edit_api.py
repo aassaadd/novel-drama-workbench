@@ -9,7 +9,13 @@ from __future__ import annotations
 from fastapi import HTTPException
 
 from ..store import ProjectStore
-from ..writing.outline_edit import chapter_delete_impact, delete_beat, delete_outline_chapter
+from ..writing.outline_edit import (
+    act_delete_impact,
+    chapter_delete_impact,
+    delete_beat,
+    delete_outline_act,
+    delete_outline_chapter,
+)
 
 
 def _store(path: str | None) -> ProjectStore:
@@ -66,6 +72,32 @@ def register_outline_edit_routes(app) -> None:
             raise HTTPException(status_code=400, detail="缺少 beat 参数（节拍序号，从 1 开始）") from exc
         try:
             return delete_beat(store, chapter_id, beat_index)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post("/api/ui/outline/act/delete")
+    def ui_outline_act_delete(body: dict) -> dict:
+        """预览或执行整幕删除（含幕下所有已落地章节）。
+
+        参数:
+            body: `{path, act, dry_run?}`；dry_run=true 只返回按幕汇总的影响。
+
+        返回:
+            dry_run 时返回 `{act_id, index, title, chapters, landed_count, totals}`；
+            正式删除返回 `{deleted, remaining_chapters, remaining_acts, warnings}`。
+
+        异常:
+            HTTPException 400: 缺少 act。
+            HTTPException 409: 大纲不存在或找不到该幕。
+        """
+        store = _store(body.get("path"))
+        act_id = str(body.get("act") or "")
+        if not act_id:
+            raise HTTPException(status_code=400, detail="缺少 act 参数（幕 ID）")
+        try:
+            if body.get("dry_run"):
+                return act_delete_impact(store, act_id)
+            return delete_outline_act(store, act_id)
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 

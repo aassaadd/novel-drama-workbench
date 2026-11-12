@@ -15,7 +15,17 @@
   let actsCache = [];     // 当前大纲的幕列表，绑定面板据此查找章节
   let landedIds = new Set(); // 已落地成章节文件的章节 ID（删除时用于二次确认）
   let lastContinueRequest = null; // 上次续写预览的入参，写入时复用，避免生成另一份
+  let continueMask = null;    // 续写面板浮层
+  let continueChapters = 3;   // 续写章数默认值（上次面板里填的数）
   let loadedPath = "";    // 上次加载的工程，切工程时关闭面板
+
+  /* 续写快捷方向：chip 只把整句填进输入框，不直接提交。 */
+  const CONTINUE_CHIPS = [
+    "推进主线：把当前冲突再往前推一步",
+    "补一段感情线：让两位主角的关系有实质进展",
+    "收束支线：把前面埋下的伏笔收掉一条",
+    "加一次反转：让读者对已知信息产生怀疑",
+  ];
   let bindMask = null;    // 绑定面板浮层
 
   const el = (id) => document.getElementById(id);
@@ -80,8 +90,11 @@
       const actChapters = act.chapters || [];
       parts.push(
         `<details class="act" ${actIndex === 0 ? "open" : ""}>` +
-          `<summary><span class="act-title">${esc(act.title || "未命名幕")}</span>` +
-          `<span class="muted">${actChapters.length} 章</span></summary>` +
+          `<summary><span class="act-title">第 ${esc(act.index ?? actIndex + 1)} 幕 · ${esc(act.title || "未命名幕")}</span>` +
+          `<span class="muted">${actChapters.length} 章</span>` +
+          `<button class="btn small act-del" type="button" data-del-act="${esc(act.id || "")}" ` +
+          `style="margin-left:auto;color:#b3261e;border-color:#d9a5a0">删除整幕</button>` +
+          `</summary>` +
           (act.summary ? `<p class="muted">${esc(act.summary)}</p>` : "")
       );
 
@@ -126,6 +139,7 @@
     if (loadedPath !== NW.state.path) {
       loadedPath = NW.state.path;
       lastContinueRequest = null;
+      closeContinuePanel();
       closeBindPanel();
     }
     try {
@@ -524,11 +538,68 @@
     }
   }
 
-  /* 大纲列表点击分发：删除节拍 / 删除整章 / 打开绑定面板。
+  /* 删除整幕：先按幕汇总影响做二次确认，再删该幕及其下全部章节。
+   * 参数：actId 幕 ID。
+   * 返回：Promise<void>。
+   */
+  async function deleteAct(actId) {
+    if (!NW.state.path || !actId) return;
+    let impact = null;
+    try {
+      impact = await NW.api("/api/ui/outline/act/delete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: NW.state.path, act: actId, dry_run: true }),
+      });
+    } catch (error) {
+      NW.toast(`读取幕影响失败：${error.message}`);
+      return;
+    }
+    const rows = impact.chapters.map((item) =>
+      item.landed
+        ? `· 第 ${item.index} 章 ${item.title}（已落地）：正文 ${item.chars} 字、台词 ${item.lines} 条、音频 ${item.audio} 条、图片 ${item.image} 条、视频 ${item.video} 条`
+        : `· 第 ${item.index} 章 ${item.title}（未落地）`
+    );
+    const totals = impact.totals;
+    const message =
+      `删除《第 ${impact.index} 幕 ${impact.title}》及其 ${impact.chapters.length} 章后不可恢复：\n` +
+      rows.join("\n") +
+      `\n合计：正文 ${totals.chars} 字、台词 ${totals.lines} 条、音频 ${totals.audio} 条、图片 ${totals.image} 条、视频 ${totals.video} 条\n` +
+      "· 后续章节序号与幕序号自动前移\n" +
+      "· assets 下的素材文件保留，不自动删除\n" +
+      "确定删除整幕？";
+    if (!window.confirm(message)) return;
+    try {
+      const result = await NW.api("/api/ui/outline/act/delete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: NW.state.path, act: actId }),
+      });
+      let note = `已删除「${impact.title}」及其 ${impact.chapters.length} 章（素材文件保留）`;
+      if (result.remaining_chapters === 0) note += "；大纲已清空，可重新生成或续写";
+      if ((result.warnings || []).length) note += `；${result.warnings.join("；")}`;
+      NW.toast(note, true);
+      if (impact.landed_count && NW.openProject) {
+        await NW.openProject();
+      }
+      await load();
+    } catch (error) {
+      NW.toast(`删除整幕失败：${error.message}`);
+    }
+  }
+
+  /* 大纲列表点击分发：删除节拍 / 删除整章 / 删除整幕 / 打开绑定面板。
    * 参数：event 点击事件。
    * 返回：无。
    */
   function onBodyClick(event) {
+    const delAct = event.target.closest("[data-del-act]");
+    if (delAct) {
+      event.preventDefault();
+      event.stopPropagation();
+      deleteAct(delAct.dataset.delAct || "");
+      return;
+    }
     const delBeat = event.target.closest("[data-del-beat]");
     if (delBeat) {
       event.preventDefault();
@@ -556,19 +627,146 @@
 
   /* ---------------- 续写大纲 ---------------- */
 
-  /* 请求大纲续写预览：在已有章节之后追加，跨幕自动建幕，不写盘。
-   * 章数取工具条上的「续写章数」，不再复用「每幕章数」。
+  /* 关闭续写面板（不提交）。 */
+  function closeContinuePanel() {
+    if (!continueMask) return;
+    document.removeEventListener("keydown", onContinueKeydown, true);
+    continueMask.remove();
+    continueMask = null;
+  }
+
+  /* 续写面板键盘：Esc 关闭（不提交）。 */
+  function onContinueKeydown(event) {
+    if (event.key !== "Escape") return;
+    event.preventDefault();
+    closeContinuePanel();
+  }
+
+  /* 打开「续写大纲」面板：章数 + 需求 textarea + 快捷方向 chip + 预览。
    * 参数：无。
+   * 返回：无。
+   */
+  function openContinuePanel() {
+    if (!NW.state.path) {
+      NW.toast("先打开或新建工程");
+      return;
+    }
+    closeContinuePanel();
+    continueMask = document.createElement("div");
+    continueMask.className = "modal-mask";
+
+    const dialog = document.createElement("div");
+    dialog.className = "modal-editor continue-panel";
+    dialog.setAttribute("role", "dialog");
+    dialog.setAttribute("aria-modal", "true");
+
+    const title = document.createElement("h3");
+    title.className = "modal-title";
+    title.textContent = "续写大纲";
+    dialog.appendChild(title);
+
+    const hint = document.createElement("p");
+    hint.className = "modal-hint";
+    hint.textContent = "按当前大纲节奏往后追加，先预览，确认后再写入设定库。";
+    dialog.appendChild(hint);
+
+    const chaptersLabel = document.createElement("label");
+    chaptersLabel.className = "stack";
+    chaptersLabel.textContent = "续写章数";
+    const chaptersInput = document.createElement("input");
+    chaptersInput.type = "number";
+    chaptersInput.min = "1";
+    chaptersInput.max = "12";
+    chaptersInput.value = String(continueChapters);
+    chaptersInput.style.width = "96px";
+    chaptersLabel.appendChild(chaptersInput);
+    const chaptersHint = document.createElement("span");
+    chaptersHint.className = "muted";
+    chaptersHint.style.fontSize = "12px";
+    chaptersHint.textContent = "按当前大纲节奏";
+    chaptersLabel.appendChild(chaptersHint);
+    dialog.appendChild(chaptersLabel);
+
+    const intentLabel = document.createElement("label");
+    intentLabel.className = "stack";
+    intentLabel.textContent = "续写需求";
+    const intentInput = document.createElement("textarea");
+    intentInput.rows = 4;
+    intentInput.placeholder = "例如：这一段落要收束师父的旧案，让主角第一次动摇";
+    intentInput.style.cssText = "width:100%;box-sizing:border-box;min-height:96px;resize:vertical";
+    intentLabel.appendChild(intentInput);
+    dialog.appendChild(intentLabel);
+
+    const intentHint = document.createElement("p");
+    intentHint.className = "muted";
+    intentHint.style.cssText = "margin:0;font-size:12px";
+    intentHint.textContent = "留空则按现有大纲自然续写（Ctrl/Cmd + Enter 可预览）";
+    dialog.appendChild(intentHint);
+
+    const chips = document.createElement("div");
+    chips.className = "actions";
+    chips.style.cssText = "flex-wrap:wrap;gap:6px";
+    CONTINUE_CHIPS.forEach((text) => {
+      const chip = document.createElement("button");
+      chip.type = "button";
+      chip.className = "btn small";
+      chip.textContent = text.split("：")[0];
+      chip.title = text;
+      /* 只填充输入框，不提交预览 */
+      chip.addEventListener("click", () => {
+        const current = String(intentInput.value || "").trim();
+        intentInput.value = current ? `${current}；${text}` : text;
+        intentInput.focus();
+      });
+      chips.appendChild(chip);
+    });
+    dialog.appendChild(chips);
+
+    const foot = document.createElement("div");
+    foot.className = "modal-foot";
+    foot.style.cssText = "display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap";
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "btn";
+    cancel.textContent = "取消";
+    cancel.addEventListener("click", closeContinuePanel);
+    const preview = document.createElement("button");
+    preview.type = "button";
+    preview.className = "btn primary";
+    preview.textContent = "预览";
+    preview.addEventListener("click", () => previewContinue(chaptersInput, intentInput, preview));
+    foot.append(cancel, preview);
+    dialog.appendChild(foot);
+
+    /* Ctrl / Cmd + Enter 触发预览（不写入） */
+    dialog.addEventListener("keydown", (event) => {
+      if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+        event.preventDefault();
+        previewContinue(chaptersInput, intentInput, preview);
+      }
+    });
+    continueMask.appendChild(dialog);
+    continueMask.addEventListener("click", (event) => {
+      if (event.target === continueMask) closeContinuePanel();
+    });
+    document.body.appendChild(continueMask);
+    document.addEventListener("keydown", onContinueKeydown, true);
+    intentInput.focus();
+  }
+
+  /* 请求大纲续写预览：在已有章节之后追加，跨幕自动建幕，不写盘。
+   * 参数：chaptersInput 章数输入框；intentInput 需求输入框；button 预览按钮。
    * 返回：Promise<void>。
    */
-  async function requestOutlineContinue() {
+  async function previewContinue(chaptersInput, intentInput, button) {
     if (busy || !NW.state.path) return;
-    const chapters = Number((el("olContinueChapters") || {}).value || 3);
+    const chapters = Math.max(1, Math.min(12, Number((chaptersInput && chaptersInput.value) || 3)));
+    const intent = String((intentInput && intentInput.value) || "").trim();
     const words = Number((el("olWords") || {}).value || 1200);
-    const intent = String((el("olContinueIntent") || {}).value || "").trim();
+    continueChapters = chapters;
     lastContinueRequest = { chapters, words, intent };
     busy = true;
-    el("olContinue").disabled = true;
+    if (button) button.disabled = true;
     try {
       const result = await NW.api("/api/ui/outline/continue", {
         method: "POST",
@@ -577,13 +775,19 @@
         busy: "正在续写大纲…",
         busyDetail: intent ? "按填写的续写需求往后排，先预览再写入" : "接着已有章节往后排，先预览再写入",
       });
+      closeContinuePanel();
       showContinueDialog(result);
     } catch (error) {
       NW.toast(`续写大纲失败（${error.code || "-"}）：${error.message}`);
     } finally {
       busy = false;
-      el("olContinue").disabled = false;
+      if (button) button.disabled = false;
     }
+  }
+
+  /* 「续写大纲」入口：先打开面板收集章数与需求。 */
+  function requestOutlineContinue() {
+    openContinuePanel();
   }
 
   /* 大纲续写确认弹窗：列出新增幕/章，可取消或写入设定库。
@@ -610,7 +814,7 @@
     const intentLine = result.intent
       ? `<div style="margin-top:6px;font-size:13px;line-height:1.7">续写需求：<b>${esc(result.intent)}</b></div>` +
         `<div style="font-size:13px;line-height:1.7">将按这个要求续写 <b>${result.chapters_added}</b> 章</div>`
-      : "";
+      : `<div style="margin-top:6px;font-size:13px;line-height:1.7">未填写续写需求，按现有大纲续写 <b>${result.chapters_added}</b> 章</div>`;
     head.innerHTML =
       "<b>大纲续写预览（尚未写入）</b>" +
       intentLine +

@@ -149,8 +149,13 @@ class SettingsStore:
         """
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_name(f"{self.path.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
-        tmp.write_text(json.dumps(bible, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        os.replace(tmp, self.path)
+        try:
+            tmp.write_text(json.dumps(bible, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            os.replace(tmp, self.path)
+        except OSError:
+            # 写入失败时清掉临时文件，保留原设定库不动
+            tmp.unlink(missing_ok=True)
+            raise
 
     # ---------- 大纲工具 ----------
 

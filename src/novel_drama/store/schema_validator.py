@@ -47,6 +47,31 @@ def _build_registry(schemas: dict[str, dict]):
         return None
 
 
+def _chinese_message(error) -> str:
+    """把常见的 jsonschema 英文错误翻成中文，便于页面直接展示。
+
+    参数:
+        error: jsonschema 的 ValidationError。
+
+    返回:
+        中文描述；无法识别时原样返回英文消息。
+    """
+    import re
+
+    message = error.message
+    if "Additional properties are not allowed" in message:
+        names = re.findall(r"'([^']+)' was unexpected", message)
+        if names:
+            return "出现 schema 不允许的字段：" + "、".join(f"「{name}」" for name in names)
+    required = re.match(r"'(.+?)' is a required property", message)
+    if required:
+        return f"缺少必填字段「{required.group(1)}」"
+    wrong_type = re.match(r"(.+?) is not of type (.+)", message)
+    if wrong_type:
+        return f"字段 {wrong_type.group(1)} 类型不正确：应为 {wrong_type.group(2)}"
+    return message
+
+
 def validate(doc: dict, schema_name: str, schema_dir: Path | None = None) -> None:
     """校验一个实体文档。
 
@@ -59,7 +84,7 @@ def validate(doc: dict, schema_name: str, schema_dir: Path | None = None) -> Non
         无。校验通过即正常返回。
 
     异常:
-        SchemaValidationError: 校验失败，消息含首个错误的字段路径。
+        SchemaValidationError: 校验失败，消息含首个错误的字段路径（中文说明）。
     """
     directory = schema_dir or SCHEMA_DIR
     schemas = _load_schemas(directory)
@@ -75,4 +100,6 @@ def validate(doc: dict, schema_name: str, schema_dir: Path | None = None) -> Non
     if errors:
         first = errors[0]
         location = "/".join(str(part) for part in first.absolute_path) or "<root>"
-        raise SchemaValidationError(f"{schema_name} 校验失败 @ {location}: {first.message}")
+        chinese = _chinese_message(first)
+        detail = chinese if chinese == first.message else f"{chinese}（原文：{first.message}）"
+        raise SchemaValidationError(f"{schema_name} 校验失败 @ {location}: {detail}")
