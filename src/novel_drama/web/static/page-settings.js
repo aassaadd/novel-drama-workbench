@@ -247,12 +247,23 @@
     return rows + warn;
   }
 
+  /* 卡片底部的「保存本块」+ 行内状态。
+   * 参数：section 区块 ID（writing / tts / image / models / advanced）。
+   * 返回：HTML 字符串。
+   */
+  function sectionFoot(section) {
+    return `<div class="settings-card-foot">
+      <button class="btn small section-save" type="button" data-save-section="${section}">保存本块</button>
+      <span class="settings-hint section-status" data-section-status="${section}"></span>
+    </div>`;
+  }
+
   /* 渲染写作模型卡片（接口地址 / 模型 / API Key / 采样参数 / 上限）。
    * 参数：writing GET 返回的 writing 段。
    * 返回：HTML 字符串。
    */
   function renderWriting(writing) {
-    return `<section class="settings-card">
+    return `<section class="settings-card" data-section="writing">
       <h3>写作模型（LLM）</h3>
       <div class="health-slot">
         <button class="btn small" type="button" id="setLlmCheck">检测连接</button>
@@ -292,6 +303,7 @@
       </div>
       <div class="settings-hint" id="setLlmOutHint">${esc(llmOutputHintHtml())}</div>
       <div class="kv settings-readonly" id="setLlmLimits">${llmLimitsHtml(writing)}</div>
+      ${sectionFoot("writing")}
     </section>`;
   }
 
@@ -342,7 +354,7 @@
         ? `<option value="${esc(current)}" selected>${esc(current)}（未识别）</option>`
         : "";
     const order = (tts.provider_order || []).join(", ");
-    return `<section class="settings-card">
+    return `<section class="settings-card" data-section="tts">
       <h3>音频 TTS</h3>
       <div class="settings-grid">
         ${fieldBlock("tts.default_provider_id", "默认 provider", `<select data-key="tts.default_provider_id">${extra}${options}</select>`)}
@@ -355,6 +367,7 @@
       </div>
       <h4 class="settings-subtitle">可用 provider（只读，启用状态请在配置文件里改）</h4>
       ${renderProviders(providers)}
+      ${sectionFoot("tts")}
     </section>`;
   }
 
@@ -488,7 +501,7 @@
     const templates = image.templates || {};
     const missing = image.templates_dir_exists === false;
     const warn = missing ? '<div class="settings-warn">模板目录不存在，图像/视频阶段会没有可用模板</div>' : "";
-    return `<section class="settings-card">
+    return `<section class="settings-card" data-section="image">
       <div class="card-head"><h3>图像 / 视频 / 音乐（ComfyUI）</h3>
         <span class="health-slot">
           <button class="btn small" type="button" id="setHealthCheck">检测连接</button>
@@ -512,6 +525,7 @@
       <div class="kv settings-readonly">${readRow("模板目录", image.templates_dir || "—")}${readRow("ComfyUI 模型目录", image.models_dir || (models && models.dirs && models.dirs.comfy_models_dir) || "—")}</div>
       <div id="setTplInfo">${templateInfoHtml(true)}</div>
       ${warn}
+      ${sectionFoot("image")}
     </section>`;
   }
 
@@ -636,14 +650,15 @@
       )}
     </div>`;
     if (!models) {
-      return `<section class="settings-card" id="setModelsCard">
+      return `<section class="settings-card" id="setModelsCard" data-section="models">
         <h3>模型与下载</h3>
         ${inputs}
         <div class="error-box">模型清单读取失败：${esc(modelsError || "未知原因")}</div>
+        ${sectionFoot("models")}
       </section>`;
     }
     const mirrors = (models.mirrors || []).join(" → ") || "—";
-    return `<section class="settings-card" id="setModelsCard">
+    return `<section class="settings-card" id="setModelsCard" data-section="models">
       <h3>模型与下载</h3>
       ${inputs}
       <div class="kv settings-readonly">${readRow("镜像链", mirrors)}</div>
@@ -652,6 +667,7 @@
       ${renderModelGroup("视频模型", "video", models.video)}
       ${renderModelGroup("音乐模型", "music", models.music)}
       <div class="settings-hint">下载在后台进行，页面按 1.2s 轮询进度；同一时间只允许一个下载任务。已就位的项不会重复下载。</div>
+      ${sectionFoot("models")}
     </section>`;
   }
 
@@ -671,10 +687,11 @@
         </div>`;
       })
       .join("");
-    return `<section class="settings-card" id="setAdvancedCard">
+    return `<section class="settings-card" id="setAdvancedCard" data-section="advanced">
       <h3>全部配置</h3>
       <div class="settings-hint">config.yaml 的可调项都在这里；留空表示沿用 config.yaml 原值，保存写入页面覆盖文件。TTS provider 的能力矩阵（tts.providers）属于模型能力清单，仍在 config.yaml 维护。</div>
       ${blocks}
+      ${sectionFoot("advanced")}
     </section>`;
   }
 
@@ -721,6 +738,7 @@
         <div class="settings-hint">配置文件：${esc(data.ui_path || "—")}</div>
       </div>`;
     markInitial();
+    refreshAllDirty();
     setModelButtonsDisabled(Boolean(pollingKey));
   }
 
@@ -753,6 +771,131 @@
     document.querySelectorAll("#setBody [data-key]").forEach((node) => {
       node.dataset.init = normalized(node);
     });
+  }
+
+  /* 判断某个区块是否有未保存改动（改过的字段或「恢复」标记）。
+   * 参数：root 区块容器。
+   * 返回：布尔值。
+   */
+  function sectionDirty(root) {
+    const nodes = Array.from(root.querySelectorAll("[data-key]")).filter((node) => isEditable(node.dataset.key));
+    if (nodes.some((node) => normalized(node) !== (node.dataset.init ?? ""))) return true;
+    return Array.from(root.querySelectorAll("[data-key]")).some((node) => pending[node.dataset.key]);
+  }
+
+  /* 刷新区块的改动提示：按钮激活态 + 标题右侧小圆点。
+   * 参数：root 区块容器。
+   * 返回：无。
+   */
+  function refreshSectionDirty(root) {
+    const dirty = sectionDirty(root);
+    root.classList.toggle("has-pending", dirty);
+    const button = root.querySelector("[data-save-section]");
+    if (button) button.classList.toggle("is-dirty", dirty);
+  }
+
+  /* 刷新整页所有区块的改动提示。
+   * 参数：无。
+   * 返回：无。
+   */
+  function refreshAllDirty() {
+    document.querySelectorAll("#setBody [data-section]").forEach((root) => refreshSectionDirty(root));
+  }
+
+  /* 保存某区块前记录其它区块的未保存输入与「恢复」标记，保存后还原，避免被重渲染清掉。
+   * 参数：root 当前要保存的区块容器。
+   * 返回：{drafts, pending}。
+   */
+  function snapshotDrafts(root) {
+    const drafts = {};
+    document.querySelectorAll("#setBody [data-key]").forEach((node) => {
+      if (root.contains(node)) return;
+      drafts[node.dataset.key] = { value: node.value, checked: node.checked };
+    });
+    const keep = {};
+    const keys = new Set(Array.from(root.querySelectorAll("[data-key]")).map((node) => node.dataset.key));
+    Object.keys(pending).forEach((key) => {
+      if (!keys.has(key)) keep[key] = true;
+    });
+    return { drafts, pending: keep };
+  }
+
+  /* 重渲染后把其它区块的未保存输入写回控件。
+   * 参数：drafts 快照里的输入值映射。
+   * 返回：无。
+   */
+  function restoreDrafts(drafts) {
+    Object.keys(drafts).forEach((key) => {
+      const node = document.querySelector(`#setBody [data-key="${key}"]`);
+      const draft = drafts[key];
+      if (!node || !draft) return;
+      if (node.type === "checkbox") node.checked = Boolean(draft.checked);
+      else node.value = draft.value;
+    });
+  }
+
+  /* 保存单个区块：只提交该区块改过的字段，其它区块的未保存改动保持原样。
+   * 参数：section 区块 ID（writing / tts / image / models / advanced）。
+   * 返回：Promise，无。
+   */
+  async function saveSection(section) {
+    if (busy || !data) return;
+    const card = document.querySelector(`#setBody [data-section="${section}"]`);
+    if (!card) return;
+    const status = card.querySelector(`[data-section-status="${section}"]`);
+    const values = collectValues(card);
+    if (!Object.keys(values).length) {
+      if (status) {
+        status.textContent = "没有未保存的改动";
+        status.classList.remove("is-error");
+      }
+      return;
+    }
+    busy = true;
+    const button = card.querySelector(`[data-save-section="${section}"]`);
+    if (button) {
+      button.disabled = true;
+      button.textContent = "保存中…";
+    }
+    if (status) {
+      status.textContent = "";
+      status.classList.remove("is-error", "is-ok");
+    }
+    const snapshot = snapshotDrafts(card);
+    try {
+      const response = await NW.api("/api/config", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ values }),
+      });
+      pending = snapshot.pending;
+      data = response;
+      render();
+      restoreDrafts(snapshot.drafts);
+      refreshAllDirty();
+      const fresh = document.querySelector(`#setBody [data-section="${section}"]`);
+      const freshStatus = fresh && fresh.querySelector(`[data-section-status="${section}"]`);
+      if (freshStatus) {
+        freshStatus.textContent = "已保存";
+        freshStatus.classList.add("is-ok");
+        setTimeout(() => {
+          if (freshStatus.isConnected) freshStatus.textContent = "";
+        }, 3000);
+      }
+      Promise.all([refreshHealth(), refreshLlm(), refreshModels()]);
+    } catch (error) {
+      if (status) {
+        status.textContent = `保存失败：${error.message}`;
+        status.classList.add("is-error");
+      }
+    } finally {
+      busy = false;
+      const current = document.querySelector(`#setBody [data-section="${section}"] [data-save-section="${section}"]`);
+      if (current) {
+        current.disabled = false;
+        current.textContent = "保存本块";
+      }
+    }
   }
 
   /* 拉取 ComfyUI 连接状态（失败也存成 ok=false，页面显示红色徽标）。
@@ -1017,15 +1160,17 @@
     }
   }
 
-  /* 收集表单当前值，按 POST /api/config 的要求整理。
+  /* 收集可编辑字段的值，按 POST /api/config 的要求整理。
    * 空字符串 → null（删除覆盖项、回落 config.yaml）；api_key 留空时不提交；
    * 点了「恢复」的键一律置 null。只提交 editable 白名单内的键。
-   * 参数：无。
+   * 参数：root 可选的区块容器；传了就只收集该容器内的字段，否则收集整页。
    * 返回：{点号路径: 值} 对象。
    */
-  function collectValues() {
+  function collectValues(root) {
     const values = {};
-    document.querySelectorAll("#setBody [data-key]").forEach((node) => {
+    const scope = root || document;
+    const selector = root ? "[data-key]" : "#setBody [data-key]";
+    scope.querySelectorAll(selector).forEach((node) => {
       const key = node.dataset.key;
       if (!isEditable(key)) return;
       // 没改过的字段不提交，避免把 config.yaml 的取值复制进覆盖层
@@ -1051,8 +1196,9 @@
       }
       values[key] = raw === "" ? null : raw;
     });
+    const scopeKeys = new Set(Array.from(scope.querySelectorAll("[data-key]")).map((node) => node.dataset.key));
     Object.keys(pending).forEach((key) => {
-      values[key] = null;
+      if (!root || scopeKeys.has(key)) values[key] = null;
     });
     return values;
   }
@@ -1288,6 +1434,11 @@
    * 返回：无。
    */
   function onClick(event) {
+    const sectionSave = event.target.closest("[data-save-section]");
+    if (sectionSave) {
+      saveSection(sectionSave.dataset.saveSection || "");
+      return;
+    }
     const revert = event.target.closest("[data-revert]");
     if (revert) {
       markRevert(revert.dataset.revert || "");
@@ -1324,6 +1475,17 @@
     if (key.startsWith("comfyui.templates.")) refreshTemplateInfo();
     // 切到另一个模型时，上限区跟着该模型的检测结果变
     if (event.target && event.target.id === "setLlmModel") refreshLlmLimits();
+    const card = event.target && event.target.closest ? event.target.closest("[data-section]") : null;
+    if (card) refreshSectionDirty(card);
+  }
+
+  /* 容器上的 input 委托：输入过程中即时点亮「保存本块」的改动提示。
+   * 参数：event input 事件。
+   * 返回：无。
+   */
+  function onInput(event) {
+    const card = event.target && event.target.closest ? event.target.closest("[data-section]") : null;
+    if (card) refreshSectionDirty(card);
   }
 
   /* 首次激活时绑定事件，避免重复绑定。 */
@@ -1332,6 +1494,7 @@
     bound = true;
     el("setBody").addEventListener("click", onClick);
     el("setBody").addEventListener("change", onChange);
+    el("setBody").addEventListener("input", onInput);
   }
 
   window.Pages.settings = {

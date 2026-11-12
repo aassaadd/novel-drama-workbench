@@ -1598,6 +1598,22 @@ table.grid td.wrap { word-break: break-word; }
 
 .settings-hint { font-size: var(--fs-xs); color: var(--muted); line-height: var(--lh-loose); }
 
+/* 区块保存：底部按钮 + 未保存小圆点 + 行内状态（窄屏自动换行，不挤压） */
+.settings-card-foot { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; }
+.settings-card-foot .section-save.is-dirty { border-color: var(--accent); color: var(--accent); }
+.settings-card.has-pending > h3::after {
+  content: "";
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-left: var(--sp-1);
+  border-radius: 50%;
+  background: var(--accent);
+  vertical-align: middle;
+}
+.section-status.is-ok { color: var(--ok, #3fb950); }
+.section-status.is-error { color: var(--danger, #d9534f); }
+
 /* 只读信息（上下文窗口 / 模板目录）与警示提示 */
 .settings-readonly { font-size: var(--fs-xs); }
 .settings-warn {
