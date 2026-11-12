@@ -577,6 +577,20 @@ class OmlxWritingAdapter:
         # 3) 服务特有端点（omlx 有 /v1/models/status；换服务时可能 404，忽略即可）
         status, data, error = self._probe("/v1/models/status", timeout_s)
         fields = []
+        if isinstance(data, dict):
+            # omlx 实测形态：上限字段直接放在顶层（model_context_length / max_context_window / max_tokens）
+            top_context, top_output, top_hits = self._pick_limits(data)
+            if top_hits:
+                fields.extend(top_hits)
+                # 顶层字段可能带模型标识；只有未标注或标注与目标一致时才并入当前目标模型
+                # （不用裸 id：部分实现会把它当作请求标识，容易误判）
+                owner = ""
+                for key in ("model", "model_id", "current_model", "loaded_model"):
+                    if data.get(key):
+                        owner = str(data[key])
+                        break
+                if selected is not None and (not owner or owner == target):
+                    self._merge_limits(selected, top_context, top_output)
         if isinstance(data, dict) and isinstance(data.get("models"), list):
             for item in data["models"]:
                 if not isinstance(item, dict) or not item.get("id"):

@@ -898,6 +898,8 @@
       }
     }
     const values = collectValues(card);
+    // 有改动时，写作块必须带上表单当前地址/key，保存校验才能与「检测连接」使用同一份输入
+    if (section === "writing" && Object.keys(values).length) attachCurrentLlmTarget(values, card);
     if (!Object.keys(values).length) {
       if (status) {
         status.textContent = "没有未保存的改动";
@@ -1256,6 +1258,22 @@
     return values;
   }
 
+  /* 保存时强制带上表单当前的模型接口地址与 key（不以「是否改过」为准）。
+   * 参数：values 待提交对象；scope 表单容器。
+   * 返回：values（原地补充）。
+   */
+  function attachCurrentLlmTarget(values, scope) {
+    const root = scope || document;
+    const endpoint = root.querySelector('[data-key="omlx.endpoint"]');
+    const apiKey = root.querySelector('[data-key="omlx.api_key"]');
+    if (endpoint) values["omlx.endpoint"] = String(endpoint.value || "").trim();
+    // key 留空表示沿用已保存值，不能提交 null（那会删掉已保存 key）
+    if (apiKey && String(apiKey.value || "").trim()) {
+      values["omlx.api_key"] = String(apiKey.value).trim();
+    }
+    return values;
+  }
+
   /* 保存：提交改过的可编辑字段（含「恢复」标记），成功后重新渲染。
    * 参数：无。
    * 返回：Promise，无。
@@ -1270,12 +1288,15 @@
         return;
       }
     }
+    const values = collectValues();
+    // 「保存全部」同样以表单当前地址/key 为准，避免字段未改动时不提交而回落到已保存地址
+    if (Object.keys(values).length) attachCurrentLlmTarget(values, document);
     busy = true;
     try {
       data = await NW.api("/api/config", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ values: collectValues() }),
+        body: JSON.stringify({ values }),
       });
       pending = {};
       render();
