@@ -37,6 +37,12 @@
 | [r20-jianying-draft-compat-review.md](r20-jianying-draft-compat-review.md) | 剪映草稿 10.8/11.x 字段兼容性核对：字段对照、风险等级、最可能问题 | 核对完成；两处确定性修复已应用，剪映侧未实测 |
 | [research-sfx-local-commercial-options.md](research-sfx-local-commercial-options.md) | 本地可商用音效（SFX）方案调研：候选模型许可/体积/条件生成/ComfyUI 支持、与本项目匹配度、推荐与备选路线 | 已随实测更新：11 项待查逐条标注，ComfyUI 模板路线已停用，改本项目 provider |
 
+## 梳理（只读整理，不改生产代码）
+
+| 文档 | 内容 | 状态 |
+| --- | --- | --- |
+| [llm-calling-patterns.md](llm-calling-patterns.md) | LLM 调用模式：适配层与参数来源、单次/多轮与终止条件、工具调用、思考模式、各业务调用点归类、上下文注入与裁剪、代码可见风险 | 按当前代码整理，结论均带源码位置 |
+
 ## 阅读顺序建议
 
 1. 先看仓库根目录 [README.md](../README.md) 的「快速开始」与「当前完成度」。

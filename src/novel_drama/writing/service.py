@@ -25,6 +25,41 @@ from .worlds import clean_world_entry, worlds_digest
 # 默认每章目标字数
 DEFAULT_CHAPTER_WORDS = 1200
 
+# 工具调用输出预算：schema 普遍较大，且 reasoning_tokens 也计入 max_tokens。
+# 适配器只会保证不低于 4096，这里按「固定附加内容 + 条目数」估算，避免参数被截断。
+_TOOL_BASE_MAX_TOKENS = 4096
+#: 每个条目的平均输出预算（token）：人物卡/世界条目/节拍的信息量不同
+_TOOL_PER_ITEM_TOKENS = {
+    "characters": 1600,
+    "character": 1600,
+    "worlds": 1800,
+    "world": 1200,
+    "outline": 2600,
+    "act": 2200,
+    "premise": 600,
+    "style": 600,
+}
+#: 固定附加开销（旁白音色、龙套池等与条目数无关的内容）
+_TOOL_EXTRA_TOKENS = {"characters": 2600, "worlds": 1600}
+#: 单次工具调用的输出预算上限
+_TOOL_MAX_TOKENS_CAP = 16384
+
+
+def _tool_max_tokens(step: str, items: int = 1) -> int:
+    """估算一次工具调用需要的输出预算。
+
+    参数:
+        step: 工具步骤（characters/worlds/outline/act/world/character/premise/style）。
+        items: 预估条目数（人物数、世界数、节拍数等），至少按 1 计算。
+
+    返回:
+        建议的 max_tokens；低于适配器下限时由适配器抬到 4096，上限 16384。
+    """
+    per_item = _TOOL_PER_ITEM_TOKENS.get(step, 800)
+    extra = _TOOL_EXTRA_TOKENS.get(step, 1200)
+    budget = _TOOL_BASE_MAX_TOKENS + extra + per_item * max(1, int(items))
+    return max(_TOOL_BASE_MAX_TOKENS, min(_TOOL_MAX_TOKENS_CAP, budget))
+
 
 def build_writing_adapter(config: AppConfig, settings: dict | None = None):
     """按配置装配写作适配器。
@@ -123,6 +158,7 @@ def generate_outline(
         system="你是长篇小说的结构编辑，按工具参数输出大纲，不要解释。",
         messages=[Message("user", "\n".join(context_parts))],
         stream=False,
+        max_tokens=_tool_max_tokens("outline", acts * chapters_per_act * beats_per_chapter),
         metadata={
             "acts": acts,
             "chapters_per_act": chapters_per_act,
@@ -242,6 +278,8 @@ def _generate_outline_acts(adapter, req: TextGenRequest, acts: int, chapters_per
                 done.append(f"第 {done_index} 幕《{title}》：{summary}")
             lines.append("已完成幕（不要重复）：\n" + "\n".join(done))
         request = replace(req, messages=base_messages + [Message("user", "\n".join(lines))])
+        # 单幕输出预算按本幕章数 × 每章节拍数估算，避免多轮时沿用整本预算或默认 2048
+        request.max_tokens = _tool_max_tokens("act", chapters_per_act * beats_per_chapter)
         # 离线适配器据此从确定性整本大纲里挑出对应幕
         request.metadata = dict(base_metadata, act_offset=act_index)
         payload = _generate_json(adapter, request, "act")
@@ -1726,6 +1764,7 @@ def generate_worlds(
         messages=[Message("user", prompt)],
         stream=False,
         temperature=0.7,
+        max_tokens=_tool_max_tokens("worlds", wanted or 6),
         metadata={
             "step": "worlds",
             "work": {"title": work.get("title"), "author": work.get("author"), "genre": work.get("genre") or []},
@@ -1758,6 +1797,7 @@ def generate_worlds(
             if names:
                 lines.append("已生成世界（不要重复名称）：" + "、".join(names))
             batch_req = replace(req, messages=list(req.messages) + [Message("user", "\n".join(lines))])
+            batch_req.max_tokens = _tool_max_tokens("worlds", take)
             batch_req.metadata = dict(req.metadata or {}, count=take)
             batch_payload = _generate_json(adapter, batch_req, "worlds")
             batch_rows = batch_payload.get("worlds")
@@ -1840,6 +1880,7 @@ def generate_settings(store: ProjectStore, config: AppConfig, step: str, overwri
         messages=[Message("user", prompt)],
         stream=False,
         temperature=0.7,
+        max_tokens=_tool_max_tokens(step, 1),
         metadata={
             "step": step,
             "work": {"title": work.get("title"), "author": work.get("author"), "genre": work.get("genre") or []},
@@ -1909,12 +1950,23 @@ def generate_characters(
     # 无论需求怎么写，都先把作品梗概/文风/世界/已有角色交给模型，避免脱离设定
     context = _project_context(work, bible, existing_characters, worlds)
     prompt = f"{context}\n\n任务：{ask}" if context else ask
+    mt = config.get("writing.multi_turn") or {}
+    try:
+        batch = int(batch_size or mt.get("batch_size_characters") or 5)
+        total = int(count) if count else 0
+    except (TypeError, ValueError):
+        batch = 5
+        total = 0
+    batch = max(1, batch)
+
     req = TextGenRequest(
         task="character",
         system="你是中文小说的人物编辑，人物必须与给定的作品设定一致，只按工具参数输出，不要解释。",
         messages=[Message("user", prompt)],
         stream=False,
         temperature=0.8,
+        # 未指定数量时按一屏 8 个角色的规模预留；人物卡含背景/外貌/关系/音色，单条开销明显高于普通字段
+        max_tokens=_tool_max_tokens("characters", min(total, batch) if total else max(batch, 8)),
         metadata={
             "work": {"title": work.get("title"), "author": work.get("author"), "genre": work.get("genre") or []},
             "premise": bible.get("premise") or {},
@@ -1924,14 +1976,6 @@ def generate_characters(
             "seed": work.get("id"),
         },
     )
-    mt = config.get("writing.multi_turn") or {}
-    try:
-        batch = int(batch_size or mt.get("batch_size_characters") or 5)
-        total = int(count) if count else 0
-    except (TypeError, ValueError):
-        batch = 5
-        total = 0
-    batch = max(1, batch)
 
     batches = 1
     stock_rows: list[dict] = []
@@ -1949,6 +1993,7 @@ def generate_characters(
             if names:
                 lines.append("已生成人物（不要重复姓名）：" + "、".join(names))
             batch_req = replace(req, messages=list(req.messages) + [Message("user", "\n".join(lines))])
+            batch_req.max_tokens = _tool_max_tokens("characters", take)
             batch_req.metadata = dict(req.metadata or {}, count=take)
             batch_payload = _generate_json(adapter, batch_req, "characters")
             if not stock_rows and isinstance(batch_payload.get("stock_characters"), list):
@@ -2339,6 +2384,7 @@ def generate_section(
             messages=[Message("user", prompt)],
             stream=False,
             temperature=0.7,
+            max_tokens=_tool_max_tokens("world", 1),
             metadata={
                 "step": "world",
                 "work": work_payload,
@@ -2379,6 +2425,7 @@ def generate_section(
         messages=[Message("user", prompt)],
         stream=False,
         temperature=0.8,
+        max_tokens=_tool_max_tokens("character", 1),
         metadata={
             "mode": "single",
             "work": work_payload,

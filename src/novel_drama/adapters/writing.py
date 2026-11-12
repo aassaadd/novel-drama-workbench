@@ -417,7 +417,10 @@ class OmlxWritingAdapter:
         payload = self._build_payload(req, stream=False)
         payload["tools"] = [tool]
         payload["tool_choice"] = {"type": "function", "function": {"name": name}}
-        # thinking 模型的 reasoning_tokens 同样占用 max_tokens，预算太小会把参数截断
+        # thinking 模型的 reasoning_tokens 同样占用 max_tokens，预算太小会把参数截断；
+        # 结构化输出默认关闭思考，调用方可用 metadata.enable_thinking 显式覆盖
+        thinking = (req.metadata or {}).get("enable_thinking")
+        payload.setdefault("chat_template_kwargs", {})["enable_thinking"] = bool(thinking) if thinking is not None else False
         payload["max_tokens"] = max(int(payload.get("max_tokens") or 0), TOOL_MIN_MAX_TOKENS)
 
         data = self._request_json("POST", "/v1/chat/completions", payload, timeout_s=timeout_s)
@@ -431,7 +434,23 @@ class OmlxWritingAdapter:
         finish = str(choices[0].get("finish_reason") or "")
         message = choices[0].get("message") or {}
         calls = message.get("tool_calls") or []
+        usage = self._parse_usage(data.get("usage"))
         if not calls:
+            # finish_reason=length 说明参数在输出预算内没写完，单独给出可操作的截断提示
+            if finish == "length":
+                raise AdapterError(
+                    ErrorCode.UPSTREAM_ERROR,
+                    f"模型输出被截断（finish_reason=length），工具调用 {name} 未完整返回："
+                    "可重试，或减少本次生成数量后分批生成",
+                    retryable=True,
+                    detail={
+                        "finish_reason": finish,
+                        "tool": name,
+                        "prompt_tokens": usage.prompt_tokens,
+                        "completion_tokens": usage.completion_tokens,
+                        "raw": str(data)[:2000],
+                    },
+                )
             raise AdapterError(
                 ErrorCode.UPSTREAM_ERROR,
                 f"omlx 未返回工具调用 {name}（finish_reason={finish or '空'}）",
@@ -443,10 +462,23 @@ class OmlxWritingAdapter:
         try:
             parsed = json.loads(str(arguments or ""))
         except json.JSONDecodeError as exc:
+            if finish == "length":
+                message = (
+                    f"工具调用 {name} 的参数被截断（finish_reason=length），不是合法 JSON：{exc}；"
+                    "可重试，或减少本次生成数量后分批生成"
+                )
+            else:
+                message = f"工具调用 {name} 的参数不是合法 JSON：{exc}"
             raise AdapterError(
                 ErrorCode.UPSTREAM_ERROR,
-                f"工具调用 {name} 的参数不是合法 JSON：{exc}",
-                detail={"arguments": str(arguments)[:1000]},
+                message,
+                retryable=True,
+                detail={
+                    "finish_reason": finish,
+                    "tool": name,
+                    "completion_tokens": usage.completion_tokens,
+                    "arguments": str(arguments)[:1000],
+                },
             ) from exc
         if not isinstance(parsed, dict):
             raise AdapterError(
