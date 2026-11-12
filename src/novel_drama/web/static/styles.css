@@ -1585,6 +1585,8 @@ table.grid td.wrap { word-break: break-word; }
 
 .settings-field input,
 .settings-field select { width: 100%; color: var(--text); }
+.settings-field select:disabled { opacity: .6; cursor: not-allowed; }
+.settings-field select.is-invalid { border-color: var(--danger, #d9534f); }
 
 .override-badge {
   flex: none;

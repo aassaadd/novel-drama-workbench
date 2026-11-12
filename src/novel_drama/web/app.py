@@ -21,6 +21,7 @@ from fastapi import HTTPException
 
 from .. import __version__
 from ..adapters.base import AdapterError
+from ..adapters.writing import OmlxWritingAdapter
 from ..config import DEFAULT_UI_CONFIG_PATH, load_config
 from ..media import comfy_media
 from ..media.references import collect_references
@@ -802,6 +803,31 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
             values = _validate_config_patch(raw_values)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail={"code": 2, "message": str(exc)}) from exc
+
+        # 模型名必须来自服务端实时列表：保存前再校验一次，避免写进已失效的模型
+        model_value = values.get("omlx.model")
+        if isinstance(model_value, str) and model_value.strip():
+            settings = dict((load_config(config_path).get("omlx") or {}))
+            for key in ("endpoint", "api_key"):
+                patch = values.get(key)
+                if isinstance(patch, str) and patch.strip():
+                    settings[key.split(".", 1)[1]] = patch.strip()
+            settings["model"] = model_value.strip()
+            catalog = OmlxWritingAdapter(settings).fetch_model_catalog(timeout_s=2.0)
+            ids = [str(item.get("id")) for item in catalog.get("models") or []]
+            if not catalog.get("ok"):
+                raise HTTPException(
+                    status_code=400,
+                    detail={"code": 2, "message": f"无法校验模型：{catalog.get('message') or '服务未返回模型列表'}"},
+                )
+            if model_value.strip() not in ids:
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "code": 2,
+                        "message": f"模型 {model_value.strip()} 不在服务端模型列表中，当前可用：{'、'.join(ids)}",
+                    },
+                )
 
         # 目录类配置在保存时先创建，创建失败直接拦下，避免写入不可用路径
         for key in ("paths.models_root", "comfyui.models_dir"):

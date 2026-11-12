@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import replace
 
 from ..adapters.base import AdapterError, ErrorCode, Message, TextGenRequest

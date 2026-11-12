@@ -35,6 +35,9 @@ _CONTEXT_FIELDS = ("max_model_len", "context_length", "context_window", "model_c
 _OUTPUT_FIELDS = ("max_output_tokens", "max_completion_tokens", "max_tokens", "max_new_tokens")
 #: 探测上限时额外尝试的非标准端点（没有的会记录 404 / 非 JSON，不抛错）
 _LIMIT_PROBE_PATHS = ("/props", "/v1/internal/model/info", "/v1/model/info", "/health")
+#: 模型列表缓存：`(endpoint, api_key) -> (抓取时间, id 列表)`；只用于调用前轻量校验，短 TTL
+_MODEL_CACHE: dict[tuple[str, str], tuple[float, list[str]]] = {}
+_MODEL_CACHE_TTL_S = 30.0
 
 
 class OmlxWritingAdapter:
@@ -98,18 +101,50 @@ class OmlxWritingAdapter:
         """
         return f"{self.endpoint}{path}"
 
+    @staticmethod
+    def _upstream_message(body: str) -> str:
+        """从上游错误响应里提取可读说明（OpenAI 兼容格式或纯文本）。
+
+        参数:
+            body: 原始响应体文本。
+
+        返回:
+            截断到 300 字的中文/原始说明；无法解析时返回原文片段。
+        """
+        text = (body or "").strip()
+        if not text:
+            return ""
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            return text[:300]
+        if isinstance(data, dict):
+            error = data.get("error")
+            if isinstance(error, dict) and error.get("message"):
+                return str(error["message"])[:300]
+            if isinstance(error, str):
+                return error[:300]
+            if data.get("message"):
+                return str(data["message"])[:300]
+            detail = data.get("detail")
+            if isinstance(detail, str):
+                return detail[:300]
+            if isinstance(detail, dict) and detail.get("message"):
+                return str(detail["message"])[:300]
+        return text[:300]
+
     def _map_error(self, status: int, body: str, path: str) -> AdapterError:
         """把 HTTP 错误映射为统一错误码。
 
         参数:
-            status: HTTP 状态码。
+            status: HTTP 状态码（上游可能返回非标准码，统一在此转中文）。
             body: 响应体文本（截断后用于提示）。
             path: 请求路径，便于定位。
 
         返回:
             AdapterError。
         """
-        snippet = (body or "").strip()[:300]
+        snippet = self._upstream_message(body) or (body or "").strip()[:300]
         if status in (401, 403):
             return AdapterError(
                 ErrorCode.INVALID_INPUT,
@@ -117,6 +152,14 @@ class OmlxWritingAdapter:
                 detail={"status": status, "path": path},
             )
         if status == 404:
+            # 404 既可能是路径不存在，也可能是模型不存在：优先按上游说明区分
+            lowered = snippet.lower()
+            if "model" in lowered and ("not found" in lowered or "不存在" in snippet):
+                return AdapterError(
+                    ErrorCode.INVALID_INPUT,
+                    f"omlx 未找到模型（HTTP 404，{path}）：{snippet}；请在设置页重新选择模型",
+                    detail={"status": status, "path": path},
+                )
             return AdapterError(
                 ErrorCode.INVALID_INPUT,
                 f"omlx 接口不存在（HTTP 404，{path}）：确认服务版本支持该接口，或检查 omlx.endpoint 是否指向 omlx 而非其他服务。响应：{snippet}",
@@ -138,7 +181,8 @@ class OmlxWritingAdapter:
             )
         return AdapterError(
             ErrorCode.INVALID_INPUT,
-            f"omlx 请求被拒绝（HTTP {status}，{path}）：响应：{snippet}",
+            f"omlx 拒绝请求（HTTP {status}，{path}）：{snippet or '服务未返回说明'}；"
+            "请在设置页「测试连接」确认模型与密钥后再试",
             detail={"status": status, "path": path},
         )
 
@@ -240,6 +284,136 @@ class OmlxWritingAdapter:
     def model_ids(self) -> list[str]:
         """返回模型 ID 列表。"""
         return [str(item.get("id")) for item in self.list_models() if item.get("id")]
+
+    def fetch_model_catalog(self, timeout_s: float = 2.0) -> dict:
+        """实时读取服务端模型列表（设置页「测试连接」与模型下拉的唯一来源）。
+
+        只访问 OpenAI 兼容的 `GET /v1/models`，不读本机配置文件；单次请求短超时，
+        失败不抛异常，统一转成中文说明，便于页面直接展示。
+
+        参数:
+            timeout_s: 单次请求超时秒数（默认 2 秒）。
+
+        返回:
+            dict：`{ok, connected, status, models, count, message}`；
+            `models` 条目含 `id/owned_by/created/max_model_len`，字段存在上限时
+            额外带 `context_length/max_output_tokens`（来源固定为 server）。
+        """
+        if not self.endpoint:
+            return {
+                "ok": False,
+                "connected": False,
+                "status": None,
+                "models": [],
+                "count": 0,
+                "message": "未配置接口地址：请先填写 omlx.endpoint（例如 http://127.0.0.1:9000）",
+            }
+        status, data, error = self._probe("/v1/models", timeout_s)
+        if status in (401, 403):
+            return {
+                "ok": False,
+                "connected": True,
+                "status": status,
+                "models": [],
+                "count": 0,
+                "message": f"密钥无效或无权限（HTTP {status}）：请检查 omlx.api_key 是否与服务端一致",
+            }
+        if status is None:
+            reason = str(error or "无响应")
+            return {
+                "ok": False,
+                "connected": False,
+                "status": None,
+                "models": [],
+                "count": 0,
+                "message": f"无法连接服务（{self.endpoint}）：{reason}；请确认服务已启动、地址正确",
+            }
+        if status != 200 or not isinstance(data, dict):
+            snippet = str(data)[:200] if data else "响应不是 JSON"
+            return {
+                "ok": False,
+                "connected": True,
+                "status": status,
+                "models": [],
+                "count": 0,
+                "message": f"服务返回 HTTP {status}：{snippet}",
+            }
+        rows = data.get("data")
+        if not isinstance(rows, list):
+            rows = data.get("models") if isinstance(data.get("models"), list) else []
+        models: list[dict] = []
+        for row in rows:
+            if not isinstance(row, dict) or not row.get("id"):
+                continue
+            context, output, _hits = self._pick_limits(row)
+            entry = {
+                "id": str(row.get("id")),
+                "owned_by": row.get("owned_by"),
+                "created": row.get("created"),
+                "max_model_len": row.get("max_model_len"),
+            }
+            if context:
+                entry["context_length"] = context
+                entry["context_source"] = "server"
+            if output:
+                entry["max_output_tokens"] = output
+                entry["max_output_source"] = "server"
+            models.append(entry)
+        if not models:
+            return {
+                "ok": False,
+                "connected": True,
+                "status": status,
+                "models": [],
+                "count": 0,
+                "message": "服务可达但未返回任何模型",
+            }
+        _MODEL_CACHE[(self.endpoint, self.api_key)] = (time.monotonic(), [item["id"] for item in models])
+        return {
+            "ok": True,
+            "connected": True,
+            "status": status,
+            "models": models,
+            "count": len(models),
+            "message": f"连接成功，已获取 {len(models)} 个模型",
+        }
+
+    def invalidate_model_cache(self) -> None:
+        """清掉本适配器对应的模型列表缓存（设置页刷新后调用）。"""
+        _MODEL_CACHE.pop((self.endpoint, self.api_key), None)
+
+    def _check_model_available(self) -> None:
+        """调用前轻量校验配置的模型仍在服务端列表中。
+
+        缓存 30 秒，避免每次生成都多打一次 `/v1/models`；列表接口本身不可用时
+        不阻断调用（由真实请求给出可读错误），只在确认列表为空或缺少目标模型时报错。
+
+        异常:
+            AdapterError(INVALID_INPUT): 配置模型不在服务端返回的模型列表里。
+        """
+        if not self.endpoint or not self.model:
+            return
+        key = (self.endpoint, self.api_key)
+        cached = _MODEL_CACHE.get(key)
+        if cached and time.monotonic() - cached[0] < _MODEL_CACHE_TTL_S:
+            ids = cached[1]
+        else:
+            status, data, _error = self._probe("/v1/models", 2.0)
+            # 列表接口失败（401/超时/非标准实现）交给真实请求处理，避免误伤可用服务
+            if status != 200 or not isinstance(data, dict):
+                return
+            rows = data.get("data") if isinstance(data.get("data"), list) else []
+            ids = [str(row.get("id")) for row in rows if isinstance(row, dict) and row.get("id")]
+            if not ids:
+                return
+            _MODEL_CACHE[key] = (time.monotonic(), ids)
+        if self.model not in ids:
+            raise AdapterError(
+                ErrorCode.INVALID_INPUT,
+                f"模型 {self.model} 不在服务端模型列表中，当前可用：{'、'.join(ids)}。"
+                "请到「设置 → 写作模型」重新选择模型后再试",
+                detail={"model": self.model, "available": ids, "endpoint": self.endpoint},
+            )
 
     def _probe(self, path: str, timeout_s: float) -> tuple[int | None, dict | None, str | None]:
         """快速 GET 一个端点，用于上限探测。
@@ -654,6 +828,7 @@ class OmlxWritingAdapter:
             AdapterError: 配置缺失、服务不可达、鉴权失败或上游错误。
         """
         self._require_ready()
+        self._check_model_available()
         payload = self._build_payload(req, stream=False)
         data = self._request_json("POST", "/v1/chat/completions", payload)
         choices = data.get("choices") or []
@@ -688,6 +863,7 @@ class OmlxWritingAdapter:
             AdapterError: 配置缺失、服务不可达、未返回 tool_calls 或参数不是 JSON 对象。
         """
         self._require_ready()
+        self._check_model_available()
         function = (tool or {}).get("function") or {}
         name = str(function.get("name") or "").strip()
         if not name:
@@ -780,6 +956,7 @@ class OmlxWritingAdapter:
             AdapterError: 建立连接失败或流中错误。已产出的增量不会回滚。
         """
         self._require_ready()
+        self._check_model_available()
         payload = self._build_payload(req, stream=True)
         attempt = 0
         while True:

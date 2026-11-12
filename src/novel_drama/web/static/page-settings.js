@@ -20,6 +20,7 @@
   let llm = null; // POST /api/ui/llm/status 的结果（写作模型可用清单与上限）
   let models = null; // GET /api/ui/models 的结果
   let modelsError = ""; // 模型清单读取失败原因
+  let catalog = null; // 由 /api/ui/llm/status 的结果派生：服务端实时模型列表
   let jobs = {}; // "group:key" → 下载任务 {job_id, status, logs, result}
   let pollingKey = ""; // 正在轮询的任务键（同时只允许一个下载任务）
   let pollTimer = null; // 轮询定时器
@@ -148,51 +149,108 @@
    * 返回：HTML 字符串。
    */
   function llmBadge() {
-    if (!llm) return '<span class="state-badge s-pending"><span class="dot"></span>检查中…</span>';
-    if (llm.ok) {
-      const count = (llm.models || []).length;
-      return `<span class="state-badge s-ready"><span class="dot"></span>已连接 · ${count} 个模型</span>`;
+    if (!llm) return '<span class="state-badge s-pending"><span class="dot"></span>未检测</span>';
+    if (llm.stage === "connect") return '<span class="state-badge s-failed"><span class="dot"></span>未连接</span>';
+    if (llm.stage === "auth") return '<span class="state-badge s-failed"><span class="dot"></span>鉴权失败</span>';
+    if (llm.stage === "models") return '<span class="state-badge s-stale"><span class="dot"></span>无模型列表</span>';
+    if (llm.stage === "limits") return '<span class="state-badge s-stale"><span class="dot"></span>缺少上下限</span>';
+    if (llm.stage === "model") return '<span class="state-badge s-stale"><span class="dot"></span>待选模型</span>';
+    const count = (llm.models || []).length;
+    return `<span class="state-badge s-ready"><span class="dot"></span>已连接 · ${count} 个模型</span>`;
+  }
+
+  /* 写作模型检测的三行结果：连接 / 模型列表 / 上下限。
+   * 参数：writing 配置段（页面未渲染完成时用于回落模型名）。
+   * 返回：HTML 字符串。
+   */
+  function llmLimitsHtml(writing) {
+    const rows = (llm && llm.models) || [];
+    const count = rows.length;
+    const latency = llm && llm.latency_ms ? `（耗时 ${llm.latency_ms}ms）` : "";
+    const select = el("setLlmModel");
+    const current = String((select ? select.value : (writing || {}).model) || "").trim();
+    const entry = llmModelEntry(current);
+    const context = (entry && entry.context_length) || (llm && llm.context_window);
+    const contextSource = (entry && entry.context_source) || (llm && llm.context_source);
+    const output = (entry && entry.max_output_tokens) || (llm && llm.max_output_tokens);
+    const outputSource = (entry && entry.max_output_source) || (llm && llm.max_output_source);
+    let connectText = "未检测";
+    if (llm) {
+      if (llm.stage === "connect") connectText = llm.message || "连接失败";
+      else if (llm.stage === "auth") connectText = llm.message || "鉴权失败";
+      else connectText = `连接成功${latency}`;
     }
-    if (llm.connected) return '<span class="state-badge s-stale"><span class="dot"></span>模型不可用</span>';
-    return '<span class="state-badge s-failed"><span class="dot"></span>未连接</span>';
+    let modelsText = "未获取";
+    if (llm && llm.stage !== "connect" && llm.stage !== "auth") {
+      modelsText = count ? `已获取 ${count} 个模型` : "服务端未返回模型列表";
+    }
+    let limitsText = "未获取";
+    if (llm && count) {
+      limitsText =
+        context && output
+          ? `上下文 ${context} tokens（${limitSourceLabel(contextSource)}） / 输出 ${output} tokens（${limitSourceLabel(outputSource)}）`
+          : "未返回上下限字段";
+    }
+    const business = llm && llm.business_budget;
+    const warn =
+      business && output && output < business
+        ? `<div class="settings-warn">该模型输出上限 ${output} 小于业务估算 ${business} tokens：长内容可能被截断，建议分批生成或调小单批数量。</div>`
+        : "";
+    return (
+      readRow("连接", connectText) +
+      readRow("模型", modelsText) +
+      readRow("上下限", limitsText) +
+      warn
+    );
   }
 
-  /* 写作模型检测失败时的红色说明（可用时为空）。
+  /* 服务端实时模型列表里的 id（只认「检测连接」拿到的结果）。
    * 参数：无。
+   * 返回：id 数组。
+   */
+  function catalogModelIds() {
+    return ((catalog && catalog.models) || []).map((item) => String(item.id || "")).filter(Boolean);
+  }
+
+  /* 模型列表是否可用：测试连接成功且至少返回一个模型。
+   * 参数：无。
+   * 返回：布尔值。
+   */
+  function catalogUsable() {
+    return Boolean(catalog && catalog.ok && catalogModelIds().length);
+  }
+
+  /* 模型下拉的选项 HTML（只来自服务端实时列表，不回落到配置文件里的旧值）。
+   * 参数：preferred 期望选中的模型名。
    * 返回：HTML 字符串。
    */
-  function llmWarnHtml() {
-    if (!llm || llm.ok || !llm.message) return "";
-    return `<div class="settings-warn">${esc(llm.message)}</div>`;
-  }
-
-  /* 写作模型检测成功时的灰色说明（消息 + 耗时）。
-   * 参数：无。
-   * 返回：HTML 字符串。
-   */
-  function llmDetailHtml() {
-    if (!llm || !llm.ok) return "";
-    const latency = llm.latency_ms ? ` · 耗时 ${llm.latency_ms}ms` : "";
-    return `<div class="settings-hint">${esc(llm.message || "写作模型连通正常")}${esc(latency)}</div>`;
-  }
-
-  /* 本地接口返回的可用模型，用作模型下拉的选项。
-   * 参数：current 当前生效的模型名（检测列表里没有时补在最前面，避免选中项丢失）。
-   * 返回：HTML 字符串（option）。
-   */
-  function llmModelOptionsHtml(current) {
-    const ids = ((llm && llm.models) || []).map((item) => item.id).filter(Boolean);
-    const selected = String(current || "").trim();
-    const values = ids.slice();
-    if (selected && !values.includes(selected)) values.unshift(selected);
-    if (!values.length) return '<option value="">（未获取到模型，点检测重试）</option>';
-    const head = selected ? "" : '<option value="">（请选择模型）</option>';
+  function modelOptionsHtml(preferred) {
+    const ids = catalogModelIds();
+    if (!ids.length) {
+      return '<option value="">请先点「检测连接」</option>';
+    }
+    const selected = ids.includes(String(preferred || "").trim()) ? String(preferred).trim() : "";
+    const head = selected ? "" : '<option value="" selected>请选择模型</option>';
     return (
       head +
-      values
+      ids
         .map((id) => `<option value="${esc(id)}"${id === selected ? " selected" : ""}>${esc(id)}</option>`)
         .join("")
     );
+  }
+
+  /* 模型字段下方的中文提示：未测试 / 连接失败 / 保存值已失效 / 正常。
+   * 参数：saved 当前保存的模型名。
+   * 返回：纯文本。
+   */
+  function modelHintText(saved) {
+    const ids = catalogModelIds();
+    if (!catalog) return "请先点「检测连接」读取服务端模型列表";
+    if (!catalog.ok) return catalog.message || (catalog.connected ? "服务可达但未返回任何模型" : "无法连接服务");
+    const value = String(saved || "").trim();
+    if (!value) return `已获取 ${ids.length} 个模型，请选择要使用的模型`;
+    if (!ids.includes(value)) return `已保存的模型 ${value} 不在当前服务列表，请重新选择`;
+    return `已获取 ${ids.length} 个模型`;
   }
 
   /* 按模型 id 在检测结果里找上限信息。
@@ -224,29 +282,6 @@
     return `已按 ${llm.model} 检测：${value} tokens（来源：${limitSourceLabel(llm.max_output_source)}）。`;
   }
 
-  /* 输入/输出上限只读区：只展示服务端接口给的值，未取到就显示「未获取」。
-   * 参数：writing 配置段（页面未渲染完成时用于回落模型名）。
-   * 返回：HTML 字符串。
-   */
-  function llmLimitsHtml(writing) {
-    const input = el("setLlmModel");
-    const current = String((input ? input.value : writing.model) || "").trim();
-    const entry = llmModelEntry(current);
-    const context = (entry && entry.context_length) || (llm && llm.context_window);
-    const contextSource = (entry && entry.context_source) || (llm && llm.context_source);
-    const output = (entry && entry.max_output_tokens) || (llm && llm.max_output_tokens);
-    const outputSource = (entry && entry.max_output_source) || (llm && llm.max_output_source);
-    const rows =
-      readRow("输入上限（上下文窗口）", context ? `${context} tokens · ${limitSourceLabel(contextSource)}` : "未获取") +
-      readRow("输出上限（检测值）", output ? `${output} tokens · ${limitSourceLabel(outputSource)}` : "未获取");
-    const business = llm && llm.business_budget;
-    const warn =
-      business && output && output < business
-        ? `<div class="settings-warn">该模型输出上限 ${output} 小于业务估算 ${business} tokens：长内容可能被截断，建议分批生成或调小单批数量。</div>`
-        : "";
-    return rows + warn;
-  }
-
   /* 卡片底部的「保存本块」+ 行内状态。
    * 参数：section 区块 ID（writing / tts / image / models / advanced）。
    * 返回：HTML 字符串。
@@ -266,24 +301,22 @@
     return `<section class="settings-card" data-section="writing">
       <h3>写作模型（LLM）</h3>
       <div class="health-slot">
-        <button class="btn small" type="button" id="setLlmCheck">检测连接</button>
-        <button class="btn small" type="button" id="setLlmLimitCheck">检测上限</button>
         <span id="setLlmBadge">${llmBadge()}</span>
       </div>
-      <div id="setLlmWarn">${llmWarnHtml()}</div>
-      <div id="setLlmDetail">${llmDetailHtml()}</div>
       <div class="settings-grid">
         ${fieldBlock(
           "omlx.endpoint",
           "接口地址",
           `<input data-key="omlx.endpoint" value="${esc(writing.endpoint || "")}" placeholder="http://127.0.0.1:9000" spellcheck="false" />`
         )}
-        ${fieldBlock(
-          "omlx.model",
-          "可用模型",
-          `<select data-key="omlx.model" id="setLlmModel">${llmModelOptionsHtml(writing.model)}</select>`,
-          "下拉项来自本地接口 /v1/models，点「检测连接」刷新。"
-        )}
+        <div class="settings-field">
+          <div class="settings-label">
+            <span>可用模型</span>
+            <button class="btn small" type="button" id="setLlmCheck">检测连接</button>
+          </div>
+          <select data-key="omlx.model" id="setLlmModel"${catalogUsable() ? "" : " disabled"}>${modelOptionsHtml(writing.model)}</select>
+          <span class="settings-hint" id="setLlmModelHint">${esc(modelHintText(writing.model))}</span>
+        </div>
         ${fieldBlock(
           "omlx.api_key",
           "API Key",
@@ -843,6 +876,17 @@
     const card = document.querySelector(`#setBody [data-section="${section}"]`);
     if (!card) return;
     const status = card.querySelector(`[data-section-status="${section}"]`);
+    if (section === "writing") {
+      const modelError = modelSelectionError();
+      if (modelError) {
+        if (status) {
+          status.textContent = modelError;
+          status.classList.add("is-error");
+          status.classList.remove("is-ok");
+        }
+        return;
+      }
+    }
     const values = collectValues(card);
     if (!Object.keys(values).length) {
       if (status) {
@@ -989,8 +1033,59 @@
         body: JSON.stringify(payload),
       });
     } catch (error) {
-      llm = { ok: false, connected: false, models: [], message: `检测失败：${error.message}` };
+      llm = {
+        ok: false,
+        connected: false,
+        stage: "connect",
+        list_status: null,
+        list_ok: false,
+        models: [],
+        message: `检测失败：${error.message}`,
+      };
     }
+    // 同一次检测结果里已经带回了模型列表，不再单独请求一次列表接口
+    catalog = {
+      ok: Boolean(llm && llm.list_ok),
+      connected: Boolean(llm && llm.connected),
+      status: llm ? llm.list_status : null,
+      models: (llm && llm.models) || [],
+      count: ((llm && llm.models) || []).length,
+      message: (llm && llm.message) || "",
+    };
+  }
+
+  /* 按最新模型列表刷新模型下拉与提示（保留用户已选的合法值）。
+   * 参数：无。
+   * 返回：无。
+   */
+  function syncModelField() {
+    const select = el("setLlmModel");
+    const saved = String((data && data.writing && data.writing.model) || "");
+    if (!select) return;
+    const keep = String(select.value || "").trim();
+    const ids = catalogModelIds();
+    const preferred = ids.includes(keep) ? keep : saved;
+    select.innerHTML = modelOptionsHtml(preferred);
+    select.disabled = !catalogUsable();
+    const chosen = String(select.value || "").trim();
+    select.classList.toggle("is-invalid", catalogUsable() && (!chosen || !ids.includes(chosen)));
+    // 保存值有效时把它作为「初始值」，避免仅因重建下拉而被判定为未保存改动
+    if (catalogUsable() && chosen && chosen === saved) select.dataset.init = chosen;
+    const hint = el("setLlmModelHint");
+    if (hint) hint.textContent = modelHintText(saved);
+  }
+
+  /* 写作模型保存前的校验：必须先测试连接，且选中的模型仍在服务端列表里。
+   * 参数：无。
+   * 返回：错误文案；通过时为空字符串。
+   */
+  function modelSelectionError() {
+    if (!catalogUsable()) return "请先点「检测连接」获取服务端模型列表";
+    const select = el("setLlmModel");
+    const value = select ? String(select.value || "").trim() : "";
+    if (!value) return "请选择要使用的模型";
+    if (!catalogModelIds().includes(value)) return "所选模型不在服务端列表，请重新选择";
+    return "";
   }
 
   /* 把检测结果刷到写作模型卡片（徽标 / 说明 / 候选模型 / 上限），不重渲染整页。
@@ -1000,16 +1095,7 @@
   function renderLlm() {
     const badge = el("setLlmBadge");
     if (badge) badge.innerHTML = llmBadge();
-    const warn = el("setLlmWarn");
-    if (warn) warn.innerHTML = llmWarnHtml();
-    const detail = el("setLlmDetail");
-    if (detail) detail.innerHTML = llmDetailHtml();
-    const list = el("setLlmModel");
-    if (list) {
-      // 保留页面上的当前选择（可能还没保存），再按最新检测结果重建选项
-      const current = list.value || (llm && llm.model) || "";
-      list.innerHTML = llmModelOptionsHtml(current);
-    }
+    syncModelField();
     refreshLlmLimits();
   }
 
@@ -1060,51 +1146,6 @@
     }
   }
 
-  /* 手动检测上下限：只调用 /api/ui/settings/model-limits，短超时，失败不阻塞页面。
-   * 参数：无。
-   * 返回：Promise，无。
-   */
-  async function testLlmLimits() {
-    const button = el("setLlmLimitCheck");
-    if (button) {
-      button.disabled = true;
-      button.textContent = "检测中…";
-    }
-    const payload = {};
-    const endpoint = document.querySelector('#setBody [data-key="omlx.endpoint"]');
-    const model = document.querySelector('#setBody [data-key="omlx.model"]');
-    const apiKey = document.querySelector('#setBody [data-key="omlx.api_key"]');
-    if (endpoint) payload.endpoint = String(endpoint.value || "").trim();
-    if (model) payload.model = String(model.value || "").trim();
-    if (apiKey) payload.api_key = String(apiKey.value || "").trim();
-    try {
-      const limits = await NW.api("/api/ui/settings/model-limits", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      llm = Object.assign(llm || {}, {
-        ok: Boolean(llm && llm.ok) || Boolean(limits.ok),
-        connected: Boolean(limits.connected),
-        model: limits.model || (llm && llm.model) || "",
-        context_window: limits.context_length,
-        context_source: limits.context_source,
-        max_output_tokens: limits.max_output_tokens,
-        max_output_source: limits.max_output_source,
-        business_budget: limits.business_budget,
-        message: limits.message,
-      });
-    } catch (error) {
-      NW.toast(`检测上限失败：${error.message}`);
-    } finally {
-      if (button) {
-        button.disabled = false;
-        button.textContent = "检测上限";
-      }
-      refreshLlmLimits();
-    }
-  }
-
   /* 保存后重新检测（地址 / 模型可能刚改），只刷新状态区。
    * 参数：无。
    * 返回：Promise，无。
@@ -1150,6 +1191,7 @@
     llm = null;
     models = null;
     modelsError = "";
+    catalog = null;
     try {
       data = await NW.api("/api/config");
       await Promise.all([loadHealth(), loadLlm(false), loadModels()]);
@@ -1209,6 +1251,14 @@
    */
   async function save() {
     if (busy || !data) return;
+    // 模型列表已拿到时，写作模型必须是列表内的有效值；列表不可用则不阻断其它设置
+    if (catalogUsable()) {
+      const modelError = modelSelectionError();
+      if (modelError) {
+        NW.toast(`写作模型：${modelError}`);
+        return;
+      }
+    }
     busy = true;
     try {
       data = await NW.api("/api/config", {
@@ -1461,7 +1511,6 @@
     }
     if (event.target.closest("#setHealthCheck")) testHealth();
     else if (event.target.closest("#setLlmCheck")) testLlm();
-    else if (event.target.closest("#setLlmLimitCheck")) testLlmLimits();
     else if (event.target.closest("#setSave")) save();
     else if (event.target.closest("#setReset")) load();
   }
@@ -1484,6 +1533,14 @@
    * 返回：无。
    */
   function onInput(event) {
+    const key = event.target && event.target.dataset ? event.target.dataset.key || "" : "";
+    // 地址或密钥一变，旧列表就不再可信：清空并要求重新「测试连接」
+    if (key === "omlx.endpoint" || key === "omlx.api_key") {
+      if (catalog) {
+        catalog = null;
+        syncModelField();
+      }
+    }
     const card = event.target && event.target.closest ? event.target.closest("[data-section]") : null;
     if (card) refreshSectionDirty(card);
   }

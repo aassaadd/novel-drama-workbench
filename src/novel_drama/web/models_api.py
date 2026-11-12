@@ -804,17 +804,42 @@ def register_models_routes(app, config_path: str | None = None) -> None:
         models = limits.get("models") or []
         ids = [item["id"] for item in models]
         probes = limits.get("probes") or []
-        connected = any(item.get("status") == 200 for item in probes)
+        list_probe = next((item for item in probes if item.get("path") == "/v1/models"), {})
+        list_status = list_probe.get("status")
+        # 只要能收到任何 HTTP 响应就算「服务可达」；401/403 仍算可达，只是鉴权失败
+        connected = list_status is not None
+        list_ok = list_status == 200 and bool(ids)
         selected = next((item for item in models if item["id"] == model), None)
-        if selected:
-            message = f"omlx 可达，模型 {model} 存在（共 {len(ids)} 个）"
-        elif model:
-            message = f"服务可达，但模型 {model} 不在列表中：可用 {'、'.join(ids)}" if ids else "服务可达，但模型列表为空"
+        if not connected:
+            stage = "connect"
+            message = f"无法连接服务（{adapter.endpoint}）：{list_probe.get('error') or '无响应'}"
+        elif list_status in (401, 403):
+            stage = "auth"
+            message = f"连接成功，鉴权失败：密钥无效或无权限（HTTP {list_status}）"
+        elif not models:
+            stage = "models"
+            message = "连接成功，但服务端未返回模型列表"
+        elif not model:
+            stage = "model"
+            message = f"连接成功，请选择模型：可用 {'、'.join(ids)}"
+        elif selected is None:
+            stage = "model"
+            message = f"连接成功，但模型 {model} 不在列表中：可用 {'、'.join(ids)}"
+        elif not (selected.get("context_length") and selected.get("max_output_tokens")):
+            stage = "limits"
+            message = "连接成功、已取列表，但未返回上下限字段"
         else:
-            message = f"服务可达，请选择模型：可用 {'、'.join(ids)}" if ids else "服务可达，但模型列表为空"
+            stage = "ok"
+            message = (
+                f"已按 {model} 检测：上下文 {selected.get('context_length')} tokens / "
+                f"最大输出 {selected.get('max_output_tokens')} tokens（来源：服务端字段）"
+            )
         return {
-            "ok": selected is not None,
+            "ok": stage == "ok",
             "connected": connected,
+            "stage": stage,
+            "list_status": list_status,
+            "list_ok": list_ok,
             "endpoint": adapter.endpoint,
             "model": model,
             "model_found": selected is not None,
@@ -826,7 +851,50 @@ def register_models_routes(app, config_path: str | None = None) -> None:
             "business_budget": _business_budget(config),
             "probes": probes,
             "latency_ms": latency,
-            "message": message if selected else (limits.get("message") or message),
+            "message": message,
+        }
+
+    @app.post("/api/ui/settings/models")
+    def ui_model_catalog(body: dict | None = None) -> dict:
+        """实时读取上游模型列表（设置页「测试连接」与模型下拉的唯一来源）。
+
+        参数:
+            body: 可选 `{endpoint, api_key}`；用于测试尚未保存的地址与密钥，
+                不传则使用已保存配置。不会回显 api_key。
+
+        返回:
+            `{ok, connected, status, endpoint, models, count, latency_ms, message}`；
+            `models` 条目含 `id/owned_by/created/max_model_len`。服务不可达或
+            鉴权失败时 HTTP 仍为 200，由页面展示中文原因。
+        """
+        config = load_config(config_path)
+        settings, _model = _llm_settings(config, body)
+        adapter = OmlxWritingAdapter(settings)
+        started = time.monotonic()
+        try:
+            catalog = adapter.fetch_model_catalog(timeout_s=2.0)
+            error = None
+        except Exception as exc:  # 探测内部已兜底，这里再保一层，保证接口不 500
+            catalog = {
+                "ok": False,
+                "connected": False,
+                "status": None,
+                "models": [],
+                "count": 0,
+                "message": f"读取模型列表失败：{_err_message(exc)}",
+            }
+            error = _err_message(exc)
+        latency = int((time.monotonic() - started) * 1000)
+        message = catalog.get("message") or (f"读取模型列表失败：{error}" if error else "未获取到模型列表")
+        return {
+            "ok": bool(catalog.get("ok")),
+            "connected": bool(catalog.get("connected")),
+            "status": catalog.get("status"),
+            "endpoint": adapter.endpoint,
+            "models": catalog.get("models") or [],
+            "count": int(catalog.get("count") or 0),
+            "latency_ms": latency,
+            "message": message,
         }
 
     @app.post("/api/ui/settings/model-limits")
