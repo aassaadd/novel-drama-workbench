@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import re
 import socket
 import time
 import urllib.error
@@ -1077,6 +1078,8 @@ class OmlxWritingAdapter:
         name = str(function.get("name") or "").strip()
         if not name:
             raise AdapterError(ErrorCode.INVALID_INPUT, "工具定义缺少 function.name")
+        parameters = function.get("parameters") or {}
+        required = [str(key) for key in (parameters.get("required") or [])]
 
         payload = self._build_payload(req, stream=bool(req.stream))
         payload["tools"] = [tool]
@@ -1092,7 +1095,7 @@ class OmlxWritingAdapter:
             data = self._aggregate_tool_stream(payload)
         else:
             data = self._request_json("POST", "/v1/chat/completions", payload, timeout_s=timeout_s)
-        return self._tool_result(data, name)
+        return self._tool_result(data, name, stream=bool(req.stream), required=required)
 
     def _aggregate_tool_stream(self, payload: dict) -> dict:
         """把流式 tool_calls 分片拼接成非流式响应结构。
@@ -1104,9 +1107,10 @@ class OmlxWritingAdapter:
             payload: 已带 tools/tool_choice 的请求体（stream=true）。
 
         返回:
-            形如非流式响应的 dict：`{model, choices:[{message:{tool_calls},finish_reason}], usage}`。
+            形如非流式响应的 dict：`{model, choices:[{message:{tool_calls,content},finish_reason}], usage}`。
         """
         slots: dict[int, dict] = {}
+        contents: list[str] = []
         finish = ""
         model = self.model
         usage: dict | None = None
@@ -1121,9 +1125,13 @@ class OmlxWritingAdapter:
                 if choice.get("finish_reason"):
                     finish = str(choice["finish_reason"])
                 delta = choice.get("delta") or {}
+                # 不支持的模型会把 JSON 写在 content 里，必须累计下来供兜底解析
+                if delta.get("content"):
+                    contents.append(str(delta["content"]))
                 for shard in delta.get("tool_calls") or []:
                     if not isinstance(shard, dict):
                         continue
+                    # 缺 index 时按同一次调用（0）处理，不丢弃分片
                     try:
                         index = int(shard.get("index") or 0)
                     except (TypeError, ValueError):
@@ -1139,89 +1147,185 @@ class OmlxWritingAdapter:
                     function = shard.get("function") or {}
                     if function.get("name"):
                         slot["function"]["name"] += str(function["name"])
-                    if function.get("arguments"):
-                        slot["function"]["arguments"] += str(function["arguments"])
-        message: dict = {"role": "assistant", "content": ""}
+                    arguments = function.get("arguments")
+                    if isinstance(arguments, dict):
+                        # 个别实现直接给对象，保留结构，避免 str(dict) 变成非法 JSON
+                        slot["function"]["arguments"] = arguments
+                    elif arguments:
+                        current = slot["function"]["arguments"]
+                        if isinstance(current, dict):
+                            current = json.dumps(current, ensure_ascii=False)
+                        slot["function"]["arguments"] = current + str(arguments)
+        message: dict = {"role": "assistant", "content": "".join(contents)}
         if slots:
             message["tool_calls"] = [slots[key] for key in sorted(slots)]
         return {"model": model, "choices": [{"message": message, "finish_reason": finish or "stop"}], "usage": usage or {}}
 
-    def _tool_result(self, data: dict, name: str) -> dict:
+    @staticmethod
+    def _extract_json_object(text: str) -> dict | None:
+        """从模型自由文本里提取第一个 JSON 对象。
+
+        容忍 ```json 代码块包裹与前后说明文字：先试整段，再试代码块，
+        最后从每个 `{` 起用 raw_decode 扫描。
+
+        参数:
+            text: 模型返回的 content 文本。
+
+        返回:
+            dict；提取不到返回 None。
+        """
+        source = str(text or "").strip()
+        if not source:
+            return None
+        try:
+            whole = json.loads(source)
+        except json.JSONDecodeError:
+            whole = None
+        if isinstance(whole, dict):
+            return whole
+        for block in re.findall(r"```(?:json)?\s*(.*?)```", source, flags=re.S | re.I):
+            candidate = block.strip()
+            if not candidate:
+                continue
+            try:
+                parsed = json.loads(candidate)
+            except json.JSONDecodeError:
+                parsed = None
+            if isinstance(parsed, dict):
+                return parsed
+        decoder = json.JSONDecoder()
+        for index, char in enumerate(source):
+            if char != "{":
+                continue
+            try:
+                parsed, _end = decoder.raw_decode(source, index)
+            except ValueError:
+                continue
+            if isinstance(parsed, dict):
+                return parsed
+        return None
+
+    @staticmethod
+    def _tool_error_text(
+        name: str, finish: str, calls_len: int, content: str, stream: bool, has_content_json: bool = False
+    ) -> str:
+        """拼装工具调用失败的可读原因（含诊断字段）。
+
+        参数:
+            name: 工具函数名。
+            finish: finish_reason。
+            calls_len: tool_calls 数量。
+            content: message.content 原文。
+            stream: 是否流式。
+            has_content_json: content 里是否提取到了 JSON（用于区分「不支持 tools」与「schema 不符」）。
+
+        返回:
+            中文错误说明。
+        """
+        snippet = content[:200].replace("\n", " ") or "（空）"
+        diagnostics = (
+            f"[finish_reason={finish or '空'}，tool_calls={calls_len}，content={len(content)} 字，"
+            f"流式={'是' if stream else '否'}，content 前 200 字：{snippet}]"
+        )
+        if calls_len:
+            lead = f"工具调用 {name} 的参数不可用：可重试，或改用文本模式（要求模型直接输出 JSON）"
+        elif has_content_json:
+            lead = (
+                f"模型未返回 tool_calls，content 中的 JSON 不符合工具 {name} 的 schema："
+                "请让模型按 schema 输出，或换用支持 tools 的模型"
+            )
+        else:
+            lead = (
+                "当前模型不支持工具调用（未返回 tool_calls，content 中也提取不到 JSON）："
+                "请换用支持 tools 的模型或改用文本模式（要求模型直接输出 JSON）"
+            )
+        return lead + diagnostics
+
+    def _tool_result(self, data: dict, name: str, stream: bool = False, required: list[str] | None = None) -> dict:
         """解析工具调用响应（流式聚合结果与非流式响应共用）。
+
+        优先用 `tool_calls[0].function.arguments`；模型不支持 tools 时
+        （200 但 tool_calls 为空、JSON 写在 content 里）转向 content 兜底提取，
+        并校验工具 schema 的 required 字段。
 
         参数:
             data: 非流式响应或 `_aggregate_tool_stream` 的聚合结果。
             name: 工具函数名，用于中文错误提示。
+            stream: 本次是否流式，用于诊断。
+            required: 工具参数 schema 的必需字段。
 
         返回:
             工具参数解析后的 dict。
 
         异常:
-            AdapterError: 空 choices、未返回 tool_calls 或参数不是 JSON 对象。
+            AdapterError: 空 choices、没有可用 tool_calls 且 content 也提不出 JSON、
+                或缺少必需字段。
         """
         choices = data.get("choices") or []
         if not choices:
             raise AdapterError(
                 ErrorCode.UPSTREAM_ERROR,
-                f"omlx 返回空 choices：{str(data)[:300]}",
-                detail={"path": "/v1/chat/completions"},
+                f"omlx 返回空 choices（流式={'是' if stream else '否'}）：{str(data)[:300]}",
+                detail={"path": "/v1/chat/completions", "stream": stream},
             )
         finish = str(choices[0].get("finish_reason") or "")
         message = choices[0].get("message") or {}
         calls = message.get("tool_calls") or []
+        if not isinstance(calls, list):
+            calls = []
+        content = str(message.get("content") or "")
         usage = self._parse_usage(data.get("usage"))
-        if not calls:
-            # finish_reason=length 说明参数在输出预算内没写完，单独给出可操作的截断提示
-            if finish == "length":
-                raise AdapterError(
-                    ErrorCode.UPSTREAM_ERROR,
-                    f"模型输出被截断（finish_reason=length），工具调用 {name} 未完整返回："
-                    "可重试，或减少本次生成数量后分批生成",
-                    retryable=True,
-                    detail={
-                        "finish_reason": finish,
-                        "tool": name,
-                        "prompt_tokens": usage.prompt_tokens,
-                        "completion_tokens": usage.completion_tokens,
-                        "raw": str(data)[:2000],
-                    },
-                )
-            raise AdapterError(
-                ErrorCode.UPSTREAM_ERROR,
-                f"omlx 未返回工具调用 {name}（finish_reason={finish or '空'}）",
-                detail={"raw": str(data)[:1000]},
-            )
-        arguments = ((calls[0] or {}).get("function") or {}).get("arguments")
-        if isinstance(arguments, dict):
-            return arguments
-        try:
-            parsed = json.loads(str(arguments or ""))
-        except json.JSONDecodeError as exc:
-            if finish == "length":
-                message_text = (
-                    f"工具调用 {name} 的参数被截断（finish_reason=length），不是合法 JSON：{exc}；"
-                    "可重试，或减少本次生成数量后分批生成"
-                )
+        required = [str(key) for key in (required or [])]
+        detail = {
+            "tool": name,
+            "stream": stream,
+            "finish_reason": finish,
+            "tool_calls": len(calls),
+            "content_length": len(content),
+            "content_head": content[:200].replace("\n", " "),
+            "prompt_tokens": getattr(usage, "prompt_tokens", 0),
+            "completion_tokens": getattr(usage, "completion_tokens", 0),
+        }
+
+        failure = "tool_calls 为空"
+        if calls:
+            arguments = ((calls[0] or {}).get("function") or {}).get("arguments")
+            if isinstance(arguments, dict):
+                missing = [key for key in required if key not in arguments]
+                if not missing:
+                    return arguments
+                failure = f"tool_calls[0].function.arguments 缺少必需字段：{'、'.join(missing)}"
             else:
-                message_text = f"工具调用 {name} 的参数不是合法 JSON：{exc}"
-            raise AdapterError(
-                ErrorCode.UPSTREAM_ERROR,
-                message_text,
-                retryable=True,
-                detail={
-                    "finish_reason": finish,
-                    "tool": name,
-                    "completion_tokens": usage.completion_tokens,
-                    "arguments": str(arguments)[:1000],
-                },
-            ) from exc
-        if not isinstance(parsed, dict):
-            raise AdapterError(
-                ErrorCode.UPSTREAM_ERROR,
-                f"工具调用 {name} 的参数不是 JSON 对象：{str(parsed)[:200]}",
-                detail={"arguments": str(arguments)[:1000]},
-            )
-        return parsed
+                raw_args = str(arguments or "").strip()
+                if not raw_args:
+                    failure = "tool_calls[0].function.arguments 为空"
+                else:
+                    try:
+                        parsed = json.loads(raw_args)
+                    except json.JSONDecodeError as exc:
+                        failure = f"tool_calls[0].function.arguments 不是合法 JSON：{exc}"
+                    else:
+                        if not isinstance(parsed, dict):
+                            failure = f"tool_calls[0].function.arguments 不是 JSON 对象：{str(parsed)[:200]}"
+                        else:
+                            missing = [key for key in required if key not in parsed]
+                            if not missing:
+                                return parsed
+                            failure = f"tool_calls[0].function.arguments 缺少必需字段：{'、'.join(missing)}"
+
+        # 兜底：模型不支持 tools 时通常把 JSON 写在 content；按同一 schema 的 required 校验
+        parsed = self._extract_json_object(content)
+        has_content_json = isinstance(parsed, dict)
+        if has_content_json:
+            missing = [key for key in required if key not in parsed]
+            if not missing:
+                return parsed
+            failure = f"content 中的 JSON 缺少必需字段：{'、'.join(missing)}"
+
+        headline = self._tool_error_text(name, finish, len(calls), content, stream, has_content_json)
+        if finish == "length":
+            headline = f"模型输出被截断（finish_reason=length），工具调用 {name} 未完整返回；{headline}"
+        raise AdapterError(ErrorCode.UPSTREAM_ERROR, f"{headline}（{failure}）", retryable=True, detail=detail)
 
     def stream(self, req: TextGenRequest) -> Iterator[TextGenChunk]:
         """流式生成文本（POST /v1/chat/completions，stream=true，SSE）。

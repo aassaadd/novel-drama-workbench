@@ -2039,6 +2039,7 @@ def generate_characters(
     batches = 1
     stock_rows: list[dict] = []
     narrator_profile_raw: dict | None = None
+    last_payload: dict = {}
     if total > batch:
         # 数量超过单批上限：按批生成，每批在固定前缀后追加本批要求与已生成名单
         batches = (total + batch - 1) // batch
@@ -2055,6 +2056,7 @@ def generate_characters(
             batch_req.max_tokens = _tool_max_tokens(config, "characters", take)
             batch_req.metadata = dict(req.metadata or {}, count=take)
             batch_payload = _generate_json(adapter, batch_req, "characters")
+            last_payload = batch_payload
             if not stock_rows and isinstance(batch_payload.get("stock_characters"), list):
                 stock_rows = [row for row in batch_payload["stock_characters"] if isinstance(row, dict)]
             if narrator_profile_raw is None and isinstance(batch_payload.get("narrator_profile"), dict):
@@ -2073,13 +2075,20 @@ def generate_characters(
                 rows.append(row)
     else:
         payload = _generate_json(adapter, req, "characters")
+        last_payload = payload
         rows = payload.get("characters")
         if isinstance(payload.get("stock_characters"), list):
             stock_rows = [row for row in payload["stock_characters"] if isinstance(row, dict)]
         if isinstance(payload.get("narrator_profile"), dict):
             narrator_profile_raw = payload["narrator_profile"]
     if not isinstance(rows, list) or not rows:
-        raise ValueError("LLM 返回的人物列表为空")
+        # 带上响应顶层字段与摘录，便于区分「模型不支持 tools / 字段名不对 / 数组为空」
+        keys = "、".join(sorted(str(key) for key in last_payload.keys())) or "（空对象）"
+        excerpt = json.dumps(last_payload, ensure_ascii=False)[:300]
+        raise ValueError(
+            f"LLM 返回的人物列表为空：响应顶层字段为 {keys}，未包含非空的 characters 数组；"
+            f"响应摘录：{excerpt}"
+        )
 
     characters: list[dict] = []
     seen: set[str] = set()
