@@ -28,6 +28,7 @@ from ..config import load_config
 from ..store import ProjectStore
 from ..writing.character_plan import generate_from_plan, load_plan, plan_characters
 from ..writing.continuation import continue_chapter
+from ..writing.outline_hier import generate_hierarchical_outline
 from ..writing.service import (
     DEFAULT_CHAPTER_WORDS,
     generate_chapter,
@@ -404,6 +405,38 @@ def register_stream_routes(app, config_path: str | None = None) -> None:
                 binding=str(body.get("binding") or "auto"),
                 multi_turn=bool(body.get("multi_turn")),
                 acts_per_round=int(body.get("acts_per_round") or 1),
+                on_progress=on_progress,
+            )
+
+        return _progress_response(task)
+
+    @app.post("/api/ui/outline/hierarchical/stream")
+    def ui_outline_hierarchical_stream(body: dict) -> StreamingResponse:
+        """大纲三级分层生成（流式进度）：幕 → 章 → 节拍。
+
+        参数:
+            body: `{path, acts?, chapters_per_act?, beats_per_chapter?, words?, binding?,
+                dry_run?, resume?}`；resume=true 时只补做失败/缺失的幕与章。
+
+        返回:
+            SSE：start → stage/batch/chars* → done(result) / error(message)；
+            result.failures 里是单幕/单章的失败项，可再次以 resume=true 重试。
+        """
+        store = _store(body.get("path"))
+        config = load_config(config_path)
+
+        def task(on_progress):
+            """调用三级分层生成并透出层级进度。"""
+            return generate_hierarchical_outline(
+                store,
+                config,
+                acts=int(body.get("acts") or 3),
+                chapters_per_act=int(body.get("chapters_per_act") or 3),
+                beats_per_chapter=int(body.get("beats_per_chapter") or 3),
+                chapter_words=int(body.get("words") or DEFAULT_CHAPTER_WORDS),
+                dry_run=bool(body.get("dry_run")),
+                binding=str(body.get("binding") or "auto"),
+                resume=bool(body.get("resume")),
                 on_progress=on_progress,
             )
 

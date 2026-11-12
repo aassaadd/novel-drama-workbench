@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import re
 from dataclasses import replace
@@ -37,6 +38,9 @@ _TOOL_PER_ITEM_TOKENS = {
     "world": 1200,
     "outline": 2600,
     "act": 2200,
+    "outline_acts": 900,
+    "outline_chapters": 700,
+    "outline_beats": 450,
     "premise": 600,
     "style": 600,
 }
@@ -1339,6 +1343,58 @@ _ACT_TOOL_SCHEMA = {
 }
 
 
+#: 三级分层生成：阶段一幕列表（不塞章节与节拍）
+_HIER_ACTS_TOOL_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "acts": {
+            "type": "array",
+            "description": "幕列表，按顺序排列",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string", "description": "幕标题，80 字以内"},
+                    "summary": {"type": "string", "description": "本幕目标与概要，300 字以内"},
+                    "chapters_count": {"type": "integer", "description": "本幕预计章数"},
+                },
+                "required": ["title"],
+            },
+        }
+    },
+    "required": ["acts"],
+}
+
+#: 三级分层生成：阶段二某幕的章节（只出标题与概要）
+_HIER_CHAPTERS_TOOL_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "chapters": {
+            "type": "array",
+            "description": "本幕章节，按顺序排列",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string", "description": "章节标题，80 字以内"},
+                    "summary": {"type": "string", "description": "本章概要，300 字以内"},
+                },
+                "required": ["title"],
+            },
+        }
+    },
+    "required": ["chapters"],
+}
+
+#: 复用大纲结构里的节拍项定义，避免重复维护
+_BEAT_ITEM_SCHEMA = _OUTLINE_TOOL_SCHEMA["properties"]["acts"]["items"]["properties"]["chapters"]["items"]["properties"]["beats"]["items"]
+
+#: 三级分层生成：阶段三某章的节拍（一次补齐）
+_HIER_BEATS_TOOL_SCHEMA = {
+    "type": "object",
+    "properties": {"beats": {"type": "array", "description": "本章全部节拍，按顺序排列", "items": _BEAT_ITEM_SCHEMA}},
+    "required": ["beats"],
+}
+
+
 def _gen_tool(step: str | None) -> dict | None:
     """按生成步骤返回对应的工具定义（OpenAI tools 单项）。
 
@@ -1351,6 +1407,21 @@ def _gen_tool(step: str | None) -> dict | None:
     异常:
         无。
     """
+    if step == "outline_acts":
+        return {
+            "type": "function",
+            "function": {"name": "emit_acts", "description": "输出幕列表（标题、目标/概要、预计章数）", "parameters": _HIER_ACTS_TOOL_SCHEMA},
+        }
+    if step == "outline_chapters":
+        return {
+            "type": "function",
+            "function": {"name": "emit_chapters", "description": "输出某一幕的章节列表（标题与概要）", "parameters": _HIER_CHAPTERS_TOOL_SCHEMA},
+        }
+    if step == "outline_beats":
+        return {
+            "type": "function",
+            "function": {"name": "emit_beats", "description": "输出某一章的全部节拍", "parameters": _HIER_BEATS_TOOL_SCHEMA},
+        }
     if step == "outline":
         return {
             "type": "function",
@@ -1456,7 +1527,13 @@ def _generate_json(adapter, req: TextGenRequest, step: str, on_delta=None) -> di
         raise ValueError(f"写作适配器不支持工具调用: {type(adapter).__name__}")
     if on_delta is None:
         return generate_tool(req, tool)
-    return generate_tool(req, tool, on_delta=on_delta)
+    try:
+        accepts = "on_delta" in inspect.signature(generate_tool).parameters
+    except (TypeError, ValueError):
+        accepts = False
+    if accepts:
+        return generate_tool(req, tool, on_delta=on_delta)
+    return generate_tool(req, tool)
 
 
 def _progress(on_progress, event: dict) -> None:

@@ -180,7 +180,7 @@ class OfflineWritingAdapter:
             raw={"provider": "offline-writing", "task": task},
         )
 
-    def generate_tool(self, req: TextGenRequest, tool: dict, timeout_s: float | None = None) -> dict:
+    def generate_tool(self, req: TextGenRequest, tool: dict, timeout_s: float | None = None, on_delta=None) -> dict:
         """离线实现工具调用：直接解析自身规则生成的结构化 JSON。
 
         参数:
@@ -194,7 +194,13 @@ class OfflineWritingAdapter:
         异常:
             ValueError: 规则输出不是合法 JSON。
         """
-        payload = json.loads(self.generate(req).text)
+        text = self.generate(req).text
+        payload = json.loads(text)
+        if on_delta is not None:
+            try:
+                on_delta(text)
+            except Exception:  # 进度是旁路信息，不打断生成
+                pass
         name = str(((tool or {}).get("function") or {}).get("name") or "")
         # 单人物规则输出多包一层 {"characters": [...]}，而工具参数要求平铺
         if name == "emit_character" and isinstance(payload.get("characters"), list) and payload["characters"]:
@@ -209,6 +215,43 @@ class OfflineWritingAdapter:
                     offset = 0
                 index = offset if 0 <= offset < len(acts) else 0
                 return {"act": acts[index]}
+        # 三级分层：幕列表只保留标题/概要/预计章数
+        acts = payload.get("acts") if isinstance(payload.get("acts"), list) else []
+        meta = req.metadata or {}
+        if name == "emit_acts":
+            if acts:
+                return {
+                    "acts": [
+                        {
+                            "title": str(act.get("title") or ""),
+                            "summary": str(act.get("summary") or ""),
+                            "chapters_count": len(act.get("chapters") or []),
+                        }
+                        for act in acts
+                    ]
+                }
+        if name == "emit_chapters":
+            try:
+                act_offset = int(meta.get("act_offset") or 0)
+            except (TypeError, ValueError):
+                act_offset = 0
+            act = acts[act_offset] if 0 <= act_offset < len(acts) else (acts[0] if acts else {})
+            return {
+                "chapters": [
+                    {"title": str(chapter.get("title") or ""), "summary": str(chapter.get("summary") or "")}
+                    for chapter in act.get("chapters") or []
+                ]
+            }
+        if name == "emit_beats":
+            try:
+                act_offset = int(meta.get("act_offset") or 0)
+                chapter_offset = int(meta.get("chapter_offset") or 0)
+            except (TypeError, ValueError):
+                act_offset, chapter_offset = 0, 0
+            act = acts[act_offset] if 0 <= act_offset < len(acts) else {}
+            chapters = act.get("chapters") or []
+            chapter = chapters[chapter_offset] if 0 <= chapter_offset < len(chapters) else {}
+            return {"beats": chapter.get("beats") or []}
         return payload
 
     def stream(self, req: TextGenRequest) -> Iterator[TextGenChunk]:

@@ -267,33 +267,48 @@ function formatChars(n) {
   return `${(value / 10000).toFixed(1).replace(/\.0$/, "")}万`;
 }
 
-/* 新建一轮生成进度状态（批次与已接收字数）。
- * 返回：{batch, total, chars, name}。
+/* 新建一轮生成进度状态（层级批次与已接收字数）。
+ * 返回：{batch, total, chars, name, unit, actIndex, actTotal}。
  */
 function progressInit() {
-  return { batch: 0, total: 0, chars: 0, name: "" };
+  return { batch: 0, total: 0, chars: 0, name: "", unit: "", actIndex: 0, actTotal: 0 };
 }
 
 /* 应用一条进度事件并生成文案；不含「已用时」，由蒙版统一追加。
  * 参数：state progressInit() 返回的状态（就地更新）；event 事件对象
- *       （batch: {index,total,name?}，chars: {chars,index|batch,total,name?}）。
- * 返回：文案，如「第 2/3 批 · 已接收 1.2k 字」或「第 3/9 个：林墨 · 已接收 420 字」。
+ *       （batch: {index,total,name?,unit?,act_index?,act_total?}，
+ *        chars: {chars,index|batch,total,name?,unit?,act_index?,act_total?}）。
+ * 返回：文案，如「第 2/3 幕 · 第 4/9 章 · 已接收 1.2k 字」「第 3/9 个：林墨 · 已接收 420 字」。
  */
 function progressApply(state, event) {
   const data = event || {};
   const current = state || progressInit();
-  if (data.type === "batch") {
-    current.batch = Number(data.index || data.batch) || 0;
-    current.total = Number(data.total) || 0;
-    current.name = data.name ? String(data.name) : "";
-  } else if (data.type === "chars") {
-    current.chars = Number(data.chars) || current.chars;
-    if (data.index || data.batch) current.batch = Number(data.index || data.batch) || current.batch;
-    if (data.total) current.total = Number(data.total) || current.total;
-    if (data.name) current.name = String(data.name);
+  if (data.type === "batch" || data.type === "chars") {
+    if (data.unit) current.unit = String(data.unit);
+    if (data.type === "batch") {
+      current.batch = Number(data.index || data.batch) || 0;
+      current.total = Number(data.total) || 0;
+      current.name = data.name ? String(data.name) : "";
+    } else {
+      current.chars = Number(data.chars) || current.chars;
+      if (data.index || data.batch) current.batch = Number(data.index || data.batch) || current.batch;
+      if (data.total) current.total = Number(data.total) || current.total;
+      if (data.name) current.name = String(data.name);
+    }
+    if (data.act_index) current.actIndex = Number(data.act_index) || current.actIndex;
+    if (data.act_total) current.actTotal = Number(data.act_total) || current.actTotal;
   }
   const parts = [];
-  if (current.batch && current.total) {
+  if (current.unit === "chapter" && current.batch && current.total) {
+    /* 三级分层：幕与章同时展示，例如「第 2/3 幕 · 第 4/9 章」 */
+    parts.push(
+      current.actIndex && current.actTotal
+        ? `第 ${current.actIndex}/${current.actTotal} 幕 · 第 ${current.batch}/${current.total} 章`
+        : `第 ${current.batch}/${current.total} 章`
+    );
+  } else if (current.unit === "act" && current.batch && current.total) {
+    parts.push(`第 ${current.batch}/${current.total} 幕`);
+  } else if (current.batch && current.total) {
     parts.push(current.name ? `第 ${current.batch}/${current.total} 个：${current.name}` : `第 ${current.batch}/${current.total} 批`);
   }
   if (current.chars) parts.push(`已接收 ${formatChars(current.chars)} 字`);

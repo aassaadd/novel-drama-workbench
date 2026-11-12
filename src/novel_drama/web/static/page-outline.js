@@ -390,7 +390,33 @@
     }
   }
 
-  /* 生成大纲。已有大纲时先确认，避免一次点击替换整份大纲。 */
+  /* 调用三级分层生成（幕 → 章 → 节拍），resume=true 时只补做失败/缺失部分。
+   * 参数：resume 是否续跑。
+   * 返回：Promise<结果>，含 chapters / beats / failures。
+   */
+  async function runHierarchical(resume) {
+    const progress = NW.progressInit();
+    return NW.streamPost(
+      "/api/ui/outline/hierarchical/stream",
+      {
+        path: NW.state.path,
+        acts: Number(el("olActs").value),
+        chapters_per_act: Number(el("olChapters").value),
+        beats_per_chapter: Number(el("olBeats").value),
+        words: Number(el("olWords").value),
+        resume: Boolean(resume),
+      },
+      (event, data) => {
+        if (event === "stage") {
+          NW.busyDetail(`正在规划幕结构（共 ${data.total || 0} 幕）…`);
+          return;
+        }
+        if (event === "batch" || event === "chars") NW.busyDetail(NW.progressApply(progress, data));
+      }
+    );
+  }
+
+  /* 生成大纲：三级分层（幕 → 章 → 节拍），失败项可原地重试。已有大纲时先确认。 */
   async function generate() {
     if (busy || !NW.state.path) return;
     const currentChapters = actsCache.reduce((sum, act) => sum + (act.chapters || []).length, 0);
@@ -403,24 +429,29 @@
     }
     busy = true;
     el("olGenerate").disabled = true;
-    const progress = NW.progressInit();
-    NW.busyShow("正在生成大纲…", "正在准备提示词…");
+    NW.busyShow("正在生成大纲…", "先规划幕结构…");
     try {
-      /* 走流式进度接口：显示批次与模型已返回的 JSON 增量字数 */
-      const result = await NW.streamPost(
-        "/api/ui/outline/generate/stream",
-        {
-          path: NW.state.path,
-          acts: Number(el("olActs").value),
-          chapters_per_act: Number(el("olChapters").value),
-          beats_per_chapter: Number(el("olBeats").value),
-          words: Number(el("olWords").value),
-        },
-        (event, data) => {
-          if (event === "batch" || event === "chars") NW.busyDetail(NW.progressApply(progress, data));
-        }
+      let result = await runHierarchical(false);
+      const failures = result.failures || [];
+      if (failures.length) {
+        const detail = failures
+          .slice(0, 3)
+          .map((item) =>
+            item.scope === "act"
+              ? `第 ${item.act_index} 幕「${item.act_name}」：${item.message}`
+              : `第 ${item.chapter_index} 章「${item.chapter_title}」：${item.message}`
+          )
+          .join("\n");
+        const retry = window.confirm(
+          `有 ${failures.length} 项没有生成成功：\n${detail}\n\n已生成的幕/章已保留，只重试失败项？`
+        );
+        if (retry) result = await runHierarchical(true);
+      }
+      const left = (result.failures || []).length;
+      NW.toast(
+        `大纲已生成：${result.chapters} 章 / ${result.beats} 个节拍${left ? `（仍有 ${left} 项失败）` : ""}`,
+        true
       );
-      NW.toast(`大纲已生成：${result.chapters} 章 / ${result.beats} 个节拍`, true);
       /* 重新拉取大纲与候选，保证绑定信息一并刷新 */
       await load();
       /* 生成后自动跑一次黄金三章检查（只提示，不阻断） */
