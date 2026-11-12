@@ -177,5 +177,75 @@
     });
   }
 
-  window.NWEditor = { open, openBrief };
+  /* 「生成中」进度浮层：关闭按钮、Esc、点遮罩走同一条关闭路径。
+   *
+   * 与编辑器不同，这里不读写文本框，只负责展示进度和回收 DOM；
+   * 关闭时通过 onClose(reason) 通知调用方取消请求、停轮询、复位按钮。
+   * reason 取 "button" / "escape" / "mask" / "manual" / "done"。
+   *
+   * 参数:
+   *   options.title 标题；options.text 初始进度；options.hint 补充说明；
+   *   options.onClose(reason) 关闭回调（完成时也会调用，调用方按 reason 区分）。
+   * 返回:
+   *   `{update(text), close(reason)}` 控制器。
+   */
+  function openProgress(options) {
+    const opts = options || {};
+    const previous = document.activeElement;
+    const mask = document.createElement("div");
+    mask.className = "modal-mask";
+
+    const dialog = node("div", "modal-editor", null, mask);
+    dialog.setAttribute("role", "dialog");
+    dialog.setAttribute("aria-modal", "true");
+    node("h3", "modal-title", opts.title || "正在生成", dialog);
+    const textNode = node("p", "muted", opts.text || "", dialog);
+    if (opts.hint) node("p", "muted", opts.hint, dialog);
+    const actions = node("div", "actions", null, dialog);
+    const closeButton = node("button", "btn small", "关闭", actions);
+    closeButton.type = "button";
+
+    let closed = false;
+
+    /* 统一的关闭入口：解绑监听、移除 DOM、通知调用方，重复调用无副作用。 */
+    const finish = (reason) => {
+      if (closed) return;
+      closed = true;
+      document.removeEventListener("keydown", onKeydown, true);
+      mask.remove();
+      if (previous && document.contains(previous) && typeof previous.focus === "function") {
+        previous.focus({ preventScroll: true });
+      }
+      if (typeof opts.onClose === "function") opts.onClose(reason);
+    };
+
+    /* Esc 与关闭按钮同路径。 */
+    const onKeydown = (event) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      finish("escape");
+    };
+
+    closeButton.addEventListener("click", () => finish("button"));
+    mask.addEventListener("click", (event) => {
+      if (event.target === mask) finish("mask");
+    });
+
+    document.body.appendChild(mask);
+    document.addEventListener("keydown", onKeydown, true);
+    closeButton.focus({ preventScroll: true });
+
+    return {
+      /* 更新进度文案（已关闭时忽略）。 */
+      update(text) {
+        if (!closed) textNode.textContent = text || "";
+      },
+      /* 主动关闭（完成/失败/外部复位），reason 默认 manual。 */
+      close(reason) {
+        finish(reason || "manual");
+      },
+    };
+  }
+
+  window.NWEditor = { open, openBrief, openProgress };
 })();

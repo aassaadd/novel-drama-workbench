@@ -454,7 +454,16 @@
 
   /* ---------------- 角色设定生成音色（voice design） ---------------- */
 
-  const design = { batchId: "", timer: null, running: false };
+  const design = {
+    batchId: "",
+    timer: null,
+    running: false,
+    overlay: null,
+    overlayTimer: null,
+    abort: null,
+    token: 0,
+    stopped: false,
+  };
 
   /* 候选音频试听地址。 */
   function designAudioUrl(batchId, index) {
@@ -545,9 +554,12 @@
   function restoreDesignBatch(meta) {
     design.batchId = meta.batch_id;
     if (meta.status === "running") {
+      // 从历史恢复时重新开启轮询，避免沿用上一次「用户已关闭」的停止标记
+      design.stopped = false;
+      design.token += 1;
       design.running = true;
       setDesignStatus(`已恢复批次 ${meta.batch_id}，正在继续生成…`);
-      pollDesignBatch();
+      pollDesignBatch(design.token);
       return;
     }
     design.running = false;
@@ -572,31 +584,54 @@
     if (el("voiceDesignState")) el("voiceDesignState").textContent = text;
   }
 
-  /* 显示生成蒙版（只在请求超过 200ms 后调用）。 */
+  /* 显示生成进度浮层（只在请求超过 200ms 后调用）。 */
   function showDesignOverlay(text) {
-    let mask = el("voiceDesignOverlay");
-    if (!mask) {
-      mask = document.createElement("div");
-      mask.id = "voiceDesignOverlay";
-      mask.className = "modal-mask";
-      mask.innerHTML = `<div class="modal-editor">
-        <h3>正在生成音色候选</h3>
-        <p id="voiceDesignOverlayText" class="muted"></p>
-        <p class="muted">首次运行需加载约 4.6GB 模型；可关闭此窗口，任务会在后台继续。</p>
-        <div class="actions"><button id="voiceDesignOverlayClose" class="btn small" type="button">关闭</button></div>
-      </div>`;
-      document.body.appendChild(mask);
-      mask.querySelector("#voiceDesignOverlayClose").addEventListener("click", () => { mask.hidden = true; });
+    if (design.overlay) {
+      design.overlay.update(text);
+      return;
     }
-    mask.hidden = false;
-    const label = el("voiceDesignOverlayText");
-    if (label) label.textContent = text;
+    design.overlay = NWEditor.openProgress({
+      title: "正在生成音色候选",
+      text,
+      hint: "首次运行需加载约 4.6GB 模型；关闭窗口只会停止等待，服务端任务可能仍会完成。",
+      onClose(reason) {
+        design.overlay = null;
+        // 只有用户主动关闭才复位；完成/失败由轮询自己收尾
+        if (reason === "button" || reason === "escape" || reason === "mask" || reason === "manual") {
+          stopDesignWaiting();
+        }
+      },
+    });
   }
 
-  /* 隐藏生成蒙版。 */
-  function hideDesignOverlay() {
-    const mask = el("voiceDesignOverlay");
-    if (mask) mask.hidden = true;
+  /* 关闭生成浮层；reason 为 done/failed 时不提示「已停止等待」。 */
+  function closeDesignOverlay(reason) {
+    const overlay = design.overlay;
+    design.overlay = null;
+    if (overlay) overlay.close(reason);
+  }
+
+  /* 用户关闭浮层后的统一复位：停轮询、停请求、恢复按钮与状态。 */
+  function stopDesignWaiting() {
+    design.stopped = true;
+    design.token += 1;
+    design.running = false;
+    if (design.timer) {
+      clearTimeout(design.timer);
+      design.timer = null;
+    }
+    if (design.overlayTimer) {
+      clearTimeout(design.overlayTimer);
+      design.overlayTimer = null;
+    }
+    if (design.abort) {
+      design.abort.abort();
+      design.abort = null;
+    }
+    if (el("voiceDesignStart")) el("voiceDesignStart").disabled = false;
+    const text = "已停止等待；服务端任务可能仍会完成，稍后可重新打开音色库查看历史批次。";
+    setDesignStatus(text);
+    toast(text);
   }
 
   /* 根据人物设定生成（或手写）音色描述。 */
@@ -643,35 +678,49 @@
     const count = Math.max(1, Math.min(6, Number(el("voiceDesignCount") && el("voiceDesignCount").value) || 4));
     const button = el("voiceDesignStart");
     if (button) button.disabled = true;
+    // 新批次从干净状态开始：清掉上一次的浮层、计时器与中断标记
+    closeDesignOverlay("done");
+    design.stopped = false;
+    design.token += 1;
+    const token = design.token;
+    design.abort = new AbortController();
     const started = Date.now();
     try {
-      const data = await post("/api/ui/voices/design/batches", {
-        path,
-        character_id: characterId,
-        prompt,
-        count,
+      const data = await api("/api/ui/voices/design/batches", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path, character_id: characterId, prompt, count }),
+        signal: design.abort.signal,
       });
-      if (!data) return;
+      if (design.stopped || token !== design.token) return;
       design.batchId = data.batch_id;
       design.running = true;
       setDesignStatus("已提交，排队中…");
-      // 超过 200ms 仍未完成才弹蒙版，避免快请求闪一下
-      setTimeout(() => {
-        if (design.running) showDesignOverlay("排队中…");
+      // 超过 200ms 仍未完成才弹浮层，避免快请求闪一下
+      design.overlayTimer = setTimeout(() => {
+        design.overlayTimer = null;
+        if (design.running && !design.stopped && token === design.token) showDesignOverlay("排队中…");
       }, Math.max(0, 200 - (Date.now() - started)));
-      pollDesignBatch();
+      pollDesignBatch(token);
+    } catch (error) {
+      if (error.name === "AbortError" || design.stopped || token !== design.token) return;
+      design.running = false;
+      closeDesignOverlay("failed");
+      setDesignStatus(error.message);
+      toast(error.message);
     } finally {
       if (button) button.disabled = false;
     }
   }
 
-  /* 轮询批次状态，完成后渲染候选。 */
-  async function pollDesignBatch() {
+  /* 轮询批次状态，完成后渲染候选；token 变化或用户关闭后不再更新页面。 */
+  async function pollDesignBatch(token = design.token) {
     const batchId = design.batchId;
     const path = projectPath();
-    if (!batchId || !path) return;
+    if (!batchId || !path || design.stopped || token !== design.token) return;
     try {
       const meta = await api(`/api/ui/voices/design/batches/${encodeURIComponent(batchId)}?${buildQuery({ path })}`);
+      if (design.stopped || token !== design.token) return;
       if (meta.status === "running") {
         const text = meta.stage === "loading"
           ? "加载模型…"
@@ -679,13 +728,16 @@
             ? `生成中 ${meta.done}/${meta.total}`
             : "排队中…";
         setDesignStatus(text);
-        const label = el("voiceDesignOverlayText");
-        if (label) label.textContent = text;
-        design.timer = setTimeout(pollDesignBatch, 2000);
+        if (design.overlay) design.overlay.update(text);
+        design.timer = setTimeout(() => pollDesignBatch(token), 2000);
         return;
       }
       design.running = false;
-      hideDesignOverlay();
+      if (design.timer) {
+        clearTimeout(design.timer);
+        design.timer = null;
+      }
+      closeDesignOverlay("done");
       if (meta.status === "ready") {
         renderDesignCandidates(meta);
         setDesignStatus(`已生成 ${meta.candidates.length} 条候选，试听后点「采用」`);
@@ -694,8 +746,9 @@
         toast(meta.error || "生成失败");
       }
     } catch (error) {
+      if (error.name === "AbortError" || design.stopped || token !== design.token) return;
       design.running = false;
-      hideDesignOverlay();
+      closeDesignOverlay("failed");
       toast(error.message);
     }
   }

@@ -212,9 +212,6 @@
         hasMarkup ? (data.has_script ? "已生成并应用" : "已生成预览，尚未应用") : "还没有标注"
       )}</span></div>`,
       fileName ? `<div class="kv-row"><span class="kv-key">文件</span><span class="kv-val">${esc(fileName)}</span></div>` : "",
-      hasMarkup
-        ? `<div class="kv-row"><span class="kv-key">重切</span><span class="kv-val">已有标注，重切场景/台词会使其失效，需要重新生成</span></div>`
-        : "",
     ].join("");
     el("scMarkup").innerHTML = markupHtml(data.markup);
   }
@@ -335,26 +332,12 @@
     }
   }
 
-  /* 重新切分场景 / 台词：先出影响清单，确认后执行（默认保留人工修改）。 */
-  async function resplit(kind) {
-    try {
-      await NWResplit.run(kind, {
-        keep: el("scKeepEdits").checked,
-        onDone: () => load(),
-      });
-    } catch (error) {
-      NW.toast(`切分失败（退出码 ${error.code}）：${error.message}`);
-    }
-  }
-
   /* 首次激活绑定事件。 */
   function bind() {
     if (bound) return;
     bound = true;
     el("scSuggest").addEventListener("click", () => suggest(false));
     el("scApply").addEventListener("click", () => suggest(true));
-    el("scResplitScene").addEventListener("click", () => resplit("scene"));
-    el("scResplitLine").addEventListener("click", () => resplit("line"));
     if (el("scStop")) {
       el("scStop").addEventListener("click", () => {
         if (streamAbort) streamAbort.abort();

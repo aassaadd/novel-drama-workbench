@@ -75,6 +75,12 @@
             "prompt": { "type": "string", "maxLength": 2000 },
             "profile": { "type": ["object", "null"] },
             "seed": { "type": ["integer", "null"] },
+            "candidate_index": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 6,
+              "description": "抽卡批次中的候选序号（从 1 开始）：用于页面恢复候选列表时标记已采用的候选；旧数据可能没有该字段，读取侧按参考音 sha256 回退匹配"
+            },
             "params": { "type": ["object", "null"] },
             "batch_id": { "type": ["string", "null"], "maxLength": 64 },
             "license": { "type": ["string", "null"], "maxLength": 120 },
