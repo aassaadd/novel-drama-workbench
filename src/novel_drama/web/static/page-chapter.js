@@ -1168,6 +1168,9 @@
   /* ---------------- 续写正文 ---------------- */
 
   let continueDraft = null; // 最近一次草稿（预览结果或页面加载时查到的未应用草稿）
+  let continuePanel = null; // 续写参数面板浮层
+  let continueWords = 800;  // 上次选择的篇幅（面板默认值）
+  let lastContinueOptions = null; // 上次续写入参，重抽时复用
 
   /* 查询本章是否留有未应用的续写草稿（刷新页面后仍可一键应用）。
    * 参数：无。
@@ -1194,16 +1197,198 @@
     }
   }
 
+  /* 关闭续写参数面板（不发起请求）。 */
+  function closeContinuePanel() {
+    if (!continuePanel) return;
+    document.removeEventListener("keydown", onContinuePanelKeydown, true);
+    continuePanel.remove();
+    continuePanel = null;
+  }
+
+  /* 续写参数面板键盘：Esc 关闭（不发起预览）。 */
+  function onContinuePanelKeydown(event) {
+    if (event.key !== "Escape") return;
+    event.preventDefault();
+    closeContinuePanel();
+  }
+
+  /* 打开「续写正文」面板：篇幅 + 可选续写起点 + 多行需求，确认后才预览。
+   * 与「续写大纲」面板共用 modal-mask / modal-editor 结构与按钮语义。
+   * 参数：无。
+   * 返回：无。
+   */
+  function openContinuePanel() {
+    if (busy || !NW.state.path || !NW.state.chapter) {
+      NW.toast("先选择要续写的章节");
+      return;
+    }
+    if (blockWhileEditing()) return;
+    closeContinuePanel();
+    continuePanel = document.createElement("div");
+    continuePanel.className = "modal-mask";
+
+    const dialog = document.createElement("div");
+    dialog.className = "modal-editor continue-panel";
+    dialog.setAttribute("role", "dialog");
+    dialog.setAttribute("aria-modal", "true");
+
+    const title = document.createElement("h3");
+    title.className = "modal-title";
+    title.textContent = "续写正文";
+    dialog.appendChild(title);
+
+    const hint = document.createElement("p");
+    hint.className = "modal-hint";
+    hint.textContent = "先预览，确认后再写入正文；新内容只会追加在正文末尾。";
+    dialog.appendChild(hint);
+
+    const wordsLabel = document.createElement("label");
+    wordsLabel.className = "stack";
+    wordsLabel.textContent = "篇幅";
+    const wordsSelect = document.createElement("select");
+    [
+      ["500", "短 500 字"],
+      ["800", "中 800 字"],
+      ["1200", "长 1200 字"],
+    ].forEach(([value, text]) => {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = text;
+      if (String(continueWords) === value) option.selected = true;
+      wordsSelect.appendChild(option);
+    });
+    wordsLabel.appendChild(wordsSelect);
+    const wordsHint = document.createElement("span");
+    wordsHint.className = "muted";
+    wordsHint.style.fontSize = "12px";
+    wordsHint.textContent = "指本次新增的目标字数";
+    wordsLabel.appendChild(wordsHint);
+    dialog.appendChild(wordsLabel);
+
+    const beatLabel = document.createElement("label");
+    beatLabel.className = "stack";
+    beatLabel.textContent = "续写起点";
+    const beatSelect = document.createElement("select");
+    const autoOption = document.createElement("option");
+    autoOption.value = "";
+    autoOption.textContent = "自动（从正文末尾继续）";
+    beatSelect.appendChild(autoOption);
+    beatLabel.appendChild(beatSelect);
+    const beatHint = document.createElement("span");
+    beatHint.className = "muted";
+    beatHint.style.fontSize = "12px";
+    beatHint.textContent = "选具体节拍时从该拍开始写；自动按已写字数推断";
+    beatLabel.appendChild(beatHint);
+    dialog.appendChild(beatLabel);
+
+    const intentLabel = document.createElement("label");
+    intentLabel.className = "stack";
+    intentLabel.textContent = "续写需求";
+    const intentInput = document.createElement("textarea");
+    intentInput.rows = 4;
+    intentInput.placeholder = "例如：让主角在雨里追上师父，第一次听到旧案的真相";
+    intentInput.style.cssText = "width:100%;box-sizing:border-box;min-height:96px;resize:vertical";
+    intentLabel.appendChild(intentInput);
+    dialog.appendChild(intentLabel);
+
+    const intentHint = document.createElement("p");
+    intentHint.className = "muted";
+    intentHint.style.cssText = "margin:0;font-size:12px";
+    intentHint.textContent = "留空则按当前正文自然续写（Ctrl/Cmd + Enter 可预览）";
+    dialog.appendChild(intentHint);
+
+    const foot = document.createElement("div");
+    foot.className = "modal-foot";
+    foot.style.cssText = "display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap";
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "btn";
+    cancel.textContent = "取消";
+    cancel.addEventListener("click", closeContinuePanel);
+    foot.appendChild(cancel);
+    if (continueDraft) {
+      const chars = String(continueDraft.text || "").replace(/\s/g, "").length;
+      const applyDraft = document.createElement("button");
+      applyDraft.type = "button";
+      applyDraft.className = "btn";
+      applyDraft.textContent = `应用续写草稿（+${chars} 字）`;
+      applyDraft.addEventListener("click", async () => {
+        closeContinuePanel();
+        await applyContinueDraft();
+      });
+      foot.appendChild(applyDraft);
+    }
+    const preview = document.createElement("button");
+    preview.type = "button";
+    preview.className = "btn primary";
+    preview.textContent = "生成预览";
+    preview.addEventListener("click", () => submitContinuePanel(wordsSelect, beatSelect, intentInput, preview));
+    foot.appendChild(preview);
+    dialog.appendChild(foot);
+
+    /* Ctrl / Cmd + Enter 直接生成预览 */
+    dialog.addEventListener("keydown", (event) => {
+      if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+        event.preventDefault();
+        submitContinuePanel(wordsSelect, beatSelect, intentInput, preview);
+      }
+    });
+
+    continuePanel.appendChild(dialog);
+    continuePanel.addEventListener("click", (event) => {
+      if (event.target === continuePanel) closeContinuePanel();
+    });
+    document.body.appendChild(continuePanel);
+    document.addEventListener("keydown", onContinuePanelKeydown, true);
+    intentInput.focus();
+
+    /* 异步补「续写起点」：从大纲里取本章节拍，失败不影响手动续写 */
+    NW.api(`/api/ui/outline?${NW.qs({ path: NW.state.path })}`)
+      .then((data) => {
+        if (!continuePanel) return;
+        let beats = [];
+        ((data && data.acts) || []).forEach((act) => {
+          (act.chapters || []).forEach((chapter) => {
+            if (chapter.id === NW.state.chapter) beats = chapter.beats || [];
+          });
+        });
+        beats.forEach((beat, index) => {
+          const option = document.createElement("option");
+          option.value = String(index + 1);
+          option.textContent = `第 ${index + 1} 拍：${String(beat.summary || "").slice(0, 24)}`;
+          beatSelect.appendChild(option);
+        });
+      })
+      .catch(() => {});
+  }
+
+  /* 读取面板参数并关闭面板，随后发起续写预览。
+   * 参数：wordsSelect 篇幅；beatSelect 续写起点；intentInput 需求；button 预览按钮。
+   * 返回：无。
+   */
+  function submitContinuePanel(wordsSelect, beatSelect, intentInput, button) {
+    const words = Number((wordsSelect && wordsSelect.value) || 800);
+    const intent = String((intentInput && intentInput.value) || "").trim();
+    const fromBeat = Number((beatSelect && beatSelect.value) || 0) || null;
+    continueWords = words;
+    closeContinuePanel();
+    if (button) button.disabled = false;
+    requestContinue(false, { words, intent, fromBeat });
+  }
+
   /* 请求续写预览（结果先落成未应用草稿，不写正文）。
    * 流式请求：正文区实时追加新增段落，状态显示「已生成 N 字 / 已用 X 秒」。
-   * 参数：retry 是否重抽（忽略已有草稿重新生成）。
+   * 参数：retry 是否重抽（忽略已有草稿重新生成）；options `{words, intent, fromBeat}`。
    * 返回：Promise<void>。
    */
-  async function requestContinue(retry) {
+  async function requestContinue(retry, options) {
     if (busy || !NW.state.path || !NW.state.chapter) return;
     if (blockWhileEditing()) return;
-    const words = Number((el("chContinueWords") || {}).value || 800);
-    const intent = String((el("chContinueIntent") || {}).value || "").trim();
+    const opts = options || lastContinueOptions || {};
+    const words = Number(opts.words || continueWords || 800);
+    const intent = String(opts.intent || "").trim();
+    const fromBeat = Number(opts.fromBeat || 0) || null;
+    lastContinueOptions = { words, intent, fromBeat };
     busy = true;
     el("chContinuePreview").disabled = true;
     el("chGenerate").disabled = true;
@@ -1219,6 +1404,7 @@
           chapter: NW.state.chapter,
           words,
           intent,
+          from_beat: fromBeat,
           retry: Boolean(retry),
         },
         (event, payload) => {
@@ -1259,8 +1445,12 @@
       ? `，从第 ${result.from_beat} 个节拍继续（覆盖第 ${covered[0]}~${covered[covered.length - 1]} 拍）`
       : "";
     const head = document.createElement("div");
+    const intentLine = result.intent
+      ? `<div style="margin-top:6px;font-size:13px;line-height:1.7">续写需求：<b>${esc(result.intent)}</b></div>`
+      : `<div style="margin-top:6px;font-size:13px;line-height:1.7">未填写续写需求，按当前正文自然续写</div>`;
     head.innerHTML =
       "<b>续写预览（尚未写入正文）</b>" +
+      intentLine +
       `<div style="margin-top:6px;font-size:13px;line-height:1.7">本次将追加 <b>${result.added_words}</b> 字：` +
       `${result.before_words} 字 → ${result.after_words} 字${beat}<br/>` +
       `追加位置：正文末尾（第 ${result.append_start} 字之后）· 字数档位 ${words} 字</div>`;
@@ -1281,7 +1471,7 @@
     actions.appendChild(
       mk("重抽", false, () => {
         mask.remove();
-        requestContinue(true);
+        requestContinue(true, lastContinueOptions);
       })
     );
     actions.appendChild(mk("应用并写入正文", true, () => applyContinue(mask)));
@@ -1337,7 +1527,7 @@
   function bind() {
     if (bound) return;
     bound = true;
-    el("chContinuePreview").addEventListener("click", () => requestContinue(false));
+    el("chContinuePreview").addEventListener("click", openContinuePanel);
     el("chStreamStop").addEventListener("click", stopStream);
     el("chContinueApply").addEventListener("click", applyContinueDraft);
     el("chGenerate").addEventListener("click", generate);

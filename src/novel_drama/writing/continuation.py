@@ -706,6 +706,8 @@ def continue_chapter(
         "continuation_id": record["id"] if record_saved else None,
         "draft_path": draft_path,
         "warnings": warnings,
+        # 回显续写需求，页面可在预览弹窗里确认「按这个要求续写」
+        "intent": str(intent or "").strip(),
     }
     if error_note:
         response["error"] = error_note

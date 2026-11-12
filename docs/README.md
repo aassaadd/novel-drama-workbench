@@ -29,6 +29,7 @@
 | [spec-r20-sfx-provider.md](spec-r20-sfx-provider.md) | 音效 provider：本地 Stable Audio 3 Small-SFX（独立 venv + 常驻 worker） | 已实现并实测出音；2 条样例与参数快扫；页面未接入 |
 | [spec-r21-bgm-local-provider.md](spec-r21-bgm-local-provider.md) | 配乐 provider：本地 Stable Audio Open 1.0（独立 venv + 常驻 worker，可回落 ACE-Step） | 已实现并实测两档样例；媒体页已接入后端选择与本地生成；ACE-Step 出音回归待 ComfyUI 启动 |
 | [spec-r22-hierarchical-outline.md](spec-r22-hierarchical-outline.md) | 三级分层大纲生成（幕 → 章 → 节拍） | 已实现；桩验证层级进度、单幕失败与续跑，未做页面实测 |
+| [spec-r23-chapter-continue-panel.md](spec-r23-chapter-continue-panel.md) | 正文续写参数面板（与大纲续写统一） | 已实现；桩验证面板入参与需求回显，未做页面实测 |
 
 ## 调研（只作依据，不改生产代码）
 
