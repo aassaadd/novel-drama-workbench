@@ -771,6 +771,7 @@
         <div class="settings-hint">配置文件：${esc(data.ui_path || "—")}</div>
       </div>`;
     markInitial();
+    syncModelField();
     refreshAllDirty();
     setModelButtonsDisabled(Boolean(pollingKey));
   }
