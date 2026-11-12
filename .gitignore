@@ -32,3 +32,4 @@ var/tts/compare/
 .DS_Store
 .trae
 2026-11-12/bgm-codes-ab/outputs/A_codes_on_norm.wav
+config/config.ui.yaml
