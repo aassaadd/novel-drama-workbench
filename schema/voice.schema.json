@@ -109,7 +109,21 @@
         "text": { "type": ["string", "null"], "maxLength": 2000, "description": "参考音频对应文本（可选）" },
         "snr_db": { "type": ["number", "null"] },
         "channels": { "type": ["integer", "null"], "enum": [1, 2, null] },
-        "sample_rate": { "type": ["integer", "null"], "minimum": 16000, "maximum": 96000 }
+        "sample_rate": { "type": ["integer", "null"], "minimum": 16000, "maximum": 96000 },
+        "denoise": {
+          "type": ["object", "null"],
+          "description": "录制/上传参考音频的降噪记录；enabled=false 表示保留原音",
+          "additionalProperties": false,
+          "required": ["enabled"],
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "engine": { "type": ["string", "null"], "maxLength": 64 },
+            "original_audio_path": { "type": ["string", "null"], "description": "降噪前的原始音频相对路径" },
+            "attenuation_db": { "type": ["number", "null"] },
+            "applied_at": { "type": ["string", "null"], "format": "date-time" },
+            "note": { "type": ["string", "null"], "maxLength": 500 }
+          }
+        }
       }
     },
     "prompt_cache": {

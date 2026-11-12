@@ -17,6 +17,7 @@
     blob: null,
     blobName: "",
     recorded: false,
+    denoiseInit: false,
     timer: null,
     startedAt: 0,
     bound: false,
@@ -27,9 +28,11 @@
     return (window.NW && NW.state && NW.state.path) || "";
   }
 
-  /* 工程内音色参考音频的试听地址。 */
-  function voiceAudioUrl(voice) {
-    return `/api/ui/voices/audio?${buildQuery({ path: projectPath(), voice_id: voice.id })}`;
+  /* 工程内音色参考音频的试听地址；variantId 为空时用默认变体。 */
+  function voiceAudioUrl(voice, variantId) {
+    const query = { path: projectPath(), voice_id: voice.id };
+    if (variantId) query.variant_id = variantId;
+    return `/api/ui/voices/audio?${buildQuery(query)}`;
   }
 
   /* 内置音色试听地址。 */
@@ -63,6 +66,11 @@
       state.voices = data.voices || [];
       state.characters = data.characters || [];
       state.builtin = data.builtin || { root: "", items: [] };
+      if (!state.denoiseInit && data.denoise_config) {
+        const checkbox = el("voiceDenoise");
+        if (checkbox) checkbox.checked = !!data.denoise_config.default_enabled;
+        state.denoiseInit = true;
+      }
       renderAll();
     } catch (error) {
       toast(error.message);
@@ -118,10 +126,12 @@
       .map((voice) => {
         const variants = voice.variants || [];
         const tags = (voice.tags || []).map((tag) => `<span class="tag">${esc(tag)}</span>`).join(" ");
+        const denoised = variants.some((item) => ((item.reference || {}).denoise || {}).enabled);
         return `<div class="voice-row">
           <span class="voice-name">${esc(voice.name)}</span>
           <span class="tag">${genderText(voice.gender)}</span>
           ${tags}
+          ${denoised ? '<span class="tag">已降噪</span>' : ""}
           <span class="muted">变体 ${variants.length}</span>
           <audio controls preload="none" src="${voiceAudioUrl(voice)}"></audio>
           <div class="voice-actions">
@@ -393,8 +403,9 @@
     }
     const button = el("voiceSave");
     const status = el("voiceSaveState");
+    const denoise = !!(el("voiceDenoise") || {}).checked;
     if (button) button.disabled = true;
-    if (status) status.textContent = "转换并保存中…";
+    if (status) status.textContent = denoise ? "转码并降噪中…" : "转换并保存中…";
     try {
       const audioBase64 = await blobToBase64(state.blob);
       const data = await post(
@@ -406,12 +417,15 @@
           ref_text: (el("voiceRefText") || {}).value || "",
           consent: true,
           recorded: state.recorded,
+          denoise,
           audio_base64: audioBase64,
           audio_filename: state.blobName,
         },
         "音色已保存"
       );
       if (data) {
+        const info = data.denoise || {};
+        if (denoise && !info.enabled) toast(info.note || "降噪未生效，已保留原音");
         state.voices = data.voices || state.voices;
         state.characters = data.characters || state.characters;
         state.blob = null;
@@ -422,9 +436,11 @@
         if (el("voiceFile")) el("voiceFile").value = "";
         if (el("voiceConsent")) el("voiceConsent").checked = false;
         const audio = el("voicePreviewAudio");
-        if (audio) {
-          audio.hidden = true;
-          audio.removeAttribute("src");
+        if (audio && data.voice) {
+          // 保存后试听切到服务端产物：勾选降噪时即为降噪后的版本
+          audio.hidden = false;
+          audio.src = voiceAudioUrl(data.voice, data.variant_id);
+          audio.load();
         }
         setRecordState("未录音");
         renderAll();

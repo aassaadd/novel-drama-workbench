@@ -71,6 +71,15 @@ _FALLBACK = {
         },
     },
     "output": {"sample_rate": 48000, "channels": 2, "loudness_target_lufs": -16, "video_max_ms": 5000, "image_width": 1328, "image_height": 1328},
+    "voice": {
+        "denoise": {
+            "default_enabled": True,
+            "engine": "ffmpeg_afftdn",
+            "noise_reduction_db": 12,
+            "noise_floor_db": -50,
+            "max_attenuation_db": 20,
+        }
+    },
     "audio": {
         "highpass_hz": 80,
         "high_shelf_gain_db": 1.5,

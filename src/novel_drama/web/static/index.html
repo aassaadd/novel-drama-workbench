@@ -349,6 +349,10 @@
               </div>
               <audio id="voicePreviewAudio" controls hidden></audio>
               <label class="check-line">
+                <input id="voiceDenoise" type="checkbox" checked />
+                去除底噪/环境音（ffmpeg 轻度降噪，会多花约 1~3 秒）
+              </label>
+              <label class="check-line">
                 <input id="voiceConsent" type="checkbox" />
                 我确认拥有这段录音的使用授权
               </label>

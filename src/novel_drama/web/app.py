@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -107,6 +108,16 @@ CONFIG_FIELD_GROUPS = (
             ("tts.routing.retry_original_first", "先重试原 provider", "bool", None, None, None),
             ("tts.routing.allow_noncommercial", "允许非商用 provider", "bool", None, None, None),
             ("tts.routing.policy_revision", "路由策略版本", "int", None, 0, None),
+        ),
+    ),
+    (
+        "音色库",
+        (
+            ("voice.denoise.default_enabled", "上传/录音默认降噪", "bool", None, None, None),
+            ("voice.denoise.engine", "降噪引擎", "select", ("ffmpeg_afftdn",), None, None),
+            ("voice.denoise.noise_reduction_db", "降噪强度（dB）", "float", None, 1, 40),
+            ("voice.denoise.noise_floor_db", "底噪门限（dB）", "float", None, -80, -20),
+            ("voice.denoise.max_attenuation_db", "过度抑制阈值（dB）", "float", None, 1, 60),
         ),
     ),
     (
@@ -2018,12 +2029,13 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
             path: 工程目录。
 
         返回:
-            `{voices, characters, builtin}`。
+            `{voices, characters, builtin, denoise_config}`。
         """
         from ..tts import builtin_voices
 
         store = _store(path)
         cfg = _tts_config()
+        denoise_conf = cfg.get("voice.denoise", {}) or {}
         characters = store.load_characters()["characters"]
         voices = store.load_voices()["voices"]
         binding_index = _voice_binding_index(voices)
@@ -2043,6 +2055,10 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
             "builtin": {
                 "root": str(builtin_voices.builtin_root(cfg)),
                 "items": builtin_voices.rows(cfg),
+            },
+            "denoise_config": {
+                "default_enabled": bool(denoise_conf.get("default_enabled", True)),
+                "engine": denoise_conf.get("engine"),
             },
         }
 
@@ -2139,16 +2155,17 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
             raise HTTPException(status_code=404, detail={"code": 3, "message": "参考音频不存在"})
         return FileResponse(ref)
 
-    def _decode_audio(store: ProjectStore, body: dict, variant_id: str) -> tuple[Path, int]:
-        """把前端上传/录音的 base64 音频落盘并转成 24k 单声道 wav。
+    def _decode_audio(store: ProjectStore, body: dict, variant_id: str, cfg) -> tuple[Path, int, dict]:
+        """把前端上传/录音的 base64 音频落盘，转成 24k 单声道 wav，并按需降噪。
 
         参数:
             store: 工程。
-            body: 含 audio_base64 / audio_filename。
+            body: 含 audio_base64 / audio_filename / denoise。
             variant_id: 变体 ID，用作文件名。
+            cfg: 本机配置（读 `voice.denoise` 与 `ffmpeg.binary`）。
 
         返回:
-            (wav 绝对路径, 时长毫秒)。
+            (wav 绝对路径, 时长毫秒, 降噪记录)。
 
         异常:
             HTTPException 400: 音频为空、过大、转码失败或时长越界。
@@ -2177,31 +2194,72 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         suffix = Path(str(body.get("audio_filename") or "recording.webm")).suffix or ".webm"
         ref_dir = store.voice_asset_dir("ref")
         ref_dir.mkdir(parents=True, exist_ok=True)
-        tmp = ref_dir / f".upload-{variant_id}{suffix}"
+        upload = ref_dir / f".upload-{variant_id}{suffix}"
+        raw_wav = ref_dir / f".raw-{variant_id}.wav"
         out = ref_dir / f"{variant_id}.wav"
-        tmp.write_bytes(data)
+        upload.write_bytes(data)
         try:
-            run(["ffmpeg", "-v", "error", "-y", "-i", str(tmp), "-ac", "1", "-ar", "24000", "-c:a", "pcm_s16le", str(out)])
+            run(["ffmpeg", "-v", "error", "-y", "-i", str(upload), "-ac", "1", "-ar", "24000", "-c:a", "pcm_s16le", str(raw_wav)])
         except Exception as exc:
-            tmp.unlink(missing_ok=True)
+            upload.unlink(missing_ok=True)
+            raw_wav.unlink(missing_ok=True)
             out.unlink(missing_ok=True)
             raise HTTPException(status_code=400, detail={"code": 2, "message": f"录音转码失败: {exc}"})
-        tmp.unlink(missing_ok=True)
+        upload.unlink(missing_ok=True)
+
+        conf = cfg.get("voice.denoise", {}) or {}
+        wanted = body.get("denoise")
+        if wanted is None:
+            wanted = bool(conf.get("default_enabled", True))
+        denoise_info = {
+            "enabled": False,
+            "engine": conf.get("engine"),
+            "original_audio_path": None,
+            "attenuation_db": None,
+            "applied_at": None,
+            "note": "未勾选降噪",
+        }
+        original = ref_dir / f"{variant_id}.orig.wav"
+        if wanted:
+            from ..media.denoise import denoise_wav
+
+            shutil.copyfile(raw_wav, original)
+            result = denoise_wav(raw_wav, out, conf, cfg.get("ffmpeg.binary", "ffmpeg"))
+            if result.get("enabled"):
+                denoise_info = {
+                    "enabled": True,
+                    "engine": result.get("engine"),
+                    "original_audio_path": str(original.relative_to(store.root)),
+                    "attenuation_db": result.get("attenuation_db"),
+                    "applied_at": now_iso(),
+                    "note": result.get("note"),
+                }
+            else:
+                # 降噪失败或过度抑制：丢弃副本，直接用原音作为正式参考音频
+                original.unlink(missing_ok=True)
+                denoise_info["note"] = result.get("note")
+                os.replace(raw_wav, out)
+        else:
+            os.replace(raw_wav, out)
+        raw_wav.unlink(missing_ok=True)
+
         duration = probe_duration_ms(out)
         if duration < 2000 or duration > 20000:
             out.unlink(missing_ok=True)
+            original.unlink(missing_ok=True)
             raise HTTPException(
                 status_code=400,
                 detail={"code": 2, "message": f"参考音频需 2~20 秒，当前 {duration / 1000:.1f} 秒"},
             )
-        return out, duration
+        return out, duration, denoise_info
 
-    def _variant_from_upload(store: ProjectStore, body: dict) -> tuple[dict, Path]:
+    def _variant_from_upload(store: ProjectStore, body: dict, cfg) -> tuple[dict, Path]:
         """构造一个「真人/上传」音色变体并落盘。
 
         参数:
             store: 工程。
-            body: 含 name / gender / ref_text / consent / recorded 等。
+            body: 含 name / gender / ref_text / consent / recorded / denoise 等。
+            cfg: 本机配置（透传给转码与降噪）。
 
         返回:
             (变体 dict, wav 路径)。
@@ -2214,7 +2272,7 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         if not body.get("consent"):
             raise HTTPException(status_code=400, detail={"code": 2, "message": "请先确认你拥有这段录音的使用授权"})
         variant_id = entities.new_id("vav")
-        out, duration = _decode_audio(store, body, variant_id)
+        out, duration, denoise_info = _decode_audio(store, body, variant_id, cfg)
         variant = {
             "id": variant_id,
             "name": str(body.get("variant_name") or "默认"),
@@ -2224,6 +2282,7 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
                 "audio_path": str(out.relative_to(store.root)),
                 "duration_ms": int(duration),
                 "text": (body.get("ref_text") or "").strip() or None,
+                "denoise": denoise_info,
             },
             "consent": {
                 "confirmed": True,
@@ -2251,14 +2310,14 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
                     ref_text?, consent, recorded?, variant_name?}`。
 
         返回:
-            `{voice, voices, characters, builtin}`。
+            `{voice, variant_id, denoise, voices, characters, builtin}`。
         """
         from ..models import entities
 
         path = body.get("path")
         store = _store(path)
         table = store.load_voices()
-        variant, out = _variant_from_upload(store, body)
+        variant, out = _variant_from_upload(store, body, _tts_config())
         voice_id = body.get("voice_id")
         if voice_id:
             voice = next((item for item in table["voices"] if item["id"] == voice_id), None)
@@ -2297,7 +2356,7 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
             out.unlink(missing_ok=True)
             raise
         board = _voice_board(path)
-        return {"voice": voice, **board}
+        return {"voice": voice, "variant_id": variant["id"], "denoise": variant["reference"].get("denoise"), **board}
 
     @app.post("/api/ui/voices/bind")
     def ui_voices_bind(body: dict) -> dict:

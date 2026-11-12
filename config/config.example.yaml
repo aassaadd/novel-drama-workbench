@@ -109,6 +109,15 @@ output:
   image_width: 1328
   image_height: 1328
 
+# 音色库：录音 / 上传参考音频的降噪（ffmpeg afftdn，零额外依赖）
+voice:
+  denoise:
+    default_enabled: true        # 页面勾选框默认值
+    engine: ffmpeg_afftdn        # 当前只实现这一种
+    noise_reduction_db: 12       # 保守档；越大越容易伤音色
+    noise_floor_db: -50          # 底噪门限
+    max_attenuation_db: 20       # 整体音量下降超过该值判定为过度抑制，回退原音
+
 # ffmpeg 可执行文件（M4 混音用）
 ffmpeg:
   binary: ffmpeg
