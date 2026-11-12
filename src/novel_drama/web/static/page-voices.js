@@ -82,6 +82,7 @@
     renderBuiltin();
     renderMine();
     renderBinds();
+    fillDesignCharacters();
   }
 
   /* 渲染内置音色卡片。 */
@@ -451,6 +452,222 @@
     }
   }
 
+  /* ---------------- 角色设定生成音色（voice design） ---------------- */
+
+  const design = { batchId: "", timer: null, running: false };
+
+  /* 候选音频试听地址。 */
+  function designAudioUrl(batchId, index) {
+    return `/api/ui/voices/design/audio?${buildQuery({ path: projectPath(), batch_id: batchId, index })}`;
+  }
+
+  /* 填充「选择角色」下拉；保留当前选中项。 */
+  function fillDesignCharacters() {
+    const select = el("voiceDesignCharacter");
+    if (!select) return;
+    const current = select.value;
+    select.innerHTML = state.characters.map((item) => `<option value="${esc(item.id)}">${esc(item.name)}</option>`).join("");
+    if (current && state.characters.some((item) => item.id === current)) select.value = current;
+  }
+
+  /* 更新设计区状态文案。 */
+  function setDesignStatus(text) {
+    if (el("voiceDesignState")) el("voiceDesignState").textContent = text;
+  }
+
+  /* 显示生成蒙版（只在请求超过 200ms 后调用）。 */
+  function showDesignOverlay(text) {
+    let mask = el("voiceDesignOverlay");
+    if (!mask) {
+      mask = document.createElement("div");
+      mask.id = "voiceDesignOverlay";
+      mask.className = "modal-mask";
+      mask.innerHTML = `<div class="modal-editor">
+        <h3>正在生成音色候选</h3>
+        <p id="voiceDesignOverlayText" class="muted"></p>
+        <p class="muted">首次运行需加载约 4.6GB 模型；可关闭此窗口，任务会在后台继续。</p>
+        <div class="actions"><button id="voiceDesignOverlayClose" class="btn small" type="button">关闭</button></div>
+      </div>`;
+      document.body.appendChild(mask);
+      mask.querySelector("#voiceDesignOverlayClose").addEventListener("click", () => { mask.hidden = true; });
+    }
+    mask.hidden = false;
+    const label = el("voiceDesignOverlayText");
+    if (label) label.textContent = text;
+  }
+
+  /* 隐藏生成蒙版。 */
+  function hideDesignOverlay() {
+    const mask = el("voiceDesignOverlay");
+    if (mask) mask.hidden = true;
+  }
+
+  /* 根据人物设定生成（或手写）音色描述。 */
+  async function generateDesignProfile() {
+    const path = projectPath();
+    const characterId = el("voiceDesignCharacter") ? el("voiceDesignCharacter").value : "";
+    if (!path || !characterId) {
+      toast("请先打开工程并选择角色");
+      return;
+    }
+    const button = el("voiceDesignProfile");
+    if (button) button.disabled = true;
+    setDesignStatus("正在生成描述…");
+    try {
+      const data = await post("/api/ui/voices/design/preview", { path, character_id: characterId });
+      if (!data) return;
+      if (el("voiceDesignPrompt")) el("voiceDesignPrompt").value = data.prompt || "";
+      const gender = (data.profile && data.profile.gender) || "unknown";
+      if (el("voiceDesignGender")) el("voiceDesignGender").value = data.profile ? gender : el("voiceDesignGender").value;
+      const summary = (data.profile && data.profile.voice_summary) || "已使用手写描述";
+      if (el("voiceDesignHint")) {
+        el("voiceDesignHint").textContent = `${summary}${data.note ? `（${data.note}）` : ""}`;
+      }
+      if (data.note) toast(data.note);
+      setDesignStatus("描述已生成，可编辑后开始抽卡");
+    } finally {
+      if (button) button.disabled = false;
+    }
+  }
+
+  /* 提交抽卡批次并轮询进度。 */
+  async function startDesignBatch() {
+    const path = projectPath();
+    const characterId = el("voiceDesignCharacter") ? el("voiceDesignCharacter").value : "";
+    const prompt = el("voiceDesignPrompt") ? el("voiceDesignPrompt").value.trim() : "";
+    if (!path || !characterId) {
+      toast("请先打开工程并选择角色");
+      return;
+    }
+    if (!prompt) {
+      toast("请先生成或填写音色描述");
+      return;
+    }
+    const count = Math.max(1, Math.min(6, Number(el("voiceDesignCount") && el("voiceDesignCount").value) || 4));
+    const button = el("voiceDesignStart");
+    if (button) button.disabled = true;
+    const started = Date.now();
+    try {
+      const data = await post("/api/ui/voices/design/batches", {
+        path,
+        character_id: characterId,
+        prompt,
+        count,
+      });
+      if (!data) return;
+      design.batchId = data.batch_id;
+      design.running = true;
+      setDesignStatus("已提交，排队中…");
+      // 超过 200ms 仍未完成才弹蒙版，避免快请求闪一下
+      setTimeout(() => {
+        if (design.running) showDesignOverlay("排队中…");
+      }, Math.max(0, 200 - (Date.now() - started)));
+      pollDesignBatch();
+    } finally {
+      if (button) button.disabled = false;
+    }
+  }
+
+  /* 轮询批次状态，完成后渲染候选。 */
+  async function pollDesignBatch() {
+    const batchId = design.batchId;
+    const path = projectPath();
+    if (!batchId || !path) return;
+    try {
+      const meta = await api(`/api/ui/voices/design/batches/${encodeURIComponent(batchId)}?${buildQuery({ path })}`);
+      if (meta.status === "running") {
+        const text = meta.stage === "loading"
+          ? "加载模型…"
+          : meta.stage === "generating"
+            ? `生成中 ${meta.done}/${meta.total}`
+            : "排队中…";
+        setDesignStatus(text);
+        const label = el("voiceDesignOverlayText");
+        if (label) label.textContent = text;
+        design.timer = setTimeout(pollDesignBatch, 2000);
+        return;
+      }
+      design.running = false;
+      hideDesignOverlay();
+      if (meta.status === "ready") {
+        renderDesignCandidates(meta);
+        setDesignStatus(`已生成 ${meta.candidates.length} 条候选，试听后点「采用」`);
+      } else {
+        setDesignStatus(meta.error || "生成失败");
+        toast(meta.error || "生成失败");
+      }
+    } catch (error) {
+      design.running = false;
+      hideDesignOverlay();
+      toast(error.message);
+    }
+  }
+
+  /* 渲染候选卡片（含基频提示）。 */
+  function renderDesignCandidates(meta) {
+    const box = el("voiceDesignCandidates");
+    if (!box) return;
+    box.innerHTML = (meta.candidates || [])
+      .map((item) => {
+        const hint = item.hint || {};
+        const warn = hint.mismatch ? '<span class="tag">听感可能与设定不符</span>' : "";
+        const f0 = hint.f0_median ? `基频 ${hint.f0_median}Hz` : "基频未测";
+        return `<div class="voice-card">
+          <div class="voice-title"><span class="voice-name">候选 ${item.index}</span>${warn}</div>
+          <div class="voice-meta">${(item.duration_ms / 1000).toFixed(1)}s · ${f0} · seed ${item.seed ?? "-"}</div>
+          <audio controls preload="none" src="${designAudioUrl(meta.batch_id, item.index)}"></audio>
+          <div class="voice-actions">
+            <button class="btn small primary" type="button" data-design-select="${item.index}">采用这个音色</button>
+          </div>
+        </div>`;
+      })
+      .join("");
+  }
+
+  /* 采用候选：人工确认性别后入库，可选绑定角色。 */
+  async function selectDesignCandidate(index) {
+    const path = projectPath();
+    const batchId = design.batchId;
+    const characterId = el("voiceDesignCharacter") ? el("voiceDesignCharacter").value : "";
+    const character = state.characters.find((item) => item.id === characterId);
+    const gender = el("voiceDesignGender") ? el("voiceDesignGender").value : "unknown";
+    const name = (el("voiceDesignName") && el("voiceDesignName").value.trim()) || (character && character.name) || "生成音色";
+    const confirmed = window.confirm(`采用候选 ${index}？\n性别标签将记为「${genderText(gender)}」，请确认与实际听感一致。`);
+    if (!confirmed) return;
+    const data = await post("/api/ui/voices/design/select", {
+      path,
+      batch_id: batchId,
+      index,
+      name,
+      gender,
+      gender_source: "manual",
+      bind: true,
+    }, "已采用并绑定角色");
+    if (!data) return;
+    state.voices = data.voices || state.voices;
+    state.characters = data.characters || state.characters;
+    design.batchId = "";
+    if (el("voiceDesignCandidates")) el("voiceDesignCandidates").innerHTML = "";
+    setDesignStatus("已入库；可继续「重新抽卡」生成下一批");
+    renderAll();
+  }
+
+  /* 清理当前批次候选（不影响已入库音色）。 */
+  async function cleanupDesignBatch() {
+    if (!design.batchId) {
+      toast("当前没有待清理的候选批次");
+      return;
+    }
+    try {
+      await api(`/api/ui/voices/design/batches/${encodeURIComponent(design.batchId)}?${buildQuery({ path: projectPath() })}`, { method: "DELETE" });
+      if (el("voiceDesignCandidates")) el("voiceDesignCandidates").innerHTML = "";
+      design.batchId = "";
+      setDesignStatus("候选已清理");
+    } catch (error) {
+      toast(error.message);
+    }
+  }
+
   /* 切换「人物档案 / 音色库」子标签。 */
   function onTabClick(event) {
     const trigger = event.target.closest("[data-char-tab]");
@@ -477,6 +694,15 @@
     if (el("voiceMineList")) el("voiceMineList").addEventListener("click", onAction);
     if (el("voiceBuiltinList")) el("voiceBuiltinList").addEventListener("click", onAction);
     if (el("voiceBindList")) el("voiceBindList").addEventListener("change", onAction);
+    if (el("voiceDesignProfile")) el("voiceDesignProfile").addEventListener("click", generateDesignProfile);
+    if (el("voiceDesignStart")) el("voiceDesignStart").addEventListener("click", startDesignBatch);
+    if (el("voiceDesignCleanup")) el("voiceDesignCleanup").addEventListener("click", cleanupDesignBatch);
+    if (el("voiceDesignCandidates")) {
+      el("voiceDesignCandidates").addEventListener("click", (event) => {
+        const trigger = event.target.closest("[data-design-select]");
+        if (trigger) selectDesignCandidate(Number(trigger.dataset.designSelect));
+      });
+    }
     if (window.NW && NW.onProject) {
       NW.onProject(() => {
         if (el("charVoicesPane") && !el("charVoicesPane").hidden && projectPath()) loadBoard();

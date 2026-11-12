@@ -15,6 +15,11 @@
     "synopsis": { "type": ["string", "null"], "maxLength": 4000, "description": "滚动摘要，供后续章节上下文使用" },
     "content": { "type": ["string", "null"], "maxLength": 200000 },
     "pov_character_id": { "type": ["string", "null"], "pattern": "^chr_[0-9A-Za-z]{6,32}$" },
+    "voice_overrides": {
+      "type": "object",
+      "description": "R18：章节级音色覆盖，仅允许旁白或龙套；键为角色 ID，必须写 reason",
+      "additionalProperties": { "$ref": "#/$defs/voice_override" }
+    },
     "word_count": { "type": ["integer", "null"], "minimum": 0 },
     "status": {
       "type": "string",
@@ -56,6 +61,17 @@
     "updated_at": { "type": "string", "format": "date-time" }
   },
   "$defs": {
+    "voice_override": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reason"],
+      "properties": {
+        "voice_id": { "type": ["string", "null"], "pattern": "^voc_[0-9A-Za-z]{3,32}$" },
+        "variant_id": { "type": ["string", "null"], "pattern": "^vav_[0-9A-Za-z]{3,32}$" },
+        "persona_id": { "type": ["string", "null"], "pattern": "^npr_[0-9A-Za-z]{3,32}$", "description": "仅旁白使用：指向 tts.cast.narrators" },
+        "reason": { "type": "string", "minLength": 1, "maxLength": 200 }
+      }
+    },
     "block": {
       "type": "object",
       "required": ["id", "index", "kind", "char_start", "char_end", "text_hash"],

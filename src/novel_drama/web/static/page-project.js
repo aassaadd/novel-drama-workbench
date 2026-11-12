@@ -74,12 +74,12 @@
     const work = info.work || {};
     el("pjInfo").innerHTML = [
       row("工程", info.root),
-      row("书名", work.title || "—"),
-      row("作者", work.author || "—"),
-      row("题材", (work.genre || []).join("、") || "—"),
+      row("书名", work.title || "未填写"),
+      row("作者", work.author || "未填写"),
+      row("题材", (work.genre || []).join("、") || "未填写"),
       row("章节", `${(info.chapters || []).length} 章`),
       row("角色", `${info.characters || 0} 位`),
-      row("设定库", `r${bible.settings_revision ?? "?"}（${bible.updated_at || ""}）`),
+      row("设定库", bible.settings_revision ? `已保存（${bible.updated_at || "时间未知"}）` : "未初始化"),
     ].join("");
   }
 
@@ -170,7 +170,7 @@
   async function load() {
     const path = NW.state.path;
     if (!path) {
-      el("pjInfo").textContent = "先在上方填工程目录并点「打开」";
+      el("pjInfo").textContent = "还没有打开工程：点左上角工程名，打开或新建一个工程";
       return;
     }
     try {

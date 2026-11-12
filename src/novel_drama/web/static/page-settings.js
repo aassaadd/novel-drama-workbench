@@ -108,21 +108,39 @@
    */
   function healthWarnHtml() {
     if (!health || !health.message) return "";
-    const badTemplate = (health.templates || []).some((item) => item.ok === false);
-    if (health.ok && !badTemplate) return "";
+    if (health.ok) return ""; // 连通正常时，模板缺模型的细节交给 healthDetailHtml 展示
     return `<div class="settings-warn">${esc(health.message)}</div>`;
   }
 
-  /* 连接成功时的灰色说明（版本 / 显存 / 队列 / 耗时），失败时为空。
+  /* 连接成功时的灰色说明（版本 / 显存 / 队列 / 耗时）；模板缺模型时直接列出文件、目录与下载入口。
    * 参数：无。
    * 返回：HTML 字符串。
    */
   function healthDetailHtml() {
     if (!health || !health.ok) return "";
-    const badTemplate = (health.templates || []).some((item) => item.ok === false);
-    if (badTemplate) return "";
     const latency = health.latency_ms ? ` · 耗时 ${health.latency_ms}ms` : "";
-    return `<div class="settings-hint">${esc(health.message || "ComfyUI 连通正常")}${esc(latency)}</div>`;
+    const head = `<div class="settings-hint">${esc(health.message || "ComfyUI 连通正常")}${esc(latency)}</div>`;
+    const bad = (health.templates || []).filter((item) => item.ok === false);
+    if (!bad.length) return head;
+    const rows = [];
+    bad.forEach((tpl) => {
+      const group = tpl.kind === "music" ? "music" : tpl.kind === "video" ? "video" : "image";
+      (tpl.missing_files || []).forEach((file) => {
+        const download = file.downloadable
+          ? `<button class="btn small" type="button" data-download="${esc(group)}" data-mkey="${esc(file.key)}">下载</button>`
+          : "";
+        rows.push(
+          `<div class="settings-warn">模板 ${esc(tpl.id)} 缺少模型：${esc(file.key)}<br>应放到：${esc(file.path || health.models_dir || "—")} ${download}</div>`
+        );
+      });
+      if (!(tpl.missing_files || []).length && (tpl.missing_nodes || []).length) {
+        rows.push(`<div class="settings-warn">模板 ${esc(tpl.id)} 缺少节点：${esc((tpl.missing_nodes || []).join("、"))}</div>`);
+      }
+      if (!(tpl.missing_files || []).length && !(tpl.missing_nodes || []).length && (tpl.missing_model_options || []).length) {
+        rows.push(`<div class="settings-warn">模板 ${esc(tpl.id)} 的模型未出现在 ComfyUI 下拉项：${esc((tpl.missing_model_options || []).join("、"))}</div>`);
+      }
+    });
+    return head + rows.join("");
   }
 
   /* 写作模型连接状态徽标：连接中 / 可用 / 模型不在列表 / 连不上。
@@ -396,7 +414,13 @@
     const manifest = (data && data.image && data.image.templates_manifest) || [];
     const templates = (data && data.image && data.image.templates) || {};
     const pick = (key) => {
-      const kind = key.includes("video") ? "video" : key.includes("image_ref") ? "image_ref" : "image";
+      const kind = key.includes("video")
+        ? "video"
+        : key.includes("image_ref")
+          ? "image_ref"
+          : key.includes("music")
+            ? "music"
+            : "image";
       const current = fromData ? String(templates[key.split(".").pop()] || "") : selectedTemplate(key);
       if (current) return current;
       // 配置为空时下拉会自动选中第一条，这里同步显示第一条，避免只读区与下拉不一致
@@ -408,6 +432,7 @@
       ["参考图模板（头像 / 三视图）", "image_ref", "comfyui.templates.image_ref"],
       ["文生视频模板", "video", "comfyui.templates.video_t2v"],
       ["图生视频模板", "video", "comfyui.templates.video_i2v"],
+      ["背景音乐模板", "music", "comfyui.templates.music"],
     ]
       .map(([label, kind, key]) => templateInfoBlock(label, kind, pick(key), manifest))
       .join("");
@@ -432,7 +457,7 @@
     const missing = image.templates_dir_exists === false;
     const warn = missing ? '<div class="settings-warn">模板目录不存在，图像/视频阶段会没有可用模板</div>' : "";
     return `<section class="settings-card">
-      <div class="card-head"><h3>图像 / 视频（ComfyUI）</h3>
+      <div class="card-head"><h3>图像 / 视频 / 音乐（ComfyUI）</h3>
         <span class="health-slot">
           <button class="btn small" type="button" id="setHealthCheck">检测连接</button>
           <span id="setHealthBadge">${healthBadge()}</span>
@@ -450,6 +475,7 @@
         ${templateSelect("comfyui.templates.image_ref", "参考图模板（头像 / 三视图）", "image_ref", templates.image_ref || "", manifest)}
         ${templateSelect("comfyui.templates.video_t2v", "文生视频模板", "video", templates.video_t2v || "", manifest)}
         ${templateSelect("comfyui.templates.video_i2v", "图生视频模板", "video", templates.video_i2v || "", manifest)}
+        ${templateSelect("comfyui.templates.music", "背景音乐模板", "music", templates.music || "", manifest)}
       </div>
       <div class="kv settings-readonly">${readRow("模板目录", image.templates_dir || "—")}${readRow("ComfyUI 模型目录", image.models_dir || (models && models.dirs && models.dirs.comfy_models_dir) || "—")}</div>
       <div id="setTplInfo">${templateInfoHtml(true)}</div>
@@ -502,6 +528,11 @@
     const present = Boolean(item.present) && item.complete !== false;
     const gate = item.license_gate || "none";
     const status = present ? "就位" : item.present ? "不完整" : "缺失";
+    const sizeText = present
+      ? modelBytes(item.bytes)
+      : item.expected_bytes
+        ? `${modelBytes(item.expected_bytes)}（待下载）`
+        : modelBytes(item.bytes);
     const license = `${item.license || "—"} · ${gateText(gate)}`;
     const address = item.repo
       ? item.hf_filename
@@ -533,9 +564,9 @@
       ? `<tr class="job-row"><td colspan="6" data-job="${esc(id)}">${jobHtml(id)}</td></tr>`
       : "";
     return `<tr>
-        <td class="wrap">${esc(key)}</td>
+        <td class="wrap">${esc(key)}${item.target_path ? `<div class="settings-hint">${esc(item.target_path)}</div>` : ""}</td>
         <td>${esc(status)}</td>
-        <td>${esc(modelBytes(item.bytes))}</td>
+        <td>${esc(sizeText)}</td>
         <td class="wrap">${esc(license)}</td>
         <td class="wrap">${esc(address)}${error}${manual}</td>
         <td><div class="settings-actions">${download}${check}${resolve}</div></td>
@@ -578,6 +609,7 @@
       ${renderModelGroup("音频模型", "audio", models.audio)}
       ${renderModelGroup("图像模型", "image", models.image)}
       ${renderModelGroup("视频模型", "video", models.video)}
+      ${renderModelGroup("音乐模型", "music", models.music)}
       <div class="settings-hint">下载在后台进行，页面按 1.2s 轮询进度；同一时间只允许一个下载任务。已就位的项不会重复下载。</div>
     </section>`;
   }
@@ -1042,7 +1074,7 @@
       return;
     }
     // 下载前做体积确认：体积未知时也提示，避免误下超大文件
-    const size = Number(item && item.bytes) || 0;
+    const size = Number(item && (item.bytes || item.expected_bytes)) || 0;
     const sizeText = size ? modelBytes(size) : "体积未知";
     if (!window.confirm(`将下载 ${key}（${sizeText}），确认继续？`)) return;
     try {

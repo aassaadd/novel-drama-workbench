@@ -16,6 +16,7 @@ from pathlib import Path
 
 from ..config import AppConfig
 from ..media import concat_voice, export_bundle, plan_concat, plan_mix, plan_mux, render_mix, run_media
+from ..media.comfy_media import load_manifest, templates_dir
 from ..media.mux import mux as run_mux
 from ..media.timeline_builder import build_timeline, summarize_timeline
 from ..models.ids import new_id, now_iso
@@ -347,7 +348,13 @@ def _stage_mux(ctx: dict) -> tuple[list[dict], str]:
     """音画混流。"""
     store = ctx["store"]
     timeline = json.loads(store.timeline_path(ctx["chapter_id"]).read_text(encoding="utf-8"))
-    plan = plan_mux(timeline, store.root, plan_mix(timeline, store.root))
+    plan = plan_mux(
+        timeline,
+        store.root,
+        plan_mix(timeline, store.root),
+        settings=store.settings(),
+        manifest=load_manifest(templates_dir(ctx["config"])),
+    )
     plan["binary"] = ctx["config"].get("ffmpeg.binary", "ffmpeg")
     if plan["blockers"]:
         raise RuntimeError("；".join(plan["blockers"]))

@@ -20,7 +20,7 @@ from ..store import ProjectStore
 from ..store.settings_store import SettingsStore
 from ..store.world_store import WorldStore
 from ..writing.service import build_art_prompt
-from .comfy_media import seed_for
+from .comfy_media import resolve_aspect, seed_for
 from .generate import render_image
 
 #: 角色设定图支持的档位（fullbody 是头像与三视图的母图）
@@ -28,22 +28,22 @@ CHARACTER_KINDS = ("fullbody", "closeup", "turnaround")
 
 
 def _style(store: ProjectStore, visual_style: str) -> dict:
-    """拼装配图风格参数（全局视觉风格 + 工程输出尺寸）。
+    """拼装配图风格参数（全局视觉风格 + 工程画幅尺寸）。
 
     参数:
         store: 工程。
         visual_style: 世界或全书统一画面风格。
 
     返回:
-        {"visual_style", "width", "height"}；尺寸取工程 output 默认，缺失时 1024。
+        {"visual_style", "width", "height"}；尺寸由工程画幅解析，不再读独立宽高配置。
     """
-    output = store.settings().get("output") or {}
-    try:
-        width = int(output.get("image_width") or 1024)
-        height = int(output.get("image_height") or 1024)
-    except (TypeError, ValueError):
-        width, height = 1024, 1024
-    return {"visual_style": str(visual_style or "").strip(), "width": width, "height": height}
+    settings = store.settings() or {}
+    aspect = resolve_aspect(settings, "image")
+    return {
+        "visual_style": str(visual_style or "").strip(),
+        "width": int(aspect["width"]),
+        "height": int(aspect["height"]),
+    }
 
 
 def _render(

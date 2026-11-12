@@ -15,8 +15,8 @@
   const GENDER_LABELS = { male: "男", female: "女", other: "其他", unknown: "性别未知" };
 
   const NARRATOR_ID = "chr_narrator";
-  const EMPTY_TEXT = "还没有人物：先打开工程，再点「✨ 生成人物」或「＋ 新增人物」。";
-  const NO_PROJECT_TEXT = "先打开工程：在上方「工程目录」里选择或新建一个工程。";
+  const EMPTY_TEXT = "还没有人物：先打开工程，再点「AI 生成人物」或「＋ 新增人物」。";
+  const NO_PROJECT_TEXT = "还没有打开工程：点左上角工程名，打开或新建一个工程。";
 
   /* 图像槽位：key 与 character.image_assets 一致。
    * fullbody 是母图：头像与三视图都以它为参考图生成，保证同一张脸、同一套风格。 */
@@ -69,11 +69,11 @@
 
   /* 背景摘要：把换行压成空格并截断，卡片里只展示一句。
    * 参数：text 原文；limit 最大字数。
-   * 返回：摘要字符串；空值返回「—」。
+   * 返回：摘要字符串；空值返回「未填写」。
    */
   function summary(text, limit = 120) {
     const value = String(text || "").replace(/\s+/g, " ").trim();
-    if (!value) return "—";
+    if (!value) return "未填写";
     return value.length > limit ? `${value.slice(0, limit)}…` : value;
   }
 
@@ -190,7 +190,7 @@
   function relationshipText(item) {
     const notes = (item.state && item.state.relationship_notes) || item.relationships || {};
     const entries = Object.entries(notes);
-    if (!entries.length) return "—";
+    if (!entries.length) return "还没有关系备注";
     const nameById = Object.fromEntries(characters.map((row) => [row.id, row.name]));
     return entries.map(([key, note]) => `${nameById[key] || key}：${note || ""}`).join("；");
   }
@@ -237,8 +237,8 @@
     const notes = (item.state && item.state.relationship_notes) || item.relationships || {};
     return `<div class="char-edit">
       <div class="actions">
-        <button class="btn" type="button" data-char-act="generate">✨ 按需求生成</button>
-        <span class="muted">按需求一次生成全部字段，确认后回填到下方表单</span>
+        <button class="btn" type="button" data-char-act="generate">✨ AI 补全此条</button>
+        <span class="muted">按补充要求生成整条人物档案，确认后回填到下方表单，不会自动保存</span>
       </div>
       <div class="form-grid">
         <label class="stack">姓名<input data-edit="name" value="${esc(item.name || "")}" /></label>
@@ -292,6 +292,7 @@
       <div class="char-head">
         <span class="char-name">${esc(item.name || "（未命名）")}</span>
         ${roleBadge(item.role)}
+        ${item.stock ? `<span class="char-sub muted">${esc(item.stock.label || item.stock.slot)}</span>` : ""}
         <span class="char-sub muted">${esc(GENDER_LABELS[item.gender] || "性别未知")} · ${esc(item.age_range || "年龄未知")}</span>
         ${id && item.id !== NARRATOR_ID
           ? `<span class="char-actions">
@@ -300,7 +301,8 @@
             </span>`
           : ""}
       </div>
-      <div class="char-meta"><span class="muted">性格</span>${esc((item.personality || []).join("、") || "—")}</div>
+      <div class="char-meta"><span class="muted">性格</span>${esc((item.personality || []).join("、") || "未填写")}</div>
+      <div class="char-bg"><span class="muted">音色</span>${esc(voiceText(item))}</div>
       <div class="char-bg"><span class="muted">小传</span>${esc(summary(item.background))}</div>
       <div class="char-bg"><span class="muted">外貌提示词</span>${esc(summary(item.appearance_prompt))}</div>
       <div class="char-bg"><span class="muted">关系备注</span>${esc(summary(relationshipText(item)))}</div>
@@ -309,11 +311,24 @@
     </article>`;
   }
 
-  /* 当前可展示的人物：旁白是系统角色，不在列表里编辑。
+  /* 当前可展示的人物：旁白作为正式实体展示在最上方（不可删除，跨章复用音色）。
    * 返回：人物数组。
    */
   function visibleCharacters() {
-    return characters.filter((item) => item.role !== "narrator" && item.id !== NARRATOR_ID);
+    return characters.slice().sort((left, right) => {
+      const leftNarrator = left.role === "narrator" || left.id === NARRATOR_ID ? 0 : 1;
+      const rightNarrator = right.role === "narrator" || right.id === NARRATOR_ID ? 0 : 1;
+      return leftNarrator - rightNarrator;
+    });
+  }
+
+  /* 音色描述的一句话展示。
+   * 参数：item 人物对象。
+   * 返回：展示文本。
+   */
+  function voiceText(item) {
+    const profile = item.voice_profile || {};
+    return profile.summary || profile.voice_summary || "未生成音色描述";
   }
 
   /* 渲染人物列表与空态。
@@ -450,6 +465,8 @@
       }
       editingId = null;
       await load();
+      // 保存成功后提示音色/BGM 编排问题，不阻断保存
+      if (NW.refreshCastHint) NW.refreshCastHint(NW.state.chapter);
     } catch (error) {
       NW.toast(`保存人物失败：${error.message}`);
     } finally {
@@ -588,6 +605,8 @@
       personality: row.personality || [],
       background: row.background || "",
       relationships: row.relationships || (row.state && row.state.relationship_notes) || {},
+      voice_profile: row.voice_profile || undefined,
+      stock: row.stock || undefined,
     };
   }
 
@@ -696,7 +715,7 @@
 
       const personality = document.createElement("span");
       personality.className = "muted";
-      personality.textContent = `性格：${(row.personality || []).join("、") || "—"}`;
+      personality.textContent = `性格：${(row.personality || []).join("、") || "未填写"}`;
       body.appendChild(personality);
 
       line.appendChild(body);
@@ -765,7 +784,7 @@
             busy: "正在生成人物…",
             busyDetail: "数量较多时分批生成",
           });
-          openWizard(result.characters || []);
+          openWizard([...(result.characters || []), ...(result.stock_characters || [])]);
         } catch (error) {
           NW.toast(`生成人物失败：${error.message}`);
         } finally {
@@ -853,12 +872,557 @@
     NW.onProject(() => load());
   }
 
+  /* ===== 音色编排编辑（R18）：音色池 + 龙套映射 + 旁白人格 + 切换点 ===== */
+
+  let castDraft = null;
+  let castMeta = { chapters: [], voices: [], characters: [], stockSlots: [] };
+  /* Casting 试听：只存页面状态，音频落 .ndw/cast_previews，不进正式资产 */
+  let castPreview = { character: "", voice: "", log: [] };
+
+  const CAST_DEFAULT_POOL = [
+    ["male_young", "青年男声", "male", "young_adult"],
+    ["male_mid", "中年男声", "male", "adult"],
+    ["male_elder", "老年男声", "male", "elderly"],
+    ["female_young", "青年女声", "female", "young_adult"],
+    ["female_mid", "中年女声", "female", "adult"],
+    ["female_elder", "老年女声", "female", "elderly"],
+  ];
+
+  /* 下拉选项：音色库。 */
+  function castVoiceOptions(selected) {
+    const rows = castMeta.voices.map(
+      (item) => `<option value="${esc(item.id)}"${item.id === selected ? " selected" : ""}>${esc(item.name || item.id)}</option>`
+    );
+    return `<option value=""${selected ? "" : " selected"}>（未绑定）</option>${rows.join("")}`;
+  }
+
+  /* 下拉选项：试听候选音色（空值表示跟随角色当前绑定）。 */
+  function castCandidateOptions(selected) {
+    const rows = castMeta.voices.map(
+      (item) => `<option value="${esc(item.id)}"${item.id === selected ? " selected" : ""}>${esc(item.name || item.id)}</option>`
+    );
+    return `<option value=""${selected ? "" : " selected"}>（跟随角色当前音色）</option>${rows.join("")}`;
+  }
+
+  /* 下拉选项：可试听的角色（旁白以外的登场角色）。 */
+  function castPreviewCharacterOptions(selected) {
+    const rows = (castMeta.characters || [])
+      .filter((item) => item.role !== "narrator")
+      .map(
+        (item) =>
+          `<option value="${esc(item.id)}"${item.id === selected ? " selected" : ""}>${esc(item.name || item.id)}${
+            item.voice_id ? "" : "（未绑音色）"
+          }</option>`
+      );
+    return rows.join("");
+  }
+
+  /* 下拉选项：章节（allowEmpty 用于「到下一个切换点」）。 */
+  function castChapterOptions(selected, allowEmpty) {
+    const rows = castMeta.chapters
+      .slice()
+      .sort((left, right) => (left.index || 0) - (right.index || 0))
+      .map(
+        (item) =>
+          `<option value="${esc(item.id)}"${item.id === selected ? " selected" : ""}>第${esc(item.index)}章 ${esc(
+            summary(item.title, 18)
+          )}</option>`
+      );
+    const empty = allowEmpty ? `<option value=""${selected ? "" : " selected"}>（延续到下一个切换点）</option>` : "";
+    return empty + rows.join("");
+  }
+
+  /* 下拉选项：旁白人格。 */
+  function castPersonaOptions(selected) {
+    const rows = (castDraft.narrators || []).map(
+      (item) => `<option value="${esc(item.id)}"${item.id === selected ? " selected" : ""}>${esc(item.label || item.id)}</option>`
+    );
+    return `<option value=""${selected ? "" : " selected"}>（未指定）</option>${rows.join("")}`;
+  }
+
+  /* 确保默认 6 个音色池槽位（仅在完全空配置时填充）。 */
+  function ensureDefaultPool() {
+    if ((castDraft.voice_pool || []).length) return;
+    castDraft.voice_pool = CAST_DEFAULT_POOL.map(([slot, label, gender, ageFeel]) => ({
+      slot,
+      label,
+      gender,
+      age_feel: ageFeel,
+      voice_id: "",
+    }));
+  }
+
+  /* 龙套映射可用的键：音色池槽位 + 角色实际职业槽位 + 已保存键。 */
+  function stockKeys() {
+    const keys = new Set((castDraft.voice_pool || []).map((item) => item.slot).filter(Boolean));
+    castMeta.stockSlots.forEach((item) => {
+      if (item.slot) keys.add(item.slot);
+      if (item.voice_slot) keys.add(item.voice_slot);
+    });
+    Object.keys(castDraft.stock_defaults || {}).forEach((key) => keys.add(key));
+    return Array.from(keys).sort();
+  }
+
+  /* 渲染整块编辑器。 */
+  function renderCastEditor() {
+    const box = el("castEditor");
+    if (!box) return;
+    const pool = castDraft.voice_pool || [];
+    const personas = castDraft.narrators || [];
+    const switches = castDraft.narrator_switches || [];
+    const defaults = castDraft.stock_defaults || {};
+    const poolRows = pool
+      .map(
+        (item, index) => `<tr>
+          <td><input class="input" data-cast-section="pool" data-index="${index}" data-key="slot" value="${esc(item.slot)}" /></td>
+          <td><input class="input" data-cast-section="pool" data-index="${index}" data-key="label" value="${esc(item.label)}" /></td>
+          <td><select class="input" data-cast-section="pool" data-index="${index}" data-key="voice_id">${castVoiceOptions(item.voice_id)}</select></td>
+          <td><select class="input" data-cast-section="pool" data-index="${index}" data-key="gender">
+            <option value="">—</option>
+            <option value="male"${item.gender === "male" ? " selected" : ""}>男</option>
+            <option value="female"${item.gender === "female" ? " selected" : ""}>女</option>
+            <option value="other"${item.gender === "other" ? " selected" : ""}>其他</option>
+          </select></td>
+          <td><input class="input" data-cast-section="pool" data-index="${index}" data-key="age_feel" value="${esc(item.age_feel || "")}" placeholder="young_adult" /></td>
+          <td><button class="btn small" type="button" data-cast-del="pool" data-index="${index}">删除</button></td>
+        </tr>`
+      )
+      .join("");
+    const stockRows = stockKeys()
+      .map((key) => {
+        const meta = castMeta.stockSlots.find((item) => item.slot === key);
+        return `<tr>
+          <td><code>${esc(key)}</code></td>
+          <td>${esc((meta && meta.label) || "")}${meta ? `（${meta.count} 个角色）` : ""}</td>
+          <td><select class="input" data-cast-section="stock" data-stock-key="${esc(key)}">${castVoiceOptions(defaults[key] || "")}</select></td>
+        </tr>`;
+      })
+      .join("");
+    const personaRows = personas
+      .map(
+        (item, index) => `<tr>
+          <td><code>${esc(item.id)}</code></td>
+          <td><input class="input" data-cast-section="persona" data-index="${index}" data-key="label" value="${esc(item.label)}" /></td>
+          <td><select class="input" data-cast-section="persona" data-index="${index}" data-key="voice_id">${castVoiceOptions(item.voice_id)}</select></td>
+          <td><button class="btn small" type="button" data-cast-del="persona" data-index="${index}">删除</button></td>
+        </tr>`
+      )
+      .join("");
+    const switchRows = switches
+      .map(
+        (item, index) => `<tr>
+          <td><select class="input" data-cast-section="switch" data-index="${index}" data-key="at_chapter_id">${castChapterOptions(
+            item.at_chapter_id,
+            false
+          )}</select></td>
+          <td><select class="input" data-cast-section="switch" data-index="${index}" data-key="end_chapter_id">${castChapterOptions(
+            item.end_chapter_id || "",
+            true
+          )}</select></td>
+          <td><select class="input" data-cast-section="switch" data-index="${index}" data-key="persona_id">${castPersonaOptions(
+            item.persona_id
+          )}</select></td>
+          <td><input class="input" data-cast-section="switch" data-index="${index}" data-key="reason" value="${esc(
+            item.reason || ""
+          )}" placeholder="必填：为什么从这里切换" /></td>
+          <td><button class="btn small" type="button" data-cast-del="switch" data-index="${index}">删除</button></td>
+        </tr>`
+      )
+      .join("");
+    box.innerHTML = `
+      <div class="card" style="padding:12px;margin-top:8px">
+        <h3 style="margin:0 0 8px">音色池（6 个槽位起步）</h3>
+        <p class="muted" style="margin:0 0 8px">槽位键是稳定键，保存后不要随意改名；同一槽位可被多个职业龙套复用。</p>
+        <table class="table"><thead><tr><th>槽位</th><th>名称</th><th>音色</th><th>性别</th><th>年龄感</th><th></th></tr></thead>
+        <tbody>${poolRows || '<tr><td colspan="6" class="muted">还没有音色池槽位</td></tr>'}</tbody></table>
+        <button class="btn small" type="button" id="castPoolAdd">新增音色槽位</button>
+
+        <h3 style="margin:16px 0 8px">龙套职业映射</h3>
+        <p class="muted" style="margin:0 0 8px">键可以是音色池槽位（如 male_mid），也可以是具体职业槽位（如 waiter）；职业槽位优先。</p>
+        <table class="table"><thead><tr><th>键</th><th>来源</th><th>音色</th></tr></thead><tbody>${
+          stockRows || '<tr><td colspan="3" class="muted">还没有可映射的槽位</td></tr>'
+        }</tbody></table>
+
+        <h3 style="margin:16px 0 8px">旁白人格</h3>
+        <table class="table"><thead><tr><th>ID</th><th>名称</th><th>音色</th><th></th></tr></thead>
+        <tbody>${personaRows || '<tr><td colspan="4" class="muted">还没有旁白人格</td></tr>'}</tbody></table>
+        <button class="btn small" type="button" id="castPersonaAdd">新增旁白人格</button>
+        <label style="margin-left:12px">默认旁白：
+          <select class="input" id="castDefaultPersona">${castPersonaOptions(castDraft.default_narrator_id)}</select>
+        </label>
+
+        <h3 style="margin:16px 0 8px">旁白切换点</h3>
+        <p class="muted" style="margin:0 0 8px">区间含首尾；结束章留空表示延续到下一个切换点之前。区间不允许重叠或中间断开。</p>
+        <table class="table"><thead><tr><th>起始章</th><th>结束章</th><th>人格</th><th>理由</th><th></th></tr></thead>
+        <tbody>${switchRows || '<tr><td colspan="5" class="muted">没有切换点，全书使用默认旁白</td></tr>'}</tbody></table>
+        <button class="btn small" type="button" id="castSwitchAdd">新增切换点</button>
+
+        <h3 style="margin:16px 0 8px">每章旁白预览（当前已保存配置）</h3>
+        <div id="castPlanPreview" class="muted">—</div>
+
+        <h3 style="margin:16px 0 8px">角色试听（用本书真实台词）</h3>
+        <p class="muted" style="margin:0 0 8px">优先取当前章节的一句台词，按所选音色合成到 <code>.ndw/cast_previews/</code>（只保留最近 12 条，不写章节、不进时间轴）。换几个候选音色连续点「试听这句」即可横向对比。</p>
+        <div class="cast-preview">
+          <div class="row">
+            <select class="input" id="castPreviewCharacter">${castPreviewCharacterOptions(castPreview.character)}</select>
+            <select class="input" id="castPreviewVoice">${castCandidateOptions(castPreview.voice)}</select>
+            <button class="btn small" type="button" id="castPreviewRun">试听这句</button>
+            <button class="btn small" type="button" id="castPreviewClear">清空试听缓存</button>
+          </div>
+          <p class="muted" id="castPreviewHint" style="margin:8px 0 0">—</p>
+          <div class="cast-preview-log" id="castPreviewLog"></div>
+        </div>
+
+        <div id="castErrors" style="margin-top:10px;color:#c0392b"></div>
+        <div style="margin-top:10px"><button class="btn" type="button" id="castSave">保存并检查</button></div>
+      </div>`;
+    renderCastPreviewLog();
+  }
+
+  /* 渲染试听历史（最多 6 条，方便 A/B 对比；页面刷新即清空）。 */
+  function renderCastPreviewLog() {
+    const box = document.getElementById("castPreviewLog");
+    if (!box) return;
+    box.innerHTML = (castPreview.log || [])
+      .map(
+        (item) =>
+          `<div class="item">` +
+          `<button class="btn small" type="button" data-preview-play="${esc(item.audio)}">▶</button>` +
+          `<b>${esc(item.voice_name || item.voice_id)}</b>` +
+          `<span>${esc(summary(item.text || "", 24))}</span>` +
+          `<span class="muted">${esc(item.chapter_title || item.chapter_id || "")} · ${esc(item.line_id || "")}</span>` +
+          `</div>`
+      )
+      .join("");
+  }
+
+  /* 试听一句：把当前角色 + 候选音色发给后端合成。 */
+  async function runCastPreview() {
+    const hint = document.getElementById("castPreviewHint");
+    if (!NW.state.path) {
+      NW.toast("先打开工程");
+      return;
+    }
+    if (!castPreview.character) {
+      NW.toast("先选一个角色");
+      return;
+    }
+    if (hint) hint.textContent = "合成中…";
+    try {
+      const result = await NW.api("/api/ui/cast/preview", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          path: NW.state.path,
+          character_id: castPreview.character,
+          voice_id: castPreview.voice || undefined,
+          chapter: NW.state.chapter || undefined,
+        }),
+        busy: "正在用本书台词试听…",
+      });
+      castPreview.log.unshift(result);
+      castPreview.log = castPreview.log.slice(0, 6);
+      if (hint) {
+        hint.textContent = `已用「${result.chapter_title || result.chapter_id}」的台词试听：${summary(
+          result.text || "",
+          30
+        )}（保留最近 ${result.kept} 条）`;
+      }
+      renderCastPreviewLog();
+      if (result.audio) {
+        const audio = new Audio(uiFileUrl(result.audio, NW.state.path));
+        audio.play().catch(() => {});
+      }
+    } catch (error) {
+      if (hint) hint.textContent = `试听失败：${error.message}`;
+    }
+  }
+
+  /* 清空服务器上的试听临时文件。 */
+  async function clearCastPreviews() {
+    if (!NW.state.path) return;
+    try {
+      const result = await NW.api("/api/ui/cast/preview/clear", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: NW.state.path }),
+      });
+      castPreview.log = [];
+      renderCastPreviewLog();
+      const hint = document.getElementById("castPreviewHint");
+      if (hint) hint.textContent = `已清空 ${result.removed || 0} 个试听文件`;
+    } catch (error) {
+      NW.toast(`清空失败：${error.message}`);
+    }
+  }
+
+  /* 渲染每章旁白预览。 */
+  function renderCastPlan(plan) {
+    const box = el("castPlanPreview");
+    if (!box) return;
+    const rows = plan || [];
+    if (!rows.length) {
+      box.textContent = "还没有章节";
+      return;
+    }
+    box.innerHTML = rows
+      .map(
+        (item) =>
+          `<div>第${esc(item.index)}章 ${esc(summary(item.title, 20))} → <b>${esc(item.label)}</b>（${
+            item.source === "switch" ? "切换" : "默认"
+          }）</div>`
+      )
+      .join("");
+  }
+
+  /* 渲染校验错误。 */
+  function renderCastErrors(errors) {
+    const box = el("castErrors");
+    if (!box) return;
+    const list = errors || [];
+    box.innerHTML = list.length ? `<b>未保存，请先修正：</b><ul>${list.map((item) => `<li>${esc(item)}</li>`).join("")}</ul>` : "";
+  }
+
+  /* 打开编辑器：拉取当前 cast 与章节/音色。 */
+  async function openCastEditor() {
+    if (!NW.state.path) {
+      NW.toast("先打开工程");
+      return;
+    }
+    const box = el("castEditor");
+    if (box) {
+      box.hidden = false;
+      box.innerHTML = '<p class="muted">读取音色编排…</p>';
+    }
+    try {
+      const data = await NW.api(`/api/ui/cast?path=${encodeURIComponent(NW.state.path)}`);
+      const cast = data.cast || {};
+      castDraft = {
+        narrators: (cast.narrators || []).map((item) => ({ ...item })),
+        narrator_switches: (cast.narrator_switches || []).map((item) => ({ ...item })),
+        voice_pool: (cast.voice_pool || []).map((item) => ({ ...item })),
+        stock_defaults: { ...(cast.stock_defaults || {}) },
+        default_narrator_id: cast.default_narrator_id || "",
+        unknown_voice_id: cast.unknown_voice_id || "",
+        minor_fallback_voice_id: cast.minor_fallback_voice_id || "",
+        narrator_fallback_voice_id: cast.narrator_fallback_voice_id || "",
+      };
+      castMeta = {
+        chapters: data.chapters || [],
+        voices: data.voices || [],
+        characters: data.characters || [],
+        stockSlots: data.stock_slots || [],
+      };
+      ensureDefaultPool();
+      // 试听默认选第一个非旁白角色（保留用户上次选择）
+      const previewable = (castMeta.characters || []).filter((item) => item.role !== "narrator");
+      if (!castPreview.character || !previewable.some((item) => item.id === castPreview.character)) {
+        castPreview.character = previewable.length ? previewable[0].id : "";
+        castPreview.voice = "";
+      }
+      renderCastEditor();
+      renderCastPlan(data.plan);
+      renderCastErrors(data.errors);
+    } catch (error) {
+      if (box) box.textContent = `读取失败：${error.message}`;
+    }
+  }
+
+  /* 处理编辑器内的输入、选择与删除。 */
+  function handleCastEdit(event) {
+    const target = event.target;
+    if (!target) return;
+    if (target.id === "castPreviewCharacter") {
+      castPreview.character = target.value;
+      castPreview.voice = "";
+      renderCastEditor();
+      return;
+    }
+    if (target.id === "castPreviewVoice") {
+      castPreview.voice = target.value;
+      return;
+    }
+    if (target.id === "castPreviewRun") {
+      runCastPreview();
+      return;
+    }
+    if (target.id === "castPreviewClear") {
+      clearCastPreviews();
+      return;
+    }
+    const previewPlay = target.closest("[data-preview-play]");
+    if (previewPlay) {
+      const audio = new Audio(uiFileUrl(previewPlay.getAttribute("data-preview-play"), NW.state.path));
+      audio.play().catch(() => {});
+      return;
+    }
+    if (target.id === "castPoolAdd") {
+      castDraft.voice_pool.push({ slot: `slot_${castDraft.voice_pool.length + 1}`, label: "新音色槽位", voice_id: "" });
+      renderCastEditor();
+      return;
+    }
+    if (target.id === "castPersonaAdd") {
+      const id = `npr_${Date.now().toString(36)}`;
+      castDraft.narrators.push({ id, label: "新旁白人格", voice_id: "" });
+      renderCastEditor();
+      return;
+    }
+    if (target.id === "castSwitchAdd") {
+      const first = (castMeta.chapters || [])[0];
+      if (!first) {
+        NW.toast("还没有章节，无法设置切换点");
+        return;
+      }
+      const firstPersona = (castDraft.narrators || [])[0];
+      if (!firstPersona) {
+        NW.toast("请先新增一个旁白人格，再设置切换点");
+        return;
+      }
+      castDraft.narrator_switches.push({
+        at_chapter_id: first.id,
+        end_chapter_id: "",
+        persona_id: firstPersona ? firstPersona.id : "",
+        reason: "",
+        scope: "from_here",
+      });
+      renderCastEditor();
+      return;
+    }
+    if (target.id === "castDefaultPersona") {
+      castDraft.default_narrator_id = target.value;
+      return;
+    }
+    if (target.id === "castSave") {
+      saveCast();
+      return;
+    }
+    const del = target.getAttribute("data-cast-del");
+    if (del) {
+      const index = Number(target.getAttribute("data-index"));
+      if (del === "pool") castDraft.voice_pool.splice(index, 1);
+      if (del === "persona") castDraft.narrators.splice(index, 1);
+      if (del === "switch") castDraft.narrator_switches.splice(index, 1);
+      renderCastEditor();
+      return;
+    }
+    const section = target.getAttribute("data-cast-section");
+    if (!section) return;
+    const key = target.getAttribute("data-key");
+    const value = target.value;
+    if (section === "stock") {
+      const stockKey = target.getAttribute("data-stock-key");
+      if (value) castDraft.stock_defaults[stockKey] = value;
+      else delete castDraft.stock_defaults[stockKey];
+      return;
+    }
+    const index = Number(target.getAttribute("data-index"));
+    const row = (castDraft[section === "pool" ? "voice_pool" : section === "persona" ? "narrators" : "narrator_switches"] || [])[index];
+    if (!row) return;
+    row[key] = value;
+    if (event.type === "change" && (section === "pool" || section === "persona")) renderCastEditor();
+  }
+
+  /* 保存并重新跑检查。 */
+  async function saveCast() {
+    const box = el("castErrors");
+    if (box) box.textContent = "保存中…";
+    try {
+      const result = await NW.api("/api/ui/cast", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: NW.state.path, cast: castDraft }),
+        busy: "正在保存音色编排…",
+      });
+      if (!result.ok) {
+        renderCastErrors(result.errors);
+        return;
+      }
+      renderCastErrors([]);
+      renderCastPlan(result.plan);
+      if (result.check) renderCastCheck(result.check);
+      NW.toast("音色编排已保存，并重新跑了检查");
+    } catch (error) {
+      if (box) box.textContent = `保存失败：${error.message}`;
+    }
+  }
+
+  /* 把检查结果写回工具条。 */
+  function renderCastCheck(result) {
+    const out = el("castResult");
+    const findings = (result && result.findings) || [];
+    const errors = findings.filter((item) => item.level === "error").length;
+    const warns = findings.filter((item) => item.level === "warn").length;
+    if (out) out.textContent = `结论 ${(result && result.level) || "ok"}：error ${errors}，warn ${warns}`;
+  }
+
+  /* 注入音色编排工具条（不改 index.html，避免与并行改动冲突）。
+   * 返回：无。
+   */
+  function injectCastPanel() {
+    const list = el("charactersList");
+    if (!list || document.getElementById("castPanel")) return;
+    const panel = document.createElement("div");
+    panel.id = "castPanel";
+    panel.className = "row";
+    panel.style.cssText = "gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap";
+    panel.innerHTML = `
+      <button class="btn small" type="button" id="castEditBtn">编辑音色编排</button>
+      <button class="btn small" type="button" id="castCheckBtn">音色编排检查</button>
+      <button class="btn small" type="button" id="castBackfillBtn">批量生成音色描述</button>
+      <span class="muted" id="castResult"></span>`;
+    list.parentNode.insertBefore(panel, list);
+    const editor = document.createElement("div");
+    editor.id = "castEditor";
+    editor.hidden = true;
+    list.parentNode.insertBefore(editor, list);
+    editor.addEventListener("input", handleCastEdit);
+    editor.addEventListener("change", handleCastEdit);
+    editor.addEventListener("click", handleCastEdit);
+    panel.querySelector("#castEditBtn").addEventListener("click", async () => {
+      const box = document.getElementById("castEditor");
+      if (box && !box.hidden) {
+        box.hidden = true;
+        return;
+      }
+      await openCastEditor();
+    });
+    panel.querySelector("#castCheckBtn").addEventListener("click", async () => {
+      const out = document.getElementById("castResult");
+      out.textContent = "检查中…";
+      try {
+        const result = await NW.api(`/api/ui/cast/check?path=${encodeURIComponent(NW.state.path)}`);
+        renderCastCheck(result);
+        const findings = result.findings || [];
+        if (findings.length) NW.toast(findings.slice(0, 3).map((item) => item.message).join("；"));
+      } catch (error) {
+        out.textContent = `检查失败：${error.message}`;
+      }
+    });
+    panel.querySelector("#castBackfillBtn").addEventListener("click", async () => {
+      const out = document.getElementById("castResult");
+      out.textContent = "生成中…";
+      try {
+        const result = await NW.api("/api/ui/cast/backfill", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ path: NW.state.path }),
+          busy: "正在批量生成音色描述…",
+        });
+        out.textContent = `已补 ${result.changed || 0} 个角色`;
+        load();
+      } catch (error) {
+        out.textContent = `生成失败：${error.message}`;
+      }
+    });
+  }
+
   window.Pages.characters = {
     init() {
       bind();
     },
     activate() {
       bind();
+      injectCastPanel();
       load();
       if (window.VoiceLibrary) window.VoiceLibrary.activate();
     },

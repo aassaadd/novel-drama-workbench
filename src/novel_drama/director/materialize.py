@@ -43,17 +43,25 @@ def _merge_items(scene: dict, key: str, incoming: list[dict]) -> tuple[int, int]
     return added, updated
 
 
-def materialize_media(chapter: dict, script: dict) -> dict:
+def materialize_media(chapter: dict, script: dict, settings: dict | None = None) -> dict:
     """把导演脚本物化进章节场景。
 
     参数:
         chapter: 章节 dict（就地修改，由调用方负责保存）。
         script: 导演脚本 dict。
+        settings: 工程设置；给出时画幅统一取 `output.aspect_ratio`，忽略条目级比例。
 
     返回:
         {"sfx_added", "sfx_updated", "image_added", "image_updated",
          "video_added", "video_updated", "scenes"}。
     """
+    from ..media.comfy_media import resolve_aspect
+
+    # 画幅与宽高统一按工程 output.aspect_ratio 解析（模板 size_map 是宽高唯一来源）
+    aspect = resolve_aspect(settings or {}, "image")
+    output_aspect = aspect["ratio"]
+    output_width = int(aspect["width"])
+    output_height = int(aspect["height"])
     scenes = {int(scene.get("index") or 0): scene for scene in chapter.get("scenes") or []}
     stats = {
         "sfx_added": 0,
@@ -95,11 +103,11 @@ def materialize_media(chapter: dict, script: dict) -> dict:
                 int(visual.get("index") or len(image_items) + 1),
                 anchor_line_id,
                 visual.get("prompt") or "",
-                int(visual.get("width") or 1152),
-                int(visual.get("height") or 1536),
+                output_width,
+                output_height,
+                output_aspect,
             )
             built["id"] = visual["id"]
-            built["aspect_ratio"] = visual.get("aspect_ratio") or built["aspect_ratio"]
             built["workflow_template_id"] = visual.get("workflow_template_id") or built["workflow_template_id"]
             image_items.append(built)
             visual_ids[visual["id"]] = built["id"]

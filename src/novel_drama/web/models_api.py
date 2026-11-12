@@ -105,9 +105,10 @@ def _template_kinds(config) -> dict[str, set[str]]:
         config: AppConfig。
 
     返回:
-        `{"image": {模板ID...}, "video": {模板ID...}}`；清单缺失时回落到内置模板 ID。
+        `{"image": {模板ID...}, "video": {模板ID...}, "music": {模板ID...}}`；
+        清单缺失时图像/视频回落到内置模板 ID。
     """
-    groups: dict[str, set[str]] = {"image": set(), "video": set()}
+    groups: dict[str, set[str]] = {"image": set(), "video": set(), "music": set()}
     try:
         manifest = comfy_media.load_manifest(comfy_media.templates_dir(config))
     except Exception:  # 清单缺失/损坏只影响分组，不影响其它接口
@@ -121,6 +122,8 @@ def _template_kinds(config) -> dict[str, set[str]]:
             groups["image"].add(template_id)
         elif kind == "video":
             groups["video"].add(template_id)
+        elif kind == "music":
+            groups["music"].add(template_id)
     for kind in ("image", "video"):
         if groups[kind]:
             continue
@@ -165,6 +168,7 @@ def _comfy_rows(config) -> tuple[str | None, list[dict], str | None]:
                 "kind": item.get("kind"),
                 "target_path": str(root / key),
                 "bytes": int(item.get("bytes") or 0),
+                "expected_bytes": int(item.get("expected_bytes") or 0),
                 "present": bool(item.get("present")),
                 "templates": list(item.get("templates") or []),
                 "license": item.get("license"),
@@ -219,25 +223,30 @@ def _audio_rows(config) -> tuple[str, list[dict], str | None]:
     return str(root), rows, None
 
 
-def _split_groups(rows: list[dict], groups: dict[str, set[str]]) -> tuple[list[dict], list[dict]]:
-    """把图像/视频模型行按模板归属拆成两组（同一行只进一组）。
+def _split_groups(
+    rows: list[dict], groups: dict[str, set[str]]
+) -> tuple[list[dict], list[dict], list[dict]]:
+    """把图像/视频/音乐模型行按模板归属拆成三组（同一行只进一组）。
 
     参数:
         rows: 扫描出的模型行。
-        groups: `{"image": {模板ID}, "video": {模板ID}}`。
+        groups: `{"image": {模板ID}, "video": {模板ID}, "music": {模板ID}}`。
 
     返回:
-        `(图像模型行, 视频模型行)`。
+        `(图像模型行, 视频模型行, 音乐模型行)`。
     """
     images: list[dict] = []
     videos: list[dict] = []
+    music: list[dict] = []
     for row in rows:
         templates = {str(item) for item in row.get("templates") or []}
         if templates & groups["image"]:
             images.append(row)
         elif templates & groups["video"]:
             videos.append(row)
-    return images, videos
+        elif templates & groups["music"]:
+            music.append(row)
+    return images, videos, music
 
 
 def _find_comfy_entry(key: str) -> dict | None:
@@ -408,11 +417,11 @@ def register_models_routes(app, config_path: str | None = None) -> None:
 
     @app.get("/api/ui/models")
     def ui_models() -> dict:
-        """模型清单：音频 / 图像 / 视频三组 + 目录与镜像链（只读、不联网、不写盘）。"""
+        """模型清单：音频 / 图像 / 视频 / 音乐四组 + 目录与镜像链（只读、不联网、不写盘）。"""
         config = load_config(config_path)
         groups = _template_kinds(config)
         comfy_dir, comfy_rows, comfy_error = _comfy_rows(config)
-        images, videos = _split_groups(comfy_rows, groups)
+        images, videos, music = _split_groups(comfy_rows, groups)
         audio_root, audio_rows, audio_error = _audio_rows(config)
         return {
             "dirs": {"models_root": audio_root, "comfy_models_dir": comfy_dir},
@@ -420,6 +429,7 @@ def register_models_routes(app, config_path: str | None = None) -> None:
             "audio": {"root": audio_root, "models": audio_rows, "message": audio_error},
             "image": {"models": images, "message": comfy_error},
             "video": {"models": videos, "message": comfy_error},
+            "music": {"models": music, "message": comfy_error},
         }
 
     @app.post("/api/ui/models/install")
@@ -437,8 +447,8 @@ def register_models_routes(app, config_path: str | None = None) -> None:
         """
         group = str(body.get("group") or "")
         key = str(body.get("key") or "").strip()
-        if group not in ("audio", "image", "video") or not key:
-            raise HTTPException(status_code=400, detail={"code": 2, "message": "需要 group（audio/image/video）与 key"})
+        if group not in ("audio", "image", "video", "music") or not key:
+            raise HTTPException(status_code=400, detail={"code": 2, "message": "需要 group（audio/image/video/music）与 key"})
         gate, entry = _license_gate(group, key)
         if entry is None:
             raise HTTPException(status_code=400, detail={"code": 2, "message": f"未知模型：{group}:{key}"})
@@ -512,8 +522,8 @@ def register_models_routes(app, config_path: str | None = None) -> None:
         """
         group = str(body.get("group") or "")
         key = str(body.get("key") or "").strip()
-        if group not in ("audio", "image", "video") or not key:
-            raise HTTPException(status_code=400, detail={"code": 2, "message": "需要 group（audio/image/video）与 key"})
+        if group not in ("audio", "image", "video", "music") or not key:
+            raise HTTPException(status_code=400, detail={"code": 2, "message": "需要 group（audio/image/video/music）与 key"})
         config = load_config(config_path)
         if group == "audio":
             entry = model_store.catalog_entry(key)
@@ -564,8 +574,8 @@ def register_models_routes(app, config_path: str | None = None) -> None:
         """
         group = str(body.get("group") or "")
         key = str(body.get("key") or "").strip()
-        if group not in ("image", "video") or not key:
-            raise HTTPException(status_code=400, detail={"code": 2, "message": "需要 group（image/video）与 key"})
+        if group not in ("image", "video", "music") or not key:
+            raise HTTPException(status_code=400, detail={"code": 2, "message": "需要 group（image/video/music）与 key"})
         config = load_config(config_path)
         try:
             result = comfy_models.save_manual(
@@ -630,9 +640,22 @@ def register_models_routes(app, config_path: str | None = None) -> None:
             if not template_id:
                 continue
             missing: list[str] = []
+            missing_files: list[dict] = []
             error = None
             try:
                 missing = comfy_models.missing_for_template(config, [str(item) for item in entry.get("models") or []])
+                for key in missing:
+                    model_entry = _find_comfy_entry(key) or {}
+                    missing_files.append(
+                        {
+                            "key": key,
+                            "path": str(Path(models_dir) / key) if models_dir else None,
+                            "downloadable": bool(model_entry),
+                            "license": model_entry.get("license"),
+                            "license_gate": model_entry.get("license_gate") or "none",
+                            "expected_bytes": int(model_entry.get("bytes") or 0),
+                        }
+                    )
             except Exception as exc:
                 error = _err_message(exc)
             missing_nodes: list[str] = []
@@ -651,6 +674,7 @@ def register_models_routes(app, config_path: str | None = None) -> None:
                     "display_name": entry.get("display_name") or template_id,
                     "ok": not missing and not error and not missing_nodes and not missing_options,
                     "missing": missing,
+                    "missing_files": missing_files,
                     "missing_nodes": missing_nodes,
                     "missing_model_options": missing_options,
                     "error": error,
@@ -664,7 +688,21 @@ def register_models_routes(app, config_path: str | None = None) -> None:
             message = f"{message}；节点定义读取失败：{info_error}" if message else f"节点定义读取失败：{info_error}"
         bad = [item["id"] for item in templates if not item["ok"]]
         if status.ok and bad:
-            message = f"{message}；模板校验未通过：{'、'.join(bad)}"
+            details: list[str] = []
+            for item in templates:
+                if item["ok"]:
+                    continue
+                if item["missing"]:
+                    files = "、".join(str(name) for name in item["missing"])
+                    where = f"（应放到 {models_dir}）" if models_dir else ""
+                    details.append(f"{item['id']} 缺少模型 {files}{where}")
+                elif item["missing_nodes"]:
+                    details.append(f"{item['id']} 缺少节点 {'、'.join(item['missing_nodes'])}")
+                elif item["missing_model_options"]:
+                    details.append(f"{item['id']} 模型未在 ComfyUI 下拉项中 {'、'.join(item['missing_model_options'])}")
+                else:
+                    details.append(f"{item['id']} 校验失败")
+            message = f"{message}；模板校验未通过：{'；'.join(details)}" if message else f"模板校验未通过：{'；'.join(details)}"
         if manifest_error:
             message = f"{message}；模板清单读取失败：{manifest_error}" if message else f"模板清单读取失败：{manifest_error}"
         return {

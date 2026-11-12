@@ -226,8 +226,10 @@ def render_image(item: dict, out_path: str | Path) -> dict:
         raise RuntimeError("缺少 Pillow：请在项目 venv 中安装 pillow 后重试") from exc
 
     prompt = (item.get("prompt") or "").strip()
-    width = int(item.get("width") or 1152)
-    height = int(item.get("height") or 1536)
+    width = int(item.get("width") or 0)
+    height = int(item.get("height") or 0)
+    if width <= 0 or height <= 0:
+        raise ValueError("缺少目标尺寸：请先按工程画幅解析 width/height 再渲染")
     # 控制占位图体积：长边不超过 1536
     scale = min(1.0, 1536 / max(width, height))
     width, height = max(64, int(width * scale)), max(64, int(height * scale))
@@ -270,7 +272,15 @@ def render_image(item: dict, out_path: str | Path) -> dict:
 # ---------------- 短视频位 ----------------
 
 
-def render_video(segment: dict, out_path: str | Path, source_image: str | Path | None, binary: str = "ffmpeg") -> dict:
+def render_video(
+    segment: dict,
+    out_path: str | Path,
+    source_image: str | Path | None,
+    binary: str = "ffmpeg",
+    *,
+    width: int,
+    height: int,
+) -> dict:
     """把关键图渲染成一段 H.264 静音短视频。
 
     参数:
@@ -278,17 +288,21 @@ def render_video(segment: dict, out_path: str | Path, source_image: str | Path |
         out_path: 输出 mp4 路径。
         source_image: 首帧图片；为空时用纯色兜底。
         binary: ffmpeg 可执行文件。
+        width: 工程画幅对应的目标宽。
+        height: 工程画幅对应的目标高。
 
     返回:
-        {"path", "duration_ms", "fps", "sha256"}。
+        {"path", "duration_ms", "fps", "width", "height", "sha256"}。
 
     异常:
         RuntimeError: ffmpeg 失败。
-        ValueError: 时长越界。
+        ValueError: 时长越界或目标尺寸缺失。
     """
     duration_ms = int(segment.get("duration_ms") or 5000)
     if duration_ms < 500 or duration_ms > 5000:
         raise ValueError(f"视频位时长必须在 500~5000ms：{duration_ms}")
+    if int(width) <= 0 or int(height) <= 0:
+        raise ValueError("缺少目标尺寸：请先按工程画幅解析 width/height 再渲染")
     fps = int(segment.get("fps") or 24)
     target = Path(out_path)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -297,7 +311,7 @@ def render_video(segment: dict, out_path: str | Path, source_image: str | Path |
         inputs = ["-loop", "1", "-i", str(source_image)]
     else:
         # 没有源图时生成纯色输入，保证视频位永远可出片
-        inputs = ["-f", "lavfi", "-i", f"color=c=0x1f2430:s=1280x720:d={duration_ms / 1000.0:.2f}"]
+        inputs = ["-f", "lavfi", "-i", f"color=c=0x1f2430:s={width}x{height}:d={duration_ms / 1000.0:.2f}"]
 
     cmd = [
         binary,
@@ -309,7 +323,7 @@ def render_video(segment: dict, out_path: str | Path, source_image: str | Path |
         "-t",
         f"{duration_ms / 1000.0:.3f}",
         "-vf",
-        "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,format=yuv420p",
+        f"scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,format=yuv420p",
         "-r",
         str(fps),
         "-c:v",
@@ -325,4 +339,11 @@ def render_video(segment: dict, out_path: str | Path, source_image: str | Path |
     ]
     _run(cmd)
     actual = probe_duration_ms(target) or duration_ms
-    return {"path": str(target), "duration_ms": actual, "fps": fps, "sha256": _sha256(target)}
+    return {
+        "path": str(target),
+        "duration_ms": actual,
+        "fps": fps,
+        "width": int(width),
+        "height": int(height),
+        "sha256": _sha256(target),
+    }

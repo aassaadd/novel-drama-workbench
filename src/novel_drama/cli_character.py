@@ -9,7 +9,7 @@ import json
 import sys
 from pathlib import Path
 
-from .cli_common import PreconditionError, _emit, _resolve_store
+from .cli_common import PreconditionError, _emit, _resolve_store, cast_hint
 from .config import AppConfig
 from .media.art import render_character_sheet
 from .models import entities
@@ -84,6 +84,12 @@ def append_characters(store, rows: list[dict]) -> dict:
         if not relationships and isinstance(state.get("relationship_notes"), dict):
             relationships = state["relationship_notes"]
         character["state"] = {"situation": None, "relationship_notes": None, "knowledge": None, "as_of_chapter_id": None}
+        if isinstance(row.get("voice_profile"), dict):
+            character["voice_profile"] = row["voice_profile"]
+        if isinstance(row.get("stock"), dict):
+            character["stock"] = row["stock"]
+        if isinstance(row.get("voice_binding"), dict):
+            character["voice_binding"] = row["voice_binding"]
         table["characters"].append(character)
         existing.add(name)
         id_by_name[name] = character["id"]
@@ -149,9 +155,25 @@ def cmd_character_generate(args, config: AppConfig) -> int:
     if getattr(args, "dry_run", False):
         _emit(args, f"[dry-run] 已生成 {len(result['characters'])} 个人物", {**result, "applied": False})
         return 0
-    applied = append_characters(store, result["characters"])
-    payload = {"characters": applied["characters"], "applied": True, "skipped": applied["skipped"]}
+    rows = list(result["characters"]) + list(result.get("stock_characters") or [])
+    applied = append_characters(store, rows)
+    narrator_profile = result.get("narrator_profile") or {}
+    if narrator_profile.get("voice_profile"):
+        table = store.load_characters()
+        narrator = next((item for item in table["characters"] if item.get("id") == entities.NARRATOR_ID), None)
+        if narrator is not None and not narrator.get("voice_profile"):
+            narrator["voice_profile"] = narrator_profile["voice_profile"]
+            store.save_characters(table)
+    payload = {
+        "characters": applied["characters"],
+        "stock_characters": len(result.get("stock_characters") or []),
+        "narrator_profile": bool(narrator_profile.get("voice_profile")),
+        "applied": True,
+        "skipped": applied["skipped"],
+    }
     text = f"已写入 {len(applied['characters'])} 个人物"
+    if result.get("stock_characters"):
+        text += f"（含龙套 {len(result['stock_characters'])} 个）"
     if applied["skipped"]:
         text += f"（重名跳过：{'、'.join(applied['skipped'])}）"
     _emit(args, text, payload)
@@ -175,6 +197,9 @@ def cmd_character_apply(args, config: AppConfig) -> int:
     if applied["skipped"]:
         text += f"（重名跳过：{'、'.join(applied['skipped'])}）"
     _emit(args, text, payload)
+    if not getattr(args, "dry_run", False):
+        # 保存人物后提示音色/BGM 编排问题，不阻断写入
+        cast_hint(store)
     return 0
 
 
@@ -230,6 +255,32 @@ def cmd_character_update(args, config: AppConfig) -> int:
     if getattr(args, "negative_prompt", None) is not None:
         target["negative_prompt"] = args.negative_prompt.strip()
         changed.append("negative_prompt")
+    if getattr(args, "voice_profile", None) is not None:
+        raw = args.voice_profile.strip()
+        if raw:
+            try:
+                profile = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"voice_profile 不是合法 JSON: {exc}") from exc
+            if not isinstance(profile, dict):
+                raise ValueError("voice_profile 必须是 JSON 对象")
+            target["voice_profile"] = profile
+        else:
+            target.pop("voice_profile", None)
+        changed.append("voice_profile")
+    if getattr(args, "stock", None) is not None:
+        raw = args.stock.strip()
+        if raw:
+            try:
+                stock = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"stock 不是合法 JSON: {exc}") from exc
+            if not isinstance(stock, dict) or not stock.get("slot"):
+                raise ValueError("stock 必须是含 slot 的 JSON 对象")
+            target["stock"] = stock
+        else:
+            target.pop("stock", None)
+        changed.append("stock")
 
     state = target.get("state") or {}
     state_changed = False
@@ -267,6 +318,9 @@ def cmd_character_update(args, config: AppConfig) -> int:
     target["updated_at"] = now_iso()
     store.save_characters(table)
     _emit(args, f"已更新角色 {target.get('name')}（{args.id}）：" + "、".join(changed), target)
+    if not getattr(args, "dry_run", False):
+        # 保存人物后提示音色/BGM 编排问题，不阻断写入
+        cast_hint(store)
     return 0
 
 

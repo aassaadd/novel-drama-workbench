@@ -149,6 +149,21 @@ REQUIRED_MODELS: list[dict] = [
         "commercial_use": False,
         "note": "H3 音频 VAE（fp32），视频模板里的音轨解码用；许可随 H3 仓库",
     },
+    {
+        "key": "checkpoints/ace_step_1.5_turbo_aio.safetensors",
+        "kind": "checkpoint",
+        "templates": ["ace_step_1_5"],
+        "license": "Apache-2.0",
+        "license_gate": GATE_NONE,
+        "commercial_use": True,
+        "note": (
+            "ACE-Step 1.5 turbo 三合一 AIO：扩散模型 + Qwen 文本编码器 + VAE 全在这一个文件里，"
+            "背景音乐模板唯一依赖，无需再单独下 text_encoders / vae"
+        ),
+        "repo": "Comfy-Org/ACE-Step-1.5",
+        "hf_filename": "checkpoints/ace_step_1.5_turbo_aio.safetensors",
+        "bytes": 10025478736,
+    },
 ]
 
 
@@ -386,13 +401,19 @@ def _weight_files(root: Path) -> list[Path]:
 
 
 def _manual_hints() -> dict[str, dict]:
-    """读取 models.json 里手工固定的 `repo` / `hf_filename`。
+    """读取内置来源与 models.json 里手工固定的 `repo` / `hf_filename`。
+
+    内置来源（`REQUIRED_MODELS` 里的 `repo` / `hf_filename`）先写入，
+    再用 models.json 的同键值覆盖，保证人工修正永远优先。
 
     返回:
-        `{key: {"repo":..., "hf_filename":...}}`；文件缺失时为空字典。
+        `{key: {"repo":..., "hf_filename":...}}`；没有可用来源时为空字典。
     """
-    data = _read_json(MODELS_JSON) or {}
     hints: dict[str, dict] = {}
+    for entry in REQUIRED_MODELS:
+        if entry.get("repo") or entry.get("hf_filename"):
+            hints[entry["key"]] = {"repo": entry.get("repo"), "hf_filename": entry.get("hf_filename")}
+    data = _read_json(MODELS_JSON) or {}
     for item in data.get("models") or []:
         if not isinstance(item, dict) or not item.get("key"):
             continue
@@ -445,22 +466,24 @@ def scan(config, write: bool = True) -> dict:
         path = root / key
         present = path.is_file()
         hint = manual.get(key, {})
-        models.append(
-            {
-                "key": key,
-                "kind": entry["kind"],
-                "path": key,
-                "bytes": _file_bytes(path) if present else 0,
-                "present": present,
-                "templates": list(entry["templates"]),
-                "license": entry["license"],
-                "license_gate": entry["license_gate"],
-                "commercial_use": entry["commercial_use"],
-                "note": entry["note"],
-                "repo": hint.get("repo"),
-                "hf_filename": hint.get("hf_filename"),
-            }
-        )
+        row = {
+            "key": key,
+            "kind": entry["kind"],
+            "path": key,
+            "bytes": _file_bytes(path) if present else 0,
+            "present": present,
+            "templates": list(entry["templates"]),
+            "license": entry["license"],
+            "license_gate": entry["license_gate"],
+            "commercial_use": entry["commercial_use"],
+            "note": entry["note"],
+            "repo": hint.get("repo") or entry.get("repo"),
+            "hf_filename": hint.get("hf_filename") or entry.get("hf_filename"),
+        }
+        # 只有登记了预期体积的条目才写 expected_bytes，避免老条目被塞满 0
+        if int(entry.get("bytes") or 0):
+            row["expected_bytes"] = int(entry["bytes"])
+        models.append(row)
 
     unreferenced = []
     for path in _weight_files(root):
@@ -1042,7 +1065,7 @@ def install(
         (item for item in scan_data.get("models") or [] if item.get("key") == key),
         {},
     )
-    expected = int(scanned.get("bytes") or 0)
+    expected = int(scanned.get("bytes") or 0) or int(entry.get("bytes") or 0)
     actual = _file_bytes(target)
 
     if actual and _size_matches(actual, expected):

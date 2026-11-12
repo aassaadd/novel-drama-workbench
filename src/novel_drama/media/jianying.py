@@ -20,6 +20,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from .comfy_media import project_ratio
+
 # 剪映 5.9 基线字段：低版本草稿可被高版本剪映打开并自动升级
 JY_VERSION = 360000
 JY_NEW_VERSION = "110.0.0"
@@ -82,8 +84,8 @@ def export_jianying(
     root = Path(store.root)
     project = store.load_project()
     settings = store.settings()
-    ratio = ((settings.get("output") or {}).get("aspect_ratio")) or "16:9"
-    width, height = CANVAS_BY_RATIO.get(ratio, CANVAS_BY_RATIO["16:9"])
+    ratio = project_ratio(settings)
+    width, height = CANVAS_BY_RATIO.get(ratio, CANVAS_BY_RATIO["1:1"])
 
     draft_name = _draft_name(project, chapter)
     base_dir = Path(out_dir) if out_dir else root / "exports" / "jianying"
@@ -281,6 +283,47 @@ def _screen_layout(items: list[dict]) -> list[dict]:
         item["_layer"] = layer
         lane_ends[layer] = end
     return ordered
+
+
+def _assign_layers(items: list[dict]) -> list[tuple[int, dict]]:
+    """把可能重叠的片段分配到多条互不重叠的轨道层。
+
+    剪映同一条轨道内不允许片段重叠，因此按开始时间贪心选择「已结束的最早层」；
+    本函数不裁剪、不丢弃任何片段，只决定它落在第几层。
+
+    参数:
+        items: 含 `start_ms` / `end_ms` 的片段计划列表。
+
+    返回:
+        (层号, 条目) 列表，保持入参顺序。
+    """
+    lane_ends: list[int] = []
+    result: list[tuple[int, dict]] = []
+    for item in items:
+        start = int(item.get("start_ms") or 0)
+        end = int(item.get("end_ms") or start)
+        lane = next((index for index, lane_end in enumerate(lane_ends) if start >= lane_end), None)
+        if lane is None:
+            lane = len(lane_ends)
+            lane_ends.append(0)
+        result.append((lane, item))
+        lane_ends[lane] = end
+    return result
+
+
+def _segment_speed(target_us: int, source_us: int) -> float:
+    """按 target / source 计算播放倍速，满足 target.duration × speed == source.duration。
+
+    参数:
+        target_us: 片段在轨道上的目标时长（微秒）。
+        source_us: 实际截取的素材时长（微秒）。
+
+    返回:
+        播放倍速；无法计算时返回 1.0。
+    """
+    if target_us <= 0 or source_us <= 0:
+        return 1.0
+    return round(source_us / target_us, 6)
 
 
 def _bgm_segments(
@@ -586,7 +629,8 @@ def _build_draft_content(
 
     tracks: list[dict] = []
     video_tracks: dict[int, dict] = {}
-    audio_tracks: list[dict] = []
+    audio_tracks: dict[tuple[str, int], dict] = {}
+    text_tracks: dict[int, dict] = {}
 
     def video_track(layer: int) -> dict:
         """按层级创建/复用视频轨。"""
@@ -595,16 +639,22 @@ def _build_draft_content(
             tracks.append(video_tracks[layer])
         return video_tracks[layer]
 
-    def audio_track(kind: str) -> dict:
-        """每种音频类型单独一条轨道。"""
-        for track in audio_tracks:
-            if track["_kind"] == kind:
-                return track
-        track = _new_track("audio", flag=3)
-        track["_kind"] = kind
-        audio_tracks.append(track)
-        tracks.append(track)
-        return track
+    def audio_track(kind: str, lane: int) -> dict:
+        """按「类型 + 层」创建/复用音频轨，保证同轨片段不重叠。"""
+        key = (kind, lane)
+        if key not in audio_tracks:
+            track = _new_track("audio", flag=3)
+            track["_kind"] = kind
+            audio_tracks[key] = track
+            tracks.append(track)
+        return audio_tracks[key]
+
+    def text_track(lane: int) -> dict:
+        """按层创建/复用字幕轨，保证同轨片段不重叠。"""
+        if lane not in text_tracks:
+            text_tracks[lane] = _new_track("text", flag=3)
+            tracks.append(text_tracks[lane])
+        return text_tracks[lane]
 
     # 视频 / 图片
     for item in plan["screen_items"]:
@@ -616,20 +666,23 @@ def _build_draft_content(
         end_us = _us(item.get("end_ms"))
         duration_us = max(1, end_us - start_us)
         mid = register(asset_id)
-        speed_id = _add_speed(materials)
         available_us = max(1, info["duration_ms"] * 1000) if info["duration_ms"] else duration_us
+        source_us = min(duration_us, available_us)
+        speed = _segment_speed(duration_us, source_us)
+        speed_id = _add_speed(materials, speed)
         segment = _visual_segment(
             mid,
             start_us,
             duration_us,
-            min(duration_us, available_us),
+            source_us,
             speed_id,
+            speed=speed,
             track_index=len(tracks) - 1,
         )
         video_track(int(item.get("_layer") or 0))["segments"].append(segment)
 
-    # 配音
-    for item in plan["voice_items"]:
+    # 配音：同一时刻可能有多行，按层铺到多条轨道避免同轨重叠
+    for lane, item in _assign_layers(plan["voice_items"]):
         asset_id = item.get("asset_id")
         if not asset_id:
             continue
@@ -638,23 +691,26 @@ def _build_draft_content(
         end_us = _us(item.get("end_ms"))
         duration_us = max(1, end_us - start_us)
         mid = register(asset_id)
-        speed_id = _add_speed(materials)
         fade_refs, fade = _fade_material(materials, item)
         available_us = max(1, info["duration_ms"] * 1000) if info["duration_ms"] else duration_us
+        source_us = min(duration_us, available_us)
+        speed = _segment_speed(duration_us, source_us)
+        speed_id = _add_speed(materials, speed)
         segment = _audio_segment(
             mid,
             start_us,
             duration_us,
-            min(duration_us, available_us),
+            source_us,
             speed_id,
             _gain(item),
             len(tracks),
+            speed=speed,
             extra_refs=fade_refs,
         )
-        audio_track("voice")["segments"].append(segment)
+        audio_track("voice", lane)["segments"].append(segment)
 
-    # 音效
-    for item in plan["sfx_items"]:
+    # 音效：多个音效可能同时出现，同样按层拆分
+    for lane, item in _assign_layers(plan["sfx_items"]):
         asset_id = item.get("asset_id")
         if not asset_id:
             continue
@@ -663,23 +719,26 @@ def _build_draft_content(
         end_us = _us(item.get("end_ms"))
         duration_us = max(1, end_us - start_us)
         mid = register(asset_id)
-        speed_id = _add_speed(materials)
         fade_refs, fade = _fade_material(materials, item)
         available_us = max(1, info["duration_ms"] * 1000) if info["duration_ms"] else duration_us
+        source_us = min(duration_us, available_us)
+        speed = _segment_speed(duration_us, source_us)
+        speed_id = _add_speed(materials, speed)
         segment = _audio_segment(
             mid,
             start_us,
             duration_us,
-            min(duration_us, available_us),
+            source_us,
             speed_id,
             _gain(item),
             len(tracks),
+            speed=speed,
             extra_refs=fade_refs,
         )
-        audio_track("sfx")["segments"].append(segment)
+        audio_track("sfx", lane)["segments"].append(segment)
 
-    # BGM（循环 cue 平铺）
-    for cue in plan["bgm_segments"]:
+    # BGM（循环 cue 平铺；多条 cue 或音乐轨条目可能交叠，按层拆分）
+    for lane, cue in _assign_layers(plan["bgm_segments"]):
         asset_id = cue.get("asset_id")
         if not asset_id:
             continue
@@ -706,21 +765,19 @@ def _build_draft_content(
                 len(tracks),
                 extra_refs=fade_refs,
             )
-            track = audio_track("music")
-            track["segments"].append(segment)
+            audio_track("music", lane)["segments"].append(segment)
             if not cue.get("loop"):
                 break
             cursor += duration_us
 
-    # 字幕：全部有文本的台词都要铺
-    text_track = _new_track("text", flag=3)
-    for subtitle in plan["subtitles"]:
+    # 字幕：全部有文本的台词都要铺，重叠时拆到另一条字幕轨
+    for lane, subtitle in _assign_layers(plan["subtitles"]):
         start_us = _us(subtitle["start_ms"])
         duration_us = max(_us(SUBTITLE_MIN_DURATION_MS), _us(subtitle["end_ms"]) - start_us)
         speed_id = _add_speed(materials)
         material_id = _uuid()
         materials["texts"].append(_text_material(material_id, subtitle["text"]))
-        text_track["segments"].append(
+        text_track(lane)["segments"].append(
             _text_segment(
                 material_id,
                 start_us,
@@ -729,8 +786,6 @@ def _build_draft_content(
                 len(tracks),
             )
         )
-    if text_track["segments"]:
-        tracks.append(text_track)
 
     total_us = max(
         _us(timeline.get("duration_ms")),
@@ -828,6 +883,8 @@ def _visual_segment(
     source_duration_us: int,
     speed_id: str,
     track_index: int,
+    *,
+    speed: float = 1.0,
 ) -> dict:
     """视频/图片片段。"""
     segment = _base_segment(_uuid(), material_id, start_us, duration_us)
@@ -835,7 +892,7 @@ def _visual_segment(
     segment.update(
         {
             "source_timerange": {"start": 0, "duration": source_duration_us},
-            "speed": 1.0,
+            "speed": speed,
             "volume": 1.0,
             "extra_material_refs": [speed_id],
             "is_tone_modify": False,
@@ -857,6 +914,7 @@ def _audio_segment(
     volume: float,
     track_index: int,
     *,
+    speed: float = 1.0,
     extra_refs: list[str] | None = None,
 ) -> dict:
     """音频片段。"""
@@ -865,7 +923,7 @@ def _audio_segment(
     segment.update(
         {
             "source_timerange": {"start": 0, "duration": source_duration_us},
-            "speed": 1.0,
+            "speed": speed,
             "volume": volume,
             "extra_material_refs": [speed_id, *(extra_refs or [])],
             "is_tone_modify": False,
@@ -907,10 +965,20 @@ def _clip(transform_y: float = 0.0) -> dict:
     }
 
 
-def _add_speed(materials: dict) -> str:
-    """新增一个 1.0 倍速素材并返回 id（剪映要求片段引用 speeds）。"""
+def _add_speed(materials: dict, speed: float = 1.0) -> str:
+    """新增一个倍速素材并返回 id（剪映要求片段引用 speeds）。
+
+    参数:
+        materials: 草稿素材集合。
+        speed: 播放倍速，必须与片段 target/source 的比值一致。
+
+    返回:
+        倍速素材 id。
+    """
     speed_id = _uuid()
-    materials["speeds"].append({"curve_speed": None, "id": speed_id, "mode": 0, "speed": 1.0, "type": "speed"})
+    materials["speeds"].append(
+        {"curve_speed": None, "id": speed_id, "mode": 0, "speed": speed, "type": "speed"}
+    )
     return speed_id
 
 
@@ -1279,19 +1347,19 @@ def _import_readme(draft_name: str, drafts_root: str | None, install_dir: Path) 
 草稿名称：{draft_name}
 
 导入步骤：
-1. 解压同名 zip，得到文件夹「{draft_name}」。
-2. 打开剪映，点击右上角「设置」→「全局设置」，确认「草稿位置」。
-   默认路径（macOS 剪映专业版）：{root}
-   本稿素材路径按以下位置写入：{install_dir}
+1. 把同名 zip 解压到剪映草稿目录下，使草稿文件夹的最终路径正好是：
+   {install_dir}
+   （macOS 剪映专业版默认草稿目录：{root}）
+2. 打开剪映「设置」→「全局设置」，确认「草稿位置」就是上面这个目录。
+   不一致时，先在设置页修改「导出 → 剪映草稿根目录」，再重新生成一次。
 3. 完全退出剪映（避免运行中写入缓存导致覆盖）。
-4. 把整个「{draft_name}」文件夹复制到草稿位置目录下，即成为 {install_dir}。
-5. 重新打开剪映，草稿列表中会出现「{draft_name}」，打开即可继续编辑。
+4. 重新打开剪映，草稿列表中会出现「{draft_name}」，打开即可继续编辑。
 
 注意：
-- 请勿只复制文件夹里的 json 文件，media 目录必须一起复制，否则会显示「媒体丢失」。
-- 本草稿使用绝对路径引用 media 目录内的素材，复制后请勿再移动或改名草稿文件夹。
-- 若你的剪映草稿位置不是上面的路径，请先在设置页修改「导出 → 剪映草稿根目录」再重新生成。
-- 本产物未在剪映中实测，首次打开如遇版本提示，请允许剪映升级草稿。
+- 请解压出完整文件夹：json 与 media 目录必须一起放在 {install_dir}，只拷 json 会显示「媒体丢失」。
+- 解压后不要移动、改名这个草稿文件夹：草稿内的素材路径是绝对路径，直接指向
+  {install_dir}；一旦移动或改名，剪映就找不到素材，同样会显示「媒体丢失」。
+- 本产物未在剪映中实测，首次打开如遇版本提示，允许剪映升级草稿即可。
 """
 
 

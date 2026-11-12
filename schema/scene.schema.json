@@ -23,11 +23,66 @@
       "uniqueItems": true
     },
     "target_duration_ms": { "type": ["integer", "null"], "minimum": 0 },
+    "bgm": { "$ref": "#/$defs/bgm_plan", "description": "R18：场景级 BGM 描述（镜头 bgm 缺失时的兜底）" },
     "status": { "type": "string", "enum": ["draft", "ready", "voiced", "done"] },
     "lines": { "type": "array", "items": { "$ref": "line.schema.json" } },
     "sfx_events": { "type": "array", "items": { "$ref": "sfx-event.schema.json" } },
     "key_images": { "type": "array", "items": { "$ref": "key-image.schema.json" } },
     "video_segments": { "type": "array", "items": { "$ref": "video-segment.schema.json" } },
     "revision": { "type": "integer", "minimum": 1 }
+  },
+  "$defs": {
+    "bgm_plan": {
+      "type": "object",
+      "description": "R18：结构化 BGM 描述（叙事单位级），cue 只承载音频与毫秒位置",
+      "additionalProperties": false,
+      "required": ["id", "scope", "mood_family", "status", "revision"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^bgp_[0-9A-Za-z]{6,32}$" },
+        "scope": { "type": "string", "enum": ["chapter", "shot"] },
+        "name": { "type": ["string", "null"], "maxLength": 200 },
+        "narrative_function": { "type": ["string", "null"], "maxLength": 300 },
+        "mood_family": {
+          "type": "string",
+          "enum": ["calm", "tense", "sad", "romantic", "mysterious", "action", "comedic", "epic", "horror"]
+        },
+        "mood_text": { "type": ["string", "null"], "maxLength": 200 },
+        "energy": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
+        "intensity": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
+        "style": { "type": ["string", "null"], "maxLength": 500 },
+        "instrumentation": { "type": "array", "items": { "type": "string", "maxLength": 40 } },
+        "tempo_bpm": { "type": ["integer", "null"], "minimum": 20, "maximum": 220 },
+        "duration_hint_ms": { "type": ["integer", "null"], "minimum": 0 },
+        "loop_required": { "type": "boolean" },
+        "loop_point_hint": { "type": ["string", "null"], "maxLength": 200 },
+        "gain_db_hint": { "type": ["number", "null"], "minimum": -60, "maximum": 12 },
+        "fade_in_ms": { "type": ["integer", "null"], "minimum": 0 },
+        "fade_out_ms": { "type": ["integer", "null"], "minimum": 0 },
+        "duck_under_dialogue": { "type": "boolean" },
+        "source": { "type": "string", "enum": ["llm", "manual", "rule"] },
+        "status": { "type": "string", "enum": ["planned", "asset_ready", "rendered", "missing"] },
+        "segments": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["index"],
+            "properties": {
+              "index": { "type": "integer", "minimum": 1 },
+              "anchor_line_id": { "type": ["string", "null"], "pattern": "^lin_[0-9A-Za-z]{6,32}$" },
+              "narrative_function": { "type": ["string", "null"], "maxLength": 300 },
+              "mood_family": { "type": ["string", "null"], "maxLength": 30 },
+              "energy": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
+              "style": { "type": ["string", "null"], "maxLength": 500 },
+              "duration_hint_ms": { "type": ["integer", "null"], "minimum": 0 },
+              "transition_in": { "type": ["string", "null"], "enum": ["cut", "fade", "dissolve", "none", null] },
+              "transition_out": { "type": ["string", "null"], "enum": ["cut", "fade", "dissolve", "none", null] },
+              "note": { "type": ["string", "null"], "maxLength": 300 }
+            }
+          }
+        },
+        "revision": { "type": "integer", "minimum": 1 }
+      }
+    }
   }
 }

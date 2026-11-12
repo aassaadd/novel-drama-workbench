@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import sys
 from pathlib import Path
 
 from .cli_common import (
@@ -14,6 +16,7 @@ from .cli_common import (
     _resolve_store,
     _tts_service,
 )
+from .media.comfy_media import load_manifest, templates_dir
 from .media import (
     add_cue,
     build_schedule,
@@ -28,6 +31,7 @@ from .media import (
     plan_mux,
     render_mix,
     summarize_timeline,
+    sync_cues_from_plans,
     write_export,
 )
 from .models.ids import now_iso
@@ -131,6 +135,60 @@ def _line_filter(store: ProjectStore, chapters: list[dict], args, config) -> tup
     return {row["line"]["id"] for row in picked}, bool(args.include_ready) or ("ready" in statuses)
 
 
+def _planned_counts(store: ProjectStore, chapters: list[dict], characters: list[dict], args, config) -> list[dict]:
+    """按与正式批量完全相同的条件预演每章待合成行数。
+
+    参数:
+        store: 工程。
+        chapters: 本次要处理的章节。
+        characters: 角色表。
+        args: 已解析参数（scene / limit / line / status 等）。
+        config: 本机配置。
+
+    返回:
+        `[{chapter_id, title, rows}]`，用于进度条的分母。
+    """
+    from .tts import line_state
+    from .tts.batch import plan_batch
+
+    line_ids, include_ready = _line_filter(store, chapters, args, config)
+    counts: list[dict] = []
+    for chapter in chapters:
+        rows = plan_batch(
+            chapter,
+            characters,
+            scene_ids=args.scene,
+            include_ready=include_ready,
+            limit=args.limit,
+            snapshots=line_state.load_snapshots(store.root, chapter),
+            root=store.root,
+            engine=line_state.engine_params(config),
+            live_ids=line_state.live_line_ids(store),
+            line_ids=line_ids,
+        )
+        counts.append({"chapter_id": chapter.get("id"), "title": chapter.get("title"), "rows": len(rows)})
+    return counts
+
+
+def _write_progress(path: str | None, payload: dict) -> None:
+    """原子写批量进度文件；未指定路径时静默跳过。
+
+    参数:
+        path: 进度文件路径。
+        payload: 进度内容。
+
+    返回:
+        无。
+    """
+    if not path:
+        return
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_name(target.name + ".tmp")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    os.replace(tmp, target)
+
+
 def cmd_tts_batch(args, config: AppConfig) -> int:
     """行级批量合成：单并发、可控批次、失败逐行记录不中断；支持跨章节与断点续跑。"""
     from .tts.batch import plan_batch, run_chapters
@@ -140,12 +198,24 @@ def cmd_tts_batch(args, config: AppConfig) -> int:
     chapters = [store.load_chapter(chapter_id) for chapter_id in chapter_ids]
     characters = store.load_characters()["characters"]
     line_ids, include_ready = _line_filter(store, chapters, args, config)
+    if not getattr(args, "skip_cast_check", False):
+        from .store.voice_cast import check_cast
+
+        gate = check_cast(store, chapter_ids[0]) if len(chapter_ids) == 1 else check_cast(store)
+        errors = [item for item in gate["findings"] if item["level"] == "error"]
+        if errors:
+            detail = "\n".join(f"- {item['code']}: {item['message']}" for item in errors[:8])
+            raise PreconditionError(
+                f"音色/BGM 编排有 {len(errors)} 个阻断项，已取消配音（可用 --skip-cast-check 跳过）：\n{detail}"
+            )
 
     if args.dry_run:
         from .tts import line_state
 
         lines: list[str] = []
         total = 0
+        lines_total = 0
+        per_chapter: list[dict] = []
         for chapter in chapters:
             rows = plan_batch(
                 chapter,
@@ -159,22 +229,63 @@ def cmd_tts_batch(args, config: AppConfig) -> int:
                 live_ids=line_state.live_line_ids(store),
                 line_ids=line_ids,
             )
+            chapter_lines = sum(
+                1
+                for scene in chapter.get("scenes") or []
+                if not args.scene or scene.get("id") in args.scene
+                for line in scene.get("lines") or []
+                if (line.get("text") or "").strip()
+            )
             total += len(rows)
+            lines_total += chapter_lines
+            per_chapter.append(
+                {
+                    "chapter_id": chapter.get("id"),
+                    "title": chapter.get("title"),
+                    "rows": len(rows),
+                    "lines_total": chapter_lines,
+                    "skipped": max(0, chapter_lines - len(rows)),
+                }
+            )
             for row in rows:
                 lines.append(
                     f"{chapter.get('id')}  {row['line']['id']}  {row['line'].get('speaker_id')}  {row['line']['text'][:24]}"
                 )
         _emit(
             args,
-            f"[dry-run] 待合成 {total} 行（{len(chapters)} 章）：\n" + "\n".join(lines),
-            {"rows": total, "chapters": chapter_ids},
+            f"[dry-run] 待合成 {total} 行（{len(chapters)} 章，跳过 {max(0, lines_total - total)} 行）：\n"
+            + "\n".join(lines),
+            {
+                "rows": total,
+                "chapters": chapter_ids,
+                "per_chapter": per_chapter,
+                "lines_total": lines_total,
+                "skipped": max(0, lines_total - total),
+            },
         )
         return EXIT_OK
 
     service = _tts_service(args, config)
+    progress_file = getattr(args, "progress_file", None)
+    progress = {
+        "pid": os.getpid(),
+        "total": 0,
+        "done": 0,
+        "failed": 0,
+        "failed_rows": [],
+        "current_chapter": None,
+        "started_at": now_iso(),
+        "finished": False,
+    }
+    if progress_file:
+        # 进度分母提前算好：run_chapters 是逐章规划的，不预先汇总页面就无法显示 X/Y
+        counts = _planned_counts(store, chapters, characters, args, config)
+        progress["total"] = sum(item["rows"] for item in counts)
+        progress["chapters"] = counts
+        _write_progress(progress_file, progress)
 
     def reporter(chapter_no: int, chapter: dict, batch_no: int, batch_results: list[dict], stats: dict) -> None:
-        """打印章节内批次进度。"""
+        """打印章节内批次进度，并在需要时刷新进度文件。"""
         ok = sum(1 for item in batch_results if item["status"] == "ready")
         failed = sum(1 for item in batch_results if item["status"] == "failed")
         cached = sum(1 for item in batch_results if item.get("cache_hit"))
@@ -182,6 +293,26 @@ def cmd_tts_batch(args, config: AppConfig) -> int:
             f"[章 {chapter_no} {chapter.get('id')} / 批 {batch_no}] 本批 {len(batch_results)} 行："
             f"成功 {ok}（缓存 {cached}）失败 {failed}；累计 {stats['succeeded']}/{stats['requested']}"
         )
+        if not progress_file:
+            return
+        progress["done"] += len(batch_results)
+        progress["failed"] += failed
+        progress["current_chapter"] = chapter.get("id")
+        for item in batch_results:
+            if item.get("status") != "failed":
+                continue
+            error = item.get("error") or {}
+            progress["failed_rows"].append(
+                {
+                    "chapter_id": chapter.get("id"),
+                    "chapter_title": chapter.get("title"),
+                    "line_id": item.get("line_id"),
+                    "code": error.get("code"),
+                    "message": error.get("message"),
+                }
+            )
+        progress["updated_at"] = now_iso()
+        _write_progress(progress_file, progress)
 
     try:
         report = run_chapters(
@@ -196,9 +327,23 @@ def cmd_tts_batch(args, config: AppConfig) -> int:
             limit=args.limit,
             line_ids=line_ids,
         )
+    except Exception as exc:  # noqa: BLE001 - 进度文件要记录中断原因，再原样抛出
+        progress.update({"finished": True, "error": str(exc), "updated_at": now_iso()})
+        _write_progress(progress_file, progress)
+        raise
     finally:
         # 整批结束回收常驻 worker，避免跨命令残留进程
         service.close()
+    if progress_file:
+        progress.update(
+            {
+                "finished": True,
+                "done": progress["total"] or progress["done"],
+                "report_path": report.get("report_path"),
+                "updated_at": now_iso(),
+            }
+        )
+        _write_progress(progress_file, progress)
     stats = report["stats"]
     text = (
         f"批量合成完成：{stats['chapters']} 章 / 请求 {stats['requested']} 行，成功 {stats['succeeded']}"
@@ -286,7 +431,13 @@ def cmd_mux(args, config: AppConfig) -> int:
         raise PreconditionError(f"时间轴不存在: {path}（先执行 ndw timeline build）")
     timeline = json.loads(path.read_text(encoding="utf-8"))
     mix_plan = plan_mix(timeline, store.root)
-    plan = plan_mux(timeline, store.root, mix_plan)
+    plan = plan_mux(
+        timeline,
+        store.root,
+        mix_plan,
+        settings=store.settings(),
+        manifest=load_manifest(templates_dir(config)),
+    )
     plan["binary"] = config.get("ffmpeg.binary", "ffmpeg")
     if not args.render:
         _emit(
@@ -370,6 +521,12 @@ def cmd_export(args, config: AppConfig) -> int:
     chapter = store.load_chapter(args.chapter)
     characters = {item["id"]: item for item in store.load_characters()["characters"]}
     out_dir = Path(args.out_dir) if args.out_dir else store.root / "exports"
+    from .store.voice_cast import check_cast
+
+    cast_warnings = check_cast(store, chapter["id"])["findings"]
+    if cast_warnings:
+        detail = "；".join(item["message"] for item in cast_warnings[:5])
+        print(f"[warn] 音色/BGM 编排提示 {len(cast_warnings)} 条：{detail}", file=sys.stderr)
     silences = _silence_events(store, chapter["id"])
     if getattr(args, "format", "srt") == "jianying":
         from .media import export_jianying
@@ -462,6 +619,23 @@ def cmd_bgm(args, config: AppConfig) -> int:
 
         save_cues(store.root, args.chapter, [])
         _emit(args, f"已清空 {args.chapter} 的 BGM cue", {"chapter": args.chapter})
+        return EXIT_OK
+    if args.action == "sync":
+        chapter = store.load_chapter(args.chapter)
+        try:
+            script = store.load_script(args.chapter)
+        except FileNotFoundError:
+            raise PreconditionError("导演脚本不存在：先执行 ndw script parse / generate") from None
+        timeline = build_timeline(chapter, store.settings())
+        result = sync_cues_from_plans(store.root, chapter, script, timeline, dry_run=bool(args.dry_run))
+        _emit(
+            args,
+            (
+                f"{'[dry-run] ' if args.dry_run else ''}BGM cue：由描述派生 {result['planned']} 条，"
+                f"保留手工 {result['manual']} 条"
+            ),
+            {"chapter": args.chapter, "planned": result["planned"], "manual": result["manual"], "cues": result["cues"]},
+        )
         return EXIT_OK
 
     cues = load_cues(store.root, args.chapter)

@@ -27,6 +27,14 @@
         "background": { "type": "string", "maxLength": 2000 },
         "speech_style": { "$ref": "#/$defs/speech_style" },
         "voice_binding": { "$ref": "#/$defs/voice_binding", "description": "使用 TTS 时必填 voice_id" },
+        "voice_profile": {
+          "$ref": "#/$defs/voice_profile",
+          "description": "R18：结构化音色描述。人物阶段一次生成，跨章复用，作为 voice design 抽卡输入"
+        },
+        "stock": {
+          "$ref": "#/$defs/stock",
+          "description": "R18：龙套槽位标记；只有 role=minor 的类型角色使用"
+        },
         "appearance_prompt": { "type": "string", "maxLength": 2000 },
         "negative_prompt": { "type": "string", "maxLength": 1000 },
         "portrait_asset": { "type": ["string", "null"] },
@@ -125,6 +133,70 @@
           "additionalProperties": { "type": "string", "maxLength": 60 },
           "description": "统一情绪枚举 → 具体引擎情绪标签"
         }
+      }
+    },
+    "voice_profile": {
+      "type": "object",
+      "description": "R18 音色描述：内容决策层，可评审、可作为文字造音色输入；允许扩展字段以兼容 R17 输出",
+      "additionalProperties": true,
+      "properties": {
+        "schema": { "type": ["string", "null"], "maxLength": 40 },
+        "summary": { "type": ["string", "null"], "maxLength": 300 },
+        "voice_summary": { "type": ["string", "null"], "maxLength": 300, "description": "R17 兼容字段" },
+        "gender": { "type": ["string", "null"], "enum": ["male", "female", "other", "unknown", null] },
+        "gender_source": { "type": ["string", "null"], "enum": ["character", "manual", "inferred", null] },
+        "age_feel": {
+          "type": ["string", "null"],
+          "enum": ["child", "teen", "young_adult", "adult", "middle_aged", "elderly", null]
+        },
+        "age_range_text": { "type": ["string", "null"], "maxLength": 40 },
+        "age_range": { "type": ["string", "null"], "maxLength": 40, "description": "R17 兼容字段" },
+        "pitch": { "type": ["string", "null"], "maxLength": 20 },
+        "timbre": { "type": "array", "items": { "type": "string", "maxLength": 40 } },
+        "pace": { "type": ["string", "null"], "maxLength": 20 },
+        "volume": { "type": ["string", "null"], "maxLength": 20 },
+        "energy": { "type": ["string", "null"], "maxLength": 30 },
+        "warmth": { "type": ["string", "null"], "maxLength": 30 },
+        "articulation": { "type": ["string", "null"], "maxLength": 30 },
+        "breathiness": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
+        "raspiness": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
+        "temperament": { "type": "array", "items": { "type": "string", "maxLength": 40 } },
+        "accent": { "type": ["string", "null"], "maxLength": 60 },
+        "region_hint": { "type": ["string", "null"], "maxLength": 60 },
+        "language": { "type": ["string", "null"], "maxLength": 20 },
+        "role_distinctiveness": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
+        "design_prompt": { "type": ["string", "null"], "maxLength": 1200 },
+        "negative_prompt": { "type": "array", "items": { "type": "string", "maxLength": 40 } },
+        "reference_text": { "type": ["string", "null"], "maxLength": 500 },
+        "confidence": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
+        "evidence": { "type": "array", "items": { "type": "string", "maxLength": 200 } },
+        "source": {
+          "type": ["object", "null"],
+          "additionalProperties": true,
+          "description": "推导来源：kind/provider/model/at/from_hash/override_fields/batch_id"
+        },
+        "status": { "type": ["string", "null"], "enum": ["draft", "ready", "stale", "missing", null] },
+        "stale_reason": { "type": ["string", "null"], "maxLength": 200 }
+      }
+    },
+    "stock": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["slot"],
+      "properties": {
+        "slot": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{1,39}$",
+          "description": "职业槽位稳定键（waiter/guard/...），落盘后不可改，改名走 cast rename-slot"
+        },
+        "voice_slot": {
+          "type": ["string", "null"],
+          "pattern": "^[a-z][a-z0-9_]{1,39}$",
+          "description": "音色池槽位（如 male_mid）；多个职业槽位可共用同一音色"
+        },
+        "label": { "type": ["string", "null"], "maxLength": 40 },
+        "archetype_tags": { "type": "array", "items": { "type": "string", "maxLength": 20 } },
+        "reuse_policy": { "type": "string", "enum": ["reuse", "per_scene"] }
       }
     }
   }

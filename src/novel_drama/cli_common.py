@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 
 from .config import AppConfig
 from .store import ProjectStore
@@ -58,6 +59,34 @@ def _resolve_store(args, config: AppConfig) -> ProjectStore:
     if not store.exists():
         raise PreconditionError(f"工程不存在或未初始化: {store.root}（先执行 ndw init <dir> --title 书名）")
     return store
+
+
+def cast_hint(store: ProjectStore, chapter_id: str | None = None) -> None:
+    """跑一次音色/BGM 编排校验，并把问题以中文提示打到 stderr（只提示，不阻断）。
+
+    参数:
+        store: ProjectStore。
+        chapter_id: 只校验该章；为空校验全剧。
+
+    返回:
+        无。
+    """
+    from .store.voice_cast import check_cast
+
+    try:
+        result = check_cast(store, chapter_id)
+    except Exception as exc:  # 提示性校验不能反过来中断主流程
+        print(f"[提示] 音色/BGM 编排检查未完成：{exc}", file=sys.stderr)
+        return
+    findings = result.get("findings") or []
+    if not findings:
+        return
+    labels = {"error": "错误", "warn": "告警"}
+    print(f"[提示] 音色/BGM 编排有 {len(findings)} 项待处理（本次操作已完成，不阻断）：", file=sys.stderr)
+    for item in findings[:8]:
+        print(f"  - [{labels.get(item.get('level'), item.get('level'))}] {item.get('code')}: {item.get('message')}", file=sys.stderr)
+    if len(findings) > 8:
+        print(f"  … 其余 {len(findings) - 8} 项请执行 ndw cast check 查看", file=sys.stderr)
 
 
 def _tts_service(args, config: AppConfig):

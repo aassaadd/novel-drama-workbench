@@ -602,5 +602,5 @@
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init);
   else init();
 
-  window.NWLayout = { init, renderFlow, refreshFlow: renderFlow, stageDone, currentStage, setInspectorCollapsed, renderBottom };
+  window.NWLayout = { init, renderFlow, refreshFlow: renderFlow, stageDone, currentStage, setInspectorCollapsed, renderBottom, openProjectMenu: () => toggleProjectMenu(true) };
 })();

@@ -31,6 +31,9 @@ from ..writing.editing import edit_chapter, save_chapter_content
 from ..writing.summarize import apply_summary, summarize_chapter
 from .actions import fail_body, run
 from .models_api import register_models_routes
+from .voice_tools_api import register_voice_tools_routes
+from .continue_api import register_continue_routes
+from .bgm_api import register_bgm_routes
 
 STATIC_DIR = Path(__file__).with_name("static")
 
@@ -182,6 +185,7 @@ CONFIG_EDITABLE = tuple(
     "comfyui.templates.image_ref",
     "comfyui.templates.video_t2v",
     "comfyui.templates.video_i2v",
+    "comfyui.templates.music",
     "paths.models_root",
 )
 
@@ -204,6 +208,7 @@ CONFIG_FIELD_SPEC.update(
         "comfyui.templates.image_ref": ("str", None, None, None),
         "comfyui.templates.video_t2v": ("str", None, None, None),
         "comfyui.templates.video_i2v": ("str", None, None, None),
+        "comfyui.templates.music": ("str", None, None, None),
         "paths.models_root": ("path", None, None, None),
     }
 )
@@ -233,7 +238,7 @@ def _is_tts_process(pid: int) -> bool:
 
     说明:
         pid 文件可能在进程自然退出后残留；系统复用 pid 时直接 killpg 会误杀无关进程，
-        因此先用 ps 确认命令行里确实是 `novel_drama.cli ... tts run`。
+        因此先用 ps 确认命令行里确实是 `novel_drama.cli ... tts run` 或 `tts batch`。
 
     参数:
         pid: 待确认的进程号。
@@ -251,7 +256,7 @@ def _is_tts_process(pid: int) -> bool:
     except (OSError, subprocess.SubprocessError):
         return False
     command = (result.stdout or "").strip()
-    return "novel_drama.cli" in command and "tts run" in command
+    return "novel_drama.cli" in command and ("tts run" in command or "tts batch" in command)
 
 
 #: 本次 Web 服务启动过的配音批次所属工程；服务退出时逐个回收
@@ -268,10 +273,13 @@ def _stop_tts_project(path: str) -> dict:
         {stopped 是否确实停下, killed 是否终止了进程, canceled 被取消的任务数}。
     """
     store = ProjectStore(path)
-    pid_file = store.root / ".ndw" / "web-tts.pid"
     killed = False
-    pid = 0
-    if pid_file.is_file():
+    # 兼容两种入口：逐行/队列合成写 web-tts.pid，整本批量写 web-tts-batch.pid
+    for name in ("web-tts.pid", "web-tts-batch.pid"):
+        pid_file = store.root / ".ndw" / name
+        if not pid_file.is_file():
+            continue
+        pid = 0
         try:
             pid = int(pid_file.read_text(encoding="utf-8").strip())
         except ValueError:
@@ -1456,20 +1464,36 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
             except Exception:
                 return ""
 
-        def _aspect_for(item: dict, kind: str) -> dict:
-            """解析单个条目的画幅与宽高。
+        def _aspect_for(kind: str) -> dict:
+            """按工程画幅解析尺寸。
 
             参数:
-                item: 关键图或视频条目。
                 kind: image / video。
 
             返回:
                 `{"ratio","width","height"}`；解析失败时各字段为 None。
             """
             try:
-                return comfy_media.resolve_aspect(item, project_settings, kind)
+                return comfy_media.resolve_aspect(project_settings, kind)
             except Exception:
                 return {"ratio": None, "width": None, "height": None}
+
+        def _size_mismatch(asset: dict, aspect: dict) -> bool:
+            """判断已生成产物尺寸是否与工程画幅一致。
+
+            参数:
+                asset: 条目资产状态（含 width/height）。
+                aspect: 工程画幅解析结果。
+
+            返回:
+                双方尺寸都存在且不一致时返回 True；缺数据时按一致处理。
+            """
+            try:
+                actual_width, actual_height = int(asset.get("width")), int(asset.get("height"))
+                expected_width, expected_height = int(aspect.get("width")), int(aspect.get("height"))
+            except (TypeError, ValueError):
+                return False
+            return (actual_width, actual_height) != (expected_width, expected_height)
 
         rows = {"sfx": [], "image": [], "video": []}
         keys = {"sfx": "sfx_events", "image": "key_images", "video": "video_segments"}
@@ -1495,7 +1519,7 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
                             reference_warnings = [f"参考图解析失败：{exc}"]
                     if kind in ("image", "video"):
                         template = _template_for(item, kind, bool(references))
-                        aspect = _aspect_for(item, kind)
+                        aspect = _aspect_for(kind)
                     rows[kind].append(
                         {
                             "id": item.get("id"),
@@ -1512,6 +1536,9 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
                             "aspect_ratio": aspect.get("ratio"),
                             "width": aspect.get("width"),
                             "height": aspect.get("height"),
+                            "actual_width": asset.get("width"),
+                            "actual_height": asset.get("height"),
+                            "size_mismatch": _size_mismatch(asset, aspect) if kind in ("image", "video") else False,
                             "references": references,
                             "reference_warnings": reference_warnings,
                         }
@@ -1886,6 +1913,143 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         payload = _respond(_cli("--project", path, "--json", "character", "list"))
         return {"characters": payload or []}
 
+    @app.get("/api/ui/cast/check")
+    def ui_cast_check(path: str = Query(...), chapter: str | None = None) -> dict:
+        """全剧音色与 BGM 一致性校验（R18）。
+
+        参数:
+            path: 工程根目录。
+            chapter: 只校验该章；为空校验全剧。
+
+        返回:
+            `{level, findings: [...], stats: {...}}`。
+        """
+        from ..store.voice_cast import check_cast
+
+        store = _store(path)
+        return check_cast(store, chapter)
+
+    @app.get("/api/ui/cast")
+    def ui_cast_get(path: str = Query(...)) -> dict:
+        """读取音色编排：音色池、旁白人格、切换点、每章旁白展开表。
+
+        参数:
+            path: 工程根目录。
+
+        返回:
+            `{cast, chapters, voices, stock_slots, errors, plan}`。
+        """
+        from ..store.voice_cast import narrator_plan, validate_cast_config
+
+        store = _store(path)
+        project = store.load_project()
+        cast = ((project.get("settings") or {}).get("tts") or {}).get("cast") or {}
+        chapters = [
+            {"id": item.get("id"), "index": item.get("index"), "title": item.get("title")}
+            for item in store.list_chapters()
+        ]
+        voices = [
+            {"id": item.get("id"), "name": item.get("name"), "status": item.get("status")}
+            for item in store.load_voices().get("voices") or []
+        ]
+        binding_index = _voice_binding_index(store.load_voices().get("voices") or [])
+        characters = [
+            {
+                "id": item.get("id"),
+                "name": item.get("name"),
+                "role": item.get("role"),
+                "voice_id": _resolve_voice_binding(item.get("voice_binding"), binding_index),
+            }
+            for item in store.load_characters().get("characters") or []
+        ]
+        stock: dict[str, dict] = {}
+        for character in store.load_characters().get("characters") or []:
+            slot = (character.get("stock") or {}).get("slot")
+            if not slot:
+                continue
+            stock.setdefault(
+                slot,
+                {
+                    "slot": slot,
+                    "label": (character.get("stock") or {}).get("label"),
+                    "voice_slot": (character.get("stock") or {}).get("voice_slot"),
+                    "count": 0,
+                },
+            )
+            stock[slot]["count"] += 1
+        voice_ids = {item["id"] for item in voices if item.get("id")}
+        return {
+            "cast": cast,
+            "chapters": chapters,
+            "voices": voices,
+            "characters": characters,
+            "stock_slots": list(stock.values()),
+            "errors": validate_cast_config(cast, chapters, voice_ids, set(stock)),
+            "plan": narrator_plan(cast, chapters),
+        }
+
+    @app.post("/api/ui/cast")
+    def ui_cast_save(body: dict) -> dict:
+        """保存音色池与旁白切换点；校验不通过时返回错误列表且不落盘。
+
+        参数:
+            body: `{path, cast}`。
+
+        返回:
+            `{ok, errors, check?, plan?}`。
+        """
+        from ..store.voice_cast import check_cast, narrator_plan, normalize_cast, validate_cast_config
+
+        store = _store(body.get("path"))
+        project = store.load_project()
+        chapters = [
+            {"id": item.get("id"), "index": item.get("index"), "title": item.get("title")}
+            for item in store.list_chapters()
+        ]
+        voices = store.load_voices().get("voices") or []
+        voice_ids = {item.get("id") for item in voices if item.get("id")}
+        stock_slots = {
+            (character.get("stock") or {}).get("slot")
+            for character in store.load_characters().get("characters") or []
+            if (character.get("stock") or {}).get("slot")
+        }
+        cast = normalize_cast(body.get("cast") or {})
+        errors = validate_cast_config(cast, chapters, voice_ids, stock_slots)
+        if errors:
+            return {"ok": False, "errors": errors}
+        settings = project.setdefault("settings", {})
+        tts = settings.setdefault("tts", {})
+        tts["cast"] = cast
+        try:
+            store.save_project(project)
+        except Exception as exc:  # noqa: BLE001 - schema/IO 失败统一回给页面
+            return {"ok": False, "errors": [f"保存失败：{exc}"]}
+        return {
+            "ok": True,
+            "errors": [],
+            "check": check_cast(store),
+            "plan": narrator_plan(cast, chapters),
+        }
+
+    @app.post("/api/ui/cast/backfill")
+    def ui_cast_backfill(body: dict) -> dict:
+        """给缺失音色描述的角色补生成（`cast backfill --profiles --apply`）。
+
+        参数:
+            body: `{path, all?, force?}`。
+
+        返回:
+            `{changed, applied}`。
+        """
+        path = body.get("path")
+        _store(path)
+        argv = ["--project", path, "--json", "cast", "backfill", "--profiles", "--apply"]
+        if body.get("all"):
+            argv.append("--all")
+        if body.get("force"):
+            argv.append("--force")
+        return _respond(_cli(*argv))
+
     @app.post("/api/ui/characters")
     def ui_characters_add(body: dict) -> dict:
         """批量追加人物（`character apply --file`）。
@@ -1981,12 +2145,14 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
             ("appearance_prompt", "--appearance-prompt"),
             ("negative_prompt", "--negative-prompt"),
             ("situation", "--situation"),
+            ("voice_profile", "--voice-profile"),
+            ("stock", "--stock"),
         ):
             value = body.get(key)
             if value is None:
                 continue
-            if isinstance(value, list):
-                value = ",".join(str(item) for item in value)
+            if isinstance(value, (dict, list)):
+                value = json.dumps(value, ensure_ascii=False)
             argv += [flag, str(value)]
         relationships = body.get("relationships") or {}
         if isinstance(relationships, dict):
@@ -2394,6 +2560,156 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         store.save_characters(characters)
         return {"character": target, "characters": _voice_board(path)["characters"]}
 
+    @app.post("/api/ui/voices/design/preview")
+    def ui_voices_design_preview(body: dict) -> dict:
+        """根据人物档案生成音色描述，供用户确认后再抽卡。
+
+        参数:
+            body: `{path, character_id, prompt?}`；prompt 非空表示用户手动改写。
+
+        返回:
+            `{profile, source, note, prompt, script, candidates}`。
+
+        异常:
+            HTTPException 400/404: 功能未启用或人物不存在。
+        """
+        from ..adapters import build_adapters
+        from ..tts import voice_design
+
+        store = _store(body.get("path"))
+        cfg = _tts_config()
+        design = cfg.get("voice.design") or {}
+        if not design.get("enabled", True):
+            raise HTTPException(status_code=400, detail={"code": 2, "message": "音色设计未启用（voice.design.enabled=false）"})
+        characters = store.load_characters()["characters"]
+        character = next((item for item in characters if item["id"] == body.get("character_id")), None)
+        if character is None:
+            raise HTTPException(status_code=404, detail={"code": 3, "message": "人物不存在", "character_id": body.get("character_id")})
+        manual = str(body.get("prompt") or "").strip()
+        if manual:
+            result = {"profile": None, "source": "manual", "note": None, "prompt": manual}
+        else:
+            adapters = build_adapters(cfg, store.settings())
+            built = voice_design.build_profile(adapters.writing, character)
+            result = {**built, "prompt": built["profile"]["design_prompt"]}
+        return {
+            **result,
+            "script": design.get("script"),
+            "candidates": int(design.get("candidates", 4)),
+            "max_keep_days": int(design.get("max_keep_days", 7)),
+        }
+
+    @app.post("/api/ui/voices/design/batches")
+    def ui_voices_design_start(body: dict) -> dict:
+        """启动一次音色抽卡批次（后台线程运行，接口立即返回批次 ID）。
+
+        参数:
+            body: `{path, character_id, prompt, profile?, count?}`。
+
+        返回:
+            批次元数据。
+
+        异常:
+            HTTPException 400/404: 参数缺失、环境未就绪或人物不存在。
+        """
+        from ..tts import voice_design
+
+        store = _store(body.get("path"))
+        cfg = _tts_config()
+        design = cfg.get("voice.design") or {}
+        if not design.get("enabled", True):
+            raise HTTPException(status_code=400, detail={"code": 2, "message": "音色设计未启用"})
+        python = str(design.get("python") or "")
+        model_dir = str(design.get("model_dir") or "")
+        if not Path(python).is_file():
+            raise HTTPException(status_code=400, detail={"code": 2, "message": f"VoxCPM2 运行环境不存在：{python}"})
+        if not Path(model_dir).is_dir():
+            raise HTTPException(status_code=400, detail={"code": 2, "message": f"VoxCPM2 权重目录不存在：{model_dir}"})
+        characters = store.load_characters()["characters"]
+        character = next((item for item in characters if item["id"] == body.get("character_id")), None)
+        if character is None:
+            raise HTTPException(status_code=404, detail={"code": 3, "message": "人物不存在", "character_id": body.get("character_id")})
+        prompt = str(body.get("prompt") or "").strip()
+        if not prompt:
+            raise HTTPException(status_code=400, detail={"code": 2, "message": "缺少音色描述"})
+        count = int(body.get("count") or design.get("candidates", 4))
+        return voice_design.create_batch(store, cfg, character, prompt, count, body.get("profile"))
+
+    @app.get("/api/ui/voices/design/batches/{batch_id}")
+    def ui_voices_design_status(batch_id: str, path: str = Query(...)) -> dict:
+        """轮询批次进度与候选清单。
+
+        参数:
+            batch_id: 批次 ID。
+            path: 工程目录。
+
+        异常:
+            HTTPException 404: 批次不存在。
+        """
+        from ..tts import voice_design
+
+        meta = voice_design.read_batch(_store(path), batch_id)
+        if not meta:
+            raise HTTPException(status_code=404, detail={"code": 3, "message": "批次不存在", "batch_id": batch_id})
+        return meta
+
+    @app.get("/api/ui/voices/design/audio")
+    def ui_voices_design_audio(path: str = Query(...), batch_id: str = Query(...), index: int = Query(...)):
+        """返回候选音频，供页面逐条试听。
+
+        异常:
+            HTTPException 404: 批次/候选/文件不存在。
+        """
+        from fastapi.responses import FileResponse
+
+        from ..tts import voice_design
+
+        store = _store(path)
+        meta = voice_design.read_batch(store, batch_id)
+        candidate = next((item for item in meta.get("candidates") or [] if int(item.get("index")) == index), None)
+        if candidate is None:
+            raise HTTPException(status_code=404, detail={"code": 3, "message": "候选不存在", "index": index})
+        target = voice_design.batch_dir(store, batch_id) / candidate["file"]
+        if not target.is_file():
+            raise HTTPException(status_code=404, detail={"code": 3, "message": "候选音频已过期"})
+        return FileResponse(target)
+
+    @app.post("/api/ui/voices/design/select")
+    def ui_voices_design_select(body: dict) -> dict:
+        """采用某条候选：固化参考音并（可选）绑定人物。
+
+        参数:
+            body: `{path, batch_id, index, name, gender, gender_source, bind, voice_id?}`。
+
+        异常:
+            HTTPException 400/404: 批次未就绪或参数非法。
+        """
+        from ..tts import voice_design
+
+        path = body.get("path")
+        store = _store(path)
+        try:
+            result = voice_design.select_candidate(
+                store,
+                str(body.get("batch_id") or ""),
+                int(body.get("index") or 0),
+                str(body.get("name") or ""),
+                str(body.get("gender") or "unknown"),
+                str(body.get("gender_source") or "manual"),
+                bool(body.get("bind")),
+                body.get("voice_id"),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"code": 2, "message": str(exc)}) from exc
+        return {**result, **_voice_board(path)}
+
+    @app.delete("/api/ui/voices/design/batches/{batch_id}")
+    def ui_voices_design_delete(batch_id: str, path: str = Query(...)) -> dict:
+        """手动清理一个候选批次。"""
+        from ..tts import voice_design
+
+        return {"deleted": voice_design.delete_batch(_store(path), batch_id)}
+
     @app.post("/api/ui/voices/delete")
     def ui_voices_delete(body: dict) -> dict:
         """删除音色，并解绑引用它的角色。
@@ -2562,6 +2878,12 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
 
     # 模型清单 / 下载 / ComfyUI 自检（独立模块，避免本文件继续膨胀）
     register_models_routes(app, config_path)
+    # 单行重录 / 版本对比 / Casting 试听 / 整本批量（独立模块）
+    register_voice_tools_routes(app, config_path)
+    # 章节/大纲续写（独立模块）
+    register_continue_routes(app, config_path)
+    # 配乐生成：叙事 / 铺底两档（独立模块）
+    register_bgm_routes(app, config_path)
 
     if STATIC_DIR.exists():
         from fastapi.responses import FileResponse

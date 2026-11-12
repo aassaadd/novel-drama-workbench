@@ -14,7 +14,18 @@
 
   const el = (id) => document.getElementById(id);
   const KIND_LABEL = { dialogue: "对白", narration: "旁白", inner_monologue: "独白" };
-  const CUE_LABEL = { sfx: "音效", visual: "画面", anim: "动画", silence: "静音" };
+  const CUE_LABEL = { sfx: "音效", visual: "画面", anim: "动画", silence: "静音", bgm: "配乐", "bgm-seg": "配乐段落" };
+  const BGM_MOOD_LABELS = {
+    calm: "平静",
+    tense: "紧张",
+    sad: "悲伤",
+    romantic: "浪漫",
+    mysterious: "悬疑",
+    action: "动作",
+    comedic: "喜剧",
+    epic: "史诗",
+    horror: "恐怖",
+  };
 
   /* 标注里的英文枚举 → 中文：只影响展示，markup 原文与写回仍是英文原值。
    * 情绪 / 时间 / 音效类别 / 动画模式 / 机位的中文名来自 core.js，避免多处维护。 */
@@ -122,8 +133,24 @@
       key = labelOf(ANIM_MODE_LABELS, parts[0] || "");
       detail = [parts[1] ? `${parts[1]}ms` : "", labelOf(CAMERA_LABELS, parts[2] || "")].filter(Boolean).join(" · ");
       parts.splice(0, 3);
+    } else if (cue.head === "bgm" || cue.head === "bgm-seg") {
+      const options = {};
+      parts.forEach((item) => {
+        const at = item.indexOf("=");
+        if (at > 0) options[item.slice(0, at)] = item.slice(at + 1);
+      });
+      key = labelOf(BGM_MOOD_LABELS, options.mood || "");
+      detail = [
+        options.name ? options.name.replace(/\+/g, " ") : "",
+        options.energy ? `energy ${options.energy}` : "",
+        options.anchor ? `锚点 ${options.anchor}` : "",
+        options.dur ? `${options.dur}ms` : "",
+      ]
+        .filter(Boolean)
+        .join(" · ");
+      parts.length = 0;
     }
-    const color = { sfx: "mk-sfx", visual: "mk-visual", anim: "mk-anim", silence: "mk-silence" }[cue.head] || "mk-kind";
+    const color = { sfx: "mk-sfx", visual: "mk-visual", anim: "mk-anim", silence: "mk-silence", bgm: "mk-sfx", "bgm-seg": "mk-sfx" }[cue.head] || "mk-kind";
     return (
       `<div class="mk-cue"><span class="mk-tag ${color}">{${esc(tag)}}</span>` +
       (key ? `<span class="mk-tag ${color}">${esc(key)}</span>` : "") +
@@ -177,9 +204,13 @@
 
   /* 渲染标注文本与文件状态。 */
   function render(data) {
+    const hasMarkup = Boolean(String(data.markup || "").trim());
+    const fileName = String(data.markup_path || "").split("/").pop() || "";
     el("scInfo").innerHTML = [
-      `<div class="kv-row"><span class="kv-key">标注文件</span><span class="kv-val">${esc(data.markup_path)}</span></div>`,
-      `<div class="kv-row"><span class="kv-key">已解析脚本</span><span class="kv-val">${data.has_script ? "有" : "无"}</span></div>`,
+      `<div class="kv-row"><span class="kv-key">标注状态</span><span class="kv-val">${esc(
+        hasMarkup ? (data.has_script ? "已生成并应用" : "已生成预览，尚未应用") : "还没有标注"
+      )}</span></div>`,
+      fileName ? `<div class="kv-row"><span class="kv-key">文件</span><span class="kv-val">${esc(fileName)}</span></div>` : "",
     ].join("");
     el("scMarkup").innerHTML = markupHtml(data.markup);
   }
@@ -207,6 +238,13 @@
     if (!NW.state.path || !NW.state.chapter) {
       NW.toast("先打开工程并选择章节");
       return;
+    }
+    if (apply) {
+      const ok = window.confirm(
+        "将根据本章正文重新生成标注，并同步更新本章的台词、音效、画面与视频位。\n" +
+          "已有同名条目会被更新，手工改过的台词可能被覆盖。确定继续？"
+      );
+      if (!ok) return;
     }
     busy = true;
     const buttons = [el("scSuggest"), el("scApply")];

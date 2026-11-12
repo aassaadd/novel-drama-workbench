@@ -27,6 +27,7 @@
   ];
   const LABEL = Object.fromEntries(STAGES);
   const MARK = { succeeded: "✓", failed: "✗", skipped: "–", pending: "·", running: "…" };
+  const RUN_STATUS = { running: "运行中", succeeded: "已完成", failed: "失败", dry_run: "预演", interrupted: "已中断", queued: "排队中" };
 
   let bound = false;
   let busy = false;
@@ -34,6 +35,23 @@
   let polling = false;
 
   const el = (id) => document.getElementById(id);
+
+  /* 编排记录里的章节 ID → 可读章节名；查不到时不裸露内部 ID。
+   * 参数：id 章节 ID。返回：展示文本。
+   */
+  function chapterTitle(id) {
+    if (!id) return "未记录";
+    const snap = window.NWTree && NWTree.snapshot ? NWTree.snapshot() : null;
+    const hit = snap && (snap.chapters || []).find((item) => item.id === id);
+    return hit ? `${hit.index}. ${hit.title || ""}` : "已不存在的章节";
+  }
+
+  /* 编排状态中文名：succeeded / dry_run 等不在通用状态表里，这里补齐。
+   * 参数：status 状态枚举。返回：中文字符串。
+   */
+  function runStatusLabel(status) {
+    return RUN_STATUS[status] || NW.statusLabel(status) || status || "";
+  }
 
   /* 切换「开始编排」按钮状态。
    * 参数：mode 取值 running（禁用 + 文案「编排中…」）/ checking（只禁用，等记录读回来）/ idle（按是否有章节恢复）。
@@ -90,7 +108,7 @@
       const status = item ? item.status : stage === current ? "running" : "pending";
       const note = item ? item.error || item.note || "" : "";
       return (
-        `<li class="step" data-status="${esc(status)}" title="${esc(note || `${label}：${statusLabel(status)}`)}">` +
+        `<li class="step" data-status="${esc(status)}" title="${esc(note || `${label}：${runStatusLabel(status)}`)}">` +
         `${esc(item && item.label ? item.label : label)}</li>`
       );
     }).join("");
@@ -111,7 +129,7 @@
     const progress = runProgressOf(run);
     const running = run.status === "running";
     const last = stages.length ? stages[stages.length - 1] : null;
-    const parts = [`run ${run.run_id}`, `状态 ${statusLabel(run.status)}`, `章节 ${run.chapter_id}`, `开始 ${run.started_at || ""}`];
+    const parts = [`状态 ${runStatusLabel(run.status)}`, `章节 ${chapterTitle(run.chapter_id)}`, `开始 ${run.started_at || ""}`];
     if (running) {
       const currentLabel = progress.current ? LABEL[progress.current] : "收尾";
       parts.push(`当前阶段「${currentLabel}」`);
@@ -209,7 +227,7 @@
         const stageLabel = item.label || LABEL[item.stage] || "未知阶段";
         NW.toast(`编排失败于「${stageLabel}」：${item.error || "未给出原因"}`);
       } else {
-        NW.toast(`编排结束：${statusLabel(run.status)}`, run.status === "succeeded" || run.status === "dry_run");
+        NW.toast(`编排结束：${runStatusLabel(run.status)}`, run.status === "succeeded" || run.status === "dry_run");
       }
       return;
     }
@@ -219,6 +237,27 @@
   /* 启动编排：按钮立刻进入运行态（禁用 + 「编排中…」），接口超过 200ms 才弹 busy 蒙版。 */
   async function start() {
     if (busy || !NW.state.path || !NW.state.chapter) return;
+    const from = el("exFrom").value;
+    const to = el("exTo").value;
+    const fromIndex = STAGES.findIndex(([value]) => value === from);
+    const toIndex = STAGES.findIndex(([value]) => value === to);
+    if (fromIndex < 0 || toIndex < 0) {
+      NW.toast("请先选择起始阶段与结束阶段");
+      return;
+    }
+    if (fromIndex > toIndex) {
+      NW.toast("结束阶段不能早于起始阶段，请重新选择");
+      return;
+    }
+    const force = el("exForce").checked;
+    const keepGoing = el("exKeepGoing").checked;
+    const scope = [
+      `将执行「${LABEL[from]}」→「${LABEL[to]}」`,
+      `章节：${chapterTitle(NW.state.chapter)}`,
+      force ? "已勾选强制重跑，已有产物会被覆盖" : "已完成的阶段会按「跳过已成功阶段」处理",
+      keepGoing ? "某个阶段失败后会继续执行后续阶段" : "",
+    ].filter(Boolean);
+    if (!window.confirm(`${scope.join("；")}。\n确定开始编排？`)) return;
     busy = true;
     setStartButton("running");
     try {
@@ -226,15 +265,16 @@
         method: "POST",
         headers: { "Content-Type": "application/json" },
         busy: "正在启动编排…",
-        busyDetail: `${LABEL[el("exFrom").value] || ""} → ${LABEL[el("exTo").value] || ""}`,
+        busyDetail: `${LABEL[from] || ""} → ${LABEL[to] || ""}`,
         body: JSON.stringify({
           path: NW.state.path,
           chapter: NW.state.chapter,
-          from: el("exFrom").value,
-          to: el("exTo").value,
-          force: el("exForce").checked,
-          no_resume: !el("exResume").checked,
-          keep_going: el("exKeepGoing").checked,
+          from,
+          to,
+          force,
+          // 强制重跑本身就要求忽略已有成功记录，这里再兜一层，避免界面状态没同步时传错
+          no_resume: force ? true : !el("exResume").checked,
+          keep_going: keepGoing,
         }),
       });
       NW.toast(`已启动：PID ${result.pid}，日志 ${result.log}`, true);
@@ -300,6 +340,18 @@
     el("exStart").addEventListener("click", start);
     el("exJianying").addEventListener("click", startJianying);
     el("exRefresh").addEventListener("click", loadFiles);
+    // 「强制重跑」与「跳过已成功阶段」语义互斥：勾前者时自动取消并禁用后者
+    const forceBox = el("exForce");
+    const resumeBox = el("exResume");
+    if (forceBox && resumeBox) {
+      const syncForce = () => {
+        if (forceBox.checked) resumeBox.checked = false;
+        resumeBox.disabled = forceBox.checked;
+      };
+      forceBox.addEventListener("change", syncForce);
+      forceBox.addEventListener("input", syncForce);
+      syncForce();
+    }
     NW.onProject(() => {
       // 换工程后先禁用，等新记录读回来再决定按钮状态，避免刷新/切换期间连点触发第二个编排
       setStartButton("checking");

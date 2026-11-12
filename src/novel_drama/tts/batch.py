@@ -19,7 +19,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from ..orchestration.pipeline import is_line_stale
-from ..store import resolve_for_character
 from . import alignment, cache, line_state, sidecar
 from .errors import TtsError
 from .fingerprint import line_fingerprint
@@ -86,7 +85,7 @@ def plan_batch(
     return rows
 
 
-def _line_voice(store, characters_table: dict, line: dict, service) -> dict:
+def _line_voice(store, characters_table: dict, line: dict, service, chapter: dict | None = None) -> dict:
     """解析一行该用的音色参考。
 
     参数:
@@ -94,11 +93,14 @@ def _line_voice(store, characters_table: dict, line: dict, service) -> dict:
         characters_table: 角色表。
         line: 台词行。
         service: TtsService（提供 default_voice 兜底）。
+        chapter: 所在章节（R18 章节覆盖与旁白切换点需要）；缺省时按无覆盖处理。
 
     返回:
         {"voice_id", "variant_id", "ref_audio", "ref_text", "source"}。
     """
-    resolved = resolve_for_character(store, characters_table, line.get("speaker_id"), line.get("emotion"))
+    from ..store.voice_cast import resolve_cast_voice
+
+    resolved = resolve_cast_voice(store, characters_table, chapter or {}, line)
     if resolved.get("ref_audio"):
         return resolved
     if resolved.get("voice_id"):
@@ -337,7 +339,7 @@ def run_batch(
         batch_results = []
         for row in batch_rows:
             line = row["line"]
-            voice_info = _line_voice(store, characters_table, line, service)
+            voice_info = _line_voice(store, characters_table, line, service, chapter)
             rel_path = f"assets/voice/lines/{line['id']}_r{line['revision']}.wav"
             out_path = store.root / rel_path
             instruct = _instruct_for(line)

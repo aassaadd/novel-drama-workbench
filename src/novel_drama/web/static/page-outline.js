@@ -55,7 +55,7 @@
         <button class="btn small" type="button" data-bind-chapter="${esc(chapter.id || "")}">编辑绑定</button>
       </div>
       <div class="bind-line"><span class="muted">世界</span>${chips ? `<span class="bind-chips">${chips}</span>` : `<span class="bind-none">未绑定</span>`}</div>
-      <div class="bind-line"><span class="muted">POV</span>${povId ? `<span class="bind-chip">${esc(characterName(povId))}</span>` : `<span class="bind-none">未设置</span>`}</div>
+      <div class="bind-line"><span class="muted">视角人物</span>${povId ? `<span class="bind-chip">${esc(characterName(povId))}</span>` : `<span class="bind-none">未设置</span>`}</div>
       ${missing.length ? `<div class="bind-warn">本章缺${missing.join("/")}，无法生成正文</div>` : ""}
     </div>`;
   }
@@ -218,7 +218,7 @@
 
     const hint = document.createElement("p");
     hint.className = "modal-hint";
-    hint.textContent = "世界可多选；POV 决定正文的主要视角。至少绑定 1 个世界与 1 个 POV 才能生成正文。";
+    hint.textContent = "世界可多选；视角人物决定正文的主要视角。至少绑定 1 个世界与 1 个视角人物才能生成正文。";
     dialog.appendChild(hint);
 
     const worldTitle = document.createElement("div");
@@ -270,7 +270,7 @@
 
     const povLabel = document.createElement("label");
     povLabel.className = "stack bind-pov";
-    povLabel.textContent = "POV 人物";
+    povLabel.textContent = "视角人物";
     const select = document.createElement("select");
     select.setAttribute("data-bind-pov", "");
     const none = document.createElement("option");
@@ -365,9 +365,17 @@
     }
   }
 
-  /* 生成大纲。 */
+  /* 生成大纲。已有大纲时先确认，避免一次点击替换整份大纲。 */
   async function generate() {
     if (busy || !NW.state.path) return;
+    const currentChapters = actsCache.reduce((sum, act) => sum + (act.chapters || []).length, 0);
+    if (actsCache.length) {
+      const ok = window.confirm(
+        `当前已有 ${actsCache.length} 幕 / ${currentChapters} 章大纲。\n` +
+          "重新生成会替换这份大纲（已落地章节的正文不受影响）。确定继续？"
+      );
+      if (!ok) return;
+    }
     busy = true;
     el("olGenerate").disabled = true;
     try {
@@ -384,7 +392,7 @@
         busy: "正在生成大纲…",
         busyDetail: "按幕分批生成，幕数越多耗时越长",
       });
-      NW.toast(`大纲已生成：${result.chapters} 章 / ${result.beats} 个节拍（provider=${result.provider}）`, true);
+      NW.toast(`大纲已生成：${result.chapters} 章 / ${result.beats} 个节拍`, true);
       /* 重新拉取大纲与候选，保证绑定信息一并刷新 */
       await load();
       /* 生成后自动跑一次黄金三章检查（只提示，不阻断） */
@@ -400,6 +408,14 @@
   /* 落地成章节。 */
   async function apply() {
     if (busy || !NW.state.path) return;
+    const chapterCount = actsCache.reduce((sum, act) => sum + (act.chapters || []).length, 0);
+    if (chapterCount) {
+      const ok = window.confirm(
+        `将按当前大纲落地 ${chapterCount} 章：缺失的章节会新建，已存在的同序号章节会更新标题与摘要等元数据。\n` +
+          "章节正文不会被覆盖。确定继续？"
+      );
+      if (!ok) return;
+    }
     busy = true;
     el("olApply").disabled = true;
     try {
@@ -435,10 +451,110 @@
     openBindPanel(chapter);
   }
 
+  /* ---------------- 续写大纲 ---------------- */
+
+  /* 请求大纲续写预览：在已有章节之后追加，跨幕自动建幕，不写盘。
+   * 章数取工具条上的「续写章数」，不再复用「每幕章数」。
+   * 参数：无。
+   * 返回：Promise<void>。
+   */
+  async function requestOutlineContinue() {
+    if (busy || !NW.state.path) return;
+    const chapters = Number((el("olContinueChapters") || {}).value || 3);
+    const words = Number((el("olWords") || {}).value || 1200);
+    busy = true;
+    el("olContinue").disabled = true;
+    try {
+      const result = await NW.api("/api/ui/outline/continue", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: NW.state.path, chapters, words }),
+        busy: "正在续写大纲…",
+        busyDetail: "接着已有章节往后排，先预览再写入",
+      });
+      showContinueDialog(result);
+    } catch (error) {
+      NW.toast(`续写大纲失败（${error.code || "-"}）：${error.message}`);
+    } finally {
+      busy = false;
+      el("olContinue").disabled = false;
+    }
+  }
+
+  /* 大纲续写确认弹窗：列出新增幕/章，可取消或写入设定库。
+   * 参数：result 续写预览结果。
+   * 返回：无。
+   */
+  function showContinueDialog(result) {
+    const mask = document.createElement("div");
+    mask.style.cssText =
+      "position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:60;display:flex;align-items:center;justify-content:center";
+    const box = document.createElement("div");
+    box.style.cssText =
+      "background:#fff;color:#222;border-radius:10px;max-width:680px;width:92%;max-height:82vh;display:flex;flex-direction:column;padding:16px 18px;gap:10px;box-shadow:0 12px 40px rgba(0,0,0,.25)";
+    const chapters = result.new_chapters || [];
+    const rows = chapters
+      .map(
+        (item) =>
+          `<div style="font-size:13px;line-height:1.8">第 ${item.index} 章《${item.title || "未命名"}》` +
+          (item.summary ? `：${item.summary}` : "") +
+          "</div>"
+      )
+      .join("");
+    const head = document.createElement("div");
+    head.innerHTML =
+      "<b>大纲续写预览（尚未写入）</b>" +
+      `<div style="margin-top:6px;font-size:13px;line-height:1.7">本次将新增 <b>${result.acts_added}</b> 幕 / ` +
+      `<b>${result.chapters_added}</b> 章：第 ${result.start_index} 章起</div>` +
+      `<div style="max-height:46vh;overflow:auto;margin-top:8px">${rows || "（模型没有返回可用章节）"}</div>` +
+      '<div style="margin-top:8px;font-size:12px;color:#888">写入后仍需点「落地成章节」才会创建章节文件。</div>';
+    const actions = document.createElement("div");
+    actions.style.cssText = "display:flex;gap:8px;justify-content:flex-end";
+    const mk = (text, primary, onClick) => {
+      const button = document.createElement("button");
+      button.className = primary ? "btn primary" : "btn";
+      button.textContent = text;
+      button.addEventListener("click", onClick);
+      return button;
+    };
+    actions.appendChild(mk("取消", false, () => mask.remove()));
+    actions.appendChild(mk("写入大纲", true, () => applyOutlineContinue(mask)));
+    box.append(head, actions);
+    mask.appendChild(box);
+    mask.addEventListener("click", (event) => {
+      if (event.target === mask) mask.remove();
+    });
+    document.body.appendChild(mask);
+  }
+
+  /* 把预览结果写入设定库大纲（逐幕落盘），随后刷新页面大纲。
+   * 参数：mask 当前弹窗。
+   * 返回：Promise<void>。
+   */
+  async function applyOutlineContinue(mask) {
+    const button = mask ? mask.querySelector("button.primary") : null;
+    if (button) button.disabled = true;
+    try {
+      const result = await NW.api("/api/ui/outline/continue", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: NW.state.path, apply: true }),
+        busy: "正在写入大纲…",
+      });
+      if (mask) mask.remove();
+      NW.toast(`已追加 ${result.acts_added} 幕 / ${result.chapters_added} 章，记得点「落地成章节」`, true);
+      await load();
+    } catch (error) {
+      NW.toast(`写入大纲失败（${error.code || "-"}）：${error.message}`);
+      if (button) button.disabled = false;
+    }
+  }
+
   /* 首次激活绑定事件。 */
   function bind() {
     if (bound) return;
     bound = true;
+    el("olContinue").addEventListener("click", requestOutlineContinue);
     el("olGenerate").addEventListener("click", generate);
     el("olCheckBtn").addEventListener("click", checkOutline);
     el("olApply").addEventListener("click", apply);

@@ -134,6 +134,7 @@
           "description": "v2：对比试听默认保留的候选数"
         },
         "routing": { "$ref": "#/$defs/tts_routing" },
+        "cast": { "$ref": "#/$defs/tts_cast", "description": "R18：全剧音色编排策略（旁白人格/切换点/龙套音色池/兜底）" },
         "sample_rate": { "type": "integer", "minimum": 8000, "maximum": 96000 },
         "max_chunk_ms": { "type": "integer", "minimum": 5000, "maximum": 40000, "description": "v2：单次合成硬上限" },
         "chunk_silence_ms": { "type": "integer", "minimum": 0, "maximum": 1000, "description": "v2：切块间的目标净间隔（头尾保留的气口会从插入量中扣除）" },
@@ -161,6 +162,67 @@
         "policy_revision": { "type": "integer", "minimum": 1 },
         "retry_original_first": { "type": "boolean" },
         "allow_noncommercial": { "type": "boolean" }
+      }
+    },
+    "tts_cast": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "R18：全剧音色编排。空对象表示未配置，解析时全部走角色绑定与工程默认",
+      "properties": {
+        "narrators": { "type": "array", "items": { "$ref": "#/$defs/narrator_persona" } },
+        "default_narrator_id": { "type": ["string", "null"], "pattern": "^npr_[0-9A-Za-z]{3,32}$" },
+        "narrator_switches": { "type": "array", "items": { "$ref": "#/$defs/narrator_switch" } },
+        "voice_pool": { "type": "array", "items": { "$ref": "#/$defs/voice_pool_slot" } },
+        "stock_defaults": {
+          "type": "object",
+          "description": "音色池槽位 / 职业槽位 → 音色 ID；职业槽位优先，其次 voice_slot",
+          "additionalProperties": { "type": "string", "pattern": "^voc_[0-9A-Za-z]{3,32}$" }
+        },
+        "unknown_voice_id": { "type": ["string", "null"], "pattern": "^voc_[0-9A-Za-z]{3,32}$" },
+        "minor_fallback_voice_id": { "type": ["string", "null"], "pattern": "^voc_[0-9A-Za-z]{3,32}$" },
+        "narrator_fallback_voice_id": { "type": ["string", "null"], "pattern": "^voc_[0-9A-Za-z]{3,32}$" },
+        "strict_minor": { "type": "boolean", "description": "true 时未归类路人/龙套缺音色在配音前报 error" },
+        "strict_bgm": { "type": "boolean", "description": "true 时未规划 BGM 在配音/导出前报 error" },
+        "honor_line_override": { "type": "boolean", "description": "false 时忽略 line.voice 覆盖（兼容老工程）" }
+      }
+    },
+    "narrator_persona": {
+      "type": "object",
+      "required": ["id", "label"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "pattern": "^npr_[0-9A-Za-z]{3,32}$" },
+        "label": { "type": "string", "minLength": 1, "maxLength": 60 },
+        "voice_id": { "type": ["string", "null"], "pattern": "^voc_[0-9A-Za-z]{3,32}$" },
+        "voice_profile": { "type": ["object", "null"], "additionalProperties": true, "description": "旁白人格的音色描述，结构同 character.voice_profile" }
+      }
+    },
+    "narrator_switch": {
+      "type": "object",
+      "required": ["at_chapter_id", "persona_id", "reason"],
+      "additionalProperties": false,
+      "properties": {
+        "at_chapter_id": { "type": "string", "pattern": "^chp_[0-9A-Za-z]{6,32}$" },
+        "end_chapter_id": {
+          "type": ["string", "null"],
+          "pattern": "^chp_[0-9A-Za-z]{6,32}$",
+          "description": "区间结束章节（含）；为空表示延续到下一个切换点之前"
+        },
+        "persona_id": { "type": "string", "pattern": "^npr_[0-9A-Za-z]{3,32}$" },
+        "reason": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "scope": { "type": "string", "enum": ["from_here", "this_chapter_only"] }
+      }
+    },
+    "voice_pool_slot": {
+      "type": "object",
+      "required": ["slot", "label"],
+      "additionalProperties": false,
+      "properties": {
+        "slot": { "type": "string", "pattern": "^[a-z][a-z0-9_]{1,39}$" },
+        "label": { "type": "string", "minLength": 1, "maxLength": 40 },
+        "voice_id": { "type": ["string", "null"], "pattern": "^voc_[0-9A-Za-z]{3,32}$" },
+        "gender": { "type": ["string", "null"], "enum": ["male", "female", "other", "unknown", null] },
+        "age_feel": { "type": ["string", "null"], "maxLength": 30 }
       }
     },
     "tts_provider_ref": {
@@ -219,7 +281,7 @@
           "type": "string",
           "enum": ["1:1", "3:4", "4:3", "9:16", "16:9"],
           "default": "1:1",
-          "description": "v2：工程画幅；条目自带画幅时以条目为准，旧工程缺省按 1:1"
+          "description": "v2：工程画幅；图像/视频尺寸的唯一来源，条目自带画幅不参与生成，旧工程缺省按 1:1"
         },
         "image_width": { "type": "integer", "minimum": 256, "maximum": 4096 },
         "image_height": { "type": "integer", "minimum": 256, "maximum": 4096 }

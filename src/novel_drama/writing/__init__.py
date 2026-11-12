@@ -1,5 +1,6 @@
 """写作编排包：大纲、章节正文、导演标注建议、设定与人物生成。"""
 
+from .continuation import continue_chapter, continue_outline
 from .editing import edit_chapter, save_chapter_content
 from .service import (
     apply_outline,
@@ -27,6 +28,8 @@ __all__ = [
     "build_art_prompt",
     "build_writing_adapter",
     "check_golden_three",
+    "continue_chapter",
+    "continue_outline",
     "edit_chapter",
     "generate_chapter",
     "generate_characters",

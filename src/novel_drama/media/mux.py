@@ -13,24 +13,36 @@ import subprocess
 from pathlib import Path
 
 from ..cleanup import remove_dir_quietly
+from .comfy_media import resolve_aspect
 
-# 默认编码参数
-CODEC = {"video": "libx264", "audio": "aac", "fps": 24, "width": 1280, "height": 720, "pix_fmt": "yuv420p"}
+# 默认编码参数（画布宽高由工程画幅推导，不在此留默认值）
+CODEC = {"video": "libx264", "audio": "aac", "fps": 24, "pix_fmt": "yuv420p"}
 # 无画面时的兜底色
 FALLBACK_COLOR = "0x101318"
 
 
-def plan_mux(timeline: dict, project_root: str | Path, mix_plan: dict | None = None) -> dict:
+def plan_mux(
+    timeline: dict,
+    project_root: str | Path,
+    mix_plan: dict | None = None,
+    *,
+    settings: dict | None = None,
+    manifest: dict | None = None,
+) -> dict:
     """生成混流计划（不执行）。
 
     参数:
         timeline: 时间轴 dict。
         project_root: 工程根目录。
         mix_plan: `plan_mix` 的结果；为空时只描述视频/画面输入。
+        settings: 工程设置；画布宽高由 `output.aspect_ratio` 推导。
+        manifest: ComfyUI 模板清单；用于取工程画幅对应的像素尺寸。
 
     返回:
-        {status, audio, video_segments, images, visual_items, output, codec, blockers}。
+        {status, audio, video_segments, images, visual_items, output, codec, aspect_ratio, blockers}。
     """
+    aspect = resolve_aspect(settings or {}, "image", manifest=manifest)
+    codec = {**CODEC, "width": aspect["width"], "height": aspect["height"]}
     root = Path(project_root)
     videos: list[dict] = []
     images: list[dict] = []
@@ -82,7 +94,8 @@ def plan_mux(timeline: dict, project_root: str | Path, mix_plan: dict | None = N
         "visual_items": visual_items,
         "duration_ms": int(timeline.get("duration_ms") or 0),
         "output": str(root / "renders" / f"{timeline.get('chapter_id')}.mp4"),
-        "codec": dict(CODEC),
+        "codec": codec,
+        "aspect_ratio": aspect["ratio"],
         "blockers": blockers,
     }
 
@@ -214,6 +227,8 @@ def mux(plan: dict) -> dict:
     if not audio or not Path(audio).exists():
         raise ValueError("混流缺少可用音轨：请先执行 ndw mix --render 生成混音文件")
     codec = {**CODEC, **(plan.get("codec") or {})}
+    if not codec.get("width") or not codec.get("height"):
+        raise ValueError("混流计划缺少画布尺寸：请用 plan_mux() 按工程画幅生成计划")
     binary = plan.get("binary") or "ffmpeg"
     ffprobe = plan.get("ffprobe") or "ffprobe"
     output = Path(plan["output"])

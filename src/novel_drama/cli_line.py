@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from .cli_common import EXIT_OK, EXIT_REJECTED, _emit, _resolve_store
+from .cli_common import EXIT_OK, EXIT_REJECTED, _emit, _resolve_store, cast_hint
 from .config import AppConfig
 from .models import entities
 from .orchestration.pipeline import split_chapter_scenes, split_scene_lines
@@ -29,6 +29,9 @@ def cmd_scene_split(args, config: AppConfig) -> int:
     else:
         text = f"已拆分 {len(scenes)} 个场景（章节已保存）"
     _emit(args, text, payload)
+    if not args.dry_run:
+        # 切分完成后提示音色/BGM 编排问题，但不阻断切分结果落盘
+        cast_hint(store)
     return EXIT_OK
 
 
@@ -43,6 +46,9 @@ def cmd_line_split(args, config: AppConfig) -> int:
         f"{'预览' if args.dry_run else '已切分'}：场景 {result['scenes']} 个，台词行 {result['lines']} 行，未识别说话人 {result['unknown']} 行",
         result,
     )
+    if not args.dry_run:
+        # 切分完成后提示音色/BGM 编排问题，但不阻断切分结果落盘
+        cast_hint(store)
     return EXIT_OK
 
 

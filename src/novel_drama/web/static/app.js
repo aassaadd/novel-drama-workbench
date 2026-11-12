@@ -22,7 +22,7 @@ const EMOTIONS = [
 
 const STATE_ORDER = ["pending", "queued", "running", "ready", "failed", "stale", "skipped"];
 const STATE_LABEL = {
-  pending: "待生成", queued: "排队", running: "运行中", ready: "就绪",
+  pending: "待生成", queued: "排队", running: "运行", ready: "就绪",
   failed: "失败", stale: "过期", skipped: "跳过",
 };
 
@@ -64,6 +64,369 @@ const $ = (id) => document.getElementById(id);
 
 /* toast / api / qs / stateBadge / kindLabel / fmt / escapeHtml 已下沉到 core.js，
  * 这里直接用全局同名函数，行为与原来逐字一致。 */
+
+/* 行内「重录」按钮：只重跑这一行，旧版本文件保留，可在右栏对比试听。
+ * 参数：lineId 台词行 ID。
+ * 返回：无（结果通过 toast 与刷新行体现）。
+ */
+async function rerunLine(lineId) {
+  if (!state.path || !state.chapter) return;
+  if (rerunning.has(lineId)) return;
+  rerunning.add(lineId);
+  const button = $("rows").querySelector(`.row[data-line="${CSS.escape(lineId)}"] .row-rerun`);
+  if (button) button.disabled = true;
+  try {
+    const result = await api("/api/ui/line/rerun", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: state.path, chapter: state.chapter, line: lineId }),
+      busy: "正在重录这一行…",
+      busyDetail: lineId,
+    });
+    await loadLines();
+    if (state.selected === lineId) await loadVersions(lineId);
+    toast(
+      `已重录 ${lineId}：r${result.previous_revision} → r${result.revision}` +
+        (result.timeline_rebuilt ? "（时间轴已重建）" : ""),
+      true
+    );
+  } catch (error) {
+    // 后端已经把 provider 错误翻译成中文；这里不吞错，原样展示
+    toast(`重录失败：${error.message}`);
+    await loadLines();
+  } finally {
+    rerunning.delete(lineId);
+  }
+}
+
+/* 读一行的录音版本列表并渲染到右栏。 */
+async function loadVersions(lineId) {
+  const list = $("versionList");
+  const active = $("activeVersion");
+  if (!list) return;
+  list.innerHTML = '<div class="muted">读取版本…</div>';
+  try {
+    const data = await api(`/api/ui/line/versions?${qs({ path: state.path, chapter: state.chapter, line: lineId })}`);
+    const versions = data.versions || [];
+    if (active) active.textContent = data.revision ? `当前生效 r${data.revision}` : "";
+    if (!versions.length) {
+      list.innerHTML = '<div class="muted">还没有生成过音频</div>';
+      return;
+    }
+    list.innerHTML = versions
+      .map(
+        (item) =>
+          `<div class="version-row ${item.active ? "active" : ""}">` +
+          `<span class="tag ${item.active ? "on" : ""}">r${item.revision}${item.active ? " 当前生效" : " 旧版"}</span>` +
+          `<button class="btn small" type="button" data-version-play="${escapeHtml(item.path)}">${
+            item.active ? "听新版" : "听旧版"
+          }</button>` +
+          `<span class="muted">${Math.round((item.size || 0) / 1024)} KB</span>` +
+          `</div>`
+      )
+      .join("");
+  } catch (error) {
+    list.innerHTML = `<div class="muted">读取版本失败：${escapeHtml(error.message)}</div>`;
+  }
+}
+
+/* 播放指定工程内音频（版本对比也走这一个 Audio，避免叠音）。 */
+function playFile(rel) {
+  if (!rel) return;
+  if (playback.audio) playback.audio.pause();
+  const audio = new Audio(uiFileUrl(rel, state.path));
+  playback.audio = audio;
+  playback.line = "";
+  audio.play().catch((error) => toast(`试听失败：${error.message}`));
+}
+
+/* 注入右栏「录音版本」区块（不改 index.html，避免与并行改动冲突）。 */
+function injectVersionPanel() {
+  const form = $("form");
+  if (!form || document.getElementById("versionList")) return;
+  const box = document.createElement("div");
+  box.className = "versions";
+  box.innerHTML = `
+    <div class="diff-title">录音版本 <span class="muted" id="activeVersion"></span></div>
+    <div class="diff-body" id="versionList"><div class="muted">选中一行后显示</div></div>`;
+  form.appendChild(box);
+  box.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-version-play]");
+    if (button) playFile(button.getAttribute("data-version-play"));
+  });
+}
+
+/* 重录请求的并发去重：同一行重复点击不再发第二次。 */
+const rerunning = new Set();
+
+/* ---------------- 补齐缺失（轻量增量批量） ---------------- */
+
+/* 批量界面状态：面板 DOM 由脚本注入，避免改 index.html。
+ * 只补缺失/失败行，已有音频跳过；scope=chapter 默认只看当前章。 */
+const batch = { timer: null, polling: false, plan: null, scope: "chapter" };
+
+/* 打开/收起整本批量面板；打开时先读预计条数与阻断项。 */
+async function toggleBatchPanel() {
+  const panel = $("batchPanel");
+  if (!panel) return;
+  if (!panel.hidden) {
+    panel.hidden = true;
+    return;
+  }
+  panel.hidden = false;
+  const scopeSelect = $("batchScope");
+  if (scopeSelect) scopeSelect.value = batch.scope;
+  await refreshBatch();
+}
+
+/* 读取补齐计划：跳过多少、实际要补多少、按历史均速预计多久。 */
+async function refreshBatch() {
+  if (!state.path) {
+    $("batchPlanInfo").textContent = "先打开工程";
+    return;
+  }
+  if (batch.scope === "chapter" && !state.chapter) {
+    $("batchPlanInfo").textContent = "先选一个章节";
+    $("batchStart").disabled = true;
+    return;
+  }
+  const progress = await readBatchProgress(false);
+  if (progress && progress.running) {
+    renderBatchProgress(progress);
+    startBatchPolling();
+    return;
+  }
+  try {
+    const query = { path: state.path, scope: batch.scope };
+    if (batch.scope === "chapter") query.chapter = state.chapter;
+    const plan = await api(`/api/ui/tts/batch-all/plan?${qs(query)}`);
+    batch.plan = plan;
+    const parts = [`跳过 ${plan.skipped || 0} 行`, `待补 ${plan.total} 行`];
+    if (plan.total > 0) {
+      parts.push(
+        plan.eta_ms
+          ? `预计约 ${formatEta(plan.eta_ms)}（按 ${Math.round((plan.avg_ms_per_line || 0) / 1000)} 秒/行）`
+          : "首次运行，暂无速度可估算"
+      );
+    }
+    if (plan.blockers && plan.blockers.length) parts.push(`阻断项 ${plan.blockers.length} 个`);
+    if (!plan.ready) parts.push(plan.ready_reason || "provider 不可用");
+    $("batchPlanInfo").textContent = plan.total > 0 || plan.blockers?.length ? parts.join(" · ") : "当前范围没有缺失，无需补齐";
+    $("batchStart").disabled = !plan.ready || plan.total <= 0 || (plan.blockers || []).length > 0;
+    $("batchProgress").textContent = (plan.blockers || []).length
+      ? `先修正音色编排：${plan.blockers.slice(0, 3).join("；")}`
+      : "";
+    $("batchFailures").innerHTML = "";
+    renderBatchFill(0, plan.total);
+    $("batchEta").textContent = "";
+  } catch (error) {
+    $("batchPlanInfo").textContent = `读取失败：${error.message}`;
+    $("batchStart").disabled = true;
+  }
+}
+
+/* 启动「补齐缺失」（后台进程），随后进入轮询。 */
+async function startBatch() {
+  if (!state.path) return;
+  $("batchStart").disabled = true;
+  try {
+    const body = { path: state.path, scope: batch.scope };
+    if (batch.scope === "chapter") body.chapter = state.chapter;
+    const result = await api("/api/ui/tts/batch-all", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    $("batchProgress").textContent = `已开始补齐：共 ${result.total} 行，等待第一行完成…`;
+    $("batchFailures").innerHTML = "";
+    startBatchPolling();
+  } catch (error) {
+    $("batchProgress").textContent = `启动失败：${error.message}`;
+    $("batchStart").disabled = false;
+  }
+}
+
+/* 轮询进度文件；有任务时 2.5 秒一次，结束后停。 */
+function startBatchPolling() {
+  batch.polling = true;
+  clearTimeout(batch.timer);
+  scheduleBatchPoll(600);
+}
+
+function scheduleBatchPoll(delay) {
+  clearTimeout(batch.timer);
+  batch.timer = setTimeout(pollBatch, delay);
+}
+
+async function pollBatch() {
+  if (!batch.polling) return;
+  const progress = await readBatchProgress(true);
+  if (!progress) {
+    scheduleBatchPoll(2500);
+    return;
+  }
+  renderBatchProgress(progress);
+  if (progress.running) {
+    scheduleBatchPoll(2500);
+    return;
+  }
+  batch.polling = false;
+  if (progress.interrupted) {
+    // 用户停止或进程崩溃：不重跑已完成行，再点一次会从剩下的行继续
+    await loadLines();
+    await loadPlan();
+    await refreshBatch();
+    $("batchProgress").textContent = `已中断：完成 ${progress.done}/${progress.total}，再点「开始补齐」会接着跑`;
+    toast(`补齐已中断：完成 ${progress.done}/${progress.total}，已完成的不会重复合成`);
+  } else if (progress.finished) {
+    await loadLines();
+    await loadPlan();
+    toast(
+      `补齐结束：完成 ${progress.done}/${progress.total}，失败 ${progress.failed}`,
+      progress.failed === 0
+    );
+  }
+  $("batchStart").disabled = false;
+}
+
+/* 读进度；静默模式下失败返回 null，不打扰用户。 */
+async function readBatchProgress(quiet) {
+  if (!state.path) return null;
+  try {
+    return await api(`/api/ui/tts/batch-all/progress?${qs({ path: state.path })}`);
+  } catch (error) {
+    if (!quiet) $("batchProgress").textContent = `读取进度失败：${error.message}`;
+    return null;
+  }
+}
+
+/* 渲染进度、预计剩余与失败行清单。 */
+function renderBatchProgress(progress) {
+  const total = progress.total || 0;
+  const done = progress.done || 0;
+  renderBatchFill(done, total);
+  $("batchProgress").textContent =
+    `完成 ${done}/${total}` +
+    (progress.failed ? `（失败 ${progress.failed}）` : "") +
+    (progress.running && progress.current_chapter ? ` · 当前 ${progress.current_chapter}` : "") +
+    (progress.finished && !progress.running ? " · 已结束" : "");
+  const eta = $("batchEta");
+  if (progress.running && progress.eta_ms > 0) {
+    eta.textContent = `预计剩余 ${formatEta(progress.eta_ms)}`;
+    eta.hidden = false;
+  } else {
+    eta.textContent = "";
+    eta.hidden = true;
+  }
+  renderBatchFailures(progress.rows || []);
+  if (!progress.running && progress.log_tail && done === 0) {
+    $("batchProgress").textContent += "（没有产出，见日志）";
+  }
+}
+
+function renderBatchFill(done, total) {
+  const fill = $("batchFill");
+  if (fill) fill.style.width = total > 0 ? `${Math.min(100, (done / total) * 100)}%` : "0";
+}
+
+/* 失败行清单：可定位到那一行，也可就地单行重录。 */
+function renderBatchFailures(rows) {
+  const box = $("batchFailures");
+  if (!box) return;
+  if (!rows.length) {
+    box.innerHTML = "";
+    return;
+  }
+  box.innerHTML = rows
+    .map((row) => {
+      const where = `${row.chapter_title || row.chapter_id || ""} · ${row.line_id || ""}`;
+      return (
+        `<div class="batch-failure">` +
+        `<span class="where">${escapeHtml(where)}</span>` +
+        `<span class="why" title="${escapeHtml(row.message || "")}">${escapeHtml(row.message || "未记录原因")}</span>` +
+        `<button class="btn small" type="button" data-batch-goto="${escapeHtml(row.chapter_id || "")}" data-batch-line="${escapeHtml(
+          row.line_id || ""
+        )}">定位</button>` +
+        `<button class="btn small primary" type="button" data-batch-retry="${escapeHtml(
+          row.chapter_id || ""
+        )}" data-batch-line="${escapeHtml(row.line_id || "")}">重录</button>` +
+        `</div>`
+      );
+    })
+    .join("");
+}
+
+/* 注入「批量补齐缺失」入口与面板（不改 index.html）。
+ * 面板挂在顶部徽标下方，打开时一定可见；不放在底部运行栏之后，避免被折叠区挡住。 */
+function injectBatchPanel() {
+  const view = $("view-voice");
+  if (!view || document.getElementById("batchPanel")) return;
+  const actions = view.querySelector(".run-actions");
+  if (actions) {
+    const button = document.createElement("button");
+    button.className = "btn";
+    button.type = "button";
+    button.id = "btnBatchAll";
+    button.textContent = "批量补齐缺失";
+    actions.insertBefore(button, actions.firstChild);
+    button.addEventListener("click", toggleBatchPanel);
+  }
+  const panel = document.createElement("div");
+  panel.className = "batch-panel";
+  panel.id = "batchPanel";
+  panel.hidden = true;
+  panel.innerHTML = `
+    <div class="batch-head">
+      <b>批量补齐缺失</b>
+      <select class="input" id="batchScope">
+        <option value="chapter">仅当前章节</option>
+        <option value="all">全书缺失</option>
+      </select>
+      <span class="batch-meta" id="batchPlanInfo">读取中…</span>
+      <button class="btn small primary" type="button" id="batchStart" disabled>开始补齐</button>
+      <button class="btn small" type="button" id="batchRefresh">刷新</button>
+      <button class="btn small" type="button" id="batchClose">收起</button>
+    </div>
+    <div class="run-meter" style="margin-top:8px">
+      <div class="run-track"><div class="run-fill" id="batchFill"></div></div>
+      <span class="run-eta" id="batchEta" hidden></span>
+    </div>
+    <div class="batch-meta" id="batchProgress" style="margin-top:6px"></div>
+    <div class="batch-meta" style="margin-top:4px">只补未生成/失败/过期的行，已有音频跳过；中途停止后再点「开始补齐」会接着跑。</div>
+    <div class="batch-failures" id="batchFailures"></div>`;
+  // 顶部徽标下方：面板打开时不挤在底部运行栏之外
+  const badges = view.querySelector(".badges");
+  if (badges && badges.parentElement) badges.insertAdjacentElement("afterend", panel);
+  else view.appendChild(panel);
+  panel.addEventListener("change", (event) => {
+    if (event.target.id === "batchScope") {
+      batch.scope = event.target.value === "all" ? "all" : "chapter";
+      refreshBatch();
+    }
+  });
+  panel.addEventListener("click", async (event) => {
+    if (event.target.id === "batchStart") return startBatch();
+    if (event.target.id === "batchRefresh") return refreshBatch();
+    if (event.target.id === "batchClose") {
+      panel.hidden = true;
+      return;
+    }
+    const goto = event.target.closest("[data-batch-goto]");
+    const retry = event.target.closest("[data-batch-retry]");
+    const target = goto || retry;
+    if (!target) return;
+    const chapterId = target.getAttribute("data-batch-goto") || target.getAttribute("data-batch-retry");
+    const lineId = target.getAttribute("data-batch-line");
+    if (!chapterId || !lineId) return;
+    if (retry) {
+      await NW.openLine(chapterId, lineId);
+      await rerunLine(lineId);
+    } else {
+      panel.hidden = true;
+      await NW.openLine(chapterId, lineId);
+    }
+  });
+}
 
 function renderBadges() {
   const total = state.rows.length;
@@ -108,6 +471,7 @@ function rowHtml(row, top) {
     durationCell +
     `<span class="c-num">${row.pause_before_ms ?? ""}</span>` +
     `<span class="c-num">${row.pause_after_ms ?? ""}</span>` +
+    `<span class="c-act"><button class="row-rerun" type="button" data-rerun="${row.line_id}" title="只重录这一行（保留旧版）">⟳</button></span>` +
     `</div>`
   );
 }
@@ -194,7 +558,7 @@ async function openProject() {
       state.counts = {};
       renderBadges();
       renderTable();
-      $("runInfo").textContent = "本次将生成 0 行";
+      $("runInfo").textContent = "工程里还没有章节：先到「大纲」页落地成章节";
       $("runProgress").textContent = "";
       $("btnStart").disabled = true;
       $("btnStop").hidden = true;
@@ -210,7 +574,29 @@ async function openProject() {
     NW.notifyProject();
     NW.notifyChapter();
   } catch (error) {
-    toast(`打开工程失败：${error.message}`);
+    // 工程被删除或移动后 localStorage 仍留着旧路径：清掉失效状态并直接展开工程切换器，
+    // 否则页面会一直停在「先打开工程」，用户只能从技术报错里猜下一步。
+    const message = String(error.message || "");
+    if (/工程不存在|未初始化|PRECONDITION/i.test(message)) {
+      state.path = "";
+      state.chapter = "";
+      state.rows = [];
+      state.counts = {};
+      localStorage.removeItem("ndw.path");
+      $("projectPath").value = "";
+      $("chapterSelect").innerHTML = "";
+      $("hint").textContent = "工程不可用，请重新选择或新建";
+      renderBadges();
+      renderTable();
+      $("runInfo").textContent = "先选择工程和章节";
+      $("btnStart").disabled = true;
+      NW.notifyProject();
+      NW.notifyChapter();
+      if (window.NWLayout && NWLayout.openProjectMenu) NWLayout.openProjectMenu();
+      toast("工程目录不存在或已移动：请点左上角工程名，重新打开或新建工程");
+      return;
+    }
+    toast(`打开工程失败：${message}`);
   }
 }
 
@@ -232,6 +618,11 @@ async function applyChapter(chapterId) {
   $("lineId").textContent = "未选中行";
   await loadChapter();
   NW.notifyChapter();
+  // 切章后提示本章音色/BGM 编排问题，不阻断切换
+  void refreshCastHint(chapterId);
+  // 面板开着时换章：预计条数会变，跟着刷新（运行中则只刷新进度）
+  const batchPanel = $("batchPanel");
+  if (batchPanel && !batchPanel.hidden) await refreshBatch();
 }
 
 async function loadChapter() {
@@ -297,6 +688,7 @@ async function selectLine(lineId, scrollIntoView = true) {
     }
   }
   // 选中行交给右栏 Inspector（voice 视图下右栏就是本该页的编辑表单）
+  await loadVersions(lineId);
   NW.emit("line", row);
   await loadDiff(row);
 }
@@ -456,7 +848,7 @@ function askGenerateMode(readyCount, pendingCount) {
       const cont = document.createElement("button");
       cont.className = "btn primary";
       cont.type = "button";
-      cont.textContent = `继续生成（补 ${pendingCount} 行）`;
+      cont.textContent = `只生成缺失的 ${pendingCount} 行`;
       cont.addEventListener("click", () => finish("continue"));
       actions.appendChild(cont);
     }
@@ -803,6 +1195,13 @@ function bindEvents() {
     renderTable();
   });
   $("rows").addEventListener("click", (event) => {
+    const rerun = event.target.closest(".row-rerun");
+    if (rerun) {
+      // 重录按钮不触发整行选中
+      event.stopPropagation();
+      rerunLine(rerun.dataset.rerun);
+      return;
+    }
     const play = event.target.closest(".play-btn");
     if (play) {
       // 试听按钮不触发整行选中
@@ -820,7 +1219,54 @@ function bindEvents() {
   $("btnRevert").addEventListener("click", revertLine);
   $("btnStart").addEventListener("click", startGenerate);
   $("btnStop").addEventListener("click", stopGenerate);
+  // 空态里的下一步：直接去章节页做切分，不再让用户去终端敲命令
+  const emptyGo = $("emptyGoChapter");
+  if (emptyGo) emptyGo.addEventListener("click", () => { location.hash = "#/chapter"; });
   window.addEventListener("resize", renderTable);
+}
+
+/* 音色/BGM 编排提示：切章、保存人物后调用现有检查接口，只提示不阻断。
+ * 参数：chapterId 可选章节 ID，空则用当前章节。
+ * 返回：Promise，无。
+ */
+async function refreshCastHint(chapterId) {
+  if (!state.path) return;
+  const chapter = chapterId || state.chapter || "";
+  try {
+    const result = await api(`/api/ui/cast/check?${qs({ path: state.path, chapter })}`);
+    showCastHintBar(result, chapter ? "本章" : "全剧");
+  } catch (error) {
+    // 提示性检查失败不影响切章/保存
+  }
+}
+
+/* 渲染顶部黄条；没有问题时移除黄条。
+ * 参数：result 校验结果；scope 范围文案。
+ * 返回：无。
+ */
+function showCastHintBar(result, scope) {
+  const findings = (result && result.findings) || [];
+  const existing = document.getElementById("castHintBar");
+  if (!findings.length) {
+    if (existing) existing.remove();
+    return;
+  }
+  const bar = existing || document.createElement("div");
+  if (!existing) {
+    bar.id = "castHintBar";
+    bar.style.cssText = "position:sticky;top:0;z-index:30;margin:8px 12px;padding:10px 12px;border:1px solid #d9a441;background:#fff8e6;color:#7a4d00;border-radius:8px;font-size:13px;display:flex;gap:12px;align-items:flex-start";
+    const main = document.querySelector("main") || document.body;
+    main.insertBefore(bar, main.firstChild);
+  }
+  const errors = findings.filter((item) => item.level === "error").length;
+  const preview = findings.slice(0, 3).map((item) => item.message).join("；");
+  bar.textContent = `${scope}有 ${findings.length} 项音色/BGM 待处理（error ${errors}，不阻断本次操作）：${preview}`;
+  const close = document.createElement("button");
+  close.type = "button";
+  close.textContent = "关闭";
+  close.style.cssText = "background:none;border:none;color:#7a4d00;cursor:pointer;font-size:13px;flex:0 0 auto";
+  close.addEventListener("click", () => bar.remove());
+  bar.appendChild(close);
 }
 
 /* 对外暴露共享能力：其余页面复用同一套取数与提示，避免各写一份。
@@ -842,10 +1288,28 @@ window.NW = {
   speakerLabel,
   openProject,
   loadChapter,
+  refreshCastHint,
+  showCastHintBar,
   /* 重新拉工程列表（新建工程后刷新顶栏候选，避免要刷新页面才出现） */
   refreshProjects: loadProjects,
   onProject(fn) {
     projectListeners.push(fn);
+  },
+  /* 跨页定位到「某章某行」：批量失败清单点进来时用。
+   * 参数：chapterId 章节 ID；lineId 台词行 ID。
+   * 返回：Promise，无。
+   */
+  async openLine(chapterId, lineId) {
+    if (chapterId && chapterId !== state.chapter) await applyChapter(chapterId);
+    if (!state.rows.some((row) => row.line_id === lineId)) {
+      // 失败行可能被状态筛选藏住了，定位前先清掉筛选
+      if (state.filter.size) {
+        state.filter.clear();
+        renderBadges();
+      }
+      await loadLines();
+    }
+    await selectLine(lineId);
   },
   onChapter(fn) {
     chapterListeners.push(fn);
@@ -876,6 +1340,10 @@ window.NW = {
 async function boot() {
   fillEmotions();
   bindEvents();
+  // 在既有配音页上补「重录/版本/整本批量」入口，不改 index.html，避免与并行改动冲突
+  $("thead").insertAdjacentHTML("beforeend", '<span class="c-act">操作</span>');
+  injectVersionPanel();
+  injectBatchPanel();
   // 章节切换只有一个入口：任何地方切章都只发 `chapter` 事件，由 applyChapter 统一落库到界面
   NW.on("chapter", applyChapter);
   // 右栏「在配音页校对」：切到配音视图并选中该行

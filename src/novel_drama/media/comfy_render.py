@@ -16,7 +16,7 @@ from pathlib import Path
 from ..config import AppConfig
 from ..store import ProjectStore
 from .comfy_media import build_prompt, load_manifest, resolve_aspect, resolve_template, seed_for, templates_dir
-from .runner import _check_models, _comfy_gateway, _provider, _submit_and_fetch
+from .runner import _check_models, _comfy_gateway, _provider, _release_comfy, _submit_and_fetch
 
 
 def render_image_via_comfy(
@@ -57,8 +57,8 @@ def render_image_via_comfy(
         raise RuntimeError(f"ComfyUI 未连接：{status.detail or '检查是否启动、地址是否正确'}")
 
     settings = store.settings() or {}
-    aspect = resolve_aspect({"id": item_id}, settings, "image")
     manifest = load_manifest(templates_dir(config))
+    aspect = resolve_aspect(settings, "image", manifest=manifest)
     if reference is not None:
         template_key = "comfyui.templates.image_ref"
         kind = "image_ref"
@@ -102,6 +102,8 @@ def render_image_via_comfy(
         shutil.move(str(produced), str(target))
     if not target.exists():
         raise RuntimeError(f"ComfyUI 渲染未产出图片：{target}")
+    # 单张设定图生成结束即释放模型与内存，避免常驻占用；失败只记日志
+    _release_comfy(gateway, config, f"art-{item_id}")
     return {
         "path": target,
         "width": int(payload["width"]),

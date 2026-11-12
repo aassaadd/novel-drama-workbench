@@ -84,6 +84,7 @@ def plan_mix(
     for cue in bgm_cues or []:
         asset = cue.get("asset_id")
         if not asset:
+            warnings.append(f"BGM cue 尚未选择素材，已跳过: {cue.get('name') or cue.get('id')}")
             continue
         path = _asset_path(root, asset)
         if not path.exists():

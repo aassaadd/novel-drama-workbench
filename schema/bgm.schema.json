@@ -13,18 +13,40 @@
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["id", "asset_id", "start_ms"],
+        "required": ["id", "start_ms"],
         "additionalProperties": false,
         "properties": {
           "id": { "type": "string", "pattern": "^bgm_[0-9A-Za-z]{6,32}$" },
           "name": { "type": "string", "maxLength": 200 },
-          "asset_id": { "type": "string", "description": "相对工程根目录的音频路径" },
+          "asset_id": { "type": ["string", "null"], "description": "相对工程根目录的音频路径；为空表示尚未选曲（spotting 阶段的正常状态）" },
           "start_ms": { "type": "integer", "minimum": 0 },
           "gain_db": { "type": "number", "minimum": -60, "maximum": 12 },
           "fade_in_ms": { "type": "integer", "minimum": 0 },
           "fade_out_ms": { "type": "integer", "minimum": 0 },
           "loop": { "type": "boolean" },
-          "loop_until_ms": { "type": ["integer", "null"], "minimum": 0 }
+          "loop_until_ms": { "type": ["integer", "null"], "minimum": 0 },
+          "plan_ref": {
+            "type": ["object", "null"],
+            "additionalProperties": false,
+            "description": "R18：派生自哪条 BGM 描述；带 plan_ref 的 cue 可被重建，手工 cue 不参与重建",
+            "properties": {
+              "plan_id": { "type": "string", "pattern": "^bgp_[0-9A-Za-z]{6,32}$" },
+              "shot_id": { "type": ["string", "null"], "pattern": "^sht_[0-9A-Za-z]{6,32}$" },
+              "segment_index": { "type": ["integer", "null"], "minimum": 1 }
+            }
+          },
+          "mood_family": { "type": ["string", "null"], "maxLength": 30 },
+          "narrative_function": { "type": ["string", "null"], "maxLength": 300 },
+          "status": { "type": "string", "enum": ["planned", "asset_ready", "rendered", "missing"] },
+          "mode": {
+            "type": ["string", "null"],
+            "enum": ["narrative", "bed", null],
+            "description": "R19 用途档位：narrative=叙事（层次推进），bed=铺底（对白垫底）；为空表示未指定"
+          },
+          "normalize": {
+            "type": ["boolean", "null"],
+            "description": "R19 条目级响度归一开关；叙事档未指定时跟随全局配置，铺底档始终归一"
+          }
         }
       }
     }

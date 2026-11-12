@@ -83,10 +83,16 @@ comfyui:
   status_timeout_ms: 10000
   templates_dir: config/comfy
   models_dir: ""                        # 空=自动探测（读 ComfyUI 启动日志的 extra search path 与常见安装路径）
+  free_after_job: true                  # 生成结束调用官方 POST /free 卸载模型与内存；关掉可提速连续生成
   templates:
     image: qwen_image_accel             # Qwen-Image Q4 + Lightning 4 步
     video_t2v: minimax_h3_accel_t2v     # MiniMax-H3 文生视频（无首帧）
     video_i2v: minimax_h3_accel         # MiniMax-H3 图生视频（首帧来自关键图）
+    music: ace_step_1_5                 # ACE-Step 1.5 turbo 背景音乐（AIO 三合一，48kHz）
+
+# 配乐生成（ACE-Step）；叙事档只做 loudnorm，铺底档始终归一
+bgm:
+  normalize_narrative: true             # 叙事档是否归一；条目 normalize=false 或 --no-normalize 可单独关
 
 # 模型下载（音频 / ComfyUI 模型共用）
 models:
@@ -117,8 +123,31 @@ voice:
     noise_reduction_db: 12       # 保守档；越大越容易伤音色
     noise_floor_db: -50          # 底噪门限
     max_attenuation_db: 20       # 整体音量下降超过该值判定为过度抑制，回退原音
+  design:
+    enabled: true
+    engine: voxcpm2              # 仅本地 VoxCPM2
+    # 独立 venv：voxcpm 依赖 torch2.8/transformers5，与主工程隔离
+    python: /Users/zhaohaochen/git/voxcpm-venv/bin/python
+    model_dir: /Volumes/other/models/ndw/voxcpm2
+    candidates: 4                # 一次抽卡条数
+    max_keep_days: 7             # 未采用候选的保留天数
+    cfg_value: 2.0
+    inference_timesteps: 10
+    timeout_s: 900
+    script: 我用了一段时间才明白，有些话不说出口，反而更清楚。你愿意听我讲完吗？
 
 # ffmpeg 可执行文件（M4 混音用）
 ffmpeg:
   binary: ffmpeg
   probe_binary: ffprobe
+
+# 续写（chapter continue / outline continue）
+writing:
+  continue:
+    segment_words: 800           # 正文每轮目标字数（页面按 500/800/1200 档位传值）
+    max_rounds: 3                # 单次最多轮数（内部参数，页面不暴露）
+    max_total_words: 3000        # 单次新增字数硬上限
+    recent_chars: 2000           # 注入的最近原文字数（衔接锚 + 禁止重复参考）
+    previous_summaries: 5        # 注入前情摘要的章数
+    overlap_chars: 400           # 与末尾正文去重比对的窗口
+    outline_chapters_per_turn: 3 # 大纲续写默认追加章数

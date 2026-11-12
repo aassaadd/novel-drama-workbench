@@ -64,6 +64,8 @@ class ContextAssembler:
         previous_chapters: list[dict] | None = None,
         current_content: str = "",
         budget_tokens: int = 32768,
+        excerpt_chars: int = EXCERPT_CHARS,
+        story_digest: str = "",
     ):
         """绑定上下文素材。
 
@@ -77,6 +79,8 @@ class ContextAssembler:
             previous_chapters: 前序章节列表，每项含 index/title/synopsis/content。
             current_content: 本章已有正文，用于重写场景的前文摘录。
             budget_tokens: 上下文预算（中文按 1 字 ≈ 1 token 粗算）。
+            excerpt_chars: 每段前文摘录最多保留的字数（续写时调大，默认沿用 800）。
+            story_digest: 全剧梗概文本（续写专用，与故事圣经一样固定保留，不参与裁剪）。
         """
         self.work = work or {}
         self.bible = bible or {}
@@ -87,6 +91,8 @@ class ContextAssembler:
         self.previous_chapters = previous_chapters or []
         self.current_content = current_content or ""
         self.budget_tokens = int(budget_tokens or 32768)
+        self.excerpt_chars = max(1, int(excerpt_chars or EXCERPT_CHARS))
+        self.story_digest = story_digest or ""
         #: 本次装配产生的告警（已被重置为最新一次 build 的结果）
         self.warnings: list[str] = []
 
@@ -308,10 +314,10 @@ class ContextAssembler:
             if content:
                 title = _text(last.get("title"))
                 label = f"第 {last.get('index')} 章" + (f"《{title}》" if title else "")
-                blocks.append({"kind": "previous", "title": f"【上一章{label}结尾】", "text": content[-EXCERPT_CHARS:]})
+                blocks.append({"kind": "previous", "title": f"【上一章{label}结尾】", "text": content[-self.excerpt_chars:]})
         current = _text(self.current_content)
         if current:
-            blocks.append({"kind": "current", "title": "【本章已有正文结尾】", "text": current[-EXCERPT_CHARS:]})
+            blocks.append({"kind": "current", "title": "【本章已有正文结尾】", "text": current[-self.excerpt_chars:]})
         return blocks
 
     def chapter_outline(self) -> str:
@@ -400,7 +406,7 @@ class ContextAssembler:
             speaker_ids: 本场出场角色 ID 列表；为 None 时使用全部非旁白角色。
 
         返回:
-            TextGenRequest；超预算时按「前文摘录 → 前情摘要 → 世界细节 → 角色卡细节」裁剪。
+            TextGenRequest；超预算时按「前文摘录 → 前情摘要 → 世界细节 → 角色卡细节」裁剪（全剧梗概不裁剪）。
         """
         self.warnings = []
         instruction = instruction or ""
@@ -410,6 +416,7 @@ class ContextAssembler:
         summaries = self._previous_summaries()
         excerpts = self._excerpt_blocks()
         outline = self.chapter_outline()
+        digest = _text(self.story_digest)
 
         def compose() -> tuple[str, str]:
             """按固定顺序拼出 system 与 user 文本。"""
@@ -431,6 +438,8 @@ class ContextAssembler:
             system = "\n\n".join(part for part in system_parts if part)
 
             user_parts: list[str] = []
+            if digest:
+                user_parts.append("全剧梗概：\n" + digest)
             previous_text = self._render_previous(summaries)
             if previous_text:
                 user_parts.append("前情摘要：\n" + previous_text)

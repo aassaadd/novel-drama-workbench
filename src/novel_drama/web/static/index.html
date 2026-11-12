@@ -115,7 +115,12 @@
                   </div>
                 </div>
               </div>
-              <div class="empty" id="empty" hidden>还没有台词行：先在终端执行 <code>scene split</code> 与 <code>line split</code>。</div>
+              <div class="empty" id="empty" hidden>
+                还没有台词行：先到「章节」页生成正文，再点「切分场景」「切分台词」，然后回到这里生成配音。
+                <div class="actions" style="justify-content:center">
+                  <button id="emptyGoChapter" class="btn small primary" type="button">去章节页切分</button>
+                </div>
+              </div>
             </div>
 
             <aside class="inspector" id="inspector">
@@ -171,7 +176,7 @@
           </main>
 
           <footer class="runbar">
-            <span class="run-info" id="runInfo">本次将生成 — 行</span>
+            <span class="run-info" id="runInfo">先选择章节</span>
             <div class="run-meter">
               <div class="run-track"><div class="run-fill" id="runFill"></div></div>
               <span class="run-eta" id="runEta" hidden></span>
@@ -179,7 +184,7 @@
             <span class="run-progress" id="runProgress"></span>
             <div class="run-actions">
               <button id="btnStop" class="btn danger" hidden>停止生成</button>
-              <button id="btnStart" class="btn primary" disabled>开始生成</button>
+              <button id="btnStart" class="btn primary" disabled>生成配音</button>
             </div>
           </footer>
         </section>
@@ -188,7 +193,7 @@
         <section class="view page" id="view-project" hidden>
           <div class="ws-head">
             <h2>工程与创作向导</h2>
-            <div id="pjInfo" class="kv kv-inline">—</div>
+            <div id="pjInfo" class="kv kv-inline">还没有打开工程：点左上角工程名，打开或新建一个工程</div>
           </div>
 
           <div class="ws-project">
@@ -267,11 +272,11 @@
           <div class="card">
             <div class="card-head">
               <h3>世界条目</h3>
-              <button id="worldsAdd" class="btn small" type="button">＋ 新增世界</button>
-              <button id="worldsGenerate" class="btn small" type="button">✨ 生成世界</button>
+              <button id="worldsAdd" class="btn small" type="button">＋ 新增世界条目</button>
+              <button id="worldsGenerate" class="btn small" type="button">✨ AI 生成世界条目</button>
             </div>
             <div id="worldsList" class="world-list"></div>
-            <p id="worldsEmpty" class="muted">还没有世界设定：先打开工程，再点「生成世界」，或到项目页手工录入。</p>
+            <p id="worldsEmpty" class="muted">还没有世界设定：先打开工程，再点「AI 生成世界条目」，或点「＋ 新增世界条目」手工录入。</p>
           </div>
         </section>
 
@@ -292,10 +297,10 @@
               <div class="card-head">
                 <h3>人物列表</h3>
                 <button id="charactersAdd" class="btn small" type="button">＋ 新增人物</button>
-                <button id="charactersGenerate" class="btn small" type="button">✨ 生成人物</button>
+                <button id="charactersGenerate" class="btn small" type="button">✨ AI 生成人物</button>
               </div>
               <div id="charactersList" class="char-list"></div>
-              <p id="charactersEmpty" class="muted">还没有人物：先打开工程，再点「生成人物」或手工新增。</p>
+              <p id="charactersEmpty" class="muted">还没有人物：先打开工程，再点「AI 生成人物」或「＋ 新增人物」手工录入。</p>
             </div>
           </div>
 
@@ -318,6 +323,43 @@
               </div>
               <div id="voiceMineList" class="voice-list"></div>
               <p id="voiceMineEmpty" class="muted">还没有音色：可从上方导入内置音色，或在下方录制 / 上传。</p>
+            </div>
+
+            <div class="card">
+              <div class="card-head">
+                <h3>按角色设定生成音色</h3>
+                <span class="muted">读人物档案 → 自动写音色描述 → 本地生成 4 条候选，试听挑选后入库</span>
+              </div>
+              <div class="form-grid">
+                <label class="stack">选择角色
+                  <select id="voiceDesignCharacter"></select>
+                </label>
+                <label class="stack">音色名称
+                  <input id="voiceDesignName" placeholder="留空则用角色名" />
+                </label>
+                <label class="stack span-all">音色描述（可编辑后重新抽卡）
+                  <textarea id="voiceDesignPrompt" rows="3" placeholder="先点「生成描述」，或直接手写英文描述"></textarea>
+                </label>
+                <label class="stack">性别（采用前必须确认）
+                  <select id="voiceDesignGender">
+                    <option value="female">女声</option>
+                    <option value="male">男声</option>
+                    <option value="other">其他</option>
+                    <option value="unknown">不确定</option>
+                  </select>
+                </label>
+                <label class="stack">候选条数
+                  <input id="voiceDesignCount" type="number" min="1" max="6" value="4" />
+                </label>
+              </div>
+              <p id="voiceDesignHint" class="muted"></p>
+              <div class="actions">
+                <button id="voiceDesignProfile" class="btn small" type="button">生成音色描述</button>
+                <button id="voiceDesignStart" class="btn small primary" type="button">生成音色候选</button>
+                <button id="voiceDesignCleanup" class="btn small" type="button">清理候选</button>
+                <span id="voiceDesignState" class="muted"></span>
+              </div>
+              <div id="voiceDesignCandidates" class="voice-grid"></div>
             </div>
 
             <div class="card">
@@ -394,9 +436,14 @@
                 <input id="olWords" type="number" min="200" max="8000" step="100" value="1200" />
               </label>
             </div>
+            <p class="muted">生成会替换当前大纲（不影响已落地章节的正文）；「续写大纲」只在末尾追加；「落地成章节」会新建章节，并更新已存在的同序号章节。</p>
             <div class="actions">
               <button id="olGenerate" class="btn primary">生成大纲</button>
               <button id="olCheckBtn" class="btn" type="button">检查黄金三章</button>
+              <label class="field">续写章数
+                <input id="olContinueChapters" type="number" min="1" max="12" value="3" style="width:72px" />
+              </label>
+              <button id="olContinue" class="btn" type="button">续写大纲</button>
               <button id="olApply" class="btn">落地成章节</button>
             </div>
           </div>
@@ -411,30 +458,50 @@
         <section class="view page page-fill" id="view-chapter" hidden>
           <div class="ws-head">
             <h2>章节正文</h2>
-            <div id="chInfo" class="kv kv-inline">—</div>
+            <div id="chInfo" class="kv kv-inline">先选择章节</div>
           </div>
 
           <div class="toolbar">
-            <label class="field"><input id="chRegen" type="checkbox" /> 覆盖重写</label>
-            <button id="chGenerate" class="btn primary">生成正文</button>
-            <button id="chEdit" class="btn">编辑正文</button>
-            <button id="chAiEdit" class="btn">AI 编辑</button>
-            <button id="chSummarize" class="btn">按正文重总结</button>
-            <button id="chSave" class="btn primary" hidden>保存</button>
-            <button id="chCancel" class="btn" hidden>取消</button>
-            <button id="chScenes" class="btn">切分场景</button>
-            <button id="chLines" class="btn">切分台词</button>
-            <button id="chPreview" class="btn">预览（不写盘）</button>
+            <div class="toolbar-group">
+              <span class="toolbar-label">正文</span>
+              <label class="field" title="勾选后会用新生成的内容替换当前正文，原正文不可恢复"><input id="chRegen" type="checkbox" /> 覆盖已有正文</label>
+              <button id="chGenerate" class="btn primary">生成正文</button>
+              <button id="chPreview" class="btn">预览（不写入）</button>
+            </div>
+            <div class="toolbar-group">
+              <span class="toolbar-label">改写</span>
+              <button id="chEdit" class="btn">编辑正文</button>
+              <button id="chAiEdit" class="btn">AI 编辑</button>
+              <button id="chSummarize" class="btn">按正文重总结</button>
+              <button id="chSave" class="btn primary" hidden>保存</button>
+              <button id="chCancel" class="btn" hidden>取消</button>
+            </div>
+            <div class="toolbar-group">
+              <span class="toolbar-label">续写</span>
+              <select id="chContinueWords" title="本次续写的字数档位">
+                <option value="500">短 500 字</option>
+                <option value="800" selected>中 800 字</option>
+                <option value="1200">长 1200 字</option>
+              </select>
+              <input id="chContinueIntent" placeholder="接下来发生什么（可空）" style="min-width:180px" />
+              <button id="chContinuePreview" class="btn">续写正文</button>
+              <button id="chContinueApply" class="btn" hidden>应用续写草稿</button>
+            </div>
+            <div class="toolbar-group">
+              <span class="toolbar-label">拆分</span>
+              <button id="chScenes" class="btn">切分场景</button>
+              <button id="chLines" class="btn">切分台词</button>
+            </div>
             <span class="muted toolbar-tip">点右侧台词行可在正文里定位段落</span>
           </div>
 
           <div class="chapter-main">
             <div class="chapter-doc">
-              <div id="chContent" class="doc-body">—</div>
+              <div id="chContent" class="doc-body"><p class="muted">选择章节后这里显示正文。</p></div>
             </div>
             <aside class="chapter-side">
               <h3 class="section-title">场景 / 台词</h3>
-              <div id="chScenesBody" class="scene-list">—</div>
+              <div id="chScenesBody" class="scene-list"><p class="muted">选择章节后这里显示场景与台词。</p></div>
             </aside>
           </div>
         </section>
@@ -443,35 +510,41 @@
         <section class="view page" id="view-script" hidden>
           <div class="ws-head">
             <h2>导演标注（有声剧脚本）</h2>
-            <div id="scInfo" class="kv kv-inline">—</div>
+            <div id="scInfo" class="kv kv-inline">选择章节后显示标注状态</div>
           </div>
           <div class="toolbar">
-            <button id="scSuggest" class="btn primary">生成标注建议</button>
-            <button id="scApply" class="btn">生成并应用（含音效/画面/视频位）</button>
+            <div class="toolbar-group">
+              <span class="toolbar-label">生成</span>
+              <button id="scSuggest" class="btn primary">生成预览（不写入）</button>
+              <button id="scApply" class="btn">生成并应用（同步到台词）</button>
+            </div>
+            <span class="muted toolbar-tip">先预览检查，确认后再应用；应用会更新本章台词、音效、画面与视频位</span>
           </div>
           <div id="scWarnings" class="warn-box" hidden></div>
-          <div id="scMarkup" class="markup">—</div>
+          <div id="scMarkup" class="markup">选择章节后显示标注文本</div>
         </section>
 
         <!-- ---------------- 音效·配图·视频（行可点选，详情进右栏） ---------------- -->
         <section class="view page" id="view-media" hidden>
           <div class="ws-head">
-            <h2>音效、配图与视频位</h2>
-            <label class="field"><input id="mdForce" type="checkbox" /> 已就绪项也重跑</label>
+            <h2>音效、配图与视频</h2>
+            <label class="field" title="勾选后，已经生成好的条目也会重新生成并覆盖原文件">
+              <input id="mdForce" type="checkbox" /> 重新生成已就绪项（覆盖原文件）
+            </label>
           </div>
-          <p class="muted">条目由导演标注物化而来；「运行」调 ffmpeg / Pillow 真出文件，模型侧是离线占位实现。点某一行可在右栏看提示词与状态并内联试听。</p>
+          <p class="muted">条目来自「标注」页。点某一行可在右栏查看提示词、状态并试听；每个「生成」按钮只处理当前章节。</p>
           <div class="media-grid">
             <div class="card">
-              <h3>音效（sfx）<button id="mdRunSfx" class="btn small">运行</button></h3>
-              <div id="mdSfx" class="media-table">—</div>
+              <h3>音效<button id="mdRunSfx" class="btn small">生成音效</button></h3>
+              <div id="mdSfx" class="media-table">先选择章节</div>
             </div>
             <div class="card">
-              <h3>配图（key image）<button id="mdRunImage" class="btn small">运行</button></h3>
-              <div id="mdImage" class="media-table">—</div>
+              <h3>配图<button id="mdRunImage" class="btn small">生成配图</button></h3>
+              <div id="mdImage" class="media-table">先选择章节</div>
             </div>
             <div class="card">
-              <h3>视频位（video）<button id="mdRunVideo" class="btn small">运行</button></h3>
-              <div id="mdVideo" class="media-table">—</div>
+              <h3>视频片段<button id="mdRunVideo" class="btn small">生成视频</button></h3>
+              <div id="mdVideo" class="media-table">先选择章节</div>
             </div>
           </div>
         </section>
@@ -493,15 +566,15 @@
               </label>
             </div>
             <div class="actions">
-              <label class="field"><input id="exForce" type="checkbox" /> 强制重跑</label>
-              <label class="field"><input id="exResume" type="checkbox" checked /> 跳过已成功阶段</label>
-              <label class="field"><input id="exKeepGoing" type="checkbox" /> 失败继续</label>
+              <label class="field" title="已完成的阶段也会重新执行，并覆盖已有产物"><input id="exForce" type="checkbox" /> 强制重跑（覆盖已有产物）</label>
+              <label class="field" title="阶段已有成功记录时直接跳过"><input id="exResume" type="checkbox" checked /> 跳过已成功阶段</label>
+              <label class="field" title="某个阶段失败后仍继续执行后面的阶段"><input id="exKeepGoing" type="checkbox" /> 失败后继续后续阶段</label>
               <button id="exStart" class="btn primary">开始编排</button>
             </div>
           </div>
 
           <div id="exStatus" class="muted">尚未启动。</div>
-          <ol id="exStages" class="stepbar">—</ol>
+          <ol id="exStages" class="stepbar">还没有编排记录</ol>
 
           <h3 class="section-title">剪映草稿</h3>
           <div class="card">
@@ -516,7 +589,7 @@
           </div>
 
           <h3 class="section-title">产物</h3>
-          <div id="exFiles" class="artifact-grid">—</div>
+          <div id="exFiles" class="artifact-grid">还没有产物：先跑一次编排</div>
           <div class="actions">
             <button id="exRefresh" class="btn">刷新产物</button>
           </div>

@@ -10,7 +10,7 @@
  */
 
 (function () {
-  const EMPTY_TEXT = "还没有世界设定：先打开工程，再点「生成世界」，或点「＋ 新增」手工录入。";
+  const EMPTY_TEXT = "还没有世界设定：先打开工程，再点「AI 生成世界条目」，或点「＋ 新增世界条目」手工录入。";
   const WORLD_FORM_KEYS = ["name", "era", "summary", "visual_style", "rules", "factions", "locations", "glossary"];
 
   let bound = false;
@@ -149,7 +149,7 @@
           </span>`
             : ""}
         </div>
-        <p class="world-summary">${esc(world.summary || "—")}</p>
+        <p class="world-summary">${esc(world.summary || "还没有摘要，点「编辑」补充")}</p>
         <div class="world-stats muted">
           <span>规则 ${count("rules")}</span>
           <span>势力 ${count("factions")}</span>
@@ -185,8 +185,8 @@
     const amplify = (title) => `<button class="btn small amplify-btn" type="button" data-amplify data-title="${esc(title)}" title="放大编辑">⤢</button>`;
     return `<div class="world-edit">
       <div class="actions">
-        <button class="btn" type="button" data-world-act="generate">✨ 按需求生成</button>
-        <span class="muted">按需求一次生成全部字段，确认后回填到下方表单</span>
+        <button class="btn" type="button" data-world-act="generate">✨ AI 补全此条</button>
+        <span class="muted">按补充要求生成整条世界设定，确认后回填到下方表单，不会自动保存</span>
       </div>
       <div class="form-grid">
         <label class="stack">名称
@@ -624,7 +624,7 @@
       body.appendChild(head);
 
       const summary = document.createElement("p");
-      summary.textContent = world.summary || "—";
+      summary.textContent = world.summary || "还没有摘要";
       body.appendChild(summary);
 
       if (world.visual_style) {

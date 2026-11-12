@@ -624,7 +624,7 @@ class OfflineWritingAdapter:
                 lines_out.append(f"{head}：{text}")
             # 每个镜头一条环境音 + 一张关键图 + 一段动画位
             lines_out.append(f"!sfx ambience 6000 after-line=1 {title}环境底噪")
-            lines_out.append(f"!visual 3:4 {self._visual_prompt(scene, style)}")
+            lines_out.append(f"!visual {self._visual_prompt(scene, style)}")
             lines_out.append("!anim i2v 3000 slow_push_in 镜头缓慢推近，强化情绪")
         return "\n".join(lines_out) + "\n"
 

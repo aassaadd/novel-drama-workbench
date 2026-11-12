@@ -360,6 +360,87 @@
         "vae/minimax_h3_video_vae_fp16.safetensors",
         "vae/minimax_h3_audio_vae_fp32.safetensors"
       ]
+    },
+    {
+      "id": "ace_step_1_5",
+      "kind": "music",
+      "file": "ace_step_1_5.json",
+      "source": "official/audio_ace_step_1_5_checkpoint.json",
+      "display_name": "ACE-Step 1.5 turbo · 背景音乐（48kHz）",
+      "placeholders": [
+        "prompt",
+        "lyrics",
+        "duration",
+        "bpm",
+        "seed",
+        "timesignature",
+        "language",
+        "keyscale",
+        "filename_prefix"
+      ],
+      "required_placeholders": [
+        "prompt",
+        "duration",
+        "seed",
+        "filename_prefix"
+      ],
+      "bindings": {
+        "prompt": {
+          "node": "2",
+          "input": "tags"
+        },
+        "lyrics": {
+          "node": "2",
+          "input": "lyrics"
+        },
+        "duration": [
+          {
+            "node": "2",
+            "input": "duration"
+          },
+          {
+            "node": "4",
+            "input": "seconds"
+          }
+        ],
+        "bpm": {
+          "node": "2",
+          "input": "bpm"
+        },
+        "seed": {
+          "node": "2",
+          "input": "seed"
+        },
+        "timesignature": {
+          "node": "2",
+          "input": "timesignature"
+        },
+        "language": {
+          "node": "2",
+          "input": "language"
+        },
+        "keyscale": {
+          "node": "2",
+          "input": "keyscale"
+        },
+        "filename_prefix": {
+          "node": "8",
+          "input": "filename_prefix"
+        }
+      },
+      "size_map": {},
+      "fixed": {
+        "model": "ace_step_1.5_turbo_aio.safetensors",
+        "lora": null,
+        "steps": 8,
+        "cfg": 1.0,
+        "sampler": "euler",
+        "scheduler": "simple",
+        "sample_rate": 48000
+      },
+      "models": [
+        "checkpoints/ace_step_1.5_turbo_aio.safetensors"
+      ]
     }
   ]
 }

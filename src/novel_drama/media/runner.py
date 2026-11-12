@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import logging
 import shutil
 import time
 from pathlib import Path
@@ -36,6 +37,42 @@ from .comfy_media import (
 from .generate import probe_duration_ms, render_image, render_sfx, render_video
 from .references import appearance_digest, collect_references, reference_options, scene_characters, slot_hint
 from .styles import with_style
+
+logger = logging.getLogger(__name__)
+
+
+def _release_comfy(gateway: LocalComfyGateway, config: AppConfig, reason: str) -> dict | None:
+    """按需释放 ComfyUI 常驻模型与内存（官方 POST /free）。
+
+    参数:
+        gateway: ComfyUI 网关。
+        config: 本机配置（`comfyui.free_after_job` 控制是否启用，默认开启）。
+        reason: 释放原因（写日志用）。
+
+    返回:
+        `/free` 的结果 dict；未启用或失败时返回 None。
+
+    说明:
+        释放动作放在 GPU 锁内，避免把其他进程刚加载的模型一起卸载。
+        失败只记日志，不影响已经生成的产物。
+    """
+    if not bool(config.get("comfyui.free_after_job", True)):
+        return None
+    try:
+        lock = GpuLock(
+            config.get("gpu.lock_path", "/Volumes/other/gpu.lock"),
+            poll_interval_s=float(config.get("gpu.poll_interval_s", 2) or 2),
+            timeout_s=60.0,
+        )
+        with lock.hold(f"comfy-free-{reason}"):
+            result = gateway.free_memory()
+    except Exception as exc:  # 释放失败不影响主流程
+        logger.warning("ComfyUI 释放内存失败（%s）：%s", reason, exc)
+        return None
+    if not result.get("ok"):
+        logger.warning("ComfyUI 释放内存失败（%s）：%s", reason, result.get("message"))
+        return None
+    return result
 
 
 def _visual_style(store: ProjectStore) -> str:
@@ -448,13 +485,13 @@ def _generate_image(
             ref_warnings = [*fill_warnings, *(refs.get("warnings") or [])]
     ref_items = refs.get("items") or []
 
-    aspect = resolve_aspect(item, settings, "image")
+    manifest = load_manifest(templates_dir(config))
+    aspect = resolve_aspect(settings, "image", manifest=manifest)
     item["aspect_ratio"] = aspect["ratio"]
     item["width"], item["height"] = aspect["width"], aspect["height"]
     seed = int(item["seed"]) if item.get("seed") is not None else seed_for(item["id"], revision)
     item["seed"] = seed
 
-    manifest = load_manifest(templates_dir(config))
     template_id, template_kind = _image_template_id(
         config, manifest, item.get("workflow_template_id"), bool(ref_items)
     )
@@ -517,6 +554,37 @@ def _generate_image(
     }
 
 
+def _source_ratio_note(source: Path, width: int, height: int) -> str | None:
+    """检查 i2v 首帧比例是否与工程画幅一致。
+
+    参数:
+        source: 首帧图片路径。
+        width: 工程画幅对应的目标宽。
+        height: 工程画幅对应的目标高。
+
+    返回:
+        比例不一致时的中文告警；一致或无法读取尺寸时返回 None。
+    """
+    try:
+        from PIL import Image
+    except ImportError:
+        return None
+    try:
+        with Image.open(source) as image:
+            source_width, source_height = image.size
+    except OSError:
+        return None
+    if not source_width or not source_height or not width or not height:
+        return None
+    expected = width / height
+    if abs(source_width / source_height - expected) / expected > 0.01:
+        return (
+            f"首帧比例 {source_width}×{source_height} 与工程画幅 {width}×{height} 不一致，"
+            "将按工程画幅缩放/裁剪"
+        )
+    return None
+
+
 def _generate_video(
     store: ProjectStore,
     config: AppConfig,
@@ -551,15 +619,19 @@ def _generate_video(
     if item.get("mode") == "i2v" and not source:
         warnings.append("首帧关键图未就绪，已降级为文生视频（t2v）")
 
-    aspect = resolve_aspect(item, settings, "video")
+    manifest = load_manifest(templates_dir(config))
+    aspect = resolve_aspect(settings, "video", manifest=manifest)
     item["aspect_ratio"] = aspect["ratio"]
     item["width"], item["height"] = aspect["width"], aspect["height"]
     seed = int(item["seed"]) if item.get("seed") is not None else seed_for(item["id"], revision)
     item["seed"] = seed
     if aspect.get("note"):
         warnings.append(str(aspect["note"]))
+    if source:
+        note = _source_ratio_note(source, aspect["width"], aspect["height"])
+        if note:
+            warnings.append(note)
 
-    manifest = load_manifest(templates_dir(config))
     template_key = "comfyui.templates.video_i2v" if source else "comfyui.templates.video_t2v"
     template_id = config.get(template_key)
     resolved = resolve_template(str(template_id or ""), "video_i2v" if source else "video_t2v", manifest)
@@ -753,6 +825,8 @@ def _run_comfy(
         chapter["revision"] = int(chapter.get("revision") or 1) + 1
         chapter["updated_at"] = now_iso()
         store.save_chapter(chapter)
+        # 整个批次结束后统一释放，避免逐条卸载造成每条都重新加载模型
+        stats["memory_released"] = bool(_release_comfy(gateway, config, f"{kind}-batch"))
     return stats
 
 
@@ -789,14 +863,14 @@ def plan_media(store: ProjectStore, config: AppConfig, chapter_id: str, kind: st
         references: list[dict] = []
         reference_warnings: list[str] = []
         if provider != "comfyui":
-            rel = item.get("aspect_ratio") or ((settings.get("output") or {}).get("aspect_ratio")) or "1:1"
+            aspect = resolve_aspect(settings, kind)
             rows.append(
                 {
                     "item_id": item["id"],
                     "template_id": item.get("workflow_template_id"),
-                    "aspect_ratio": rel,
-                    "width": item.get("width"),
-                    "height": item.get("height"),
+                    "aspect_ratio": aspect["ratio"],
+                    "width": aspect["width"],
+                    "height": aspect["height"],
                     "seed": item.get("seed"),
                     "source_mode": "offline",
                     "warning": f"providers.{kind} 未设为 comfyui，将走离线占位渲染",
@@ -821,7 +895,7 @@ def plan_media(store: ProjectStore, config: AppConfig, chapter_id: str, kind: st
             )
             resolved = resolve_template(template_id, template_kind, manifest)
             source_mode = "comfy"
-            aspect = resolve_aspect(item, settings, "image")
+            aspect = resolve_aspect(settings, "image", manifest=manifest)
         else:
             source = _source_image(store, chapter, item)
             source_mode = "i2v" if source else "t2v"
@@ -833,7 +907,7 @@ def plan_media(store: ProjectStore, config: AppConfig, chapter_id: str, kind: st
                 reference_warnings.append("无首帧，将补充出场角色外貌摘要（t2v）")
             key = "comfyui.templates.video_i2v" if source else "comfyui.templates.video_t2v"
             resolved = resolve_template(str(config.get(key) or ""), "video_i2v" if source else "video_t2v", manifest)
-            aspect = resolve_aspect(item, settings, "video")
+            aspect = resolve_aspect(settings, "video", manifest=manifest)
 
         if resolved.get("warning"):
             warnings.append(str(resolved["warning"]))
@@ -889,6 +963,7 @@ def run_media(
     out_dir = store.root / rel_dir
     ffmpeg = config.get("ffmpeg.binary", "ffmpeg")
     sample_rate = int(config.get("output.sample_rate", 48000))
+    settings = store.settings()
 
     stats = {"kind": kind, "total": 0, "ready": 0, "skipped": 0, "failed": 0, "items": [], "dry_run": dry_run}
     if kind in ("image", "video") and not dry_run and _provider(config, kind) == "comfyui":
@@ -924,6 +999,10 @@ def run_media(
                     }
                 )
             elif kind == "image":
+                # 离线占位图同样只认工程画幅，避免沿用条目里的旧尺寸
+                aspect = resolve_aspect(settings, "image")
+                item["aspect_ratio"] = aspect["ratio"]
+                item["width"], item["height"] = aspect["width"], aspect["height"]
                 result = render_image(item, asset_path)
                 asset.update(
                     {
@@ -937,14 +1016,27 @@ def run_media(
                 )
                 item["width"], item["height"] = result["width"], result["height"]
             else:
+                # 离线视频同样按工程画幅出片
+                aspect = resolve_aspect(settings, "video")
+                item["aspect_ratio"] = aspect["ratio"]
+                item["width"], item["height"] = aspect["width"], aspect["height"]
                 source = _source_image(store, chapter, item)
-                result = render_video(item, asset_path, source, binary=ffmpeg)
+                result = render_video(
+                    item,
+                    asset_path,
+                    source,
+                    binary=ffmpeg,
+                    width=aspect["width"],
+                    height=aspect["height"],
+                )
                 asset.update(
                     {
                         "status": "ready",
                         "asset_id": _rel(store, asset_path),
                         "job_id": None,
                         "actual_duration_ms": probe_duration_ms(asset_path) or result["duration_ms"],
+                        "width": result["width"],
+                        "height": result["height"],
                         "error": None,
                     }
                 )

@@ -150,6 +150,23 @@
       "note": "H3 音频 VAE（fp32），视频模板里的音轨解码用；许可随 H3 仓库",
       "repo": null,
       "hf_filename": null
+    },
+    {
+      "key": "checkpoints/ace_step_1.5_turbo_aio.safetensors",
+      "kind": "checkpoint",
+      "path": "checkpoints/ace_step_1.5_turbo_aio.safetensors",
+      "bytes": 10025478736,
+      "expected_bytes": 10025478736,
+      "present": true,
+      "templates": [
+        "ace_step_1_5"
+      ],
+      "license": "Apache-2.0",
+      "license_gate": "none",
+      "commercial_use": true,
+      "note": "ACE-Step 1.5 turbo 三合一 AIO：扩散模型 + Qwen 文本编码器 + VAE 全在这一个文件里，背景音乐模板唯一依赖，无需再单独下 text_encoders / vae",
+      "repo": "Comfy-Org/ACE-Step-1.5",
+      "hf_filename": "checkpoints/ace_step_1.5_turbo_aio.safetensors"
     }
   ]
 }

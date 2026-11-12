@@ -78,7 +78,19 @@ _FALLBACK = {
             "noise_reduction_db": 12,
             "noise_floor_db": -50,
             "max_attenuation_db": 20,
-        }
+        },
+        "design": {
+            "enabled": True,
+            "engine": "voxcpm2",
+            "python": "/Users/zhaohaochen/git/voxcpm-venv/bin/python",
+            "model_dir": "/Volumes/other/models/ndw/voxcpm2",
+            "candidates": 4,
+            "max_keep_days": 7,
+            "cfg_value": 2.0,
+            "inference_timesteps": 10,
+            "timeout_s": 900,
+            "script": "我用了一段时间才明白，有些话不说出口，反而更清楚。你愿意听我讲完吗？",
+        },
     },
     "audio": {
         "highpass_hz": 80,

@@ -164,6 +164,30 @@ class LocalComfyGateway:
 
     # ---------------- 健康检查与模板 ----------------
 
+    def free_memory(self, unload_models: bool = True, free_memory: bool = True) -> dict:
+        """调用官方 `POST /free` 卸载模型并释放显存/内存。
+
+        参数:
+            unload_models: 是否卸载模型（释放常驻权重）。
+            free_memory: 是否释放已分配内存（清空缓存张量）。
+
+        返回:
+            `{"ok": bool, "message": 中文说明}`；失败不抛异常，避免清理动作影响主流程。
+        """
+        try:
+            code, body = self._http(
+                "POST",
+                "/free",
+                payload={"unload_models": bool(unload_models), "free_memory": bool(free_memory)},
+                timeout_ms=self._timeout_ms("status_timeout_ms", 10000),
+            )
+        except AdapterError as exc:
+            return {"ok": False, "message": exc.message}
+        if not 200 <= code < 300:
+            text = body.decode("utf-8", "replace")
+            return {"ok": False, "message": f"ComfyUI /free 返回 HTTP {code}：{text[:200] or '无响应内容'}"}
+        return {"ok": True, "message": "已请求 ComfyUI 卸载模型并释放内存"}
+
     def health(self) -> HealthStatus:
         """检查 ComfyUI 可用性：GET /system_stats + /queue，返回 HealthStatus（成功 detail 含版本/设备，extra={version, queue}；失败不抛异常）。"""
         started = time.perf_counter()

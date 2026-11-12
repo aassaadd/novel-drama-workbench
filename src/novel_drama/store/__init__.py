@@ -12,6 +12,16 @@ from .voice_store import (
     variant_ref,
     voice_binding_summary,
 )
+from .voice_cast import (
+    cast_config,
+    check_cast,
+    narrator_persona,
+    narrator_plan,
+    normalize_cast,
+    profile_source_hash,
+    resolve_cast_voice,
+    validate_cast_config,
+)
 from .world_store import WorldStore
 
 __all__ = [
@@ -20,12 +30,20 @@ __all__ = [
     "SchemaValidationError",
     "SettingsStore",
     "WorldStore",
+    "cast_config",
+    "check_cast",
     "find_variant",
     "find_voice",
     "list_workspaces",
+    "narrator_persona",
+    "narrator_plan",
+    "normalize_cast",
     "pick_variant",
+    "profile_source_hash",
+    "resolve_cast_voice",
     "resolve_for_character",
     "validate",
+    "validate_cast_config",
     "variant_ref",
     "voice_binding_summary",
 ]

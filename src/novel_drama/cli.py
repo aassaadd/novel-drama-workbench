@@ -14,6 +14,7 @@ from pathlib import Path
 from . import __version__
 from .adapters import AdapterError, ErrorCode, build_adapters
 from .cli_common import EXIT_FAILED, EXIT_NOT_IMPLEMENTED, EXIT_OK, EXIT_PRECONDITION, EXIT_REJECTED, EXIT_SCHEMA, EXIT_USAGE, PreconditionError, TaskFailedError, _emit, _resolve_store, _tts_service
+from .cli_cast import cmd_cast
 from .cli_chapter import (
     cmd_chapter_add,
     cmd_chapter_import,
@@ -29,6 +30,7 @@ from .cli_character import (
     cmd_character_update,
 )
 from .cli_comfy import cmd_comfy
+from .cli_continue import cmd_chapter_continue, cmd_outline_continue
 from .cli_group import cmd_group_apply, cmd_group_diff, cmd_group_list
 from .cli_line import (
     cmd_line_diff,
@@ -40,11 +42,12 @@ from .cli_line import (
     cmd_scene_split,
 )
 from .cli_media import cmd_bgm, cmd_concat, cmd_export, cmd_mux, cmd_timeline, cmd_tts_batch
+from .cli_music import cmd_bgm_generate
 from .cli_models import cmd_models_import, cmd_models_install, cmd_models_list, cmd_models_verify
 from .cli_outline import cmd_outline_bind, cmd_outline_check
 from .cli_produce import cmd_produce, cmd_run_show
 from .cli_setting import cmd_setting
-from .cli_voice import cmd_script, cmd_voice, cmd_voice_builtin
+from .cli_voice import cmd_script, cmd_voice, cmd_voice_builtin, cmd_voice_design
 from .cli_world import (
     cmd_world_apply,
     cmd_world_generate,
@@ -1062,6 +1065,18 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--apply", action="store_true", help="写回章节文件与设定库大纲")
     q.add_argument("--chunk-words", dest="chunk_words", type=int, help="分块阈值（默认取配置 summary_chunk_words）")
     q.set_defaults(func=cmd_chapter_summarize)
+    q = p_sub.add_parser("continue", help="在已有正文末尾续写（默认预览，--apply 才落盘）")
+    q.add_argument("--chapter", required=True)
+    q.add_argument("--words", type=int, help="每轮目标字数（默认取配置 segment_words=800；页面用 500/800/1200 档位）")
+    q.add_argument("--rounds", type=int, help="最多轮数（内部参数，页面不暴露；默认取配置 max_rounds=3）")
+    q.add_argument("--intent", help="自由意图：接下来发生什么（最高优先级，可为空）")
+    q.add_argument("--instruction", help="续写思路（兼容旧参数，优先级低于 --intent）")
+    q.add_argument("--from-beat", dest="from_beat", type=int, help="从第几个节拍开始写（1 起）；缺省按已写字数估算")
+    q.add_argument("--retry", action="store_true", help="重抽：忽略已有草稿重新生成（覆盖草稿）")
+    continue_mode = q.add_mutually_exclusive_group()
+    continue_mode.add_argument("--dry-run", action="store_true", help="只预览（默认行为）")
+    continue_mode.add_argument("--apply", action="store_true", help="追加进正文并记录 continuations")
+    q.set_defaults(func=cmd_chapter_continue)
 
     p = sub.add_parser("setting", help="设定库（世界观/文风/大纲）")
     p_sub = p.add_subparsers(dest="action", required=True)
@@ -1142,6 +1157,17 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--worlds", help="世界 ID，逗号分隔；传空串表示清空")
     q.add_argument("--pov", help="POV 角色 ID；传空串表示清空")
     q.set_defaults(func=cmd_outline_bind)
+    q = p_sub.add_parser("continue", help="在已有大纲之后追加新章（默认预览，--apply 才写设定库）")
+    q.add_argument("--chapters", type=int, help="本次追加章数（默认取配置或 3）；与 --acts 同时给出时以本参数为准")
+    q.add_argument("--acts", type=int, help="本次追加幕数；章数 = 幕数 × 每幕章数")
+    q.add_argument("--chapters-per-act", dest="chapters_per_act", type=int, default=3)
+    q.add_argument("--beats-per-chapter", dest="beats_per_chapter", type=int, default=3)
+    q.add_argument("--words", type=int, default=1200, help="单章目标字数")
+    q.add_argument("--brief", help="补充要求，如「进入第二卷，节奏加快」")
+    outline_cont_mode = q.add_mutually_exclusive_group()
+    outline_cont_mode.add_argument("--dry-run", action="store_true", help="只预览（默认行为）")
+    outline_cont_mode.add_argument("--apply", action="store_true", help="写入设定库大纲（逐幕落盘）")
+    q.set_defaults(func=cmd_outline_continue)
 
     p = sub.add_parser("world", help="世界条目（多世界 / 封面图）")
     p_sub = p.add_subparsers(dest="action", required=True)
@@ -1203,12 +1229,34 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--appearance-prompt", dest="appearance_prompt", help="角色外貌提示词（配图用，空串表示清空）")
     q.add_argument("--negative-prompt", dest="negative_prompt", help="角色负向提示词（配图用，空串表示清空）")
     q.add_argument("--situation", help="当前处境")
+    q.add_argument("--voice-profile", dest="voice_profile", help="音色描述 JSON（空串表示清空）")
+    q.add_argument("--stock", help="龙套槽位 JSON（空串表示清空）")
     q.add_argument("--relationship", action="append", help="`目标ID=备注`，可重复")
     q.add_argument("--relationship-remove", dest="relationship_remove", action="append", help="要移除的关系目标ID，可重复")
     q.set_defaults(func=cmd_character_update)
     q = p_sub.add_parser("remove", help="按 ID 删除角色（旁白不可删）")
     q.add_argument("--id", required=True)
     q.set_defaults(func=cmd_character_remove)
+
+    p = sub.add_parser("cast", help="全剧音色编排（校验 / 回填 / 槽位改名）")
+    p_sub = p.add_subparsers(dest="action", required=True)
+    q = p_sub.add_parser("check", help="跑全剧音色与 BGM 一致性校验")
+    q.add_argument("--chapter", help="只校验该章节")
+    q.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    q.set_defaults(func=cmd_cast)
+    q = p_sub.add_parser("backfill", help="补音色描述 / 龙套槽位（默认 dry-run）")
+    q.add_argument("--profiles", action="store_true", help="补 character.voice_profile")
+    q.add_argument("--stock", action="store_true", help="给 role=minor 角色补 stock 槽位")
+    q.add_argument("--all", action="store_true", help="即使已有描述也重新生成")
+    q.add_argument("--force", action="store_true", help="覆盖手工改过的描述")
+    q.add_argument("--apply", action="store_true", help="真正写盘；缺省只预览")
+    q.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    q.set_defaults(func=cmd_cast)
+    q = p_sub.add_parser("rename-slot", help="龙套职业槽位改名（同步 stock_defaults 键）")
+    q.add_argument("--old", required=True)
+    q.add_argument("--new", required=True)
+    q.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    q.set_defaults(func=cmd_cast)
 
     p = sub.add_parser("voice", help="音色库（角色 → 多变体）")
     p_sub = p.add_subparsers(dest="action", required=True)
@@ -1222,6 +1270,16 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--key", action="append", help="只处理指定内置音色键，可重复")
     q.add_argument("--force", action="store_true", help="install 时强制重新下载")
     q.set_defaults(func=cmd_voice_builtin)
+
+    q = p_sub.add_parser("design", help="按人物设定生成音色候选（本地 VoxCPM2）")
+    q.add_argument("--character", required=True, help="人物 ID 或姓名")
+    q.add_argument("--count", type=int, default=0, help="候选条数；0 表示用配置默认值")
+    q.add_argument("--prompt", help="手写英文音色描述；省略则先由 LLM 生成")
+    q.add_argument("--select", type=int, help="生成完成后直接采用第几条候选")
+    q.add_argument("--name", help="入库音色名；默认用人物名")
+    q.add_argument("--gender", choices=["male", "female", "other", "unknown"])
+    q.add_argument("--no-bind", action="store_true", help="入库时不自动绑定到人物")
+    q.set_defaults(func=cmd_voice_design)
 
     def _add_variant_args(q, *, need_name: bool = False) -> None:
         """为音色/变体命令挂上素材参数。"""
@@ -1411,6 +1469,17 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--batch-size", type=int, default=5, dest="batch_size", help="每批行数（默认 5）")
     q.add_argument("--include-ready", action="store_true", dest="include_ready", help="连已完成的行一起重跑（命中缓存则不重新合成）")
     q.add_argument("--dry-run", action="store_true", help="只列出待合成行")
+    q.add_argument(
+        "--progress-file",
+        dest="progress_file",
+        help="把「完成 X/Y + 失败行清单」写进该 JSON 文件，供页面轮询（Web 整本批量使用）",
+    )
+    q.add_argument(
+        "--skip-cast-check",
+        action="store_true",
+        dest="skip_cast_check",
+        help="跳过配音前的音色/BGM 一致性门禁（有 error 时默认阻断）",
+    )
     q.set_defaults(func=cmd_tts_batch)
 
     p_sub.add_parser("providers", help="列出 provider 可用性与许可").set_defaults(func=cmd_tts_providers)
@@ -1484,8 +1553,22 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dry-run", action="store_true")
     p.set_defaults(func=cmd_concat)
 
-    p = sub.add_parser("bgm", help="背景音乐轨（导入现成音频、按时间轴放置）")
+    p = sub.add_parser("bgm", help="背景音乐轨（生成 / 导入现成音频、按时间轴放置）")
     p_sub = p.add_subparsers(dest="action", required=True)
+    q = p_sub.add_parser("generate", help="用 ACE-Step 生成配乐（叙事 / 铺底两档）")
+    q.add_argument("--chapter", required=True)
+    q.add_argument("--prompt", required=True, help="中文音乐描述（风格 / 情绪 / 配器）")
+    q.add_argument("--duration", type=float, help="时长秒数（10~180；缺省取计划时长，否则 40）")
+    q.add_argument("--mode", choices=["auto", "narrative", "bed"], default="auto",
+                   help="用途档位：auto=按场景推断，narrative=叙事，bed=铺底")
+    q.add_argument("--normalize", action=argparse.BooleanOptionalAction, default=None,
+                   help="叙事档是否做 loudnorm（默认跟随配置；铺底档始终归一）")
+    q.add_argument("--plan", help="关联导演脚本里的 BGM 计划 ID（用于自动推断档位）")
+    q.add_argument("--seed", type=int, help="随机种子；为空时按章节 + 档位派生")
+    q.add_argument("--name", help="cue 展示名称；为空时取计划名或描述前 16 字")
+    q.add_argument("--start-ms", type=int, default=0, dest="start_ms")
+    q.add_argument("--no-cue", action="store_true", dest="no_cue", help="只生成文件，不写 cue")
+    q.set_defaults(func=cmd_bgm_generate)
     q = p_sub.add_parser("add", help="导入音频并放置一条 cue")
     q.add_argument("--chapter", required=True)
     q.add_argument("--file", required=True, help="外部音频文件（会复制进 assets/audio/bgm/）")
@@ -1501,6 +1584,10 @@ def build_parser() -> argparse.ArgumentParser:
     q.set_defaults(func=cmd_bgm)
     q = p_sub.add_parser("clear", help="清空章节 BGM cue")
     q.add_argument("--chapter", required=True)
+    q.set_defaults(func=cmd_bgm)
+    q = p_sub.add_parser("sync", help="按导演脚本的 BGM 描述重建 cue（保留手工 cue 与选曲）")
+    q.add_argument("--chapter", required=True)
+    q.add_argument("--dry-run", action="store_true")
     q.set_defaults(func=cmd_bgm)
 
     p = sub.add_parser("mux", help="混流：音轨 + 画面合成 MP4")

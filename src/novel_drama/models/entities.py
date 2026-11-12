@@ -265,7 +265,15 @@ def new_sfx_event(scene_id: str, index: int, kind: str, prompt: str, duration_ms
     }
 
 
-def new_key_image(scene_id: str, index: int, anchor_line_id: str, prompt: str, width: int = 1152, height: int = 1536) -> dict:
+def new_key_image(
+    scene_id: str,
+    index: int,
+    anchor_line_id: str,
+    prompt: str,
+    width: int,
+    height: int,
+    aspect_ratio: str,
+) -> dict:
     """构造关键图。
 
     参数:
@@ -273,8 +281,9 @@ def new_key_image(scene_id: str, index: int, anchor_line_id: str, prompt: str, w
         index: 场景内序号。
         anchor_line_id: 锚定台词行（所属段落）。
         prompt: 正向提示词。
-        width: 目标宽。
-        height: 目标高。
+        width: 目标宽（按工程画幅解析后传入）。
+        height: 目标高（按工程画幅解析后传入）。
+        aspect_ratio: 工程画幅（`output.aspect_ratio`）。
 
     返回:
         关键图 dict，产物状态 pending。
@@ -289,7 +298,7 @@ def new_key_image(scene_id: str, index: int, anchor_line_id: str, prompt: str, w
         "negative_prompt": "低质, 多余手指, 水印, 文字",
         "prompt_source": "auto",
         "style_ref": None,
-        "aspect_ratio": "3:4" if height >= width else "4:3",
+        "aspect_ratio": aspect_ratio,
         "width": width,
         "height": height,
         "seed": None,

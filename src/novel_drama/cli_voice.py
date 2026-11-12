@@ -441,7 +441,7 @@ def _apply_script_to_chapter(store: ProjectStore, chapter: dict, script: dict) -
     # 把镜头里的音效/画面/动画物化进场景，供时间轴与渲染使用
     from .director.materialize import materialize_media
 
-    media = materialize_media(chapter, script)
+    media = materialize_media(chapter, script, store.settings())
     store.save_chapter(chapter)
     return {
         "scenes_created": created,
@@ -451,3 +451,76 @@ def _apply_script_to_chapter(store: ProjectStore, chapter: dict, script: dict) -
         "images_added": media["image_added"],
         "videos_added": media["video_added"],
     }
+
+
+def cmd_voice_design(args, config: AppConfig) -> int:
+    """按人物设定生成音色候选（本地 VoxCPM2），可同步等待并直接采用。
+
+    参数:
+        args: `{character, count, prompt, select, name, gender, no_bind}`。
+        config: 本机配置（读取 voice.design.*）。
+
+    返回:
+        退出码：成功 EXIT_OK；生成失败 EXIT_FAILED。
+    """
+    import time
+
+    from .adapters import build_adapters
+    from .tts import voice_design
+
+    store = _resolve_store(args, config)
+    design = config.get("voice.design") or {}
+    if not design.get("enabled", True):
+        raise PreconditionError("音色设计未启用：voice.design.enabled=false")
+    characters = store.load_characters()["characters"]
+    character = next((item for item in characters if item["id"] == args.character or item["name"] == args.character), None)
+    if character is None:
+        raise PreconditionError(f"人物不存在: {args.character}")
+
+    prompt = args.prompt
+    if not prompt:
+        adapters = build_adapters(config, store.settings())
+        built = voice_design.build_profile(adapters.writing, character)
+        prompt = built["profile"]["design_prompt"]
+        if built.get("note"):
+            print(f"[warn] {built['note']}")
+        print(f"音色描述: {prompt}")
+
+    count = int(args.count or design.get("candidates", 4))
+    meta = voice_design.create_batch(store, config, character, prompt, count, None)
+    batch_id = meta["batch_id"]
+    print(f"批次 {batch_id} 已提交，共 {count} 条候选…")
+    deadline = time.time() + float(design.get("timeout_s", 900)) + 60
+    while time.time() < deadline:
+        meta = voice_design.read_batch(store, batch_id)
+        if meta.get("status") != "running":
+            break
+        stage = meta.get("stage")
+        if stage == "loading":
+            print("  加载模型…")
+        elif stage == "generating":
+            print(f"  生成中 {meta.get('done')}/{meta.get('total')}")
+        time.sleep(3)
+    if meta.get("status") != "ready":
+        print(f"[failed] {meta.get('error') or '生成超时'}")
+        return EXIT_FAILED
+
+    for item in meta.get("candidates") or []:
+        print(f"  候选 {item['index']}: {item['duration_ms'] / 1000:.1f}s  seed={item.get('seed')}")
+    print(f"候选目录: {voice_design.batch_dir(store, batch_id)}")
+    if not args.select:
+        print(f"未指定 --select；候选保留 {design.get('max_keep_days', 7)} 天，可稍后在页面采用。")
+        return EXIT_OK
+
+    gender = args.gender or (meta.get("profile") or {}).get("gender") or "unknown"
+    result = voice_design.select_candidate(
+        store,
+        batch_id,
+        int(args.select),
+        args.name or character.get("name") or "生成音色",
+        gender,
+        "manual",
+        not args.no_bind,
+    )
+    print(f"已入库: {result['voice']['id']} / 变体 {result['variant_id']}")
+    return EXIT_OK

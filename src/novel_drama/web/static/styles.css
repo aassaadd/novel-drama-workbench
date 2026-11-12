@@ -49,7 +49,7 @@
 
   --radius: 8px;
   --row-h: 46px;
-  --cols: 52px 64px 104px 1fr 72px 48px 48px 76px 56px 52px 52px;
+  --cols: 52px 64px 104px 1fr 72px 48px 48px 76px 56px 52px 52px 30px;
 }
 
 * { box-sizing: border-box; }
@@ -271,14 +271,19 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); }
 
 .badges {
   display: flex;
+  flex-wrap: nowrap;
   gap: var(--sp-2);
   padding: var(--sp-2) var(--sp-4);
   background: var(--panel);
   border-bottom: 1px solid var(--line);
+  overflow-x: auto;
 }
 
+/* 徽标固定单行：窄屏放不下时横向滚动，不折行、不被挤成方块 */
 .badge {
   display: inline-flex;
+  flex: none;
+  white-space: nowrap;
   align-items: center;
   gap: var(--sp-2);
   padding: var(--sp-1) var(--sp-3);
@@ -838,6 +843,12 @@ table.grid td.wrap { word-break: break-word; }
   white-space: nowrap;
 }
 
+/* 窄屏时步骤条几乎占满整行，右侧提示会压住「媒体 / 导出」：直接隐藏，
+ * 章节信息在底部栏仍能看到，避免两个按钮叠在一起看不清。 */
+@media (max-width: 1180px) {
+  .flow-tip { display: none; }
+}
+
 /* 主 CTA 现在在顶栏右组，不需要在流程条里靠 auto 外边距顶开 */
 .flow-next { white-space: nowrap; }
 
@@ -1182,6 +1193,21 @@ table.grid td.wrap { word-break: break-word; }
 }
 
 .toolbar-tip { margin-left: auto; font-size: var(--fs-xs); }
+
+/* 工具条分组：同一种动作放在一组，组间用竖线隔开，避免十几个按钮混排 */
+.toolbar-group {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding-right: var(--sp-3);
+  border-right: 1px solid var(--line);
+}
+.toolbar-group:last-of-type { border-right: 0; padding-right: 0; }
+.toolbar-label {
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  white-space: nowrap;
+}
 
 /* 章节页：正文主区 + 右侧场景/台词紧凑列表 */
 .chapter-main {
@@ -2236,3 +2262,65 @@ select.gen-input {
   line-height: 1.7;
   word-break: break-all;
 }
+
+/* ---------------- 单行重录 / 版本对比 / Casting 试听 / 整本批量 ---------------- */
+
+.row-rerun {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+}
+.row-rerun:hover { color: var(--accent); border-color: var(--accent); background: var(--panel-2); }
+.row-rerun[disabled] { opacity: .4; cursor: progress; }
+
+.versions { border-top: 1px solid var(--line); padding-top: var(--sp-3); margin-top: var(--sp-2); }
+.version-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-1) var(--sp-2);
+  background: var(--panel-2);
+  border-radius: 6px;
+}
+.version-row.active { box-shadow: inset 2px 0 0 var(--accent); }
+.version-row .tag { color: var(--muted); font-size: var(--fs-sm); }
+.version-row .tag.on { color: var(--accent); }
+
+.cast-preview { border-top: 1px solid var(--line); margin-top: var(--sp-3); padding-top: var(--sp-3); }
+.cast-preview .row { display: flex; gap: var(--sp-2); align-items: center; flex-wrap: wrap; }
+.cast-preview select { min-width: 180px; }
+.cast-preview-log { display: flex; flex-direction: column; gap: var(--sp-1); margin-top: var(--sp-2); }
+.cast-preview-log .item { display: flex; gap: var(--sp-2); align-items: center; }
+
+.batch-panel {
+  border-top: 1px solid var(--line);
+  background: var(--panel);
+  padding: var(--sp-3) var(--sp-4);
+  max-height: 42vh;
+  overflow: auto;
+}
+.batch-panel[hidden] { display: none; }
+.batch-head { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; }
+.batch-meta { color: var(--muted); font-size: var(--fs-sm); }
+.batch-failures { display: flex; flex-direction: column; gap: var(--sp-1); margin-top: var(--sp-2); }
+.batch-failure {
+  display: flex;
+  gap: var(--sp-2);
+  align-items: center;
+  padding: var(--sp-1) var(--sp-2);
+  background: var(--panel-2);
+  border-radius: 6px;
+  font-size: var(--fs-sm);
+}
+.batch-failure .where { color: var(--muted); min-width: 10em; }
+.batch-failure .why { flex: 1; overflow: hidden; text-overflow: ellipsis; }

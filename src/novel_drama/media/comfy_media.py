@@ -5,7 +5,7 @@
 - 按 manifest 的 `bindings`（节点 ID + 输入名）写入 prompt / negative_prompt /
   width / height / seed / filename_prefix / input_image，数值保持 int；
 - 模板里只允许白名单占位符，填完后仍残留 `{{...}}` 直接 `INVALID_INPUT`；
-- 画幅按「条目 > 工程 > 1:1」解析，再经模板 `size_map` 映射为宽高；
+- 画幅只按工程 `output.aspect_ratio` 解析（唯一来源），再经模板 `size_map` 映射为宽高；
 - 视频只支持 9:16 / 16:9 / 1:1，其它画幅取比例最接近的一档并返回中文降级说明；
 - seed 与产物前缀由「条目 ID + revision」稳定派生，保证同一 revision 可复现。
 """
@@ -250,27 +250,41 @@ def _size_map_for(kind: str, manifest: dict | None = None) -> dict:
     return size_map
 
 
-def resolve_aspect(item: dict, project_settings: dict, kind: str) -> dict:
-    """解析条目画幅与宽高。
-
-    优先级：`item["aspect_ratio"]` > `project_settings["output"]["aspect_ratio"]` > `1:1`。
-    视频只允许 9:16 / 16:9 / 1:1，其余画幅按浮点比例距离取最接近的一档。
+def project_ratio(settings: dict | None) -> str:
+    """读取工程画幅（所有图像/视频尺寸的唯一来源）。
 
     参数:
-        item: 关键图或视频条目。
+        settings: 工程设置（`project.settings`）。
+
+    返回:
+        形如 `1:1` 的画幅；缺失或无法解析时回落 `1:1`。
+    """
+    output = settings.get("output") if isinstance(settings, dict) else None
+    ratio = str((output or {}).get("aspect_ratio") or "").strip()
+    return ratio if _ratio_value(ratio) is not None else "1:1"
+
+
+def resolve_aspect(
+    project_settings: dict,
+    kind: str,
+    *,
+    manifest: dict | None = None,
+) -> dict:
+    """按工程画幅解析画幅与宽高。
+
+    工程 `output.aspect_ratio` 是唯一来源；条目自带的 `aspect_ratio` 不再参与解析，
+    避免同一工程出现多套画面比例。
+
+    参数:
         project_settings: 工程设置（读 `output.aspect_ratio`）。
-        kind: image / video。
+        kind: image / image_ref / video。
+        manifest: 已加载的模板清单；为空时读默认清单。
 
     返回:
         `{"ratio","width","height","fallback","note"}`；`fallback=True` 表示发生了降级。
     """
-    output = project_settings.get("output") if isinstance(project_settings, dict) else None
-    ratio = str(item.get("aspect_ratio") or "").strip()
-    if not ratio:
-        ratio = str((output or {}).get("aspect_ratio") or "").strip()
-    if not ratio:
-        ratio = "1:1"
-    size_map = _size_map_for("video" if kind == "video" else "image")
+    ratio = project_ratio(project_settings)
+    size_map = _size_map_for("video" if kind == "video" else "image", manifest)
     allowed = VIDEO_RATIOS if kind == "video" else tuple(size_map.keys())
     chosen, fallback, note = _pick_ratio(ratio, allowed, size_map)
     width, height = size_map[chosen]
@@ -504,8 +518,11 @@ def build_prompt(
         value = values.get(name)
         if value is None:
             continue
-        node, input_name = _require_binding(template, actual_id, name, spec)
-        node["inputs"][input_name] = copy.deepcopy(value)
+        # 一个占位符可以同时写进多个节点（如 ACE-Step 的 duration 同时驱动文本编码与 latent 长度）
+        specs = spec if isinstance(spec, list) else [spec]
+        for one in specs:
+            node, input_name = _require_binding(template, actual_id, name, one)
+            node["inputs"][input_name] = copy.deepcopy(value)
 
     leftover = _leftover_placeholders(template, set())
     if leftover:

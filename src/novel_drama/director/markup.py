@@ -8,7 +8,7 @@
     林晚|whisper|inner_monologue：别出声。
     !sfx ambience 8000 after-line=2 雨声敲窗
     !silence 800  after-line=2  情绪留白
-    !visual 3:4 书房内景，暖黄台灯，雨夜，人物背对镜头
+    !visual 书房内景，暖黄台灯，雨夜，人物背对镜头
     !anim i2v 5000 slow_push_in 镜头缓慢推近，雨丝划过窗
 
 约定：
@@ -28,15 +28,9 @@ from ..models import new_id
 from ..models.entities import EMOTIONS, NARRATOR_ID, UNKNOWN_SPEAKER_ID
 from ..models.ids import now_iso
 
-ASPECT_SIZES = {
-    "1:1": (1024, 1024),
-    "3:4": (1152, 1536),
-    "4:3": (1536, 1152),
-    "9:16": (720, 1280),
-    "16:9": (1280, 720),
-}
 TIMES = ("dawn", "morning", "day", "dusk", "night", "unknown")
 SFX_KINDS = ("ambience", "foley", "impact", "transition", "music_sting")
+BGM_MOODS = ("calm", "tense", "sad", "romantic", "mysterious", "action", "comedic", "epic", "horror")
 CAMERA_MOVES = ("static", "slow_push_in", "pan_left", "pan_right", "handheld")
 
 # 内置模板 ID：工程与本机配置都取不到时的兜底（与 config.py 的 _FALLBACK 保持一致）
@@ -241,6 +235,13 @@ def parse_markup(markup: str, chapter: dict, characters: list[dict], settings: d
     warnings: list[str] = []
     templates = _template_ids(settings)
     template_image = templates["image"]
+    from ..media.comfy_media import resolve_aspect
+
+    # 画幅与宽高统一按工程 output.aspect_ratio 解析（模板 size_map 是宽高唯一来源）
+    aspect = resolve_aspect(settings, "image")
+    output_aspect = aspect["ratio"]
+    output_width = int(aspect["width"])
+    output_height = int(aspect["height"])
 
     # 已有台词行：按文本建索引，供自动挂接
     existing: dict[str, list[dict]] = {}
@@ -330,6 +331,73 @@ def parse_markup(markup: str, chapter: dict, characters: list[dict], settings: d
                     }
                 )
                 continue
+            if head in ("bgm", "bgm-seg"):
+                options = _parse_kv(parts)
+                mood = (options.get("mood") or "calm").strip()
+                if mood not in BGM_MOODS:
+                    warnings.append(f"镜头 {shot['index']} 的 BGM mood={mood} 非法，已改为 calm")
+                    mood = "calm"
+
+                def opt_number(key: str, default=None):
+                    """读取数值型选项；非法值回退默认并告警。"""
+                    raw_value = options.get(key)
+                    if raw_value in (None, ""):
+                        return default
+                    try:
+                        return float(raw_value)
+                    except ValueError:
+                        warnings.append(f"镜头 {shot['index']} 的 BGM {key}={raw_value} 不是数字，已忽略")
+                        return default
+
+                if head == "bgm":
+                    shot["bgm"] = {
+                        "id": new_id("bgp"),
+                        "scope": "shot",
+                        "name": (options.get("name") or f"镜头{shot['index']} BGM").replace("+", " ")[:200],
+                        "narrative_function": (options.get("function") or "").replace("+", " ")[:300] or None,
+                        "mood_family": mood,
+                        "mood_text": (options.get("mood_text") or "").replace("+", " ")[:200] or None,
+                        "energy": opt_number("energy", 0.4),
+                        "intensity": opt_number("intensity", 0.5),
+                        "style": (options.get("style") or "").replace("+", " ")[:500] or None,
+                        "instrumentation": [
+                            item.replace("+", " ") for item in (options.get("inst") or "").split(",") if item
+                        ],
+                        "tempo_bpm": int(opt_number("bpm", 0)) or None,
+                        "duration_hint_ms": int(opt_number("dur", 0)) or None,
+                        "loop_required": options.get("loop", "1") not in ("0", "false", "no"),
+                        "loop_point_hint": (options.get("loop_hint") or "").replace("+", " ")[:200] or None,
+                        "gain_db_hint": opt_number("gain", -20.0),
+                        "fade_in_ms": int(opt_number("fade_in", 1500)),
+                        "fade_out_ms": int(opt_number("fade_out", 2000)),
+                        "duck_under_dialogue": options.get("duck", "1") not in ("0", "false", "no"),
+                        "source": "manual",
+                        "status": "planned",
+                        "segments": [],
+                        "revision": 1,
+                    }
+                    continue
+                plan = shot.get("bgm")
+                if not plan:
+                    raise ValueError(f"!bgm-seg 必须在本镜头先声明 !bgm：{raw}")
+                anchor_raw = (options.get("anchor") or "last").strip()
+                anchor_index = len(shot["lines"]) if anchor_raw == "last" else int(anchor_raw)
+                plan["segments"].append(
+                    {
+                        "index": len(plan["segments"]) + 1,
+                        "anchor_line_id": None,
+                        "_anchor_index": anchor_index,
+                        "narrative_function": (options.get("function") or "").replace("+", " ")[:300] or None,
+                        "mood_family": mood,
+                        "energy": opt_number("energy", plan.get("energy")),
+                        "style": (options.get("style") or "").replace("+", " ")[:500] or None,
+                        "duration_hint_ms": int(opt_number("dur", 0)) or None,
+                        "transition_in": options.get("in") or "fade",
+                        "transition_out": options.get("out") or "fade",
+                        "note": (options.get("note") or "").replace("+", " ")[:300] or None,
+                    }
+                )
+                continue
             if head == "silence":
                 if len(parts) < 2:
                     raise ValueError(f"静音需要「时长 位置 [原因]」：{raw}")
@@ -348,20 +416,20 @@ def parse_markup(markup: str, chapter: dict, characters: list[dict], settings: d
                 )
                 continue
             if head == "visual":
-                if len(parts) < 2:
-                    raise ValueError(f"画面需要「比例 提示词」：{raw}")
-                aspect = parts[0]
-                if aspect not in ASPECT_SIZES:
-                    raise ValueError(f"画面比例非法：{aspect}（可选 {', '.join(ASPECT_SIZES)}）")
-                width, height = ASPECT_SIZES[aspect]
+                tokens = list(parts)
+                # 兼容旧脚本：形如 3:4 的比例令牌直接忽略，画幅统一以工程 output.aspect_ratio 为唯一来源
+                if tokens and re.match(r"^\d+:\d+$", tokens[0]):
+                    tokens = tokens[1:]
+                if not tokens:
+                    raise ValueError(f"画面需要提示词：{raw}")
                 shot["visuals"].append(
                     {
                         "id": new_id("img"),
                         "index": len(shot["visuals"]) + 1,
-                        "prompt": " ".join(parts[1:]),
-                        "aspect_ratio": aspect,
-                        "width": width,
-                        "height": height,
+                        "prompt": " ".join(tokens),
+                        "aspect_ratio": output_aspect,
+                        "width": output_width,
+                        "height": output_height,
                         "workflow_template_id": template_image,
                         "anchor": shot["anchor"],
                         "status": "pending",
@@ -458,6 +526,15 @@ def parse_markup(markup: str, chapter: dict, characters: list[dict], settings: d
     for shot in shots:
         if not shot["lines"]:
             raise ValueError(f"镜头 {shot['index']} 没有任何台词行")
+        plan = shot.get("bgm")
+        if plan:
+            for segment in plan.get("segments") or []:
+                anchor_index = int(segment.pop("_anchor_index", len(shot["lines"])))
+                if 1 <= anchor_index <= len(shot["lines"]):
+                    segment["anchor_line_id"] = shot["lines"][anchor_index - 1]["id"]
+                else:
+                    warnings.append(f"镜头 {shot['index']} 的 BGM 段落锚点 {anchor_index} 超出范围，已改到镜首")
+                    segment["anchor_line_id"] = shot["lines"][0]["id"]
         shot["status"] = "ready" if not warnings else "draft"
 
     content_hash = _sha(content)

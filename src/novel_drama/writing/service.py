@@ -763,12 +763,16 @@ def suggest_script(
             "旁白：夜色渐深。\n"
             "沈砚秋|calm：执照可以收，尸体不能白躺。\n"
             "!sfx ambience 8000 after-line=1 雨声敲窗\n"
-            "!visual 3:4 画面描述\n"
+            "!visual 画面描述\n"
+            "!bgm mood=tense energy=0.4 intensity=0.6 loop=1 name=夜雨独行 style=低音弦乐+稀疏钢琴 function=铺垫危机\n"
             "!anim i2v 5000 slow_push_in 镜头运动\n"
             "规则：@shot 后必须是整数序号与镜头名，序号与提示中的【镜头 N】一致；"
             "time 取 dawn/morning/day/dusk/night/unknown；"
             "!sfx 的 kind 只能是 ambience/foley/impact/transition/music_sting，第二个参数是毫秒数，位置写 after-line=N；"
-            "!visual 的第一个参数只能是 1:1/3:4/4:3/9:16/16:9，后面跟画面提示词；"
+            "!visual 直接跟画面提示词，不写画幅；"
+            "!bgm 每个镜头最多一条，mood 只能是 calm/tense/sad/romantic/mysterious/action/comedic/epic/horror，"
+            "energy/intensity 取 0~1，style 与 function 里的空格用 + 代替；"
+            "同一镜头内情绪有明显变化时，追加 !bgm-seg mood=... anchor=镜头内台词序号 style=...；"
             "!silence 写成「!silence 800 after-line=N 原因」；"
             "!anim 的 mode 只能是 i2v/t2v，第二个参数是 500~5000 的毫秒数，第三个参数只能是 "
             "static/slow_push_in/pan_left/pan_right/handheld；每个镜头至少一句台词；台词保留原文。"
@@ -995,6 +999,55 @@ _WORLD_TOOL_SCHEMA = {
     "required": ["name", "era"],
 }
 
+#: 音色描述参数 schema（正式角色 / 龙套 / 旁白共用）
+_VOICE_PROFILE_TOOL_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "voice_summary": {"type": "string", "description": "一句话音色概括，80 字以内"},
+        "gender": {"type": "string", "enum": list(GENDER_OPTIONS)},
+        "age_feel": {
+            "type": "string",
+            "enum": ["child", "teen", "young_adult", "adult", "middle_aged", "elderly"],
+        },
+        "age_range": {"type": "string", "description": "年龄区间，如「30-39」"},
+        "pitch": {
+            "type": "string",
+            "enum": ["very_low", "low", "mid_low", "mid", "mid_high", "high", "very_high"],
+        },
+        "timbre": {"type": "array", "items": {"type": "string"}, "description": "2-4 个音色质感词"},
+        "pace": {"type": "string", "enum": ["very_slow", "slow", "normal", "fast", "very_fast"]},
+        "volume": {"type": "string", "enum": ["soft", "normal", "loud"]},
+        "energy": {"type": "string", "enum": ["calm", "conversational", "dramatic", "authoritative"]},
+        "warmth": {"type": "string", "enum": ["warm", "neutral", "cold", "distant"]},
+        "articulation": {"type": "string", "enum": ["clear", "mumbled", "clipped", "drawl"]},
+        "temperament": {"type": "array", "items": {"type": "string"}, "description": "2-4 个气质词"},
+        "accent": {"type": "string", "description": "口音/地域腔调；标准普通话写「标准普通话」"},
+        "design_prompt": {"type": "string", "description": "可直接用于文字造音色的提示词，120 字以内"},
+        "negative_prompt": {"type": "array", "items": {"type": "string"}, "description": "应避免的音色特征"},
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+        "evidence": {"type": "array", "items": {"type": "string"}, "description": "推导依据，引用人物档案里的字段"},
+    },
+    "required": ["voice_summary", "design_prompt"],
+}
+
+#: 龙套槽位参数 schema
+_STOCK_TOOL_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "slot": {
+            "type": "string",
+            "description": "职业槽位稳定英文键，小写+下划线，如 waiter/guard/runner",
+        },
+        "voice_slot": {
+            "type": "string",
+            "description": "音色池槽位：male_young/male_mid/male_elder/female_young/female_mid/female_elder",
+        },
+        "label": {"type": "string", "description": "中文职业名，如「店小二」"},
+        "archetype_tags": {"type": "array", "items": {"type": "string"}, "description": "2-3 个语义标签"},
+    },
+    "required": ["slot", "label"],
+}
+
 #: 人物条目参数 schema（单个与批量共用）
 _CHARACTER_TOOL_SCHEMA = {
     "type": "object",
@@ -1027,8 +1080,21 @@ _CHARACTER_TOOL_SCHEMA = {
             },
             "description": "人物状态；单人物生成时关系备注写在 relationship_notes",
         },
+        "voice_profile": _VOICE_PROFILE_TOOL_SCHEMA,
+        "stock": _STOCK_TOOL_SCHEMA,
     },
     "required": ["name"],
+}
+
+#: 龙套条目 schema：在人物 schema 上要求 stock
+_STOCK_CHARACTER_TOOL_SCHEMA = {
+    "type": "object",
+    "properties": {
+        **_CHARACTER_TOOL_SCHEMA["properties"],
+        "stock": _STOCK_TOOL_SCHEMA,
+        "role": {"type": "string", "enum": ["minor"], "description": "龙套固定为 minor"},
+    },
+    "required": ["name", "stock"],
 }
 
 #: 梗概参数 schema
@@ -1191,7 +1257,20 @@ def _gen_tool(step: str | None) -> dict | None:
                 "description": "输出人物设定：数量按需求自行判断（至少 1 名主角），不要凑数",
                 "parameters": {
                     "type": "object",
-                    "properties": {"characters": {"type": "array", "items": _CHARACTER_TOOL_SCHEMA}},
+                    "properties": {
+                        "characters": {"type": "array", "items": _CHARACTER_TOOL_SCHEMA},
+                        "stock_characters": {
+                            "type": "array",
+                            "items": _STOCK_CHARACTER_TOOL_SCHEMA,
+                            "description": "常用路人/龙套池，固定 6-10 个职业，供跨章复用音色",
+                        },
+                        "narrator_profile": {
+                            "type": "object",
+                            "properties": {"voice_profile": _VOICE_PROFILE_TOOL_SCHEMA},
+                            "required": ["voice_profile"],
+                            "description": "旁白音色描述（旁白是既有实体，这里只产出描述）",
+                        },
+                    },
                     "required": ["characters"],
                 },
             },
@@ -1853,6 +1932,8 @@ def generate_characters(
     batch = max(1, batch)
 
     batches = 1
+    stock_rows: list[dict] = []
+    narrator_profile_raw: dict | None = None
     if total > batch:
         # 数量超过单批上限：按批生成，每批在固定前缀后追加本批要求与已生成名单
         batches = (total + batch - 1) // batch
@@ -1868,6 +1949,10 @@ def generate_characters(
             batch_req = replace(req, messages=list(req.messages) + [Message("user", "\n".join(lines))])
             batch_req.metadata = dict(req.metadata or {}, count=take)
             batch_payload = _generate_json(adapter, batch_req, "characters")
+            if not stock_rows and isinstance(batch_payload.get("stock_characters"), list):
+                stock_rows = [row for row in batch_payload["stock_characters"] if isinstance(row, dict)]
+            if narrator_profile_raw is None and isinstance(batch_payload.get("narrator_profile"), dict):
+                narrator_profile_raw = batch_payload["narrator_profile"]
             batch_rows = batch_payload.get("characters")
             if not isinstance(batch_rows, list):
                 continue
@@ -1883,6 +1968,10 @@ def generate_characters(
     else:
         payload = _generate_json(adapter, req, "characters")
         rows = payload.get("characters")
+        if isinstance(payload.get("stock_characters"), list):
+            stock_rows = [row for row in payload["stock_characters"] if isinstance(row, dict)]
+        if isinstance(payload.get("narrator_profile"), dict):
+            narrator_profile_raw = payload["narrator_profile"]
     if not isinstance(rows, list) or not rows:
         raise ValueError("LLM 返回的人物列表为空")
 
@@ -1900,27 +1989,220 @@ def generate_characters(
         relationships = row.get("relationships") or {}
         if not isinstance(relationships, dict):
             relationships = {}
-        characters.append(
-            {
-                "name": name,
-                "role": role,
-                "gender": gender,
-                "age_range": _check_text(row.get("age_range"), 40, f"人物 {name} 的年龄区间") or None,
-                "personality": _clean_str_list(row.get("personality"), 120, f"人物 {name} 的性格"),
-                "background": _check_text(row.get("background"), 2000, f"人物 {name} 的背景"),
-                "appearance_prompt": _check_text(row.get("appearance_prompt"), 2000, f"人物 {name} 的外貌提示词"),
-                "negative_prompt": _check_text(row.get("negative_prompt"), 1000, f"人物 {name} 的负向提示词"),
-                "relationships": {
-                    _check_text(key, 60, f"人物 {name} 的关系对象", required=True): _check_text(note, 500, f"人物 {name} 的关系备注")
-                    for key, note in relationships.items()
-                },
-            }
-        )
+        entry = {
+            "name": name,
+            "role": role,
+            "gender": gender,
+            "age_range": _check_text(row.get("age_range"), 40, f"人物 {name} 的年龄区间") or None,
+            "personality": _clean_str_list(row.get("personality"), 120, f"人物 {name} 的性格"),
+            "background": _check_text(row.get("background"), 2000, f"人物 {name} 的背景"),
+            "appearance_prompt": _check_text(row.get("appearance_prompt"), 2000, f"人物 {name} 的外貌提示词"),
+            "negative_prompt": _check_text(row.get("negative_prompt"), 1000, f"人物 {name} 的负向提示词"),
+            "relationships": {
+                _check_text(key, 60, f"人物 {name} 的关系对象", required=True): _check_text(note, 500, f"人物 {name} 的关系备注")
+                for key, note in relationships.items()
+            },
+        }
+        profile = _clean_voice_profile(row.get("voice_profile"))
+        if profile:
+            entry["voice_profile"] = _attach_profile_source(entry, profile)
+        stock = _clean_stock(row.get("stock")) if role == "minor" else None
+        if stock:
+            entry["stock"] = stock
+            entry["name"] = _stock_display_name(entry["name"], stock["label"])
+        characters.append(entry)
+
+    stock_characters = _build_stock_characters(stock_rows, seen)
+    narrator_profile = None
+    if narrator_profile_raw:
+        profile = _clean_voice_profile(narrator_profile_raw.get("voice_profile"))
+        if profile:
+            narrator_profile = {"voice_profile": _attach_profile_source({"name": "旁白"}, profile)}
+    if not stock_characters:
+        stock_characters = _default_stock_characters()
 
     # 角色数量与定位由需求决定，这里只保证至少有一个主角，不再限定配角人数
     if not any(item["role"] == "protagonist" for item in characters):
         raise ValueError("人物里至少需要 1 个 protagonist（主角）")
-    return {"characters": characters, "batches": batches}
+    return {
+        "characters": characters,
+        "stock_characters": stock_characters,
+        "narrator_profile": narrator_profile,
+        "batches": batches,
+    }
+
+
+_VOICE_PROFILE_TEXT_LIMITS = {
+    "voice_summary": 300,
+    "summary": 300,
+    "age_range": 40,
+    "age_feel": 20,
+    "pitch": 20,
+    "pace": 20,
+    "volume": 20,
+    "energy": 30,
+    "warmth": 30,
+    "articulation": 30,
+    "accent": 60,
+    "design_prompt": 1200,
+}
+
+#: 龙套默认槽位（LLM 未产出时的兜底；职业槽位与音色池分离）
+_DEFAULT_STOCK_SLOTS = (
+    ("waiter", "店小二", "male_mid"),
+    ("guard", "衙役", "male_mid"),
+    ("runner", "小厮", "male_young"),
+    ("passerby_m", "路人男", "male_mid"),
+    ("passerby_f", "路人女", "female_mid"),
+    ("elder_m", "老者", "male_elder"),
+    ("elder_f", "老妇", "female_elder"),
+    ("girl", "少女", "female_young"),
+)
+
+
+def _clean_voice_profile(row) -> dict | None:
+    """清洗 LLM 产出的音色描述（只保留已知字段，长度受限）。
+
+    参数:
+        row: 模型返回的 voice_profile 对象。
+
+    返回:
+        清洗后的 dict；空对象返回 None。
+    """
+    if not isinstance(row, dict):
+        return None
+    profile: dict = {}
+    for key, limit in _VOICE_PROFILE_TEXT_LIMITS.items():
+        value = _check_text(row.get(key), limit, f"音色描述 {key}")
+        if value:
+            profile[key] = value
+    for key in ("timbre", "temperament", "negative_prompt", "evidence"):
+        items = _clean_str_list(row.get(key), 60, f"音色描述 {key}")
+        if items:
+            profile[key] = items
+    gender = _normalize_choice(row.get("gender"), GENDER_OPTIONS)
+    if gender:
+        profile["gender"] = gender
+    confidence = row.get("confidence")
+    if isinstance(confidence, (int, float)) and 0 <= confidence <= 1:
+        profile["confidence"] = float(confidence)
+    return profile or None
+
+
+def _attach_profile_source(character: dict, profile: dict) -> dict:
+    """补齐音色描述的元数据（schema/summary/来源哈希/状态）。"""
+    from ..store.voice_cast import profile_source_hash
+
+    profile["schema"] = "voice_profile/1"
+    profile.setdefault("summary", profile.get("voice_summary"))
+    profile["source"] = {"kind": "llm", "at": now_iso(), "from_hash": profile_source_hash(character)}
+    profile["status"] = "ready"
+    return profile
+
+
+def _stock_voice_slot(gender: str | None, age_range: str | None) -> str:
+    """按性别与年龄感给出音色池槽位。"""
+    age = str(age_range or "")
+    elder = any(word in age for word in ("60", "70", "80", "老"))
+    young = any(word in age for word in ("16", "17", "18", "19", "20", "21", "22", "少年", "少女"))
+    if gender == "female":
+        return "female_elder" if elder else ("female_young" if young else "female_mid")
+    if gender == "male":
+        return "male_elder" if elder else ("male_young" if young else "male_mid")
+    return "neutral_mid"
+
+
+def _clean_stock(row) -> dict | None:
+    """清洗龙套槽位；非法槽位返回 None（由调用方决定是否降级）。"""
+    if not isinstance(row, dict):
+        return None
+    label = _check_text(row.get("label"), 40, "龙套职业名", required=True)
+    slot = str(row.get("slot") or "").strip().lower()
+    if not re.match(r"^[a-z][a-z0-9_]{1,39}$", slot):
+        return None
+    return {
+        "slot": slot,
+        "voice_slot": str(row.get("voice_slot") or "").strip() or None,
+        "label": label,
+        "archetype_tags": _clean_str_list(row.get("archetype_tags"), 20, f"龙套 {label} 的标签"),
+        "reuse_policy": "reuse",
+    }
+
+
+def _stock_display_name(name: str, label: str) -> str:
+    """统一龙套展示名：`龙套·<职业>`。"""
+    if name.startswith("龙套"):
+        return name
+    return f"龙套·{label}"
+
+
+def _build_stock_characters(rows: list[dict], seen: set[str]) -> list[dict]:
+    """把 LLM 的 stock_characters 清洗成角色实体（同槽位只保留第一条）。
+
+    参数:
+        rows: 模型返回的龙套条目。
+        seen: 已占用的人物姓名集合（会被更新）。
+
+    返回:
+        角色 dict 列表。
+    """
+    built: list[dict] = []
+    used_slots: set[str] = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        stock = _clean_stock(row.get("stock"))
+        if not stock or stock["slot"] in used_slots:
+            continue
+        used_slots.add(stock["slot"])
+        name = _stock_display_name(str(row.get("name") or "").strip(), stock["label"])
+        if name in seen:
+            continue
+        seen.add(name)
+        gender = _normalize_choice(row.get("gender"), GENDER_OPTIONS) or "unknown"
+        stock["voice_slot"] = stock.get("voice_slot") or _stock_voice_slot(gender, row.get("age_range"))
+        character = {
+            "name": name,
+            "role": "minor",
+            "gender": gender,
+            "age_range": _check_text(row.get("age_range"), 40, f"龙套 {name} 的年龄区间") or None,
+            "personality": _clean_str_list(row.get("personality"), 120, f"龙套 {name} 的性格"),
+            "background": _check_text(row.get("background"), 1200, f"龙套 {name} 的背景"),
+            "appearance_prompt": _check_text(row.get("appearance_prompt"), 1200, f"龙套 {name} 的外貌提示词"),
+            "negative_prompt": _check_text(row.get("negative_prompt"), 800, f"龙套 {name} 的负向提示词"),
+            "relationships": {},
+            "stock": stock,
+        }
+        profile = _clean_voice_profile(row.get("voice_profile"))
+        if profile:
+            character["voice_profile"] = _attach_profile_source(character, profile)
+        built.append(character)
+    return built
+
+
+def _default_stock_characters() -> list[dict]:
+    """LLM 未产出龙套时的默认 8 个职业槽位（无音色描述，由校验提醒补齐）。"""
+    return [
+        {
+            "name": f"龙套·{label}",
+            "role": "minor",
+            "gender": "female" if voice_slot.startswith("female") else ("male" if voice_slot.startswith("male") else "unknown"),
+            "age_range": None,
+            "personality": [],
+            "background": None,
+            "appearance_prompt": None,
+            "negative_prompt": None,
+            "relationships": {},
+            "stock": {
+                "slot": slot,
+                "voice_slot": voice_slot,
+                "label": label,
+                "archetype_tags": [],
+                "reuse_policy": "reuse",
+            },
+        }
+        for slot, label, voice_slot in _DEFAULT_STOCK_SLOTS
+    ]
 
 
 def _clean_character_entry(row: dict) -> dict:

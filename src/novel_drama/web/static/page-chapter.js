@@ -193,8 +193,8 @@
   async function load() {
     if (!NW.state.path || !NW.state.chapter) {
       el("chInfo").textContent = "先打开工程并选择章节";
-      el("chContent").innerHTML = "—";
-      el("chScenesBody").innerHTML = "—";
+      el("chContent").innerHTML = "<p class='muted'>还没有打开工程：点左上角工程名，打开或新建一个工程。</p>";
+      el("chScenesBody").innerHTML = "<p class='muted'>选择章节后，这里会列出场景与台词。</p>";
       return;
     }
     try {
@@ -204,6 +204,7 @@
         return;
       }
       render(data);
+      await refreshContinueDraft();
     } catch (error) {
       NW.toast(`读取章节失败：${error.message}`);
     }
@@ -391,25 +392,35 @@
     }
   }
 
-  /* 生成正文（regen 由勾选框决定）。 */
+  /* 生成正文（regen 由勾选框决定）。
+   * 勾选「覆盖已有正文」且本章已有正文时，先二次确认，避免一次误点覆盖全文。 */
   async function generate() {
     if (busy || !NW.state.path || !NW.state.chapter) return;
     if (blockWhileEditing()) return;
+    const regen = el("chRegen").checked;
+    const currentWords = Number((chapterCache && chapterCache.word_count) || 0);
+    if (regen && currentWords > 0) {
+      const ok = window.confirm(
+        `将覆盖本章现有正文（${currentWords} 字）重新生成，原正文不可恢复。\n` +
+          "生成后场景与台词需要重新切分。确定继续？"
+      );
+      if (!ok) return;
+    }
     busy = true;
     el("chGenerate").disabled = true;
     try {
       const result = await NW.api("/api/ui/chapter/generate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path: NW.state.path, chapter: NW.state.chapter, regen: el("chRegen").checked }),
+        body: JSON.stringify({ path: NW.state.path, chapter: NW.state.chapter, regen }),
         busy: "正在生成正文…",
         busyDetail: "多轮续写，长章节需要较长时间",
       });
       // 多轮生成会带回 rounds：优先展示轮次与字数，旧版无 rounds 时回落到原提示
       if (result.rounds) {
-        NW.toast(`生成完成（${result.rounds} 轮，${result.words} 字）`, true);
+        NW.toast(`生成完成（${result.rounds} 轮，${result.words} 字）${regen ? "，请重新切分场景与台词" : ""}`, true);
       } else {
-        NW.toast(`正文已生成：${result.words} 字（provider=${result.provider}）`, true);
+        NW.toast(`正文已生成：${result.words} 字${regen ? "，请重新切分场景与台词" : ""}`, true);
       }
       await load();
       if (NW.openProject) await NW.openProject();
@@ -970,10 +981,167 @@
     requestSummarizePreview(state);
   }
 
+  /* ---------------- 续写正文 ---------------- */
+
+  let continueDraft = null; // 最近一次草稿（预览结果或页面加载时查到的未应用草稿）
+
+  /* 查询本章是否留有未应用的续写草稿（刷新页面后仍可一键应用）。
+   * 参数：无。
+   * 返回：Promise<void>。
+   */
+  async function refreshContinueDraft() {
+    const applyBtn = el("chContinueApply");
+    if (!applyBtn) return;
+    continueDraft = null;
+    applyBtn.hidden = true;
+    if (!NW.state.path || !NW.state.chapter) return;
+    try {
+      const data = await NW.api(
+        `/api/ui/chapter/continue/draft?${NW.qs({ path: NW.state.path, chapter: NW.state.chapter })}`
+      );
+      if (data && data.exists && data.draft) {
+        continueDraft = data.draft;
+        const chars = String(data.draft.text || "").replace(/\s/g, "").length;
+        applyBtn.hidden = false;
+        applyBtn.textContent = `应用续写草稿（+${chars} 字）`;
+      }
+    } catch (error) {
+      // 草稿查询失败不影响正文展示
+    }
+  }
+
+  /* 请求续写预览（结果先落成未应用草稿，不写正文）。
+   * 参数：retry 是否重抽（忽略已有草稿重新生成）。
+   * 返回：Promise<void>。
+   */
+  async function requestContinue(retry) {
+    if (busy || !NW.state.path || !NW.state.chapter) return;
+    if (blockWhileEditing()) return;
+    const words = Number((el("chContinueWords") || {}).value || 800);
+    const intent = String((el("chContinueIntent") || {}).value || "").trim();
+    busy = true;
+    el("chContinuePreview").disabled = true;
+    try {
+      const result = await NW.api("/api/ui/chapter/continue", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          path: NW.state.path,
+          chapter: NW.state.chapter,
+          words,
+          intent,
+          retry: Boolean(retry),
+        }),
+        busy: retry ? "正在重抽续写…" : "正在续写…",
+        busyDetail: "从正文末尾接着写，完成后先预览",
+      });
+      continueDraft = result;
+      showContinueDialog(result, words);
+      await refreshContinueDraft();
+    } catch (error) {
+      NW.toast(`续写失败（${error.code || "-"}）：${error.message}`);
+    } finally {
+      busy = false;
+      el("chContinuePreview").disabled = false;
+    }
+  }
+
+  /* 续写确认弹窗：显示新增字数/位置与预览文本，可取消、重抽、应用。
+   * 参数：result 续写结果；words 本次字数档位。
+   * 返回：无。
+   */
+  function showContinueDialog(result, words) {
+    const mask = document.createElement("div");
+    mask.style.cssText =
+      "position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:60;display:flex;align-items:center;justify-content:center";
+    const box = document.createElement("div");
+    box.style.cssText =
+      "background:#fff;color:#222;border-radius:10px;max-width:760px;width:92%;max-height:82vh;display:flex;flex-direction:column;padding:16px 18px;gap:10px;box-shadow:0 12px 40px rgba(0,0,0,.25)";
+    const covered = result.covered_beats || [];
+    const beat = covered.length
+      ? `，从第 ${result.from_beat} 个节拍继续（覆盖第 ${covered[0]}~${covered[covered.length - 1]} 拍）`
+      : "";
+    const head = document.createElement("div");
+    head.innerHTML =
+      "<b>续写预览（尚未写入正文）</b>" +
+      `<div style="margin-top:6px;font-size:13px;line-height:1.7">本次将追加 <b>${result.added_words}</b> 字：` +
+      `${result.before_words} 字 → ${result.after_words} 字${beat}<br/>` +
+      `追加位置：正文末尾（第 ${result.append_start} 字之后）· 字数档位 ${words} 字</div>`;
+    const pre = document.createElement("pre");
+    pre.textContent = result.preview || "（模型没有返回可用新内容，可重抽或补充意图）";
+    pre.style.cssText =
+      "white-space:pre-wrap;font-size:13px;line-height:1.75;max-height:46vh;overflow:auto;background:#f6f7f9;border-radius:8px;padding:10px;margin:0";
+    const actions = document.createElement("div");
+    actions.style.cssText = "display:flex;gap:8px;justify-content:flex-end";
+    const mk = (text, primary, onClick) => {
+      const button = document.createElement("button");
+      button.className = primary ? "btn primary" : "btn";
+      button.textContent = text;
+      button.addEventListener("click", onClick);
+      return button;
+    };
+    actions.appendChild(mk("取消", false, () => mask.remove()));
+    actions.appendChild(
+      mk("重抽", false, () => {
+        mask.remove();
+        requestContinue(true);
+      })
+    );
+    actions.appendChild(mk("应用并写入正文", true, () => applyContinue(mask)));
+    box.append(head, pre, actions);
+    mask.appendChild(box);
+    mask.addEventListener("click", (event) => {
+      if (event.target === mask) mask.remove();
+    });
+    document.body.appendChild(mask);
+  }
+
+  /* 应用续写草稿：后端把草稿追加进正文并清理草稿文件。
+   * 参数：mask 当前弹窗（可为空，从工具条直接应用时传 null）。
+   * 返回：Promise<void>。
+   */
+  async function applyContinue(mask) {
+    if (!NW.state.path || !NW.state.chapter) return;
+    const button = mask ? mask.querySelector("button.primary") : el("chContinueApply");
+    if (button) button.disabled = true;
+    try {
+      const result = await NW.api("/api/ui/chapter/continue", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: NW.state.path, chapter: NW.state.chapter, apply: true }),
+        busy: "正在写入正文…",
+      });
+      if (mask) mask.remove();
+      NW.toast(`已续写 ${result.added_words} 字（${result.before_words} → ${result.after_words} 字）`, true);
+      await load();
+      if (NW.openProject) await NW.openProject();
+    } catch (error) {
+      NW.toast(`应用续写失败（${error.code || "-"}）：${error.message}`);
+      if (button) button.disabled = false;
+    }
+  }
+
+  /* 工具条上的「应用续写草稿」：直接消费页面加载时查到的草稿。
+   * 参数：无。
+   * 返回：Promise<void>。
+   */
+  async function applyContinueDraft() {
+    if (busy || !continueDraft) return;
+    if (blockWhileEditing()) return;
+    busy = true;
+    try {
+      await applyContinue(null);
+    } finally {
+      busy = false;
+    }
+  }
+
   /* 首次激活绑定事件。 */
   function bind() {
     if (bound) return;
     bound = true;
+    el("chContinuePreview").addEventListener("click", () => requestContinue(false));
+    el("chContinueApply").addEventListener("click", applyContinueDraft);
     el("chGenerate").addEventListener("click", generate);
     el("chEdit").addEventListener("click", startEdit);
     el("chAiEdit").addEventListener("click", openAiEdit);

@@ -135,12 +135,15 @@
   function stageHtml(payload) {
     const info = payload || {};
     const chapter = chapterSummary();
+    const current = (window.NWLayout && NWLayout.currentStage) ? NWLayout.currentStage() : "";
+    const here = info.stage && info.stage === current;
     return (
       `<div class="ins-title"><span><b>${esc(info.label || info.stage || "")}</b></span>` +
-      `<span class="kicker">${info.done ? "已完成" : "未完成"}</span></div>` +
-      row("阶段键", `<code>${esc(info.stage || "")}</code>`) +
+      `<span class="kicker">${here ? "当前阶段" : info.done ? "已完成" : "未完成"}</span></div>` +
       row("当前章节", chapter ? esc(`${chapter.chapter ? chapter.chapter.index + ". " + (chapter.chapter.title || "") : chapter.id}`) : "未选") +
-      `<div class="ins-actions">${action("goStage", "进入该阶段", true)}</div>`
+      (here
+        ? `<div class="ins-note">你正在这个阶段，直接用页面上的按钮操作即可。</div>`
+        : `<div class="ins-actions">${action("goStage", "进入该阶段", true)}</div>`)
     );
   }
 
@@ -292,7 +295,12 @@
     });
 
     if (window.NW) {
-      NW.on("view", applyVisibility);
+      NW.on("view", () => {
+        applyVisibility();
+        // 阶段卡片在点流程条时先渲染、随后才换 hash：切完页面重画一次，
+        // 否则已经进入该阶段后仍显示「进入该阶段」按钮。
+        if (current.kind === "stage") show("stage", current.payload);
+      });
       // 章节换了两条来源：显式 emit('chapter') 与 openProject 后的 notifyChapter，两者都要跟上
       const onChapterChange = () => {
         if (current.kind === "chapter" || !current.kind) show("chapter");
