@@ -31,6 +31,10 @@ _FALLBACK = {
         "max_concurrency": 8,
         "request_timeout_s": 300,
         "connect_timeout_s": 5,
+        # 流式超时：首字等待、分片间隔、整次总时长（null=不限）
+        "first_token_timeout_s": 60,
+        "stream_idle_timeout_s": 60,
+        "total_timeout_s": None,
         "max_retries": 2,
         "temperature": 0.8,
         "max_tokens": None,

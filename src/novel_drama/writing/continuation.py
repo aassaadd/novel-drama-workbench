@@ -861,7 +861,7 @@ def continue_outline(
         task="outline",
         system="你是长篇小说的结构编辑，按工具参数输出大纲，不要解释。",
         messages=[Message("user", "\n".join(context_lines))],
-        stream=False,
+        stream=True,
         metadata={
             "acts": new_act_count,
             "chapters_per_act": per_act,

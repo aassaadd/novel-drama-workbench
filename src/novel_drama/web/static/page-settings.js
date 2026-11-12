@@ -340,6 +340,24 @@
           "最大输出（max_tokens）",
           `<input data-key="omlx.max_tokens" type="number" min="1" value="${esc(writing.max_tokens ?? "")}" />`
         )}
+        ${fieldBlock(
+          "omlx.first_token_timeout_s",
+          "首字超时（秒）",
+          `<input data-key="omlx.first_token_timeout_s" data-type="int" type="number" min="1" value="${esc(writing.first_token_timeout_s ?? "")}" />`,
+          "发出请求到收到第一个流式分片的最长等待；默认 60 秒。"
+        )}
+        ${fieldBlock(
+          "omlx.stream_idle_timeout_s",
+          "空闲超时（秒）",
+          `<input data-key="omlx.stream_idle_timeout_s" data-type="int" type="number" min="1" value="${esc(writing.stream_idle_timeout_s ?? "")}" />`,
+          "两个流式分片之间的最长间隔；默认 60 秒，短调用也用它兜底。"
+        )}
+        ${fieldBlock(
+          "omlx.total_timeout_s",
+          "总时长上限（秒）",
+          `<input data-key="omlx.total_timeout_s" data-type="int" type="number" min="1" value="${esc(writing.total_timeout_s ?? "")}" />`,
+          "整次生成的最长时间；留空表示不限，长任务可留空。"
+        )}
       </div>
       <div class="settings-hint" id="setLlmOutHint">${esc(llmOutputHintHtml())}</div>
       <div class="kv settings-readonly" id="setLlmLimits">${llmLimitsHtml(writing)}</div>

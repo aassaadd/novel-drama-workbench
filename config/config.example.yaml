@@ -29,9 +29,12 @@ omlx:
   memory_ceiling_gb: 29.48      # 内存天花板，超出会 OOM
   idle_timeout_s: null          # 服务端不会自动卸载，必须显式卸载
   max_concurrency: 8            # 服务端上限；工作台仍固定 1 路，与 ComfyUI 串行
-  request_timeout_s: 300        # 单次请求超时（长文续写可调大）
-  connect_timeout_s: 5          # 连接超时（自检/卸载用）
-  max_retries: 2                # 仅对可重试错误（超时/限流/5xx/不可达）重试
+  request_timeout_s: 300        # 非流式短调用的读超时（长文任务已改走流式）
+  connect_timeout_s: 5          # 连接超时（建连）/ 非流式自检
+  first_token_timeout_s: 60     # 首字超时：发出请求到第一个 SSE 分片的最长等待
+  stream_idle_timeout_s: 60     # 空闲超时：两个 SSE 分片之间的最长间隔（非流式也用它兜底）
+  total_timeout_s: null         # 总时长上限；留空=不限，可填秒数
+  max_retries: 2                # 仅对可重试错误（超时/限流/5xx/不可达）重试，且只在未收到内容前
   temperature: 0.8
   max_tokens: null              # 留空：由检测值或手填决定；协议层仅保底 2048
   stop: []

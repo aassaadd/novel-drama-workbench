@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import http.client
 import json
 import socket
 import time
@@ -22,10 +23,14 @@ from typing import Iterator
 
 from .base import AdapterError, ErrorCode, HealthStatus, TextGenChunk, TextGenRequest, TextGenResult, Usage
 
-# 一次请求的默认超时（秒）；长文续写可能耗时较久，允许配置覆盖
+# 一次非流式请求的默认超时（秒）；长文任务已改走流式，这里只覆盖短调用
 DEFAULT_TIMEOUT_S = 300.0
-# 连接超时（秒）；用于快速判断服务是否可达
+# 连接超时（秒）；建立 TCP 连接的最长等待，用于快速判断服务是否可达
 CONNECT_TIMEOUT_S = 5.0
+#: 首字超时（秒）：从发出请求到收到 SSE 第一个内容分片的最长等待
+FIRST_TOKEN_TIMEOUT_S = 60.0
+#: 流式空闲超时（秒）：两个内容分片之间的最长间隔
+STREAM_IDLE_TIMEOUT_S = 60.0
 # 工具调用时的最小输出预算；thinking 模型的 reasoning_tokens 也计入 max_tokens，给少了参数会被截断
 TOOL_MIN_MAX_TOKENS = 4096
 #: 用户既未填写 max_tokens、也没有检测值时的协议层兜底：
@@ -42,6 +47,61 @@ _LIMIT_PROBE_PATHS = ("/props", "/v1/internal/model/info", "/v1/model/info", "/h
 #: 模型列表缓存：`(endpoint, api_key) -> (抓取时间, id 列表)`；只用于调用前轻量校验，短 TTL
 _MODEL_CACHE: dict[tuple[str, str], tuple[float, list[str]]] = {}
 _MODEL_CACHE_TTL_S = 30.0
+
+
+class _HttpResponse:
+    """http.client 响应的轻量包装：关闭时一并关闭连接，并支持动态调整读超时。"""
+
+    def __init__(self, conn, resp):
+        """绑定连接与响应。
+
+        参数:
+            conn: http.client.HTTPConnection/HTTPSConnection。
+            resp: conn.getresponse() 返回的响应对象。
+        """
+        self._conn = conn
+        self._resp = resp
+        self.status = int(getattr(resp, "status", 0))
+
+    def read(self):
+        """读取全部响应体。"""
+        return self._resp.read()
+
+    def readline(self):
+        """读取一行（SSE 逐行读取用）。"""
+        return self._resp.readline()
+
+    def __iter__(self):
+        """按行迭代响应体。"""
+        return iter(self._resp)
+
+    def settimeout(self, seconds: float) -> None:
+        """调整底层 socket 的读超时；连接已关闭时静默忽略。
+
+        参数:
+            seconds: 读超时秒数。
+        """
+        sock = getattr(self._conn, "sock", None)
+        if sock is not None:
+            try:
+                sock.settimeout(max(0.05, float(seconds)))
+            except OSError:
+                pass
+
+    def close(self) -> None:
+        """关闭响应与连接。"""
+        try:
+            self._resp.close()
+        finally:
+            self._conn.close()
+
+    def __enter__(self):
+        """进入 with 语句。"""
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        """离开 with 语句时关闭。"""
+        self.close()
 
 
 class OmlxWritingAdapter:
@@ -61,6 +121,14 @@ class OmlxWritingAdapter:
         self.model = str(self.settings.get("model") or "")
         self.timeout_s = float(self.settings.get("request_timeout_s") or DEFAULT_TIMEOUT_S)
         self.connect_timeout_s = float(self.settings.get("connect_timeout_s") or CONNECT_TIMEOUT_S)
+        self.first_token_timeout_s = float(self.settings.get("first_token_timeout_s") or FIRST_TOKEN_TIMEOUT_S)
+        self.stream_idle_timeout_s = float(self.settings.get("stream_idle_timeout_s") or STREAM_IDLE_TIMEOUT_S)
+        # 总时长上限：空 / 0 表示不限，由用户在设置页按需填写
+        raw_total = self.settings.get("total_timeout_s")
+        try:
+            self.total_timeout_s = float(raw_total) if raw_total not in (None, "", 0, "0") else None
+        except (TypeError, ValueError):
+            self.total_timeout_s = None
         self.max_retries = max(0, int(self.settings.get("max_retries") or 0))
         self.enable_thinking = self.settings.get("enable_thinking")
         self.unload_settings = dict(self.settings.get("unload") or {})
@@ -190,56 +258,126 @@ class OmlxWritingAdapter:
             detail={"status": status, "path": path},
         )
 
-    def _open(self, method: str, path: str, payload: dict | None, timeout_s: float | None = None):
+    def _http_target(self, path: str) -> tuple[str, str, str, int]:
+        """把 endpoint + path 解析成 http.client 需要的连接参数。
+
+        参数:
+            path: 以 / 开头的接口路径。
+
+        返回:
+            `(scheme, host, request_target, port)`。
+
+        异常:
+            AdapterError(INVALID_INPUT): 地址缺失或不是 http(s) URL。
+        """
+        if not self.endpoint:
+            raise AdapterError(ErrorCode.INVALID_INPUT, "omlx 未配置地址：请先在设置页填写接口地址")
+        parsed = urllib.parse.urlsplit(self._url(path))
+        scheme = parsed.scheme.lower()
+        if scheme not in ("http", "https") or not parsed.hostname:
+            raise AdapterError(
+                ErrorCode.INVALID_INPUT,
+                f"omlx 地址无效：{self.endpoint}；需以 http:// 或 https:// 开头",
+            )
+        port = parsed.port or (443 if scheme == "https" else 80)
+        target = parsed.path or "/"
+        if parsed.query:
+            target = f"{target}?{parsed.query}"
+        return scheme, parsed.hostname, target, port
+
+    def _nonstream_timeout(self, timeout_s: float | None) -> float:
+        """计算非流式调用的读超时（连接超时单独由 connect_timeout_s 控制）。
+
+        短调用没有分片可判断，这里用空闲超时兜底防止无限等待；
+        调用方显式给的更小超时与总时长上限也会取最小值。
+
+        参数:
+            timeout_s: 调用方显式指定的超时；None 表示用 omlx.request_timeout_s。
+
+        返回:
+            读超时秒数。
+        """
+        base = float(timeout_s if timeout_s is not None else self.timeout_s)
+        if self.stream_idle_timeout_s:
+            base = min(base, self.stream_idle_timeout_s)
+        if self.total_timeout_s:
+            base = min(base, self.total_timeout_s)
+        return max(0.5, base)
+
+    def _open(
+        self,
+        method: str,
+        path: str,
+        payload: dict | None,
+        timeout_s: float | None = None,
+        stream: bool = False,
+    ) -> _HttpResponse:
         """发起一次 HTTP 请求并返回响应对象。
+
+        连接阶段使用 connect_timeout_s（默认 5 秒）；
+        读阶段：流式用首字超时（后续由 `_read_sse` 动态改为空闲超时），
+        非流式用 `_nonstream_timeout`。
 
         参数:
             method: GET / POST 等。
             path: 接口路径。
             payload: JSON 请求体，GET 时为 None。
-            timeout_s: 超时秒数，默认使用请求超时。
+            timeout_s: 非流式读超时；None 表示用 omlx.request_timeout_s。
+            stream: 是否请求 SSE 流。
 
         返回:
-            http.client.HTTPResponse 或 urllib 响应对象。
+            `_HttpResponse` 包装对象。
 
         异常:
-            AdapterError: 网络错误、超时或非 2xx 响应。
+            AdapterError: 连接失败、超时或非 2xx 响应。
         """
+        scheme, host, target, port = self._http_target(path)
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8") if payload is not None else None
-        req = urllib.request.Request(self._url(path), data=data, headers=self._headers(), method=method)
+        headers = self._headers()
+        if stream:
+            headers["Accept"] = "text/event-stream"
+        conn_cls = http.client.HTTPSConnection if scheme == "https" else http.client.HTTPConnection
+        conn = conn_cls(host, port, timeout=self.connect_timeout_s)
+        read_timeout = self.first_token_timeout_s if stream else self._nonstream_timeout(timeout_s)
         try:
-            return urllib.request.urlopen(req, timeout=timeout_s or self.timeout_s)
-        except urllib.error.HTTPError as exc:
-            body = exc.read().decode("utf-8", errors="replace") if exc.fp else ""
-            raise self._map_error(exc.code, body, path) from exc
-        except urllib.error.URLError as exc:
-            reason = getattr(exc, "reason", exc)
-            if isinstance(reason, (socket.timeout, TimeoutError)):
-                raise AdapterError(
-                    ErrorCode.TIMEOUT,
-                    f"omlx 请求超时（{path}）：模型可能正在加载，或输入过长；可调大 omlx.request_timeout_s",
-                    retryable=True,
-                ) from exc
-            raise AdapterError(
-                ErrorCode.UNAVAILABLE,
-                f"omlx 不可达（{self.endpoint}）：确认服务已启动（如 `omlx serve --port 9000`）且地址端口正确。原因：{reason}",
-                retryable=True,
-            ) from exc
+            conn.connect()
+            sock = getattr(conn, "sock", None)
+            if sock is not None:
+                sock.settimeout(read_timeout)
+            conn.request(method, target, body=data, headers=headers)
+            resp = conn.getresponse()
         except (socket.timeout, TimeoutError) as exc:
+            conn.close()
             raise AdapterError(
                 ErrorCode.TIMEOUT,
-                f"omlx 连接超时（{path}）：可调大 omlx.request_timeout_s 或检查服务负载",
+                f"omlx 连接失败（{self.endpoint}）：连接或等待响应超时；确认服务已启动且地址端口正确，"
+                "或调大 omlx.connect_timeout_s",
                 retryable=True,
+                detail={"path": path, "stage": "connect"},
             ) from exc
+        except (OSError, http.client.HTTPException) as exc:
+            conn.close()
+            raise AdapterError(
+                ErrorCode.UNAVAILABLE,
+                f"omlx 连接失败（{self.endpoint}）：确认服务已启动（如 `omlx serve --port 9000`）且地址端口正确。原因：{exc}",
+                retryable=True,
+                detail={"path": path, "stage": "connect"},
+            ) from exc
+        wrapper = _HttpResponse(conn, resp)
+        if resp.status >= 400:
+            body = resp.read().decode("utf-8", errors="replace")
+            wrapper.close()
+            raise self._map_error(resp.status, body, path)
+        return wrapper
 
     def _request_json(self, method: str, path: str, payload: dict | None = None, timeout_s: float | None = None) -> dict:
-        """发起请求并解析 JSON，按配置自动重试。
+        """发起非流式请求并解析 JSON，按配置自动重试。
 
         参数:
             method: HTTP 方法。
             path: 接口路径。
             payload: JSON 请求体。
-            timeout_s: 超时秒数。
+            timeout_s: 非流式读超时。
 
         返回:
             解析后的 JSON dict。
@@ -258,6 +396,16 @@ class OmlxWritingAdapter:
             except AdapterError as exc:
                 if not exc.retryable or attempt >= self.max_retries:
                     raise
+            except (socket.timeout, TimeoutError) as exc:
+                # 非流式读取阶段超时：没有任何内容产出，允许按重试策略重来
+                if attempt >= self.max_retries:
+                    raise AdapterError(
+                        ErrorCode.TIMEOUT,
+                        f"omlx 生成卡住（{self._nonstream_timeout(timeout_s):.0f} 秒无响应，{path}）："
+                        "可重试，或调大 omlx.stream_idle_timeout_s / omlx.total_timeout_s",
+                        retryable=True,
+                        detail={"path": path},
+                    ) from exc
             except json.JSONDecodeError as exc:
                 raise AdapterError(ErrorCode.UPSTREAM_ERROR, f"omlx 返回非 JSON（{path}）：{exc}", detail={"path": path}) from exc
             attempt += 1
@@ -845,7 +993,7 @@ class OmlxWritingAdapter:
         return Usage(prompt_tokens=prompt_tokens, completion_tokens=completion_tokens, cached_tokens=cached_tokens)
 
     def generate(self, req: TextGenRequest) -> TextGenResult:
-        """非流式生成文本（POST /v1/chat/completions，stream=false）。
+        """生成文本：`req.stream=True` 走 SSE 流式聚合，否则一次性请求。
 
         参数:
             req: 统一文本请求。
@@ -858,6 +1006,8 @@ class OmlxWritingAdapter:
         """
         self._require_ready()
         self._check_model_available()
+        if req.stream:
+            return self._generate_stream(req)
         payload = self._build_payload(req, stream=False)
         data = self._request_json("POST", "/v1/chat/completions", payload)
         choices = data.get("choices") or []
@@ -872,6 +1022,36 @@ class OmlxWritingAdapter:
             usage=self._parse_usage(data.get("usage")),
             raw=data,
         )
+
+    def _generate_stream(self, req: TextGenRequest) -> TextGenResult:
+        """用 SSE 增量聚合出与非流式一致的 TextGenResult。
+
+        参数:
+            req: 统一文本请求。
+
+        返回:
+            TextGenResult；usage 取流中最后出现的用量事件。
+        """
+        payload = self._build_payload(req, stream=True)
+        parts: list[str] = []
+        finish = "stop"
+        model = self.model
+        usage: Usage | None = None
+        for event in self._iter_sse_with_retry(payload):
+            if event.get("model"):
+                model = str(event["model"])
+            if event.get("usage"):
+                usage = self._parse_usage(event["usage"])
+            choices = event.get("choices") or []
+            if not choices:
+                continue
+            delta = choices[0].get("delta") or {}
+            text = delta.get("content") or delta.get("reasoning_content") or ""
+            if text:
+                parts.append(text)
+            if choices[0].get("finish_reason"):
+                finish = str(choices[0]["finish_reason"])
+        return TextGenResult(text="".join(parts), finish_reason=finish, model=model, usage=usage, raw={"stream": True})
 
     def generate_tool(self, req: TextGenRequest, tool: dict, timeout_s: float | None = None) -> dict:
         """以工具调用（function calling）方式生成结构化结果。
@@ -898,7 +1078,7 @@ class OmlxWritingAdapter:
         if not name:
             raise AdapterError(ErrorCode.INVALID_INPUT, "工具定义缺少 function.name")
 
-        payload = self._build_payload(req, stream=False)
+        payload = self._build_payload(req, stream=bool(req.stream))
         payload["tools"] = [tool]
         payload["tool_choice"] = {"type": "function", "function": {"name": name}}
         # thinking 模型的 reasoning_tokens 同样占用 max_tokens，预算太小会把参数截断；
@@ -907,7 +1087,78 @@ class OmlxWritingAdapter:
         payload.setdefault("chat_template_kwargs", {})["enable_thinking"] = bool(thinking) if thinking is not None else False
         payload["max_tokens"] = max(int(payload.get("max_tokens") or 0), TOOL_MIN_MAX_TOKENS)
 
-        data = self._request_json("POST", "/v1/chat/completions", payload, timeout_s=timeout_s)
+        if req.stream:
+            # 流式：tool_calls 会按 index 分片下发，先拼接 name/arguments 再交给同一套解析逻辑
+            data = self._aggregate_tool_stream(payload)
+        else:
+            data = self._request_json("POST", "/v1/chat/completions", payload, timeout_s=timeout_s)
+        return self._tool_result(data, name)
+
+    def _aggregate_tool_stream(self, payload: dict) -> dict:
+        """把流式 tool_calls 分片拼接成非流式响应结构。
+
+        不同实现会把 `function.name` 与 `function.arguments` 拆成多片，
+        这里按 `index` 归并并逐片累加，避免只取第一片导致参数残缺。
+
+        参数:
+            payload: 已带 tools/tool_choice 的请求体（stream=true）。
+
+        返回:
+            形如非流式响应的 dict：`{model, choices:[{message:{tool_calls},finish_reason}], usage}`。
+        """
+        slots: dict[int, dict] = {}
+        finish = ""
+        model = self.model
+        usage: dict | None = None
+        for event in self._iter_sse_with_retry(payload):
+            if event.get("model"):
+                model = str(event["model"])
+            if isinstance(event.get("usage"), dict):
+                usage = event["usage"]
+            for choice in event.get("choices") or []:
+                if not isinstance(choice, dict):
+                    continue
+                if choice.get("finish_reason"):
+                    finish = str(choice["finish_reason"])
+                delta = choice.get("delta") or {}
+                for shard in delta.get("tool_calls") or []:
+                    if not isinstance(shard, dict):
+                        continue
+                    try:
+                        index = int(shard.get("index") or 0)
+                    except (TypeError, ValueError):
+                        index = 0
+                    slot = slots.setdefault(
+                        index,
+                        {"id": "", "type": "function", "function": {"name": "", "arguments": ""}},
+                    )
+                    if shard.get("id"):
+                        slot["id"] = str(shard["id"])
+                    if shard.get("type"):
+                        slot["type"] = str(shard["type"])
+                    function = shard.get("function") or {}
+                    if function.get("name"):
+                        slot["function"]["name"] += str(function["name"])
+                    if function.get("arguments"):
+                        slot["function"]["arguments"] += str(function["arguments"])
+        message: dict = {"role": "assistant", "content": ""}
+        if slots:
+            message["tool_calls"] = [slots[key] for key in sorted(slots)]
+        return {"model": model, "choices": [{"message": message, "finish_reason": finish or "stop"}], "usage": usage or {}}
+
+    def _tool_result(self, data: dict, name: str) -> dict:
+        """解析工具调用响应（流式聚合结果与非流式响应共用）。
+
+        参数:
+            data: 非流式响应或 `_aggregate_tool_stream` 的聚合结果。
+            name: 工具函数名，用于中文错误提示。
+
+        返回:
+            工具参数解析后的 dict。
+
+        异常:
+            AdapterError: 空 choices、未返回 tool_calls 或参数不是 JSON 对象。
+        """
         choices = data.get("choices") or []
         if not choices:
             raise AdapterError(
@@ -947,15 +1198,15 @@ class OmlxWritingAdapter:
             parsed = json.loads(str(arguments or ""))
         except json.JSONDecodeError as exc:
             if finish == "length":
-                message = (
+                message_text = (
                     f"工具调用 {name} 的参数被截断（finish_reason=length），不是合法 JSON：{exc}；"
                     "可重试，或减少本次生成数量后分批生成"
                 )
             else:
-                message = f"工具调用 {name} 的参数不是合法 JSON：{exc}"
+                message_text = f"工具调用 {name} 的参数不是合法 JSON：{exc}"
             raise AdapterError(
                 ErrorCode.UPSTREAM_ERROR,
-                message,
+                message_text,
                 retryable=True,
                 detail={
                     "finish_reason": finish,
@@ -987,48 +1238,154 @@ class OmlxWritingAdapter:
         self._require_ready()
         self._check_model_available()
         payload = self._build_payload(req, stream=True)
-        attempt = 0
-        while True:
-            try:
-                resp = self._open("POST", "/v1/chat/completions", payload)
-                break
-            except AdapterError as exc:
-                if not exc.retryable or attempt >= self.max_retries:
-                    raise
-                attempt += 1
-                time.sleep(min(2.0 * attempt, 5.0))
+        for event in self._iter_sse_with_retry(payload):
+            usage = self._parse_usage(event.get("usage")) if event.get("usage") else None
+            choices = event.get("choices") or []
+            if not choices:
+                if usage:
+                    yield TextGenChunk(delta="", done=False, usage=usage)
+                continue
+            delta = choices[0].get("delta") or {}
+            text = delta.get("content") or delta.get("reasoning_content") or ""
+            finish = choices[0].get("finish_reason")
+            if text:
+                yield TextGenChunk(delta=text, done=False, usage=usage)
+            if finish:
+                yield TextGenChunk(delta="", done=True, usage=usage)
+                return
+        yield TextGenChunk(delta="", done=True)
 
+    @staticmethod
+    def _event_has_output(event: dict) -> bool:
+        """判断一个 SSE 事件是否已经产生可见输出（内容、推理或工具分片）。
+
+        参数:
+            event: 解析后的 SSE JSON。
+
+        返回:
+            布尔值；用于决定是否结束「首字超时」阶段。
+        """
+        choices = event.get("choices") or []
+        if not choices or not isinstance(choices[0], dict):
+            return False
+        if choices[0].get("finish_reason"):
+            return True
+        delta = choices[0].get("delta") or {}
+        return bool(delta.get("content") or delta.get("reasoning_content") or delta.get("tool_calls"))
+
+    def _read_sse(self, payload: dict) -> Iterator[dict]:
+        """读取 SSE 流并逐条产出 JSON 事件，执行首字/空闲/总时长三级超时。
+
+        参数:
+            payload: 请求体（stream=true）。
+
+        返回:
+            逐条解析出的 JSON dict。
+
+        异常:
+            AdapterError(TIMEOUT):
+                - 首字超时：发出请求后指定秒数内没有任何内容；
+                - 生成卡住：两个分片之间超过空闲上限；
+                - 超过总时长上限。
+        """
+        # 首字超时从「发出请求」开始计时：建连与等待响应头的时间也计入
+        started = time.monotonic()
+        resp = self._open("POST", "/v1/chat/completions", payload, stream=True)
+        first_at: float | None = None
+        last_at = started
         with resp:
-            for raw_line in resp:
-                line = raw_line.decode("utf-8", errors="replace").strip()
-                if not line or not line.startswith("data:"):
+            while True:
+                now = time.monotonic()
+                # 总时长上限优先判定：已经生成的内容不会回滚，因此不可重试
+                if self.total_timeout_s and now - started >= self.total_timeout_s:
+                    raise AdapterError(
+                        ErrorCode.TIMEOUT,
+                        f"omlx 超过总时长上限（{self.total_timeout_s:.0f} 秒，/v1/chat/completions）："
+                        "已生成内容不会回滚；可调大 omlx.total_timeout_s 或分批生成",
+                        retryable=False,
+                        detail={"stage": "total"},
+                    )
+                if first_at is None:
+                    budget = self.first_token_timeout_s - (now - started)
+                else:
+                    budget = self.stream_idle_timeout_s - (now - last_at)
+                if self.total_timeout_s:
+                    budget = min(budget, self.total_timeout_s - (now - started))
+                # 每轮读之前把 socket 超时收紧到当前预算，超时即可定位到具体阶段
+                resp.settimeout(max(0.05, budget))
+                try:
+                    raw = resp.readline()
+                except (socket.timeout, TimeoutError) as exc:
+                    elapsed = time.monotonic() - started
+                    if self.total_timeout_s and elapsed >= self.total_timeout_s - 0.05:
+                        raise AdapterError(
+                            ErrorCode.TIMEOUT,
+                            f"omlx 超过总时长上限（{self.total_timeout_s:.0f} 秒，/v1/chat/completions）："
+                            "已生成内容不会回滚；可调大 omlx.total_timeout_s 或分批生成",
+                            retryable=False,
+                            detail={"stage": "total"},
+                        ) from exc
+                    if first_at is None:
+                        raise AdapterError(
+                            ErrorCode.TIMEOUT,
+                            f"omlx 首字超时（{self.first_token_timeout_s:.0f} 秒内未收到任何内容，"
+                            "/v1/chat/completions）：模型可能正在加载或排队；可稍后重试，"
+                            "或调大 omlx.first_token_timeout_s",
+                            retryable=True,
+                            detail={"stage": "first_token"},
+                        ) from exc
+                    gap = time.monotonic() - last_at
+                    raise AdapterError(
+                        ErrorCode.TIMEOUT,
+                        f"omlx 生成卡住（{gap:.0f} 秒无新内容，超过空闲上限 "
+                        f"{self.stream_idle_timeout_s:.0f} 秒）：可重试，或调大 omlx.stream_idle_timeout_s",
+                        retryable=True,
+                        detail={"stage": "idle"},
+                    ) from exc
+                if not raw:
+                    return
+                line = raw.decode("utf-8", errors="replace").strip()
+                if not line or line.startswith(":") or not line.startswith("data:"):
                     continue
                 chunk_text = line[5:].strip()
                 if chunk_text == "[DONE]":
-                    yield TextGenChunk(delta="", done=True)
                     return
                 try:
-                    data = json.loads(chunk_text)
+                    event = json.loads(chunk_text)
                 except json.JSONDecodeError:
                     continue
-                choices = data.get("choices") or []
-                usage = data.get("usage")
-                usage_obj = None
-                if usage:
-                    usage_obj = self._parse_usage(usage)
-                if not choices:
-                    if usage_obj:
-                        yield TextGenChunk(delta="", done=False, usage=usage_obj)
+                if not isinstance(event, dict):
                     continue
-                delta = choices[0].get("delta") or {}
-                text = delta.get("content") or delta.get("reasoning_content") or ""
-                finish = choices[0].get("finish_reason")
-                if text:
-                    yield TextGenChunk(delta=text, done=False, usage=usage_obj)
-                if finish:
-                    yield TextGenChunk(delta="", done=True, usage=usage_obj)
-                    return
-        yield TextGenChunk(delta="", done=True)
+                last_at = time.monotonic()
+                if first_at is None and self._event_has_output(event):
+                    # 收到首个内容分片：后续改用空闲超时约束分片间隔
+                    first_at = last_at
+                yield event
+
+    def _iter_sse_with_retry(self, payload: dict) -> Iterator[dict]:
+        """带重试的 SSE 事件迭代：只在尚未收到任何事件前允许整体重试。
+
+        一旦已经开始输出，就不再重试，避免重复生成与重复计费。
+
+        参数:
+            payload: 请求体（stream=true）。
+
+        返回:
+            逐条 SSE 事件。
+        """
+        attempt = 0
+        while True:
+            emitted = False
+            try:
+                for event in self._read_sse(payload):
+                    emitted = True
+                    yield event
+                return
+            except AdapterError as exc:
+                if emitted or not exc.retryable or attempt >= self.max_retries:
+                    raise
+            attempt += 1
+            time.sleep(min(2.0 * attempt, 5.0))
 
     def unload(self, model: str | None = None) -> dict:
         """显式卸载模型，释放显存（omlx 不会自动卸载）。

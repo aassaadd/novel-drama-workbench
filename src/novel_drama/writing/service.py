@@ -170,7 +170,7 @@ def generate_outline(
         task="outline",
         system="你是长篇小说的结构编辑，按工具参数输出大纲，不要解释。",
         messages=[Message("user", "\n".join(context_parts))],
-        stream=False,
+        stream=True,
         max_tokens=_tool_max_tokens(config, "outline", acts * chapters_per_act * beats_per_chapter),
         metadata={
             "acts": acts,
@@ -831,7 +831,7 @@ def suggest_script(
             "static/slow_push_in/pan_left/pan_right/handheld；每个镜头至少一句台词；台词保留原文。"
         ),
         messages=[Message("user", "\n\n".join(prompt_parts))],
-        stream=False,
+        stream=True,
         metadata={"scenes": scenes_payload, "style": bible.get("style") or {}},
     )
 
@@ -1775,7 +1775,7 @@ def generate_worlds(
         task="setting",
         system="你是中文小说的世界观编辑，世界设定必须与给定的作品设定一致，只按工具参数输出，不要解释。",
         messages=[Message("user", prompt)],
-        stream=False,
+        stream=True,
         temperature=0.7,
         max_tokens=_tool_max_tokens(config, "worlds", wanted or 6),
         metadata={
@@ -1891,7 +1891,7 @@ def generate_settings(store: ProjectStore, config: AppConfig, step: str, overwri
         task="setting",
         system="你是中文小说的设定编辑，设定必须与给定的作品信息一致，只按工具参数输出，不要解释。",
         messages=[Message("user", prompt)],
-        stream=False,
+        stream=True,
         temperature=0.7,
         max_tokens=_tool_max_tokens(config, step, 1),
         metadata={
@@ -1976,7 +1976,7 @@ def generate_characters(
         task="character",
         system="你是中文小说的人物编辑，人物必须与给定的作品设定一致，只按工具参数输出，不要解释。",
         messages=[Message("user", prompt)],
-        stream=False,
+        stream=True,
         temperature=0.8,
         # 未指定数量时按一屏 8 个角色的规模预留；人物卡含背景/外貌/关系/音色，单条开销明显高于普通字段
         max_tokens=_tool_max_tokens(config, "characters", min(total, batch) if total else max(batch, 8)),
@@ -2395,7 +2395,7 @@ def generate_section(
             task="setting",
             system="你是中文小说的世界观编辑，世界设定必须与给定的作品设定一致，只按工具参数输出，不要解释。",
             messages=[Message("user", prompt)],
-            stream=False,
+            stream=True,
             temperature=0.7,
             max_tokens=_tool_max_tokens(config, "world", 1),
             metadata={
@@ -2436,7 +2436,7 @@ def generate_section(
         task="character",
         system="你是中文小说的人物编辑，人物必须与给定的作品设定一致，只按工具参数输出，不要解释。",
         messages=[Message("user", prompt)],
-        stream=False,
+        stream=True,
         temperature=0.8,
         max_tokens=_tool_max_tokens(config, "character", 1),
         metadata={

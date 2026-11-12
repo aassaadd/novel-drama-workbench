@@ -164,7 +164,7 @@ def _build_request(context: dict, chapter: dict, excerpt: str, intro: str | None
         task="summarize",
         system="你是长篇小说的结构编辑，擅长从既有正文反推大纲。只输出 JSON，不要解释。",
         messages=[Message("user", instruction)],
-        stream=False,
+        stream=True,
         metadata={
             "title": chapter.get("title"),
             "content": excerpt,
@@ -360,7 +360,7 @@ def _chunk_notes_request(chapter: dict, work: dict, chunk: str) -> TextGenReques
         task="summarize",
         system="你是长篇小说的结构编辑，擅长从正文提取事件要点。只输出要点列表，不要解释。",
         messages=[Message("user", instruction)],
-        stream=False,
+        stream=True,
         metadata={"title": chapter.get("title"), "content": chunk},
     )
 
