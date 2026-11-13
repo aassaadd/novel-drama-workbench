@@ -1205,6 +1205,12 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--aliases", help="别名，逗号/顿号分隔")
     q.add_argument("--appearance-prompt", dest="appearance_prompt", help="角色外貌提示词（配图用，空串表示清空）")
     q.add_argument("--negative-prompt", dest="negative_prompt", help="角色负向提示词（配图用，空串表示清空）")
+    q.add_argument("--voice-description-zh", dest="voice_description_zh", help="中文音色描述（空串表示清空）")
+    q.add_argument("--voice-description-en", dest="voice_description_en", help="英文音色描述（空串表示清空）")
+    q.add_argument("--appearance-desc-zh", dest="appearance_desc_zh", help="中文外貌描述（空串表示清空）")
+    q.add_argument("--appearance-desc-en", dest="appearance_desc_en", help="英文外貌描述（空串表示清空）")
+    q.add_argument("--appearance-negative-zh", dest="appearance_negative_zh", help="中文负向说明（空串表示清空）")
+    q.add_argument("--appearance-negative-en", dest="appearance_negative_en", help="英文负向提示词（空串表示清空）")
     q.add_argument("--situation", help="当前处境")
     q.add_argument("--voice-profile", dest="voice_profile", help="音色描述 JSON（空串表示清空）")
     q.add_argument("--stock", help="龙套槽位 JSON（空串表示清空）")
@@ -1232,6 +1238,10 @@ def build_parser() -> argparse.ArgumentParser:
     q = p_sub.add_parser("rename-slot", help="龙套职业槽位改名（同步 stock_defaults 键）")
     q.add_argument("--old", required=True)
     q.add_argument("--new", required=True)
+    q.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    q.set_defaults(func=cmd_cast)
+    q = p_sub.add_parser("fill-descriptions", help="补全角色缺失的音色/外貌中英文描述（不覆盖已有内容）")
+    q.add_argument("--name", action="append", help="只处理指定角色（ID 或姓名），可重复")
     q.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
     q.set_defaults(func=cmd_cast)
 
@@ -1463,6 +1473,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         dest="skip_cast_check",
         help="跳过配音前的音色/BGM 一致性门禁（有 error 时默认阻断）",
+    )
+    q.add_argument(
+        "--skip-unknown-speakers",
+        action="store_true",
+        dest="skip_unknown_speakers",
+        help="跳过说话人未识别的行先配其余行（这些行保持原样，不写音频、不改说话人）",
     )
     q.set_defaults(func=cmd_tts_batch)
 

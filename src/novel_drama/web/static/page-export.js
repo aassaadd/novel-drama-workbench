@@ -324,8 +324,13 @@
       NW.toast("剪映草稿已生成", true);
       await loadFiles();
     } catch (error) {
-      box.textContent = `生成失败：${error.message}`;
-      NW.toast(`生成失败（退出码 ${error.code}）：${error.message}`);
+      // 剪映草稿依赖时间轴；把「先执行 CLI」的原始报错换成页面内可执行的下一步
+      const raw = String(error.message || "").replace(/^\[[A-Z_]+\]\s*/, "");
+      const friendly = raw.includes("时间轴不存在")
+        ? "还没有时间轴：先在左侧点「开始编排」，把「时间轴」阶段跑完后再回来生成剪映草稿"
+        : raw;
+      box.textContent = `生成失败：${friendly}`;
+      NW.toast(`生成失败（退出码 ${error.code}）：${friendly}`);
     } finally {
       busy = false;
       button.disabled = false;

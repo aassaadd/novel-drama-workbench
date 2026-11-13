@@ -1166,6 +1166,9 @@ table.grid td.wrap { word-break: break-word; }
   border-radius: var(--radius);
 }
 
+/* 卡片自身设了 display，会盖掉 UA 的 [hidden]；折叠面板与行内详情靠 hidden 互斥 */
+.card[hidden] { display: none !important; }
+
 .card > h3 { margin: 0; font-size: var(--fs-md); }
 
 /* 项目页：设定库单列纵向铺开（新建工程改由顶栏弹窗触发） */
@@ -1541,6 +1544,43 @@ table.grid td.wrap { word-break: break-word; }
 .outline-body details.chapter-row { margin: var(--sp-2) 0 0 var(--sp-2); }
 .outline-body details.chapter-row > summary { font-size: var(--fs-sm); }
 .outline-body .beats li .muted { margin-left: auto; font-size: var(--fs-xs); }
+
+/* 大纲就地编辑：幕/章用标题+概要编辑器，节拍用单行输入 */
+.outline-body .ol-editor {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  margin: var(--sp-2) 0;
+  padding: var(--sp-3);
+  background: var(--panel-2);
+  border: 1px dashed var(--line);
+  border-radius: var(--radius);
+}
+
+.outline-body .ol-editor label {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  font-size: var(--fs-xs);
+  color: var(--muted);
+}
+
+.outline-body .ol-editor input,
+.outline-body .ol-editor textarea,
+.outline-body .ol-inline-edit input {
+  width: 100%;
+  padding: var(--sp-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+}
+
+.outline-body .ol-editor-foot,
+.outline-body .ol-edit-actions { display: flex; gap: var(--sp-2); justify-content: flex-end; }
+.outline-body .ol-inline-edit { flex: 1; }
+.outline-body .ol-edit-actions .btn { flex: none; }
 
 /* ---------------- 设置页（模型配置） ---------------- */
 
@@ -2263,6 +2303,7 @@ select.gen-input {
 }
 .voice-bind-row .voice-bind-name { min-width: 8em; font-weight: 600; }
 .voice-bind-row select { min-width: 220px; }
+.voice-bind-row.cast-highlight { border-color: var(--accent, #d97706); box-shadow: 0 0 0 2px var(--accent, #d97706); }
 
 .check-line {
   display: flex;

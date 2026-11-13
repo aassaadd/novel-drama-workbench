@@ -60,7 +60,7 @@
     const total = Object.values(summary.counts).reduce((sum, value) => sum + (Number(value) || 0), 0);
     const scenes = (chapter.scenes || []).length || chapter.scene_count || 0;
     return (
-      `<div class="ins-title"><span><b>${esc(chapter.index ?? "")}. ${esc(chapter.title || "")}</b></span>` +
+      `<div class="ins-title"><span><b>${esc(chapter.index ?? "")}. ${esc(stripTitleIndex(chapter.title))}</b></span>` +
       `<span class="kicker">${esc(NW.statusLabel(chapter.status))}</span></div>` +
       row("章节 ID", `<code>${esc(summary.id)}</code>`) +
       row("字数", esc(chapter.word_count ?? 0)) +
@@ -140,7 +140,7 @@
     return (
       `<div class="ins-title"><span><b>${esc(info.label || info.stage || "")}</b></span>` +
       `<span class="kicker">${here ? "当前阶段" : info.done ? "已完成" : "未完成"}</span></div>` +
-      row("当前章节", chapter ? esc(`${chapter.chapter ? chapter.chapter.index + ". " + (chapter.chapter.title || "") : chapter.id}`) : "未选") +
+      row("当前章节", chapter ? esc(`${chapter.chapter ? chapter.chapter.index + ". " + stripTitleIndex(chapter.chapter.title) : chapter.id}`) : "未选") +
       (here
         ? `<div class="ins-note">你正在这个阶段，直接用页面上的按钮操作即可。</div>`
         : `<div class="ins-actions">${action("goStage", "进入该阶段", true)}</div>`)

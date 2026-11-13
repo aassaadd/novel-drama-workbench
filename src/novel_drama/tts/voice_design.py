@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import queue
 import shutil
 import subprocess
 import threading
@@ -21,12 +22,25 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from ..adapters.base import Message, TextGenRequest
+from ..config import AppConfig
 from ..models import entities
 
 WORKER_PATH = Path(__file__).resolve().parent / "providers" / "voxcpm2_design_worker.py"
 
 _THREADS: dict[str, threading.Thread] = {}
 _THREADS_LOCK = threading.Lock()
+
+#: 运行中的批次：batch_id -> {"cancel": Event, "proc": Popen|None}
+_RUNNING: dict[str, dict] = {}
+_RUNNING_LOCK = threading.Lock()
+
+#: SSE 订阅者：batch_id -> 队列集合；进程内广播，页面断线只退订不取消任务
+_SUBSCRIBERS: dict[str, set[queue.Queue]] = {}
+_SUB_LOCK = threading.Lock()
+
+#: 本批脚本的字数（用于「已接收 X 字」进度：每个候选完成即累计一次）
+_SCRIPT_CHARS_KEY = "script_chars"
+
 
 _PROFILE_SCHEMA = {
     "type": "object",
@@ -95,6 +109,40 @@ def _read_json(path: Path) -> dict:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
+
+
+def _subscribe(batch_id: str) -> queue.Queue:
+    """订阅批次事件，返回只属于该连接的队列。
+
+    参数:
+        batch_id: 批次 ID。
+
+    返回:
+        queue.Queue；调用方结束时必须 `_unsubscribe`。
+    """
+    channel: queue.Queue = queue.Queue()
+    with _SUB_LOCK:
+        _SUBSCRIBERS.setdefault(batch_id, set()).add(channel)
+    return channel
+
+
+def _unsubscribe(batch_id: str, channel: queue.Queue) -> None:
+    """退订批次事件；最后一个订阅者离开时清理空集合。"""
+    with _SUB_LOCK:
+        items = _SUBSCRIBERS.get(batch_id)
+        if not items:
+            return
+        items.discard(channel)
+        if not items:
+            _SUBSCRIBERS.pop(batch_id, None)
+
+
+def _publish(batch_id: str, event: dict) -> None:
+    """向该批次的所有订阅者广播一条事件（无订阅者时直接丢弃）。"""
+    with _SUB_LOCK:
+        items = list(_SUBSCRIBERS.get(batch_id) or ())
+    for channel in items:
+        channel.put(event)
 
 
 def _character_brief(character: dict) -> str:
@@ -254,7 +302,7 @@ def cleanup_expired(store, days: int) -> int:
     return removed
 
 
-def create_batch(store, cfg: dict, character: dict, prompt: str, count: int, profile: dict | None = None) -> dict:
+def create_batch(store, cfg: AppConfig, character: dict, prompt: str, count: int, profile: dict | None = None) -> dict:
     """创建抽卡批次并在后台线程启动 worker。
 
     参数:
@@ -280,6 +328,7 @@ def create_batch(store, cfg: dict, character: dict, prompt: str, count: int, pro
         "stage": "queued",
         "done": 0,
         "total": count,
+        "current_index": 0,
         "character_id": character.get("id"),
         "character_name": character.get("name"),
         "profile": profile,
@@ -291,11 +340,14 @@ def create_batch(store, cfg: dict, character: dict, prompt: str, count: int, pro
             "inference_timesteps": int(design.get("inference_timesteps", 10)),
         },
         "candidates": [],
+        "failures": [],
         "error": None,
         "note": None,
         "created_at": _now(),
     }
     _write_json(target / "batch.json", meta)
+    with _RUNNING_LOCK:
+        _RUNNING[batch_id] = {"cancel": threading.Event(), "proc": None}
     thread = threading.Thread(target=_run_batch, args=(store, dict(design), target, batch_id, prompt, count), daemon=True)
     with _THREADS_LOCK:
         _THREADS[batch_id] = thread
@@ -303,15 +355,163 @@ def create_batch(store, cfg: dict, character: dict, prompt: str, count: int, pro
     return meta
 
 
-def _run_batch(store, design: dict, target: Path, batch_id: str, prompt: str, count: int) -> None:
-    """执行一次抽卡：写临时输入 → 起 worker → 逐行解析进度 → 收尾。"""
+def _design_script(design: dict) -> str:
+    """取本批试听脚本文本（空时用默认句）。"""
+    return str(design.get("script") or "你好，这是一段用于试听的样音。").strip()
+
+
+def _upsert_candidate(meta: dict, event: dict) -> dict:
+    """把一条候选写入元数据，按序号去重并清掉同序号失败记录。"""
+    index = int(event.get("index") or 0)
+    item = {
+        "index": index,
+        "file": str(event.get("file") or f"cand-{index:02d}.wav"),
+        "seed": event.get("seed"),
+        "duration_ms": int(event.get("duration_ms") or 0),
+    }
+    candidates = [row for row in meta.get("candidates") or [] if int(row.get("index") or 0) != index]
+    candidates.append(item)
+    meta["candidates"] = sorted(candidates, key=lambda row: int(row.get("index") or 0))
+    meta["failures"] = [row for row in meta.get("failures") or [] if int(row.get("index") or 0) != index]
+    meta["done"] = len(meta["candidates"])
+    return item
+
+
+def _mark_failure(meta: dict, index: int, message: str) -> dict:
+    """记录一条候选失败（同序号覆盖），不影响其它候选。"""
+    failures = [row for row in meta.get("failures") or [] if int(row.get("index") or 0) != int(index)]
+    item = {"index": int(index), "message": str(message or "生成失败")}
+    failures.append(item)
+    meta["failures"] = sorted(failures, key=lambda row: int(row.get("index") or 0))
+    return item
+
+
+def _fill_missing_failures(meta: dict, reason: str) -> None:
+    """把既没有候选也没有失败记录的序号补成失败（worker 异常退出时使用）。"""
+    total = int(meta.get("total") or 0)
+    done = {int(row.get("index") or 0) for row in meta.get("candidates") or []}
+    failed = {int(row.get("index") or 0) for row in meta.get("failures") or []}
+    failures = list(meta.get("failures") or [])
+    for index in range(1, total + 1):
+        if index in done or index in failed:
+            continue
+        failures.append({"index": index, "message": reason})
+    meta["failures"] = sorted(failures, key=lambda row: int(row.get("index") or 0))
+
+
+def _finish_meta(meta: dict, target: Path, missing_reason: str | None = None) -> dict:
+    """按候选与失败清单收敛批次状态，并给新候选补基频提示。
+
+    参数:
+        meta: 批次元数据（就地修改）。
+        target: 批次目录。
+        missing_reason: 非空时把缺失序号补成失败（worker 异常退出）。
+
+    返回:
+        更新后的元数据。
+    """
+    if missing_reason:
+        _fill_missing_failures(meta, missing_reason)
+    total = int(meta.get("total") or 0)
+    candidates = sorted(meta.get("candidates") or [], key=lambda row: int(row.get("index") or 0))
+    done = {int(row.get("index") or 0) for row in candidates}
+    failures = sorted(
+        [row for row in meta.get("failures") or [] if int(row.get("index") or 0) not in done],
+        key=lambda row: int(row.get("index") or 0),
+    )
+    gender_hint = str((meta.get("profile") or {}).get("gender") or "unknown")
+    for item in candidates:
+        if not item.get("hint"):
+            item["hint"] = _f0_hint(target / str(item.get("file") or ""), gender_hint)
+    meta["candidates"] = candidates
+    meta["failures"] = failures
+    meta["done"] = len(candidates)
+    meta["stage"] = "done"
+    if len(candidates) >= total and not failures:
+        meta["status"] = "ready"
+        meta["error"] = None
+        meta["note"] = None
+        meta["generated_at"] = _now()
+    elif candidates:
+        meta["status"] = "partial"
+        meta["error"] = None
+        meta["note"] = f"{len(failures)} 条候选生成失败，可单条重试"
+        meta["generated_at"] = _now()
+    else:
+        meta["status"] = "failed"
+        meta["error"] = failures[0]["message"] if failures else "全部候选生成失败"
+        meta["note"] = None
+    return meta
+
+
+def _probe_ms(path: Path) -> int:
+    """探测音频时长（毫秒）；失败返回 0。"""
+    try:
+        from ..media.ffmpeg import probe_duration_ms
+
+        return int(probe_duration_ms(path, "ffprobe") or 0)
+    except Exception:  # noqa: BLE001 - 时长只用于展示，失败不影响主流程
+        return 0
+
+
+def _reconcile_candidates(meta: dict, target: Path) -> None:
+    """中断收尾时按磁盘上的 cand-*.wav 补齐候选记录，避免丢掉刚写完的文件。"""
+    known = {int(row.get("index") or 0) for row in meta.get("candidates") or []}
+    for path in sorted(target.glob("cand-*.wav")):
+        try:
+            index = int(path.stem.split("-")[1])
+        except (IndexError, ValueError):
+            continue
+        if index in known:
+            continue
+        meta.setdefault("candidates", []).append(
+            {"index": index, "file": path.name, "seed": 1000 + index, "duration_ms": _probe_ms(path)}
+        )
+    meta["candidates"] = sorted(meta.get("candidates") or [], key=lambda row: int(row.get("index") or 0))
+
+
+def _finish_stopped(meta: dict, target: Path) -> dict:
+    """中断收尾：保留已完成候选，标记 stopped，不删除已落盘音频。"""
+    _reconcile_candidates(meta, target)
+    total = int(meta.get("total") or 0)
+    if len(meta.get("candidates") or []) >= total:
+        # 中断时整批其实已经生成完：按正常完成处理，避免误报「已停止」
+        return _finish_meta(meta, target)
+    meta["status"] = "stopped"
+    meta["stage"] = "stopped"
+    meta["error"] = None
+    meta["done"] = len(meta.get("candidates") or [])
+    meta["note"] = "已停止生成，后续候选未生成"
+    return meta
+
+
+def _run_batch(
+    store, design: dict, target: Path, batch_id: str, prompt: str, count: int, indices: list[int] | None = None
+) -> None:
+    """执行一次抽卡：写临时输入 → 起 worker → 逐条广播进度 → 收尾。
+
+    参数:
+        store: 工程。
+        design: `voice.design` 配置。
+        target: 批次目录。
+        batch_id: 批次 ID。
+        prompt: 音色描述。
+        count: 计划候选总数（重试/续跑时取批次原总数）。
+        indices: 只生成这些序号（单条重试或中断续跑）；为空时生成整批。
+    """
     meta_path = target / "batch.json"
     meta = _read_json(meta_path)
+    script = _design_script(design)
+    script_chars = len(script)
     prompt_file = target / "prompt.txt"
     script_file = target / "script.txt"
     log_path = target / "worker.log"
     prompt_file.write_text(prompt, encoding="utf-8")
-    script_file.write_text(str(design.get("script") or "你好，这是一段用于试听的样音。"), encoding="utf-8")
+    script_file.write_text(script, encoding="utf-8")
+    meta[_SCRIPT_CHARS_KEY] = script_chars
+    with _RUNNING_LOCK:
+        state = _RUNNING.setdefault(batch_id, {"cancel": threading.Event(), "proc": None})
+    cancel = state["cancel"]
     cmd = [
         str(design.get("python") or ""),
         str(WORKER_PATH),
@@ -332,12 +532,18 @@ def _run_batch(store, design: dict, target: Path, batch_id: str, prompt: str, co
         "--device",
         str(design.get("device") or "auto"),
     ]
+    if indices:
+        cmd.extend(["--indices", ",".join(str(int(item)) for item in indices)])
     timeout_s = float(design.get("timeout_s", 900))
     killed = {"value": False}
     proc = None
     try:
         with log_path.open("w", encoding="utf-8") as log:
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=log, text=True, bufsize=1, start_new_session=True)
+            with _RUNNING_LOCK:
+                state["proc"] = proc
+            if cancel.is_set():
+                _kill(proc)
 
             def watchdog() -> None:
                 """超时后终止整个 worker 进程组。"""
@@ -349,6 +555,9 @@ def _run_batch(store, design: dict, target: Path, batch_id: str, prompt: str, co
 
             threading.Thread(target=watchdog, daemon=True).start()
             for line in proc.stdout or []:
+                if cancel.is_set():
+                    _kill(proc)
+                    break
                 line = line.strip()
                 if not line:
                     continue
@@ -359,53 +568,85 @@ def _run_batch(store, design: dict, target: Path, batch_id: str, prompt: str, co
                 stage = event.get("stage")
                 if stage in ("loading", "generating"):
                     meta["stage"] = stage
-                    meta["done"] = int(event.get("index", 0)) - 1 if stage == "generating" else meta.get("done", 0)
+                    if stage == "generating":
+                        meta["current_index"] = int(event.get("index") or 0)
+                        meta["done"] = len(meta.get("candidates") or [])
                     _write_json(meta_path, meta)
+                    if stage == "loading":
+                        _publish(batch_id, {"type": "stage", "stage": "loading"})
+                    else:
+                        _publish(
+                            batch_id,
+                            {
+                                "type": "batch",
+                                "index": int(event.get("index") or 0),
+                                "total": int(meta.get("total") or count),
+                                "unit": "candidate",
+                            },
+                        )
                 elif stage == "candidate":
-                    meta["done"] = int(event.get("index", meta["done"]))
-                    meta["candidates"].append(
-                        {
-                            "index": int(event["index"]),
-                            "file": event["file"],
-                            "seed": event.get("seed"),
-                            "duration_ms": int(event.get("duration_ms") or 0),
-                        }
-                    )
+                    item = _upsert_candidate(meta, event)
                     _write_json(meta_path, meta)
+                    _publish(batch_id, {"type": "candidate", **item, "done": meta["done"]})
+                    _publish(
+                        batch_id,
+                        {
+                            "type": "chars",
+                            "chars": script_chars * meta["done"],
+                            "index": item["index"],
+                            "total": int(meta.get("total") or count),
+                            "unit": "candidate",
+                        },
+                    )
+                elif stage == "candidate_error":
+                    item = _mark_failure(meta, int(event.get("index") or 0), str(event.get("message") or "生成失败"))
+                    _write_json(meta_path, meta)
+                    _publish(batch_id, {"type": "candidate_error", **item})
                 elif stage == "error":
                     meta["status"] = "failed"
                     meta["error"] = str(event.get("message") or "生成失败")
+                    meta["stage"] = "done"
                     _write_json(meta_path, meta)
+                    _publish(batch_id, {"type": "failed", "message": meta["error"]})
             code = proc.wait(timeout=30)
-        if meta.get("status") == "failed":
+        if cancel.is_set():
+            meta = _finish_stopped(meta, target)
+            _write_json(meta_path, meta)
+        elif meta.get("status") == "failed":
+            # 模型加载失败等全局错误：没有可用候选，清掉半成品
             _cleanup_partial(target)
-            return
-        if killed["value"]:
-            raise TimeoutError(f"生成超时（>{int(timeout_s)} 秒）")
-        if code != 0:
-            raise RuntimeError(f"worker 退出码 {code}，详见 worker.log")
-        if len(meta.get("candidates") or []) < count:
-            raise RuntimeError("候选数量不足，详见 worker.log")
-        meta["status"] = "ready"
-        meta["stage"] = "done"
-        meta["generated_at"] = _now()
-        # 入库前给每条候选补基频提示；只做提醒，不自动改性别标签
-        gender_hint = str((meta.get("profile") or {}).get("gender") or "unknown")
-        for item in meta.get("candidates") or []:
-            item["hint"] = _f0_hint(target / item["file"], gender_hint)
-        _write_json(meta_path, meta)
-    except Exception as exc:  # noqa: BLE001 - 任何失败都收敛为批次失败，不抛到线程外
+            _write_json(meta_path, meta)
+        elif killed["value"]:
+            meta = _finish_meta(meta, target, f"生成超时（>{int(timeout_s)} 秒）")
+            _write_json(meta_path, meta)
+            if not meta.get("candidates"):
+                _cleanup_partial(target)
+        elif code != 0:
+            # worker 非正常退出：保留已完成候选，缺失序号标为失败，可单条重试
+            meta = _finish_meta(meta, target, f"worker 退出码 {code}，详见 worker.log")
+            _write_json(meta_path, meta)
+        else:
+            meta = _finish_meta(meta, target)
+            _write_json(meta_path, meta)
+    except Exception as exc:  # noqa: BLE001 - 任何失败都收敛为批次状态，不抛到线程外
         if proc is not None and proc.poll() is None:
             _kill(proc)
-        meta["status"] = "failed"
-        meta["error"] = str(exc)
+        if cancel.is_set():
+            meta = _finish_stopped(meta, target)
+        else:
+            meta["status"] = "failed"
+            meta["error"] = str(exc)
+            meta["stage"] = "done"
         _write_json(meta_path, meta)
-        _cleanup_partial(target)
+        if not cancel.is_set() and not meta.get("candidates"):
+            _cleanup_partial(target)
     finally:
-        for item in (prompt_file, script_file):
-            item.unlink(missing_ok=True)
+        _cleanup_temp(target)
+        with _RUNNING_LOCK:
+            _RUNNING.pop(batch_id, None)
         with _THREADS_LOCK:
             _THREADS.pop(batch_id, None)
+        _publish(batch_id, {"type": "finished", "status": meta.get("status"), "meta": meta})
 
 
 def _kill(proc: subprocess.Popen) -> None:
@@ -420,11 +661,236 @@ def _kill(proc: subprocess.Popen) -> None:
             pass
 
 
+def _cleanup_temp(target: Path) -> None:
+    """清理临时输入与半截音频，不动已落盘的 cand-*.wav。"""
+    for pattern in (".cand-*.tmp*", "prompt.txt", "script.txt"):
+        for item in target.glob(pattern):
+            item.unlink(missing_ok=True)
+
+
 def _cleanup_partial(target: Path) -> None:
-    """失败/中断时删除半成品候选与临时文件，只保留 batch.json 与日志。"""
+    """批次整体失败时删除半成品候选与临时文件，只保留 batch.json 与日志。"""
     for pattern in ("cand-*.wav", ".cand-*.tmp*", "prompt.txt", "script.txt"):
         for item in target.glob(pattern):
             item.unlink(missing_ok=True)
+
+
+def is_running(batch_id: str) -> bool:
+    """批次当前是否有后台线程在生成（用于识别服务重启后的残留 running）。"""
+    with _RUNNING_LOCK:
+        return batch_id in _RUNNING
+
+
+def cancel_batch(store, batch_id: str) -> dict:
+    """停止批次后续候选：终止 worker，保留已完成候选并标记 stopped。
+
+    参数:
+        store: 工程。
+        batch_id: 批次 ID。
+
+    返回:
+        收尾后的批次元数据（不存在时为空 dict）。
+    """
+    with _RUNNING_LOCK:
+        state = _RUNNING.get(batch_id)
+        if state:
+            state["cancel"].set()
+        proc = (state or {}).get("proc")
+    if proc is not None and proc.poll() is None:
+        _kill(proc)
+    with _THREADS_LOCK:
+        thread = _THREADS.get(batch_id)
+    if thread is not None and thread.is_alive():
+        thread.join(timeout=30)
+    meta = read_batch(store, batch_id)
+    if meta.get("status") == "running":
+        target = batch_dir(store, batch_id)
+        meta = _finish_stopped(meta, target)
+        _write_json(target / "batch.json", meta)
+        _publish(batch_id, {"type": "finished", "status": meta.get("status"), "meta": meta})
+    return meta
+
+
+def retry_candidate(store, cfg: AppConfig, batch_id: str, index: int) -> dict:
+    """单条重试：只重新生成指定序号的候选。
+
+    参数:
+        store: 工程。
+        cfg: 本机配置（读取 voice.design.*）。
+        batch_id: 批次 ID。
+        index: 候选序号（从 1 开始）。
+
+    返回:
+        更新后的批次元数据。
+
+    异常:
+        ValueError: 批次不存在、仍在生成中或该候选不需要重试。
+    """
+    meta = read_batch(store, batch_id)
+    if not meta:
+        raise ValueError("批次不存在")
+    if meta.get("status") == "running":
+        raise ValueError("批次仍在生成中，请稍后再试")
+    index = int(index)
+    total = int(meta.get("total") or 0)
+    if index < 1 or index > total:
+        raise ValueError("候选序号超出范围")
+    target = batch_dir(store, batch_id)
+    candidates = meta.get("candidates") or []
+    candidate = next((row for row in candidates if int(row.get("index") or 0) == index), None)
+    file_missing = candidate is not None and not (target / str(candidate.get("file") or "")).is_file()
+    needs_retry = file_missing or any(int(row.get("index") or 0) == index for row in meta.get("failures") or [])
+    if not needs_retry:
+        raise ValueError("该候选不需要重试")
+    meta["candidates"] = [row for row in candidates if int(row.get("index") or 0) != index]
+    meta["failures"] = [row for row in meta.get("failures") or [] if int(row.get("index") or 0) != index]
+    meta["status"] = "running"
+    meta["stage"] = "queued"
+    meta["current_index"] = index
+    meta["done"] = len(meta["candidates"])
+    meta["error"] = None
+    meta["note"] = None
+    _write_json(target / "batch.json", meta)
+    design = dict(cfg.get("voice.design") or {})
+    with _RUNNING_LOCK:
+        _RUNNING[batch_id] = {"cancel": threading.Event(), "proc": None}
+    thread = threading.Thread(
+        target=_run_batch,
+        args=(store, design, target, batch_id, str(meta.get("prompt") or ""), total),
+        kwargs={"indices": [index]},
+        daemon=True,
+    )
+    with _THREADS_LOCK:
+        _THREADS[batch_id] = thread
+    thread.start()
+    _publish(batch_id, {"type": "status", "status": "running", "index": index})
+    return meta
+
+
+def resume_batch(store, cfg: AppConfig, batch_id: str) -> dict:
+    """中断/部分失败后续跑：只补生成缺失的候选序号，已完成的不重跑。
+
+    参数:
+        store: 工程。
+        cfg: 本机配置（读取 voice.design.*）。
+        batch_id: 批次 ID。
+
+    返回:
+        更新后的批次元数据。
+
+    异常:
+        ValueError: 批次不存在、仍在生成中或已生成完整。
+    """
+    meta = read_batch(store, batch_id)
+    if not meta:
+        raise ValueError("批次不存在")
+    if meta.get("status") == "running":
+        raise ValueError("批次仍在生成中，请稍后再试")
+    total = int(meta.get("total") or 0)
+    done = {int(row.get("index") or 0) for row in meta.get("candidates") or []}
+    missing = [index for index in range(1, total + 1) if index not in done]
+    if not missing:
+        raise ValueError("批次已生成完整")
+    target = batch_dir(store, batch_id)
+    meta["status"] = "running"
+    meta["stage"] = "queued"
+    meta["current_index"] = missing[0]
+    meta["done"] = len(done)
+    meta["error"] = None
+    meta["note"] = None
+    _write_json(target / "batch.json", meta)
+    design = dict(cfg.get("voice.design") or {})
+    with _RUNNING_LOCK:
+        _RUNNING[batch_id] = {"cancel": threading.Event(), "proc": None}
+    thread = threading.Thread(
+        target=_run_batch,
+        args=(store, design, target, batch_id, str(meta.get("prompt") or ""), total),
+        kwargs={"indices": missing},
+        daemon=True,
+    )
+    with _THREADS_LOCK:
+        _THREADS[batch_id] = thread
+    thread.start()
+    _publish(batch_id, {"type": "status", "status": "running", "index": missing[0]})
+    return meta
+
+
+def _attach_adopted(store, meta: dict) -> dict:
+    """给批次元数据补 `adopted_indices`，供页面显示「已自动采用候选 N」。"""
+    if not meta:
+        return meta
+    payload = dict(meta)
+    payload["adopted_indices"] = _adopted_indices(
+        store, payload, batch_dir(store, str(payload.get("batch_id") or ""))
+    )
+    return payload
+
+
+def batch_events(store, batch_id: str):
+    """产出批次事件序列：先回放磁盘状态，再转入实时广播。
+
+    参数:
+        store: 工程。
+        batch_id: 批次 ID。
+
+    产出:
+        `(event_name, payload)`；event_name 为 stage/batch/candidate/candidate_error/chars/ping/done。
+        调用方负责编码成 SSE；页面断开只会退订，不会取消生成。
+
+    异常:
+        ValueError: 批次不存在。
+    """
+    meta = read_batch(store, batch_id)
+    if not meta:
+        raise ValueError("批次不存在")
+    channel = _subscribe(batch_id)
+    try:
+        # 先订阅再重新读盘：回放期间到达的事件留在队列里，不会丢
+        meta = read_batch(store, batch_id)
+        total = int(meta.get("total") or 0)
+        if meta.get("status") == "running":
+            yield ("stage", {"stage": meta.get("stage") or "queued"})
+            yield (
+                "batch",
+                {
+                    "type": "batch",
+                    "index": int(meta.get("current_index") or (len(meta.get("candidates") or []) + 1)),
+                    "total": total,
+                    "unit": "candidate",
+                },
+            )
+        for item in meta.get("candidates") or []:
+            yield ("candidate", item)
+        for item in meta.get("failures") or []:
+            yield ("candidate_error", item)
+        if meta.get("status") != "running":
+            yield ("done", {"result": _attach_adopted(store, meta)})
+            return
+        while True:
+            try:
+                event = channel.get(timeout=15)
+            except queue.Empty:
+                latest = read_batch(store, batch_id)
+                if latest.get("status") != "running":
+                    yield ("done", {"result": _attach_adopted(store, latest)})
+                    return
+                # 心跳：保持连接，页面忽略 ping
+                yield ("ping", {})
+                continue
+            kind = str(event.get("type") or "")
+            if kind == "finished":
+                yield ("done", {"result": _attach_adopted(store, read_batch(store, batch_id) or event.get("meta") or {})})
+                return
+            if kind == "candidate":
+                yield ("candidate", {key: value for key, value in event.items() if key != "type"})
+            elif kind == "candidate_error":
+                yield ("candidate_error", {"index": event.get("index"), "message": event.get("message")})
+            elif kind in ("batch", "chars"):
+                yield (kind, event)
+            elif kind == "stage":
+                yield ("stage", {"stage": event.get("stage")})
+    finally:
+        _unsubscribe(batch_id, channel)
 
 
 def read_batch(store, batch_id: str) -> dict:
@@ -433,10 +899,14 @@ def read_batch(store, batch_id: str) -> dict:
 
 
 def delete_batch(store, batch_id: str) -> bool:
-    """删除整个候选批次目录。"""
+    """删除整个候选批次目录（运行中的批次先停止，避免后台线程继续写盘）。"""
     target = batch_dir(store, batch_id)
     if not target.exists():
         return False
+    with _RUNNING_LOCK:
+        running = batch_id in _RUNNING
+    if running:
+        cancel_batch(store, batch_id)
     shutil.rmtree(target, ignore_errors=True)
     return True
 
@@ -518,15 +988,18 @@ def list_batches(store, character_id: str | None = None) -> list[dict]:
                 "batch_id": meta.get("batch_id"),
                 "status": meta.get("status"),
                 "stage": meta.get("stage"),
-                "done": int(meta.get("done") or 0),
                 "total": int(meta.get("total") or 0),
+                "done": int(meta.get("done") or 0),
+                "current_index": int(meta.get("current_index") or 0),
                 "character_id": meta.get("character_id"),
                 "character_name": meta.get("character_name"),
                 "prompt": meta.get("prompt"),
                 "created_at": created,
                 "generated_at": meta.get("generated_at"),
                 "error": meta.get("error"),
+                "note": meta.get("note"),
                 "candidates": candidates,
+                "failures": meta.get("failures") or [],
                 "adopted": bool(adopted),
                 "adopted_indices": adopted,
             }
@@ -564,7 +1037,17 @@ def _f0_hint(path: Path, gender: str) -> dict:
         return {"f0_median": None, "mismatch": False}
 
 
-def select_candidate(store, batch_id: str, index: int, name: str, gender: str, gender_source: str, bind, voice_id: str | None = None) -> dict:
+def select_candidate(
+    store,
+    batch_id: str,
+    index: int,
+    name: str,
+    gender: str,
+    gender_source: str,
+    bind,
+    voice_id: str | None = None,
+    record_undo: bool = True,
+) -> dict:
     """把候选音频固化为正式参考音，并（可选）绑定角色。
 
     参数:
@@ -576,6 +1059,7 @@ def select_candidate(store, batch_id: str, index: int, name: str, gender: str, g
         gender_source: character | manual。
         bind: 是否绑定到批次对应角色。
         voice_id: 追加到已有音色时传入；为空则新建音色。
+        record_undo: 绑定前是否写撤销快照（批量任务自行写整批日志时传 False）。
 
     返回:
         `{voice, variant_id, character?}`。
@@ -584,8 +1068,8 @@ def select_candidate(store, batch_id: str, index: int, name: str, gender: str, g
         ValueError: 批次未就绪、候选不存在或参数非法。
     """
     meta = read_batch(store, batch_id)
-    if meta.get("status") != "ready":
-        raise ValueError("批次尚未生成完成")
+    if meta.get("status") == "running":
+        raise ValueError("批次仍在生成中")
     candidate = next((item for item in meta.get("candidates") or [] if int(item.get("index")) == int(index)), None)
     if candidate is None:
         raise ValueError("候选不存在")
@@ -689,6 +1173,10 @@ def select_candidate(store, batch_id: str, index: int, name: str, gender: str, g
         characters = store.load_characters()
         target = next((item for item in characters["characters"] if item["id"] == meta["character_id"]), None)
         if target is not None:
+            if record_undo:
+                from . import voice_casting
+
+                voice_casting.record_binding_undo(store, target)
             binding = target.get("voice_binding") or {}
             target["voice_binding"] = {
                 "adapter": binding.get("adapter") or "placeholder",

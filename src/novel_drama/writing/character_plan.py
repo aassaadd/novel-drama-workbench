@@ -22,6 +22,7 @@ from ..store import ProjectStore
 from ..store.settings_store import SettingsStore
 from ..store.world_store import WorldStore
 from .service import (
+    _CHARACTER_DESC_RULES,
     _clean_character_row,
     _generate_json,
     _progress,
@@ -298,6 +299,7 @@ def _character_prompt(
         lines.append("已生成人物（关系可以引用）：" + "、".join(done_names) + "。")
     if brief_text:
         lines.append(f"补充要求：{brief_text}。")
+    lines.append(_CHARACTER_DESC_RULES)
     lines.append(f"只输出「{name}」这一个人物，姓名保持不变。")
     return "\n".join(lines)
 
@@ -423,6 +425,166 @@ def generate_from_plan(
         },
         "success": len(characters),
         "failed": len(failures),
+        "skipped": skipped,
+        "failures": failures,
+        "summary": summary,
+    }
+
+
+#: 后续音色 / 出图直接取用的描述性字段
+DESCRIPTION_FIELDS = (
+    "voice_description_zh",
+    "voice_description_en",
+    "appearance_desc_zh",
+    "appearance_desc_en",
+    "appearance_negative_zh",
+    "appearance_negative_en",
+)
+
+#: 各描述字段的最大长度（与 schema 对齐）
+_DESC_LIMITS = {
+    "voice_description_zh": 1000,
+    "voice_description_en": 1000,
+    "appearance_desc_zh": 1200,
+    "appearance_desc_en": 1200,
+    "appearance_negative_zh": 800,
+    "appearance_negative_en": 800,
+}
+
+
+def missing_description_fields(character: dict) -> list[str]:
+    """列出角色缺失的描述性字段。
+
+    参数:
+        character: 角色档案。
+
+    返回:
+        缺失字段名列表（空列表表示已齐全）。
+    """
+    return [field for field in DESCRIPTION_FIELDS if not str(character.get(field) or "").strip()]
+
+
+def fill_character_descriptions(
+    store: ProjectStore,
+    config: AppConfig,
+    names: list[str] | None = None,
+    on_progress=None,
+) -> dict:
+    """给已有人物补全缺失的描述性字段（只补缺失，不覆盖已有内容）。
+
+    逐个角色调用 `emit_character`；单个失败只记录，不影响其它角色；
+    每次成功立即写盘，重跑时会自动跳过已补全的角色（失败项可重试）。
+
+    参数:
+        store: 工程。
+        config: 本机配置。
+        names: 只处理指定角色（ID 或姓名）；为空表示全部非旁白角色。
+        on_progress: 进度回调，事件 `batch{index,total,name}` / `chars{...}`。
+
+    返回:
+        {"total", "updated", "skipped", "failures", "summary"}。
+    """
+    settings_store = SettingsStore(store.root)
+    bible = settings_store.ensure()
+    table = store.load_characters()
+    characters = table.get("characters") or []
+    work = store.load_project().get("work") or {}
+    world_store = WorldStore(store.root)
+    worlds = world_store.list_worlds() if world_store.exists() else []
+    context = _project_context(work, bible, characters, worlds)
+    adapter = build_writing_adapter(config, bible)
+
+    wanted: list[dict] = []
+    updated: list[str] = []
+    skipped: list[str] = []
+    failures: list[dict] = []
+    for character in characters:
+        if character.get("role") == "narrator":
+            continue
+        if names:
+            keys = {str(item).strip() for item in names if str(item).strip()}
+            if character.get("id") not in keys and character.get("name") not in keys:
+                continue
+        name = str(character.get("name") or character.get("id") or "")
+        if missing_description_fields(character):
+            wanted.append(character)
+        else:
+            skipped.append(name)
+
+    total = len(wanted)
+    for index, character in enumerate(wanted, start=1):
+        name = str(character.get("name") or character.get("id") or "")
+        missing = missing_description_fields(character)
+        _progress(on_progress, {"type": "batch", "index": index, "total": total, "name": name})
+        profile = {
+            key: value
+            for key, value in character.items()
+            if key in ("name", "role", "gender", "age_range", "personality", "background",
+                       "appearance_prompt", "negative_prompt")
+        }
+        prompt = (
+            f"{context}\n\n" if context else ""
+        ) + (
+            f"已有角色「{name}」的档案（不要改写）：{json.dumps(profile, ensure_ascii=False)}\n"
+            f"只补以下缺失字段：{'、'.join(missing)}；已有内容的字段一律不要输出或改写。\n"
+        ) + _CHARACTER_DESC_RULES + f"\n只输出「{name}」这一个人物，姓名保持不变。"
+        req = TextGenRequest(
+            task="character",
+            system="你是中文小说的人物编辑，只按工具参数输出缺失字段，不要解释。",
+            messages=[Message("user", prompt)],
+            stream=True,
+            temperature=0.7,
+            max_tokens=_tool_max_tokens(config, "character", 1),
+            metadata={
+                "mode": "single",
+                "work": {"title": work.get("title"), "author": work.get("author"), "genre": work.get("genre") or []},
+                "premise": bible.get("premise") or {},
+                "characters": [{"id": character.get("id"), "name": name, "role": character.get("role")}],
+                "existing_character": character,
+                "brief": "只补缺失的描述性字段，不覆盖已有内容",
+                "seed": work.get("id"),
+            },
+        )
+        state = {"chars": 0}
+
+        def on_delta(text: str) -> None:
+            """累计接收长度并上报。"""
+            if not text:
+                return
+            state["chars"] += len(str(text))
+            _progress(on_progress, {"type": "chars", "chars": state["chars"], "index": index, "total": total})
+
+        try:
+            payload = _generate_json(adapter, req, "character", on_delta=on_delta if on_progress else None)
+            raw = payload.get("character") if isinstance(payload.get("character"), dict) else payload
+            changed = 0
+            for field in missing:
+                value = str((raw or {}).get(field) or "").strip()
+                if value:
+                    character[field] = value[: _DESC_LIMITS[field]]
+                    changed += 1
+            # 旧字段为空时顺带补齐，已有内容绝不覆盖
+            if not character.get("appearance_prompt") and character.get("appearance_desc_en"):
+                character["appearance_prompt"] = character["appearance_desc_en"]
+            if not character.get("negative_prompt") and character.get("appearance_negative_en"):
+                character["negative_prompt"] = character["appearance_negative_en"]
+            if changed:
+                character["updated_at"] = now_iso()
+                store.save_characters(table)
+                updated.append(name)
+            else:
+                failures.append({"name": name, "message": "模型没有返回缺失字段"})
+        except Exception as exc:  # 单人失败不影响其他人
+            failures.append({"name": name, "message": str(exc) or exc.__class__.__name__})
+    failed_text = "；".join(f"{item['name']}：{item['message']}" for item in failures)
+    summary = f"补全 {len(updated)}、失败 {len(failures)}"
+    if failures:
+        summary += f"（{failed_text}）"
+    if skipped:
+        summary += f"、已齐全 {len(skipped)}"
+    return {
+        "total": total,
+        "updated": updated,
         "skipped": skipped,
         "failures": failures,
         "summary": summary,

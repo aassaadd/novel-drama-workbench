@@ -20,6 +20,7 @@ from ..config import AppConfig
 from ..models.ids import new_id, now_iso
 from ..store import ProjectStore
 from ..store.settings_store import SettingsStore
+from ..text.titles import strip_index_prefix
 from .service import (
     _characters_payload,
     _generate_json,
@@ -197,7 +198,7 @@ def _normalize_acts(payload: dict, acts: int, chapters_per_act: int) -> list[dic
     for index, raw in enumerate(raw_acts[: max(1, int(acts))], start=1):
         if not isinstance(raw, dict):
             continue
-        title = _text(raw.get("title"), 80) or f"第{index}幕"
+        title = strip_index_prefix(_text(raw.get("title"), 80)) or f"第{index}幕"
         try:
             count = int(raw.get("chapters_count") or chapters_per_act)
         except (TypeError, ValueError):
@@ -239,7 +240,7 @@ def _normalize_chapters(payload: dict, expected: int) -> list[dict]:
             continue
         rows.append(
             {
-                "title": _text(item.get("title"), 80) or f"第{index}章",
+                "title": strip_index_prefix(_text(item.get("title"), 80)) or f"第{index}章",
                 "summary": _text(item.get("summary"), 400),
                 "beats": [],
                 "status": "pending",

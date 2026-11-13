@@ -848,6 +848,51 @@ def check_cast(store, chapter_id: str | None = None) -> dict:
     }
 
 
+def unresolved_speaker_lines(store, chapter_ids: list[str] | None = None) -> list[dict]:
+    """列出说话人无法归属的台词行（chr_unknown 或不在角色表里）。
+
+    批量配音用这批行做「跳过」提示：这些行保持原样（不写音频、不改说话人），
+    由用户先修说话人，或显式选择跳过。
+
+    参数:
+        store: 工程。
+        chapter_ids: 只扫描这些章节；为空扫描全部章节。
+
+    返回:
+        `[{chapter_id, chapter_title, scene_id, scene_index, line_id, line_index,
+           speaker_id, text}]`；场景序号与场景内行号均从 1 开始。
+    """
+    characters = {item.get("id") for item in store.load_characters().get("characters") or []}
+    if chapter_ids:
+        chapters = [store.load_chapter(chapter_id) for chapter_id in chapter_ids]
+    else:
+        chapters = [store.load_chapter(item["id"]) for item in store.list_chapters()]
+    rows: list[dict] = []
+    for chapter in chapters:
+        scenes = sorted(chapter.get("scenes") or [], key=lambda item: item.get("index") or 0)
+        for scene_no, scene in enumerate(scenes, start=1):
+            lines = sorted(scene.get("lines") or [], key=lambda item: item.get("index") or 0)
+            for line_no, line in enumerate(lines, start=1):
+                if not (line.get("text") or "").strip():
+                    continue
+                speaker = line.get("speaker_id")
+                if speaker and speaker != UNKNOWN_SPEAKER_ID and speaker in characters:
+                    continue
+                rows.append(
+                    {
+                        "chapter_id": chapter.get("id"),
+                        "chapter_title": chapter.get("title"),
+                        "scene_id": scene.get("id"),
+                        "scene_index": scene_no,
+                        "line_id": line.get("id"),
+                        "line_index": line_no,
+                        "speaker_id": speaker,
+                        "text": line.get("text"),
+                    }
+                )
+    return rows
+
+
 def _check_bgm(store, chapters: list[dict], strict: bool) -> list[dict]:
     """检查 BGM 规划、cue 锚点与循环一致性。
 

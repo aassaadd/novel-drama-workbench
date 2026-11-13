@@ -21,6 +21,7 @@ from ..store import ProjectStore
 from ..store.settings_store import SettingsStore
 from ..text.context import ContextAssembler
 from ..text.dialogue import normalize_dialogue
+from ..text.titles import strip_index_prefix
 from .editing import INSTRUCTION_LIMIT, STALE_WARNING, _usage_payload
 from .service import (
     DEFAULT_CHAPTER_WORDS,
@@ -82,6 +83,35 @@ def _cfg_int(config: AppConfig, key: str, default: int, minimum: int = 1) -> int
         return max(minimum, int(raw))
     except (TypeError, ValueError):
         return default
+
+
+def _trim_to_limit(text: str, limit: int) -> str:
+    """把单轮生成的正文截到指定字数内的最后一个句末标点。
+
+    模型常会超出指令长度，这里只在「明显超写」时兜底：按实际字数（去空白）
+    找到不超过 limit 的最后一个句末标点，保留完整句子后截断。
+
+    参数:
+        text: 本轮生成的正文。
+        limit: 允许的最大有效字数（去空白计）。
+
+    返回:
+        截断后的正文；未超限或找不到句末标点时原样返回。
+    """
+    if _count_words(text) <= limit:
+        return text
+    count = 0
+    cut = -1
+    for index, char in enumerate(text):
+        if not char.isspace():
+            count += 1
+        if count > limit:
+            break
+        if char in _BOUNDARY_CHARS:
+            cut = index + 1
+    if cut <= 0:
+        return text
+    return text[:cut].rstrip()
 
 
 def _chapter_plain(chapter: dict) -> str:
@@ -312,7 +342,9 @@ def _build_continue_instruction(
         lines.append(f"本次续写的明确意图（最高优先级，必须照此写）：{intent}")
     lines.append(f"接着《{chapter.get('title') or '本章'}》已有正文的最后一个字，继续写后续正文，不要重写前文。")
     lines.append(
-        f"本次计划新增约 {total_target} 字（分 {rounds} 轮，每轮约 {seg_words} 字），当前已有 {_count_words(content)} 字。"
+        f"本次目标总字数约 {total_target} 字（最多写到 {int(round(total_target * 1.1))} 字左右，"
+        f"内容不足时最多分 {rounds} 轮补足，每轮控制在剩余额度内），"
+        f"当前已有 {_count_words(content)} 字。写完目标字数即停，不要为凑轮次继续展开。"
     )
     if beats:
         lines.append(f"当前必须推进的节拍（从第 {from_beat} 个开始，按顺序写，不要跳过节拍）：")
@@ -512,7 +544,7 @@ def continue_chapter(
 
     seg_words = max(100, int(words or _cfg_int(config, "segment_words", DEFAULT_SEGMENT_WORDS)))
     max_rounds = max(1, int(rounds or _cfg_int(config, "max_rounds", DEFAULT_MAX_ROUNDS)))
-    max_total_words = max(seg_words, _cfg_int(config, "max_total_words", DEFAULT_MAX_TOTAL_WORDS))
+    configured_max_total = max(seg_words, _cfg_int(config, "max_total_words", DEFAULT_MAX_TOTAL_WORDS))
     recent_chars = _cfg_int(config, "recent_chars", DEFAULT_RECENT_CHARS, minimum=400)
     previous_limit = _cfg_int(config, "previous_summaries", DEFAULT_PREVIOUS_SUMMARIES)
     overlap_chars = _cfg_int(config, "overlap_chars", DEFAULT_OVERLAP_CHARS, minimum=50)
@@ -520,7 +552,9 @@ def continue_chapter(
     written_words = _count_words(content)
     start_beat = _from_beat(from_beat, written_words, chapter_words, len(beats))
     remaining_beats = beats[start_beat - 1 :] if beats else []
-    total_target = min(seg_words * max_rounds, max_total_words)
+    # 用户选择的字数就是「本次目标总量」：一轮写够即停，内容不足才分轮补足
+    total_target = seg_words
+    hard_cap = max(total_target, min(configured_max_total, int(round(total_target * 1.6))))
 
     previous = _previous_chapters(store, chapter, previous_limit)
     digest = _story_digest(context["bible"], previous)
@@ -545,7 +579,9 @@ def continue_chapter(
     req = assembler.build("chapter", instruction_text, context["speaker_ids"])
     req.metadata = context["metadata"]
     mt = config.get("writing.multi_turn") or {}
-    req.max_tokens = max(1, int(mt.get("round_max_tokens") or 2048))
+    round_max_tokens = max(1, int(mt.get("round_max_tokens") or 2048))
+    # 单轮输出按目标总量收口，避免一次生成远超用户选择的字数
+    req.max_tokens = max(1, min(round_max_tokens, max(256, int(total_target * 1.6) + 96)))
     work_id = str(context["work"].get("id") or "").strip()
     if work_id:
         req.prompt_cache_key = f"{work_id}:{chapter_id}:continue"
@@ -580,13 +616,16 @@ def continue_chapter(
     record_saved = False
 
     for index in range(1, max_rounds + 1):
+        remaining_words = max(80, total_target - added_total)
         if index == 1:
             request = replace(req, messages=base_messages)
         else:
             request = replace(
                 req,
                 messages=base_messages
-                + [Message("assistant", added_text), Message("user", _continue_instruction(seg_words))],
+                + [Message("assistant", added_text), Message("user", _continue_instruction(remaining_words))],
+                # 轮次越往后剩余额度越少，同步收紧单轮上限，避免累计超写
+                max_tokens=max(1, min(req.max_tokens, max(256, int(remaining_words * 1.6) + 96))),
             )
         try:
             result = stream_text(context["adapter"], request, on_delta) if on_delta else context["adapter"].generate(request)
@@ -614,6 +653,18 @@ def continue_chapter(
 
         candidate = _append_segment(current, segment, max_overlap=overlap_chars)
         added = _count_words(candidate) - _count_words(current)
+        # 单轮明显超写（超过目标的 1.1 倍）时，在句末截断后再落盘，
+        # 保证「选 500 字」的结果不会变成 1500 字。
+        overflow_limit = max(120, int(round(total_target * 1.1)))
+        if added > overflow_limit:
+            trimmed = _trim_to_limit(segment, overflow_limit)
+            if trimmed and trimmed != segment:
+                segment = trimmed
+                candidate = _append_segment(current, segment, max_overlap=overlap_chars)
+                added = _count_words(candidate) - _count_words(current)
+                warnings.append(
+                    f"本轮生成偏长，已在句末截断到约 {added} 字（目标 {total_target} 字，上限 {overflow_limit} 字）"
+                )
         if added < MIN_ADDED_WORDS:
             # 本轮基本在复述上一段：不写正文，整轮作为「未应用草稿」留给用户确认或重抽
             stop_reason = "short_output"
@@ -640,10 +691,11 @@ def continue_chapter(
             chapter["continuations"] = continuations
             store.save_chapter(chapter)
 
-        if added_total >= max_total_words:
+        if added_total >= hard_cap:
             stop_reason = "max_total_words"
             break
-        if added_total >= total_target * 1.1:
+        # 达到用户选择的目标总量即收敛：即使某一轮的段落写得偏长，也不再追加下一轮
+        if added_total >= total_target:
             stop_reason = "target_reached"
             break
         if added_total >= total_target * 0.8 and current and current[-1] in _BOUNDARY_CHARS:
@@ -743,13 +795,19 @@ def _build_outline_act(
     返回:
         可直接追加进 `outline.acts` 的幕 dict。
     """
-    act = SettingsStore.new_act(raw_act.get("title") or f"第{act_no}幕", raw_act.get("summary") or "")
+    act = SettingsStore.new_act(
+        strip_index_prefix(str(raw_act.get("title") or "")) or f"第{act_no}幕",
+        raw_act.get("summary") or "",
+    )
     raw_chapters = [item for item in (raw_act.get("chapters") or []) if isinstance(item, dict)]
     for offset in range(chapter_count):
         raw = raw_chapters[offset] if offset < len(raw_chapters) else {}
         index = start_index + offset
         outline_chapter = SettingsStore.new_outline_chapter(
-            new_id("chp"), index, raw.get("title") or f"第{index}章", raw.get("summary") or ""
+            new_id("chp"),
+            index,
+            strip_index_prefix(str(raw.get("title") or "")) or f"第{index}章",
+            raw.get("summary") or "",
         )
         raw_beats = [item for item in (raw.get("beats") or []) if isinstance(item, dict)]
         if not raw_beats:

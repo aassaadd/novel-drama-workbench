@@ -26,6 +26,8 @@
   let lineMap = new Map();  // line_id → { block, start, end }（相对段落起点）
   let lineIndex = new Map(); // line_id → 章节详情里的行对象（右栏展示用）
   let lineEdit = null;      // 正在行内编辑的台词：{ lineId, wrap, input }
+  let castRows = null;      // 人物表缓存（行内编辑「说话人」下拉用）
+  let castLoading = null;   // 正在进行的人物表请求
 
   const el = (id) => document.getElementById(id);
 
@@ -261,7 +263,7 @@
   function renderInfo(chapter, lineTotal) {
     const scenes = chapter.scenes || [];
     el("chInfo").innerHTML = [
-      `<div class="kv-row"><span class="kv-key">章节</span><span class="kv-val">${esc(chapter.index)}. ${esc(chapter.title || "")}</span></div>`,
+      `<div class="kv-row"><span class="kv-key">章节</span><span class="kv-val">${esc(chapter.index)}. ${esc(stripTitleIndex(chapter.title))}</span></div>`,
       `<div class="kv-row"><span class="kv-key">状态</span><span class="kv-val">${esc(NW.statusLabel(chapter.status))}</span></div>`,
       `<div class="kv-row"><span class="kv-key">字数</span><span class="kv-val">${esc(chapter.word_count || 0)}</span></div>`,
       `<div class="kv-row"><span class="kv-key">场景</span><span class="kv-val">${scenes.length}</span></div>`,
@@ -365,6 +367,8 @@
         return;
       }
       render(data);
+      // 预取人物表：行内编辑台词时直接用于「说话人」下拉，不额外等待
+      if (!castRows) ensureCast();
       await refreshContinueDraft();
     } catch (error) {
       NW.toast(`读取章节失败：${error.message}`);
@@ -383,6 +387,28 @@
       await new Promise((resolve) => setTimeout(resolve, 250));
     }
     return null;
+  }
+
+  /* 读取人物表（行内编辑「说话人」下拉用），成功后缓存，失败返回空数组。
+   * 参数：force 是否强制重新读取。
+   * 返回：Promise<Array<{id, name, role}>>。
+   */
+  async function ensureCast(force) {
+    if (castRows && !force) return castRows;
+    if (castLoading) return castLoading;
+    castLoading = NW.api(`/api/ui/characters?${NW.qs({ path: NW.state.path })}`)
+      .then((data) => {
+        castRows = (data && data.characters) || [];
+        return castRows;
+      })
+      .catch(() => {
+        castRows = [];
+        return castRows;
+      })
+      .finally(() => {
+        castLoading = null;
+      });
+    return castLoading;
   }
 
   /* 点台词行：在正文里定位并高亮所在段落；点段落则反过来点亮该段的台词行。
@@ -455,16 +481,45 @@
     const line = found.line || {};
     const original = line.text || "";
     const para = chip.dataset.para || "";
+    const speakerOriginal = String(line.speaker_id || "");
 
-    // 复用行样式：序号/类型保持原位，文本区换成输入框
+    // 复用行样式：序号/类型保持原位，文本区换成输入框，前面补一个说话人下拉
     const wrap = document.createElement("div");
     wrap.className = "line-chip is-editing";
     wrap.dataset.line = lineId;
     wrap.dataset.para = para;
     wrap.innerHTML = `<span class="lc-kind">${esc(NW.kindLabel(line.kind))}</span>`;
+
+    const speakerSelect = document.createElement("select");
+    speakerSelect.className = "line-edit-speaker";
+    speakerSelect.setAttribute("aria-label", "说话人");
+    speakerSelect.style.cssText = "max-width:104px;font-size:12px;margin-right:6px;";
+    const seen = new Set();
+    const addSpeaker = (value, text) => {
+      if (!value || seen.has(value)) return;
+      seen.add(value);
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = text || value;
+      speakerSelect.appendChild(option);
+    };
+    // 当前说话人放第一项：列表里没有这个角色时也能保住原值
+    if (speakerOriginal) {
+      addSpeaker(speakerOriginal, speakerLabel(line.speaker, speakerOriginal) || speakerOriginal);
+    }
+    addSpeaker("chr_narrator", "旁白");
+    (castRows || []).forEach((row) => {
+      if (!row || !row.id || row.role === "narrator") return;
+      addSpeaker(row.id, row.name || row.id);
+    });
+    if (speakerOriginal === "chr_unknown") addSpeaker("chr_unknown", "未知角色");
+    speakerSelect.value = speakerOriginal || "chr_narrator";
+    wrap.appendChild(speakerSelect);
+
     const input = document.createElement("input");
     input.type = "text";
     input.className = "line-edit-input";
+    input.setAttribute("aria-label", "台词");
     input.maxLength = 5000;
     input.value = original;
     wrap.appendChild(input);
@@ -483,7 +538,7 @@
       lineEdit = null;
     }
 
-    /* 保存：调接口同步台词与正文，成功后重载整页（正文与定位映射一起更新）。 */
+    /* 保存：台词走 `line edit`（同步正文），说话人走 `line set`，成功后重载整页。 */
     async function save() {
       if (finished || submitting) return;
       const value = input.value.trim();
@@ -492,26 +547,47 @@
         input.focus();
         return;
       }
-      if (value === original.trim()) {
+      const nextSpeaker = speakerSelect.value;
+      const textChanged = value !== original.trim();
+      const speakerChanged = Boolean(nextSpeaker) && nextSpeaker !== speakerOriginal;
+      if (!textChanged && !speakerChanged) {
         cancel();
         return;
       }
       submitting = true;
       input.disabled = true;
+      speakerSelect.disabled = true;
       try {
-        const result = await NW.api("/api/ui/line/edit", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ path: NW.state.path, chapter: NW.state.chapter, line: lineId, text: value }),
-        });
+        let revision = line.revision;
+        if (textChanged) {
+          const result = await NW.api("/api/ui/line/edit", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ path: NW.state.path, chapter: NW.state.chapter, line: lineId, text: value }),
+          });
+          revision = result.revision;
+        }
+        if (speakerChanged) {
+          // 说话人从旁白改成角色（或反过来）时同步台词类型，避免类型与说话人矛盾
+          const patch = { speaker: nextSpeaker };
+          if (line.kind === "narration" || line.kind === "dialogue") {
+            patch.kind = nextSpeaker === "chr_narrator" ? "narration" : "dialogue";
+          }
+          await NW.api("/api/ui/line/set", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ path: NW.state.path, chapter: NW.state.chapter, line: lineId, ...patch }),
+          });
+        }
         finished = true;
         lineEdit = null;
-        NW.toast(`已保存台词（revision=${result.revision}），正文已同步`, true);
+        NW.toast(speakerChanged ? `已保存台词与说话人（revision=${revision}）` : `已保存台词（revision=${revision}），正文已同步`, true);
         await load();
       } catch (error) {
         // 失败不静默：保留输入框与用户输入，允许改完重试或按 Esc 放弃
         submitting = false;
         input.disabled = false;
+        speakerSelect.disabled = false;
         const reason = String(error.message || error).replace(/^\[[A-Z]+\]\s*/, "");
         NW.toast(`保存失败：${reason}`);
         input.focus();
@@ -527,7 +603,14 @@
         cancel();
       }
     });
-    input.addEventListener("blur", () => save());
+    // 失焦保存，但焦点移到同一行的说话人下拉时不触发（否则点下拉就提前关掉编辑）
+    input.addEventListener("blur", () => {
+      setTimeout(() => {
+        if (!wrap.isConnected) return;
+        if (wrap.contains(document.activeElement)) return;
+        save();
+      }, 0);
+    });
 
     lineEdit = { lineId, wrap, input };
   }
@@ -1264,7 +1347,7 @@
     const wordsHint = document.createElement("span");
     wordsHint.className = "muted";
     wordsHint.style.fontSize = "12px";
-    wordsHint.textContent = "指本次新增的目标字数";
+    wordsHint.textContent = "本次目标总字数；达到即停，内容不足时分轮补足，可能略多";
     wordsLabel.appendChild(wordsHint);
     dialog.appendChild(wordsLabel);
 

@@ -16,9 +16,24 @@ import re
 
 from ..store import ProjectStore
 from ..store.settings_store import SettingsStore
+from ..text.titles import strip_index_prefix
 
 #: 章节删除影响预览的默认结构
 _EMPTY_IMPACT = {"chars": 0, "lines": 0, "audio": 0, "image": 0, "video": 0}
+
+#: 可编辑文本字段与长度上限（与 setting-bible.schema.json 保持一致）
+_TEXT_LIMITS = {
+    "act": {"title": 200, "summary": 2000},
+    "chapter": {"title": 200, "summary": 2000},
+    "beat": {"summary": 1000},
+}
+
+#: 字段的中文名，用于错误提示里指明是哪个字段
+_TEXT_LABELS = {
+    "act": {"title": "幕标题", "summary": "幕概要"},
+    "chapter": {"title": "章标题", "summary": "章概要"},
+    "beat": {"summary": "节拍文本"},
+}
 
 
 def _outline_text(chapter: dict) -> str:
@@ -283,6 +298,7 @@ def delete_outline_chapter(store: ProjectStore, chapter_id: str) -> dict:
     }
 
     outline = bible.setdefault("outline", {})
+    warnings: list[str] = []
     acts = []
     for act in outline.get("acts") or []:
         chapters = [item for item in act.get("chapters") or [] if item.get("id") != chapter_id]
@@ -419,6 +435,130 @@ def delete_beat(store: ProjectStore, chapter_id: str, beat_index: int) -> dict:
         "landed": landed,
         "warnings": warnings,
     }
+
+
+def _clean_text(scope: str, field: str, raw) -> str:
+    """清洗并校验一个可编辑文本字段。
+
+    参数:
+        scope: 编辑对象（act / chapter / beat）。
+        field: 字段名（title / summary）。
+        raw: 原始输入。
+
+    返回:
+        去掉首尾空白后的文本；标题会顺便剥掉模型序号前缀。
+
+    异常:
+        ValueError: 标题为空或文本超长，消息里带字段名与原因。
+    """
+    label = _TEXT_LABELS[scope][field]
+    value = str(raw or "").strip()
+    if field == "title":
+        value = strip_index_prefix(value)
+        if not value:
+            raise ValueError(f"{label}不能为空（不能只写序号）")
+    limit = _TEXT_LIMITS[scope][field]
+    if len(value) > limit:
+        raise ValueError(f"{label}过长：最多 {limit} 字，当前 {len(value)} 字")
+    return value
+
+
+def update_outline_text(
+    store: ProjectStore,
+    act: str | None = None,
+    chapter: str | None = None,
+    beat: int | str | None = None,
+    fields: dict | None = None,
+) -> dict:
+    """就地修改大纲文本（幕/章标题与概要、单个节拍文本）。
+
+    只改设定库大纲里的文本：不动章节序号、节拍顺序，不写章节文件，也不碰正文与标注。
+    保存沿用 `SettingsStore.save` 的 schema 校验 + 原子写，失败时不会留下半写状态。
+
+    参数:
+        store: 工程。
+        act: 幕 ID（编辑幕时传）。
+        chapter: 大纲章节 ID（编辑章或节拍时传）。
+        beat: 节拍序号（从 1 开始，编辑节拍时传）。
+        fields: 要更新的字段，例如 `{"title": "...", "summary": "..."}`。
+
+    返回:
+        `{scope, act_id?, chapter_id?, index?, beat?, title?, updated, settings_revision}`。
+
+    异常:
+        ValueError: 设定库不存在、对象找不到、字段不支持、标题为空或文本超长。
+    """
+    settings_store = SettingsStore(store.root)
+    if not settings_store.exists():
+        raise ValueError("设定库还没有大纲：先执行 outline generate")
+    bible = settings_store.load()
+
+    values = {str(key): value for key, value in (fields or {}).items()}
+    if not values:
+        raise ValueError("没有需要保存的字段")
+
+    act_id = str(act or "").strip()
+    chapter_id = str(chapter or "").strip()
+    try:
+        beat_index = None if beat in (None, "") else int(beat)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"节拍序号必须是整数：{beat}") from exc
+
+    if beat_index is not None:
+        scope = "beat"
+        if not chapter_id:
+            raise ValueError("编辑节拍需要同时提供 chapter（大纲章节 ID）")
+    elif chapter_id:
+        scope = "chapter"
+    elif act_id:
+        scope = "act"
+    else:
+        raise ValueError("缺少要编辑的对象：act / chapter / beat 至少给一个")
+
+    allowed = _TEXT_LIMITS[scope]
+    unknown = [key for key in values if key not in allowed]
+    if unknown:
+        raise ValueError(
+            f"不支持的字段：{'、'.join(unknown)}（{scope} 只支持 {'、'.join(allowed)}）"
+        )
+
+    if scope == "act":
+        entry = _find_act(bible, act_id)
+        if entry is None:
+            raise ValueError(f"大纲里没有这一幕：{act_id}")
+    else:
+        entry = settings_store.find_outline_chapter(bible, chapter_id)
+        if entry is None:
+            raise ValueError(f"大纲里没有这一章：{chapter_id}")
+
+    cleaned = {key: _clean_text(scope, key, value) for key, value in values.items()}
+    if scope == "beat":
+        beats = entry.get("beats") or []
+        if not 1 <= beat_index <= len(beats):
+            raise ValueError(f"节拍序号越界：{beat_index}（本章共 {len(beats)} 个节拍）")
+        beats[beat_index - 1]["summary"] = cleaned["summary"]
+    else:
+        entry.update(cleaned)
+
+    saved = settings_store.save(bible)
+    result = {
+        "scope": scope,
+        "updated": sorted(cleaned),
+        "settings_revision": saved.get("settings_revision"),
+    }
+    if scope == "act":
+        acts = (bible.get("outline") or {}).get("acts") or []
+        result["act_id"] = act_id
+        result["index"] = next((i + 1 for i, item in enumerate(acts) if item is entry), 0)
+        result["title"] = entry.get("title") or ""
+    else:
+        result["chapter_id"] = chapter_id
+        result["index"] = int(entry.get("index") or 0)
+        result["title"] = entry.get("title") or ""
+    if scope == "beat":
+        result["beat"] = beat_index
+        result["summary"] = cleaned["summary"]
+    return result
 
 
 def inspect_outline(store: ProjectStore) -> dict:

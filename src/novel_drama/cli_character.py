@@ -255,6 +255,19 @@ def cmd_character_update(args, config: AppConfig) -> int:
     if getattr(args, "negative_prompt", None) is not None:
         target["negative_prompt"] = args.negative_prompt.strip()
         changed.append("negative_prompt")
+    # 六项双语描述（音色 / 外貌 / 负向）：后续配音与出图直接取用，允许手改与清空
+    for field in (
+        "voice_description_zh",
+        "voice_description_en",
+        "appearance_desc_zh",
+        "appearance_desc_en",
+        "appearance_negative_zh",
+        "appearance_negative_en",
+    ):
+        value = getattr(args, field, None)
+        if value is not None:
+            target[field] = value.strip()
+            changed.append(field)
     if getattr(args, "voice_profile", None) is not None:
         raw = args.voice_profile.strip()
         if raw:

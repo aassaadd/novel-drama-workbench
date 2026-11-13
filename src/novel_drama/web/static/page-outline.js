@@ -13,6 +13,8 @@
   let worlds = [];        // 世界条目，绑定的候选项与名称展示
   let cast = [];          // 人物表（已排除旁白），POV 下拉候选项
   let actsCache = [];     // 当前大纲的幕列表，绑定面板据此查找章节
+  let outlineCache = null; // 最近一次读取的完整大纲，供就地编辑时重渲染
+  let editing = null;     // 正在就地编辑的目标：{scope, act?, chapter?, beat?}
   let landedIds = new Set(); // 已落地成章节文件的章节 ID（删除时用于二次确认）
   let lastContinueRequest = null; // 上次续写预览的入参，写入时复用，避免生成另一份
   let continueMask = null;    // 续写面板浮层
@@ -72,6 +74,46 @@
     </div>`;
   }
 
+  /* 幕 / 章的就地编辑器：标题输入 + 概要多行框 + 保存/取消。
+   * 参数：scope act|chapter；item 幕或章条目。
+   * 返回：HTML 字符串。
+   */
+  function textEditorHtml(scope, item) {
+    const titleLabel = scope === "act" ? "幕标题" : "章标题";
+    const summaryLabel = scope === "act" ? "幕概要" : "章概要";
+    return (
+      `<div class="ol-editor" data-editor="${scope}">` +
+      `<label>${titleLabel}<input data-field="title" value="${esc(item.title || "")}" placeholder="${titleLabel}不能为空"></label>` +
+      `<label>${summaryLabel}<textarea data-field="summary" rows="3" placeholder="可留空">${esc(item.summary || "")}</textarea></label>` +
+      `<div class="ol-editor-foot">` +
+      `<button class="btn small primary" type="button" data-save-edit>保存</button>` +
+      `<button class="btn small" type="button" data-cancel-edit>取消</button>` +
+      `</div></div>`
+    );
+  }
+
+  /* 节拍就地编辑器：单行文本 + 保存/取消。
+   * 参数：beat 节拍条目。
+   * 返回：HTML 字符串。
+   */
+  function beatEditorHtml(beat) {
+    return (
+      `<span class="ol-inline-edit"><input data-field="summary" value="${esc(beat.summary || "")}" placeholder="节拍文本"></span>` +
+      `<span class="ol-edit-actions">` +
+      `<button class="btn small primary" type="button" data-save-edit>保存</button>` +
+      `<button class="btn small" type="button" data-cancel-edit>取消</button>` +
+      `</span>`
+    );
+  }
+
+  /* 用最近一次读取的大纲重渲染（就地编辑切换时不重新请求后端）。
+   * 参数：无。
+   * 返回：无。
+   */
+  function renderOutline() {
+    if (outlineCache) render(outlineCache);
+  }
+
   /* 渲染幕 / 章 / 节拍：幕与章都是可折叠的层级卡片，节拍是幕内的一行一条。
    * 参数：data `outline generate` / `/api/ui/outline` 的原始负载。
    * 返回：无（直接写 #olBody）。
@@ -88,36 +130,52 @@
 
     acts.forEach((act, actIndex) => {
       const actChapters = act.chapters || [];
+      const editingAct = editing && editing.scope === "act" && editing.act === act.id;
       parts.push(
         `<details class="act" ${actIndex === 0 ? "open" : ""}>` +
-          `<summary><span class="act-title">第 ${esc(act.index ?? actIndex + 1)} 幕 · ${esc(act.title || "未命名幕")}</span>` +
+          `<summary><span class="act-title" data-dbl-act="${esc(act.id || "")}" title="双击编辑">第 ${esc(act.index ?? actIndex + 1)} 幕 · ${esc(stripTitleIndex(act.title) || "未命名幕")}</span>` +
           `<span class="muted">${actChapters.length} 章</span>` +
+          `<button class="btn small" type="button" data-edit-act="${esc(act.id || "")}" style="margin-left:auto">编辑</button>` +
           `<button class="btn small act-del" type="button" data-del-act="${esc(act.id || "")}" ` +
-          `style="margin-left:auto;color:#b3261e;border-color:#d9a5a0">删除整幕</button>` +
+          `style="color:#b3261e;border-color:#d9a5a0">删除整幕</button>` +
           `</summary>` +
-          (act.summary ? `<p class="muted">${esc(act.summary)}</p>` : "")
+          (editingAct ? textEditorHtml("act", act) : act.summary ? `<p class="muted">${esc(act.summary)}</p>` : "")
       );
 
       actChapters.forEach((chapter, chapterIndex) => {
         const beatList = chapter.beats || [];
         const landed = landedIds.has(chapter.id);
+        const editingChapter = editing && editing.scope === "chapter" && editing.chapter === chapter.id;
         parts.push(
           `<details class="chapter-row" ${actIndex === 0 && chapterIndex === 0 ? "open" : ""}>` +
-            `<summary><span>${esc(chapter.index)}. ${esc(chapter.title || "")}</span>` +
+            `<summary><span data-dbl-chapter="${esc(chapter.id || "")}" title="双击编辑">${esc(chapter.index)}. ${esc(stripTitleIndex(chapter.title))}</span>` +
             `${landed ? "<span class='tag'>已落地</span>" : "<span class='muted'>未落地</span>"}` +
             `<span class="muted">${beatList.length} 节拍</span>` +
+            `<button class="btn small" type="button" data-edit-chapter="${esc(chapter.id || "")}">编辑</button>` +
             `<button class="btn small" type="button" data-del-chapter="${esc(chapter.id || "")}">删除整章</button>` +
             `</summary>`
         );
-        if (chapter.outline) parts.push(`<p class="muted">${esc(chapter.outline)}</p>`);
+        if (editingChapter) {
+          parts.push(textEditorHtml("chapter", chapter));
+        } else if (chapter.outline) {
+          parts.push(`<p class="muted">${esc(chapter.outline)}</p>`);
+        }
         parts.push(bindBlockHtml(chapter));
         const list = beatList
-          .map(
-            (beat, beatIndex) =>
-              `<li><span class="beat-no">${beatIndex + 1}</span><span>${beat.turning_point ? "<span class='tag'>转折</span>" : ""}` +
-              `${esc(beat.summary || "")}</span><span class="muted">${esc(beat.target_words ?? "?")} 字</span>` +
-              `<button class="btn small" type="button" data-del-beat="${beatIndex + 1}" data-chapter="${esc(chapter.id || "")}">删除</button></li>`
-          )
+          .map((beat, beatIndex) => {
+            const no = beatIndex + 1;
+            const editingBeat = editing && editing.scope === "beat" && editing.chapter === chapter.id && editing.beat === no;
+            if (editingBeat) {
+              return `<li><span class="beat-no">${no}</span>${beatEditorHtml(beat)}</li>`;
+            }
+            return (
+              `<li><span class="beat-no">${no}</span><span data-dbl-beat="${no}" data-chapter="${esc(chapter.id || "")}" title="双击编辑">` +
+              `${beat.turning_point ? "<span class='tag'>转折</span>" : ""}${esc(beat.summary || "")}</span>` +
+              `<span class="muted">${esc(beat.target_words ?? "?")} 字</span>` +
+              `<button class="btn small" type="button" data-edit-beat="${no}" data-chapter="${esc(chapter.id || "")}">编辑</button>` +
+              `<button class="btn small" type="button" data-del-beat="${no}" data-chapter="${esc(chapter.id || "")}">删除</button></li>`
+            );
+          })
           .join("");
         parts.push(`<ul class="beats">${list || "<li class='muted'>没有节拍</li>"}</ul></details>`);
       });
@@ -139,6 +197,7 @@
     if (loadedPath !== NW.state.path) {
       loadedPath = NW.state.path;
       lastContinueRequest = null;
+      editing = null;
       closeContinuePanel();
       closeBindPanel();
     }
@@ -152,6 +211,7 @@
       worlds = worldData.worlds || [];
       cast = (charData.characters || []).filter((item) => item.role !== "narrator" && item.id !== NARRATOR_ID);
       actsCache = outline.acts || [];
+      outlineCache = outline;
       const rows = Array.isArray(chapterList) ? chapterList : chapterList.chapters || [];
       landedIds = new Set(rows.map((item) => item.id));
       render(outline);
@@ -238,7 +298,7 @@
 
     const title = document.createElement("h3");
     title.className = "modal-title";
-    title.textContent = `编辑绑定 · ${chapter.index}. ${chapter.title || ""}`;
+    title.textContent = `编辑绑定 · ${chapter.index}. ${stripTitleIndex(chapter.title || "")}`;
     dialog.appendChild(title);
 
     const hint = document.createElement("p");
@@ -538,14 +598,14 @@
     let message;
     if (impact.landed) {
       message =
-        `删除《第 ${impact.index} 章 ${impact.title}》后不可恢复：\n` +
+        `删除《第 ${impact.index} 章 ${stripTitleIndex(impact.title)}》后不可恢复：\n` +
         `· 已落地内容：正文 ${impact.chars} 字、台词 ${impact.lines} 条、音频 ${impact.audio} 条、图片 ${impact.image} 条、视频 ${impact.video} 条\n` +
         "· 大纲条目一并删除，后续章节序号自动前移\n" +
         "· assets 下的素材文件保留，不自动删除\n" +
         "确定删除？";
     } else {
       message =
-        `删除生成区里的《第 ${impact.index} 章 ${impact.title}》？\n` +
+        `删除生成区里的《第 ${impact.index} 章 ${stripTitleIndex(impact.title)}》？\n` +
         "只删大纲条目，后续章节序号自动前移；已落地章节不受影响。";
     }
     if (!window.confirm(message)) return;
@@ -588,12 +648,12 @@
     }
     const rows = impact.chapters.map((item) =>
       item.landed
-        ? `· 第 ${item.index} 章 ${item.title}（已落地）：正文 ${item.chars} 字、台词 ${item.lines} 条、音频 ${item.audio} 条、图片 ${item.image} 条、视频 ${item.video} 条`
-        : `· 第 ${item.index} 章 ${item.title}（未落地）`
+        ? `· 第 ${item.index} 章 ${stripTitleIndex(item.title)}（已落地）：正文 ${item.chars} 字、台词 ${item.lines} 条、音频 ${item.audio} 条、图片 ${item.image} 条、视频 ${item.video} 条`
+        : `· 第 ${item.index} 章 ${stripTitleIndex(item.title)}（未落地）`
     );
     const totals = impact.totals;
     const message =
-      `删除《第 ${impact.index} 幕 ${impact.title}》及其 ${impact.chapters.length} 章后不可恢复：\n` +
+      `删除《第 ${impact.index} 幕 ${stripTitleIndex(impact.title)}》及其 ${impact.chapters.length} 章后不可恢复：\n` +
       rows.join("\n") +
       `\n合计：正文 ${totals.chars} 字、台词 ${totals.lines} 条、音频 ${totals.audio} 条、图片 ${totals.image} 条、视频 ${totals.video} 条\n` +
       "· 后续章节序号与幕序号自动前移\n" +
@@ -606,7 +666,7 @@
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ path: NW.state.path, act: actId }),
       });
-      let note = `已删除「${impact.title}」及其 ${impact.chapters.length} 章（素材文件保留）`;
+      let note = `已删除「${stripTitleIndex(impact.title)}」及其 ${impact.chapters.length} 章（素材文件保留）`;
       if (result.remaining_chapters === 0) note += "；大纲已清空，可重新生成或续写";
       if ((result.warnings || []).length) note += `；${result.warnings.join("；")}`;
       NW.toast(note, true);
@@ -619,11 +679,139 @@
     }
   }
 
+  /* 进入就地编辑：只切换页面状态，不请求后端。
+   * 参数：state `{scope, act?, chapter?, beat?}`。
+   * 返回：无。
+   */
+  function startEdit(state) {
+    editing = state;
+    renderOutline();
+  }
+
+  /* 收集当前编辑器里的文本并保存；失败时把后端给出的字段与原因提示出来。
+   * 参数：button 触发保存的按钮。
+   * 返回：Promise，无。
+   */
+  async function saveInline(button) {
+    const state = editing;
+    if (!state || !NW.state.path) return;
+    const box = button.closest("[data-editor]") || button.closest("li");
+    if (!box) return;
+    const valueOf = (field) => {
+      const node = box.querySelector(`[data-field="${field}"]`);
+      return node ? node.value : "";
+    };
+    const payload = { path: NW.state.path };
+    if (state.scope === "act") {
+      payload.act = state.act;
+      payload.title = valueOf("title");
+      payload.summary = valueOf("summary");
+    } else if (state.scope === "chapter") {
+      payload.chapter = state.chapter;
+      payload.title = valueOf("title");
+      payload.summary = valueOf("summary");
+    } else {
+      payload.chapter = state.chapter;
+      payload.beat = state.beat;
+      payload.summary = valueOf("summary");
+    }
+    if (state.scope !== "beat" && !String(payload.title || "").trim()) {
+      NW.toast("标题不能为空，请填写后再保存");
+      return;
+    }
+    button.disabled = true;
+    try {
+      await NW.api("/api/ui/outline/text", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      editing = null;
+      NW.toast("大纲文本已更新", true);
+      await load();
+    } catch (error) {
+      NW.toast(`保存失败：${error.message}`);
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  /* 双击标题或节拍文本进入就地编辑。
+   * 参数：event 双击事件。
+   * 返回：无。
+   */
+  function onBodyDblClick(event) {
+    const actTitle = event.target.closest("[data-dbl-act]");
+    if (actTitle) {
+      event.preventDefault();
+      event.stopPropagation();
+      startEdit({ scope: "act", act: actTitle.dataset.dblAct || "" });
+      return;
+    }
+    const chapterTitle = event.target.closest("[data-dbl-chapter]");
+    if (chapterTitle) {
+      event.preventDefault();
+      event.stopPropagation();
+      startEdit({ scope: "chapter", chapter: chapterTitle.dataset.dblChapter || "" });
+      return;
+    }
+    const beatText = event.target.closest("[data-dbl-beat]");
+    if (beatText) {
+      event.preventDefault();
+      event.stopPropagation();
+      startEdit({
+        scope: "beat",
+        chapter: beatText.dataset.chapter || "",
+        beat: Number(beatText.dataset.dblBeat),
+      });
+    }
+  }
+
   /* 大纲列表点击分发：删除节拍 / 删除整章 / 删除整幕 / 打开绑定面板。
    * 参数：event 点击事件。
    * 返回：无。
    */
   function onBodyClick(event) {
+    const save = event.target.closest("[data-save-edit]");
+    if (save) {
+      event.preventDefault();
+      event.stopPropagation();
+      saveInline(save);
+      return;
+    }
+    const cancel = event.target.closest("[data-cancel-edit]");
+    if (cancel) {
+      event.preventDefault();
+      event.stopPropagation();
+      editing = null;
+      renderOutline();
+      return;
+    }
+    const editAct = event.target.closest("[data-edit-act]");
+    if (editAct) {
+      event.preventDefault();
+      event.stopPropagation();
+      startEdit({ scope: "act", act: editAct.dataset.editAct || "" });
+      return;
+    }
+    const editChapter = event.target.closest("[data-edit-chapter]");
+    if (editChapter) {
+      event.preventDefault();
+      event.stopPropagation();
+      startEdit({ scope: "chapter", chapter: editChapter.dataset.editChapter || "" });
+      return;
+    }
+    const editBeat = event.target.closest("[data-edit-beat]");
+    if (editBeat) {
+      event.preventDefault();
+      event.stopPropagation();
+      startEdit({
+        scope: "beat",
+        chapter: editBeat.dataset.chapter || "",
+        beat: Number(editBeat.dataset.editBeat),
+      });
+      return;
+    }
     const delAct = event.target.closest("[data-del-act]");
     if (delAct) {
       event.preventDefault();
@@ -836,7 +1024,7 @@
     const rows = chapters
       .map(
         (item) =>
-          `<div style="font-size:13px;line-height:1.8">第 ${item.index} 章《${item.title || "未命名"}》` +
+          `<div style="font-size:13px;line-height:1.8">第 ${item.index} 章《${stripTitleIndex(item.title) || "未命名"}》` +
           (item.summary ? `：${item.summary}` : "") +
           "</div>"
       )
@@ -912,6 +1100,7 @@
     el("olApply").addEventListener("click", apply);
     const body = el("olBody");
     if (body) body.addEventListener("click", onBodyClick);
+    if (body) body.addEventListener("dblclick", onBodyDblClick);
     NW.onProject(() => load());
   }
 

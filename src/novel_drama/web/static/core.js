@@ -57,6 +57,28 @@ function esc(text) {
   return String(text ?? "").replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
 }
 
+/* 剥离模型标题里自带的幕/章序号前缀（序号统一由系统渲染，避免「第 2 幕 · 第 3 幕：…」）。
+ * 参数：text 标题文本。
+ * 返回：去掉开头序号后的标题；只剥开头，正文中间的「第 N 章」不动。
+ */
+function stripTitleIndex(text) {
+  let value = String(text ?? "").trim();
+  for (let round = 0; round < 2; round += 1) {
+    let next = value.replace(
+      /^(?:[【\[（(]\s*)?第\s*[0-9０-９零〇一二三四五六七八九十百两]+\s*[幕章](?:[】\]）)]\s*|[：:·・、,，.．\-—~～]\s*|\s+|$)/,
+      ""
+    );
+    if (next === value) {
+      next = value.replace(/^[0-9０-９]{1,3}\s*(?:[.．、:：)）\]】]\s*|\s+)/, "");
+    }
+    next = next.trim();
+    if (next === value) break;
+    value = next;
+    if (!value) break;
+  }
+  return value;
+}
+
 /* 字节数转成人读体积。 */
 function humanSize(bytes) {
   const value = Number(bytes || 0);
@@ -268,10 +290,10 @@ function formatChars(n) {
 }
 
 /* 新建一轮生成进度状态（层级批次与已接收字数）。
- * 返回：{batch, total, chars, name, unit, actIndex, actTotal}。
+ * 返回：{batch, total, chars, name, unit, actIndex, actTotal, subIndex, subTotal}。
  */
 function progressInit() {
-  return { batch: 0, total: 0, chars: 0, name: "", unit: "", actIndex: 0, actTotal: 0 };
+  return { batch: 0, total: 0, chars: 0, name: "", unit: "", actIndex: 0, actTotal: 0, subIndex: 0, subTotal: 0 };
 }
 
 /* 应用一条进度事件并生成文案；不含「已用时」，由蒙版统一追加。
@@ -297,6 +319,8 @@ function progressApply(state, event) {
     }
     if (data.act_index) current.actIndex = Number(data.act_index) || current.actIndex;
     if (data.act_total) current.actTotal = Number(data.act_total) || current.actTotal;
+    if (data.sub_index) current.subIndex = Number(data.sub_index) || current.subIndex;
+    if (data.sub_total) current.subTotal = Number(data.sub_total) || current.subTotal;
   }
   const parts = [];
   if (current.unit === "chapter" && current.batch && current.total) {
@@ -308,9 +332,14 @@ function progressApply(state, event) {
     );
   } else if (current.unit === "act" && current.batch && current.total) {
     parts.push(`第 ${current.batch}/${current.total} 幕`);
+  } else if (current.unit === "candidate" && current.batch && current.total) {
+    parts.push(`第 ${current.batch}/${current.total} 个候选`);
+  } else if (current.unit === "character" && current.batch && current.total) {
+    parts.push(`第 ${current.batch}/${current.total} 个角色${current.name ? `：${current.name}` : ""}`);
   } else if (current.batch && current.total) {
     parts.push(current.name ? `第 ${current.batch}/${current.total} 个：${current.name}` : `第 ${current.batch}/${current.total} 批`);
   }
+  if (current.subIndex && current.subTotal) parts.push(`第 ${current.subIndex}/${current.subTotal} 个候选`);
   if (current.chars) parts.push(`已接收 ${formatChars(current.chars)} 字`);
   return parts.join(" · ");
 }

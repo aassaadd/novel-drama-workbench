@@ -15,6 +15,7 @@ from ..writing.outline_edit import (
     delete_beat,
     delete_outline_act,
     delete_outline_chapter,
+    update_outline_text,
 )
 
 
@@ -47,6 +48,34 @@ def register_outline_edit_routes(app) -> None:
     返回:
         无。
     """
+
+    @app.post("/api/ui/outline/text")
+    def ui_outline_text(body: dict) -> dict:
+        """就地修改大纲文本（幕/章标题与概要、单个节拍文本）。
+
+        参数:
+            body: `{path, act?, chapter?, beat?, title?, summary?}`；
+                beat 为节拍序号（从 1 开始），带 beat 时按节拍处理。
+
+        返回:
+            `{scope, act_id?, chapter_id?, index?, beat?, title?, updated, settings_revision}`。
+
+        异常:
+            HTTPException 400: 缺少 path 或没有要保存的字段。
+            HTTPException 409: 大纲不存在、对象找不到、标题为空或文本超长。
+        """
+        store = _store(body.get("path"))
+        fields = {key: body[key] for key in ("title", "summary") if key in body}
+        try:
+            return update_outline_text(
+                store,
+                act=body.get("act"),
+                chapter=body.get("chapter"),
+                beat=body.get("beat"),
+                fields=fields,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @app.post("/api/ui/outline/beat/delete")
     def ui_outline_beat_delete(body: dict) -> dict:

@@ -11,7 +11,7 @@ import hashlib
 import json
 import re
 
-from .cli_common import EXIT_OK, EXIT_PRECONDITION, _emit, _resolve_store
+from .cli_common import EXIT_OK, EXIT_PRECONDITION, EXIT_REJECTED, _emit, _resolve_store
 from .config import AppConfig
 from .models.ids import now_iso
 from .store import check_cast, profile_source_hash
@@ -155,11 +155,39 @@ def _cmd_rename_slot(args, store) -> int:
     return EXIT_OK
 
 
+def _cmd_fill_descriptions(args, store, config: AppConfig) -> int:
+    """补全角色缺失的音色/外貌中英文描述（只补缺失，不覆盖已有内容）。
+
+    参数:
+        args: 已解析参数（names 来自可重复的 --name）。
+        store: 工程。
+        config: 本机配置。
+
+    返回:
+        进程退出码：全部成功为 0，存在失败为 1，便于重试时判断。
+    """
+    from .writing.character_plan import fill_character_descriptions
+
+    result = fill_character_descriptions(store, config, names=getattr(args, "name", None))
+    if getattr(args, "json", False):
+        payload = {key: result[key] for key in ("total", "updated", "skipped", "failures", "summary")}
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        for name in result["updated"]:
+            print(f"[补全] {name}")
+        for item in result["failures"]:
+            print(f"[失败] {item['name']}：{item['message']}")
+        print(result["summary"])
+        if result["failures"]:
+            print("可重跑 `ndw cast fill-descriptions` 只补失败的条目（已齐全的角色会自动跳过）")
+    return EXIT_REJECTED if result["failures"] else EXIT_OK
+
+
 def cmd_cast(args, config: AppConfig) -> int:
     """`ndw cast` 总入口。
 
     参数:
-        args: 已解析参数（action=check|backfill|rename-slot）。
+        args: 已解析参数（action=check|backfill|rename-slot|fill-descriptions）。
         config: 本机配置。
 
     返回:
@@ -172,4 +200,6 @@ def cmd_cast(args, config: AppConfig) -> int:
         return _cmd_backfill(args, store, config)
     if args.action == "rename-slot":
         return _cmd_rename_slot(args, store)
+    if args.action == "fill-descriptions":
+        return _cmd_fill_descriptions(args, store, config)
     raise SystemExit(f"未知操作: {args.action}")

@@ -419,7 +419,7 @@
       NW.state.path = result.root || targetDir;
       localStorage.setItem("ndw.path", NW.state.path);
       el("projectPath").value = NW.state.path;
-      NW.toast("工程已创建，下一步：到大纲页生成大纲", true);
+      NW.toast("工程已创建，下一步：到世界页生成世界设定", true);
       // 新工程没有章节，openProject 只广播 project 事件；再显式 load 一次，
       // 保证设定库表单一定按新工程重渲染（否则可能还是空表，点保存就报错）
       await NW.openProject();

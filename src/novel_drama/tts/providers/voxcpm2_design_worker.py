@@ -8,8 +8,13 @@
     {"stage": "loading"}
     {"stage": "generating", "index": 1, "total": 4}
     {"stage": "candidate", "index": 1, "file": "cand-01.wav", "seed": 101, "duration_ms": 8123}
-    {"stage": "done", "files": [...]}
+    {"stage": "candidate_error", "index": 2, "message": "第 2 条生成失败：..."}
+    {"stage": "done", "files": [...], "errors": [...]}
     {"stage": "error", "message": "..."}
+
+单条失败只上报 `candidate_error` 并继续下一条，不再整批退出；
+只有模型加载失败才上报 `error` 并以 2 退出。`--indices` 用于单条重试或中断续跑，
+只生成指定序号，种子与整批一致（seed_base + index）。
 """
 
 from __future__ import annotations
@@ -57,6 +62,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--timesteps", type=int, default=10)
     parser.add_argument("--device", default="auto")
     parser.add_argument("--seed-base", type=int, default=1000)
+    # 单条重试/续跑：只生成指定序号（逗号分隔，1 起）；为空时按 count 全量生成
+    parser.add_argument("--indices", default="")
     return parser.parse_args()
 
 
@@ -96,7 +103,13 @@ def main() -> int:
 
     sample_rate = int(getattr(model.tts_model, "sample_rate", 48000) or 48000)
     files: list[dict] = []
-    for index in range(1, args.count + 1):
+    errors: list[dict] = []
+    # --indices 用于单条重试与中断续跑：只跑指定序号，种子与整批保持一致
+    if args.indices.strip():
+        indices = [int(item) for item in args.indices.split(",") if item.strip()]
+    else:
+        indices = list(range(1, args.count + 1))
+    for index in indices:
         seed = args.seed_base + index
         _emit({"stage": "generating", "index": index, "total": args.count})
         torch.manual_seed(seed)
@@ -108,9 +121,11 @@ def main() -> int:
                 inference_timesteps=args.timesteps,
                 normalize=True,
             )
-        except Exception as exc:  # noqa: BLE001 - 单条失败不打断整批
-            _emit({"stage": "error", "message": f"第 {index} 条生成失败：{exc}"})
-            return 2
+        except Exception as exc:  # noqa: BLE001 - 单条失败只记录并继续，不影响其它候选
+            message = f"第 {index} 条生成失败：{exc}"
+            errors.append({"index": index, "message": message})
+            _emit({"stage": "candidate_error", "index": index, "message": message})
+            continue
 
         audio = np.asarray(wav, dtype=np.float32).reshape(-1)
         if sample_rate != 24000:
@@ -120,14 +135,21 @@ def main() -> int:
         name = f"cand-{index:02d}.wav"
         final = out_dir / name
         _current_tmp = out_dir / f".{name}.tmp.wav"
-        sf.write(str(_current_tmp), audio, 24000, subtype="PCM_16")
-        os.replace(_current_tmp, final)
+        try:
+            sf.write(str(_current_tmp), audio, 24000, subtype="PCM_16")
+            os.replace(_current_tmp, final)
+        except Exception as exc:  # noqa: BLE001 - 落盘失败同样只记单条失败
+            _cleanup()
+            message = f"第 {index} 条写入失败：{exc}"
+            errors.append({"index": index, "message": message})
+            _emit({"stage": "candidate_error", "index": index, "message": message})
+            continue
         _current_tmp = None
         duration_ms = round(len(audio) / 24000 * 1000)
         files.append({"index": index, "file": name, "seed": seed, "duration_ms": duration_ms})
         _emit({"stage": "candidate", "index": index, "file": name, "seed": seed, "duration_ms": duration_ms})
 
-    _emit({"stage": "done", "files": files, "sample_rate": 24000})
+    _emit({"stage": "done", "files": files, "errors": errors, "sample_rate": 24000})
     return 0
 
 

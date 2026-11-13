@@ -443,6 +443,63 @@ def register_stream_routes(app, config_path: str | None = None) -> None:
 
         return _progress_response(task)
 
+    @app.post("/api/ui/voices/design/batch/{job_id}/stream")
+    def ui_voices_batch_stream(job_id: str, body: dict) -> StreamingResponse:
+        """一键批量生成音色（流式）：逐角色、逐候选透出进度。
+
+        参数:
+            job_id: 批量任务 ID。
+            body: `{path}`。
+
+        返回:
+            SSE：start → item/batch/chars* → done(result)；断线只退订不取消任务。
+        """
+        from ..tts import voice_batch
+
+        store = _store(body.get("path"))
+        if not voice_batch.read_job(store, job_id):
+            raise HTTPException(status_code=404, detail=f"批量任务不存在: {job_id}")
+
+        def events_iter():
+            """把批量任务事件转成 SSE。"""
+            yield _sse("start", {"ok": True})
+            try:
+                for event, data in voice_batch.job_events(store, job_id):
+                    yield _sse(event, data)
+            except Exception as exc:  # noqa: BLE001 - 统一转成 error 事件
+                yield _sse("error", {"message": _error_message(exc)})
+
+        return StreamingResponse(events_iter(), media_type="text/event-stream", headers=_SSE_HEADERS)
+
+    @app.post("/api/ui/voices/design/batches/{batch_id}/stream")
+    def ui_voices_design_stream(batch_id: str, body: dict) -> StreamingResponse:
+        """音色候选抽卡（流式）：逐条透出已完成候选与生成进度。
+
+        参数:
+            batch_id: 批次 ID。
+            body: `{path}`。
+
+        返回:
+            SSE：start → stage/batch/chars/candidate/candidate_error* → done(result)；
+            断线只退订，不会取消服务端任务（中断请调用 cancel 接口）。
+        """
+        from ..tts import voice_design
+
+        store = _store(body.get("path"))
+        if not voice_design.read_batch(store, batch_id):
+            raise HTTPException(status_code=404, detail=f"批次不存在: {batch_id}")
+
+        def events_iter():
+            """把批次事件转成 SSE；页面断开时停止迭代并退订。"""
+            yield _sse("start", {"ok": True})
+            try:
+                for event, data in voice_design.batch_events(store, batch_id):
+                    yield _sse(event, data)
+            except Exception as exc:  # noqa: BLE001 - 统一转成 error 事件
+                yield _sse("error", {"message": _error_message(exc)})
+
+        return StreamingResponse(events_iter(), media_type="text/event-stream", headers=_SSE_HEADERS)
+
     @app.post("/api/ui/script/suggest/stream")
     def ui_script_suggest_stream(body: dict) -> StreamingResponse:
         """导演标注（流式）：逐批生成并透出批次/接收字数，失败批次可续跑。

@@ -230,6 +230,26 @@
     }
   }
 
+  /* 在全屏进度蒙版里挂一个「停止」按钮：蒙版会盖住工具条上的停止标注，
+   * 不补这个入口生成中途就没法停。生成结束（finally）时移除。
+   * 参数：无。
+   * 返回：创建的按钮元素；蒙版不存在时返回 null。
+   */
+  function attachMaskStop() {
+    const card = document.querySelector("#busyMask .busy-card");
+    if (!card) return null;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "btn small";
+    button.textContent = "停止生成";
+    button.style.marginTop = "10px";
+    button.addEventListener("click", () => {
+      if (streamAbort) streamAbort.abort();
+    });
+    card.appendChild(button);
+    return button;
+  }
+
   /* 生成标注（流式）；apply=true 时生成完整后一并同步到章节。
    * 单批失败会保留已成功批次，并可只重试失败批次。
    * 参数：apply 是否同步进章节。
@@ -260,6 +280,7 @@
     if (el("scStop")) el("scStop").hidden = false;
     const progress = NW.progressInit();
     NW.busyShow(apply ? "正在生成并应用标注…" : "正在生成导演标注…", "正在规划批次…");
+    const maskStop = attachMaskStop();
     el("scInfo").textContent = "生成中，可在弹层里查看批次进度…";
     el("scMarkup").innerHTML = "<p class='muted'>生成中，请稍候…</p>";
 
@@ -276,8 +297,10 @@
       );
     };
 
+    let result = null;
+    let interrupted = false;
     try {
-      let result = await run({ path: NW.state.path, chapter: NW.state.chapter, apply });
+      result = await run({ path: NW.state.path, chapter: NW.state.chapter, apply });
       const failures = result.failures || [];
       if (failures.length) {
         const detail = failures
@@ -313,7 +336,9 @@
       await load();
       if (apply && NW.openProject) await NW.openProject();
     } catch (error) {
-      if (error && error.name === "AbortError") {
+      const stopped = error && (error.name === "AbortError" || String(error.message || "").includes("已停止"));
+      if (stopped) {
+        interrupted = true;
         NW.toast("已停止标注生成");
       } else {
         NW.toast(`生成失败（退出码 ${error.code}）：${error.message}`);
@@ -322,13 +347,14 @@
     } finally {
       busy = false;
       streamAbort = null;
+      if (maskStop && maskStop.parentElement) maskStop.remove();
       buttons.forEach((btn, index) => {
         btn.disabled = false;
         btn.textContent = labels[index];
       });
       if (el("scStop")) el("scStop").hidden = true;
       NW.busyHide();
-      el("scInfo").textContent = "标注预览已更新";
+      el("scInfo").textContent = interrupted ? "已停止生成（已完成批次已保留）" : "标注预览已更新";
     }
   }
 

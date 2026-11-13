@@ -840,6 +840,53 @@ class OfflineWritingAdapter:
 
         raise ValueError(f"离线写作不支持的设定步骤: {step!r}（可选 world/worlds/premise/style）")
 
+    def _desc_fields(self, gender: str, age_range: str, role: str) -> dict:
+        """生成人物描述性字段（音色/外貌的中英文与负向提示词）。
+
+        离线规则只保证字段齐全、可被下游直接取用，内容确定性拼装，不追求文学性。
+
+        参数:
+            gender: 性别（male/female/other）。
+            age_range: 年龄区间。
+            role: 角色定位。
+
+        返回:
+            含 voice_description_zh/en、appearance_desc_zh/en、appearance_negative_zh/en 的 dict。
+        """
+        gender_zh = {"male": "男声", "female": "女声"}.get(gender, "中性声线")
+        gender_word_zh = {"male": "男", "female": "女"}.get(gender, "中性")
+        gender_en = {"male": "male", "female": "female"}.get(gender, "androgynous")
+        role_zh = {"protagonist": "主角", "antagonist": "反派", "supporting": "配角", "minor": "龙套"}.get(role, "配角")
+        role_en = {"protagonist": "lead character", "antagonist": "antagonist", "supporting": "supporting character", "minor": "minor character"}.get(role, "supporting character")
+        return {
+            "voice_description_zh": (
+                f"{age_range}，{gender_zh}，中低音区偏清亮，发声位置靠前；"
+                f"语速中等偏慢，叙述时留白明显，情绪激动时会加快半拍；"
+                f"语气克制、少拖腔，重音落在实词上；年龄感与{age_range}相符，"
+                f"带轻微北方口音，避免播音腔，贴合{role_zh}的说话习惯。"
+            ),
+            "voice_description_en": (
+                f"{gender_en} voice, {age_range} years old, warm mid-low timbre with a slightly forward placement; "
+                "medium-slow pacing with deliberate pauses, quickening half a beat under stress; "
+                "restrained tone, minimal drawl, stress on content words; "
+                "subtle northern accent, natural and conversational rather than broadcast-style, "
+                f"fitting a {role_en}."
+            ),
+            "appearance_desc_zh": (
+                f"{age_range}，{gender_word_zh}性，脸型偏瘦长，颧骨清楚；"
+                "眉眼间距近，眼神偏冷静；鼻梁直，唇形偏薄；"
+                "中长发，发尾略乱，常穿深色立领外套配旧皮质挎包，整体气质克制。"
+            ),
+            "appearance_desc_en": (
+                f"{gender_en} character in their {age_range}, slim long face with defined cheekbones, "
+                "close-set eyes with a calm gaze, straight nose, thin lips; "
+                "medium-length slightly messy hair, dark high-collar coat, worn leather satchel, "
+                "restrained and grounded presence, cinematic soft lighting."
+            ),
+            "appearance_negative_zh": "眼镜, 胡须, 浓妆, 伤疤, 水印, 文字, 多余手指",
+            "appearance_negative_en": "glasses, beard, mustache, heavy makeup, scar, watermark, text, extra fingers",
+        }
+
     def _character(self, meta: dict) -> str:
         """生成 1 名主角 + 2–6 名配角的人物 JSON。
 
@@ -867,18 +914,20 @@ class OfflineWritingAdapter:
                 "弧光从「只信证据」走向「愿意为活人让步」。"
             )
             appearance = ((brief + "，") if brief else "") + f"{age_range}，五官清晰，服装质感明确，光线柔和"
+            gender = ("male", "female", "other")[rng.randint(0, 2)]
             return json.dumps(
                 {
                     "characters": [
                         {
                             "name": name,
                             "role": role,
-                            "gender": ("male", "female", "other")[rng.randint(0, 2)],
+                            "gender": gender,
                             "age_range": age_range,
                             "personality": personality,
                             "background": background,
                             "appearance_prompt": appearance,
                             "negative_prompt": "低质, 多余手指, 水印, 文字",
+                            **self._desc_fields(gender, age_range, role),
                             "state": {"relationship_notes": {}},
                         }
                     ]
@@ -937,6 +986,7 @@ class OfflineWritingAdapter:
                     "relationships": relationships,
                     "appearance_prompt": appearance,
                     "negative_prompt": "低质, 多余手指, 水印, 文字",
+                    **self._desc_fields(gender, age_range, role),
                 }
             )
         return json.dumps({"characters": characters}, ensure_ascii=False, indent=2)

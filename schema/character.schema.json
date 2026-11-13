@@ -37,6 +37,36 @@
         },
         "appearance_prompt": { "type": "string", "maxLength": 2000 },
         "negative_prompt": { "type": "string", "maxLength": 1000 },
+        "voice_description_zh": {
+          "type": "string",
+          "maxLength": 1000,
+          "description": "R27：中文音色描述（音色/语速/语气/年龄感/口音），供界面展示与人工校对"
+        },
+        "voice_description_en": {
+          "type": "string",
+          "maxLength": 1000,
+          "description": "R27：英文音色描述，可直接作为 TTS/voice design 的 prompt（纯英文）"
+        },
+        "appearance_desc_zh": {
+          "type": "string",
+          "maxLength": 1200,
+          "description": "R27：中文外貌描述（正面），供界面展示与人工校对"
+        },
+        "appearance_desc_en": {
+          "type": "string",
+          "maxLength": 1200,
+          "description": "R27：英文正面出图 prompt（纯英文，具体可见特征）"
+        },
+        "appearance_negative_zh": {
+          "type": "string",
+          "maxLength": 800,
+          "description": "R27：中文负向说明（出图应排除的元素，名词短语）"
+        },
+        "appearance_negative_en": {
+          "type": "string",
+          "maxLength": 800,
+          "description": "R27：英文 negative prompt（逗号分隔的排除项）"
+        },
         "portrait_asset": { "type": ["string", "null"] },
         "image_assets": {
           "type": "object",

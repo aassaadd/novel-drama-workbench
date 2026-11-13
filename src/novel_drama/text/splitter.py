@@ -40,8 +40,9 @@ _TRANSITION_WORDS = (
 # 同时要求必须有闭合引号才匹配，避免未闭合的引号把后半章吞成一句对白
 _QUOTE_PATTERN = re.compile(r"“([^”]+)”|「([^」]+)」|『([^』]+)』|【([^】]+)】|\"([^\"]+)\"")
 
-# 句末标点，用于切分过长旁白
-_SENTENCE_SPLIT = re.compile(r"(?<=[。！？])")
+# 句末标点与换行，用于切分过长旁白
+# 换行也作为硬边界：台词行里带 \n 会导致后续「按原文定位」失败，正文无法同步
+_SENTENCE_SPLIT = re.compile(r"(?<=[。！？])|\n+")
 
 
 def split_scenes(content: str, max_chars: int = 1200) -> list[dict]:

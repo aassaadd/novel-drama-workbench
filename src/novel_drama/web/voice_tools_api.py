@@ -655,7 +655,7 @@ def register_voice_tools_routes(app, config_path: str | None = None) -> None:
 
         返回:
             `{scope, chapter, total, skipped, lines_total, eta_ms, avg_ms_per_line,
-              chapters, per_chapter, blockers, ready, ready_reason}`。
+              chapters, per_chapter, blockers, unknown_total, unknown_rows, ready, ready_reason}`。
         """
         store = _store(path)
         if scope == "all":
@@ -674,9 +674,13 @@ def register_voice_tools_routes(app, config_path: str | None = None) -> None:
             *target_args,
             "--dry-run",
             "--skip-cast-check",
+            "--skip-unknown-speakers",
         )
         plan = result.payload if isinstance(result.payload, dict) else {}
         total = int(plan.get("rows") or 0)
+        unknown_rows = plan.get("unknown_rows") or []
+        unknown_total = int(plan.get("skipped_unknown") or len(unknown_rows))
+        unknown_ids = set(plan.get("unknown_line_ids") or [row.get("line_id") for row in unknown_rows])
         avg = _avg_ms_per_line(store)
         providers = _cli(config_path, "--json", "tts", "providers")
         rows: list[dict] = []
@@ -695,7 +699,7 @@ def register_voice_tools_routes(app, config_path: str | None = None) -> None:
         blockers = [
             f"{item.get('code')}: {item.get('message')}"
             for item in findings
-            if item.get("level") == "error"
+            if item.get("level") == "error" and item.get("line_id") not in unknown_ids
         ]
         return {
             "scope": scope,
@@ -708,6 +712,8 @@ def register_voice_tools_routes(app, config_path: str | None = None) -> None:
             "chapters": plan.get("chapters") or [],
             "per_chapter": plan.get("per_chapter") or [],
             "blockers": blockers,
+            "unknown_total": unknown_total,
+            "unknown_rows": unknown_rows,
             "ready": ready,
             "ready_reason": ready_reason,
         }
@@ -717,18 +723,19 @@ def register_voice_tools_routes(app, config_path: str | None = None) -> None:
         """启动「补齐缺失」（后台进程），只补未完成行，天然支持中断续跑。
 
         参数:
-            body: `{path, scope?, chapter?, batch_size?}`。
+            body: `{path, scope?, chapter?, batch_size?, skip_unknown?}`。
 
         返回:
-            `{started, pid, log, total}`。
+            `{started, pid, log, total, skipped_unknown}`。
 
         异常:
             HTTPException 409: 已有配音进程在运行。
-            HTTPException 412: provider 不可用或有阻断性音色编排错误。
+            HTTPException 412: provider 不可用、有阻断性音色编排错误，或有说话人未识别的行但未选择跳过。
         """
         store = _store(body.get("path"))
         scope = "all" if body.get("scope") == "all" else "chapter"
         chapter = body.get("chapter")
+        skip_unknown = bool(body.get("skip_unknown"))
         plan = ui_batch_all_plan(str(store.root), scope, chapter)
         if not plan["ready"]:
             raise HTTPException(status_code=412, detail={"code": 4, "message": plan["ready_reason"]})
@@ -738,6 +745,17 @@ def register_voice_tools_routes(app, config_path: str | None = None) -> None:
                 detail={
                     "code": 4,
                     "message": "音色/BGM 编排有阻断项，已取消补齐：\n- " + "\n- ".join(plan["blockers"][:8]),
+                },
+            )
+        if plan["unknown_total"] and not skip_unknown:
+            raise HTTPException(
+                status_code=412,
+                detail={
+                    "code": 4,
+                    "message": (
+                        f"有 {plan['unknown_total']} 行说话人未识别，默认不跳过："
+                        "请先到章节页修说话人，或选择「跳过这 N 行，先配其余行」"
+                    ),
                 },
             )
         if plan["total"] <= 0:
@@ -771,6 +789,9 @@ def register_voice_tools_routes(app, config_path: str | None = None) -> None:
             argv += ["--config", config_path]
         argv += ["tts", "batch"]
         argv += ["--all-chapters"] if scope == "all" else ["--chapter", str(chapter)]
+        if skip_unknown:
+            # 说话人未识别的行保持原样，只配能解析的行
+            argv += ["--skip-unknown-speakers"]
         batch_size = body.get("batch_size")
         if batch_size:
             argv += ["--batch-size", str(int(batch_size))]
@@ -796,7 +817,8 @@ def register_voice_tools_routes(app, config_path: str | None = None) -> None:
             path: 工程根目录。
 
         返回:
-            `{running, done, total, failed, finished, rows, chapter, elapsed_ms, eta_ms, log_tail, report_path}`。
+            `{running, done, total, failed, skipped, skipped_rows, finished, rows, chapter,
+              elapsed_ms, eta_ms, log_tail, report_path}`。
         """
         store = _store(path)
         folder = store.root / ".ndw"
@@ -828,6 +850,8 @@ def register_voice_tools_routes(app, config_path: str | None = None) -> None:
             "done": min(done, total) if total else done,
             "total": total,
             "failed": failed,
+            "skipped": int(progress.get("skipped") or 0),
+            "skipped_rows": progress.get("skipped_rows") or [],
             "finished": finished,
             "interrupted": interrupted,
             "rows": progress.get("failed_rows") or [],

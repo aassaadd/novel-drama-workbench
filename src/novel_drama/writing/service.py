@@ -22,6 +22,7 @@ from ..store.settings_store import SettingsStore
 from ..store.world_store import WorldStore
 from ..text.context import POV_LABELS, ContextAssembler
 from ..text.dialogue import normalize_dialogue
+from ..text.titles import strip_index_prefix
 from .worlds import build_art_prompt as _build_art_prompt
 from .worlds import clean_world_entry, worlds_digest
 
@@ -215,7 +216,10 @@ def generate_outline(
     for act_index, raw_act in enumerate(raw_acts):
         if not isinstance(raw_act, dict):
             raise AdapterError(ErrorCode.INVALID_INPUT, f"大纲第 {act_index + 1} 幕必须是对象，实际为：{str(raw_act)[:80]}")
-        act = SettingsStore.new_act(raw_act.get("title") or f"第{act_index + 1}幕", raw_act.get("summary") or "")
+        act = SettingsStore.new_act(
+            strip_index_prefix(str(raw_act.get("title") or "")) or f"第{act_index + 1}幕",
+            raw_act.get("summary") or "",
+        )
         for raw_chapter in raw_act.get("chapters") or []:
             chapter_count += 1
             if not isinstance(raw_chapter, dict):
@@ -229,7 +233,7 @@ def generate_outline(
             outline_chapter = SettingsStore.new_outline_chapter(
                 chapter_id,
                 chapter_count,
-                raw_chapter.get("title") or f"第{chapter_count}章",
+                strip_index_prefix(str(raw_chapter.get("title") or "")) or f"第{chapter_count}章",
                 raw_chapter.get("summary") or "",
             )
             for raw_beat in raw_chapter.get("beats") or []:
@@ -1394,8 +1398,32 @@ _CHARACTER_TOOL_SCHEMA = {
             "description": "3-5 个性格短标签，每个不超过 20 字",
         },
         "background": {"type": "string", "description": "人物背景，500 字以内"},
-        "appearance_prompt": {"type": "string", "description": "外貌提示词，用于配图"},
-        "negative_prompt": {"type": "string", "description": "配图负向提示词"},
+        "appearance_prompt": {"type": "string", "description": "外貌提示词，用于配图（可与 appearance_desc_en 一致）"},
+        "negative_prompt": {"type": "string", "description": "配图负向提示词（可与 appearance_negative_en 一致）"},
+        "voice_description_zh": {
+            "type": "string",
+            "description": "中文音色描述：音色质感、语速、语气、年龄感、口音，80-160 字，供 TTS 参考与人工校对",
+        },
+        "voice_description_en": {
+            "type": "string",
+            "description": "英文音色描述：可直接用于语音模型的 prompt，纯英文，覆盖 timbre/pace/tone/age feel/accent",
+        },
+        "appearance_desc_zh": {
+            "type": "string",
+            "description": "中文外貌描述（正面）：脸型、五官、发型、身形、惯常着装与气质，具体不空泛",
+        },
+        "appearance_desc_en": {
+            "type": "string",
+            "description": "英文正面出图 prompt：纯英文、具体可见特征，避免 young woman 这类泛描述",
+        },
+        "appearance_negative_zh": {
+            "type": "string",
+            "description": "中文负向说明：出图应排除的元素（如眼镜、胡须、伤疤），用名词短语，不要堆否定句",
+        },
+        "appearance_negative_en": {
+            "type": "string",
+            "description": "英文 negative prompt：逗号分隔的排除项，写 glasses, beard 这类名词，不要 not/no 句式",
+        },
         "relationships": {
             "type": "object",
             "additionalProperties": {"type": "string"},
@@ -1413,6 +1441,21 @@ _CHARACTER_TOOL_SCHEMA = {
     },
     "required": ["name"],
 }
+
+#: 人物描述性字段的统一要求（人物生成 / 逐人生成 / 单人物编辑共用）
+_CHARACTER_DESC_RULES = (
+    "除基础设定外，必须一次给出后续可直接使用的描述性字段（缺一不可）：\n"
+    "1) voice_description_zh：中文音色描述，覆盖音色质感、语速、语气、年龄感、口音，80-160 字，能直接指导 TTS；\n"
+    "2) voice_description_en：同一音色的英文描述，必须是可直接用于语音模型 prompt 的英文，不得夹杂中文，"
+    "覆盖 timbre、pace、tone、age feel、accent；\n"
+    "3) appearance_desc_zh：中文外貌描述（脸型、五官、发型、身形、惯常着装与气质），供界面展示与人工校对；\n"
+    "4) appearance_desc_en：英文正面出图 prompt，纯英文，写具体可见特征（发型长度、眉眼、肤色、服装材质等），"
+    "禁止只写 young woman、beautiful 这类空泛描述；\n"
+    "5) appearance_negative_zh：中文负向说明，用名词短语列出出图应排除的元素（如眼镜、胡须、伤疤），"
+    "不要写成否定句堆砌；\n"
+    "6) appearance_negative_en：英文 negative prompt，逗号分隔的排除项（如 glasses, beard, scar），"
+    "不要写 not/no 句式。"
+)
 
 #: 龙套条目 schema：在人物 schema 上要求 stock
 _STOCK_CHARACTER_TOOL_SCHEMA = {
@@ -2405,6 +2448,7 @@ def generate_characters(
         ask += f"本次共生成 {count} 个角色。"
     if brief_text:
         ask += f"补充要求：{brief_text}。"
+    ask += "\n" + _CHARACTER_DESC_RULES
     # 无论需求怎么写，都先把作品梗概/文风/世界/已有角色交给模型，避免脱离设定
     context = _project_context(work, bible, existing_characters, worlds)
     prompt = f"{context}\n\n任务：{ask}" if context else ask
@@ -2563,6 +2607,12 @@ def _clean_character_row(row, index: int) -> dict:
         "background": _check_text(row.get("background"), 2000, f"人物 {name} 的背景"),
         "appearance_prompt": _check_text(row.get("appearance_prompt"), 2000, f"人物 {name} 的外貌提示词"),
         "negative_prompt": _check_text(row.get("negative_prompt"), 1000, f"人物 {name} 的负向提示词"),
+        "voice_description_zh": _check_text(row.get("voice_description_zh"), 1000, f"人物 {name} 的中文音色描述"),
+        "voice_description_en": _check_text(row.get("voice_description_en"), 1000, f"人物 {name} 的英文音色描述"),
+        "appearance_desc_zh": _check_text(row.get("appearance_desc_zh"), 1200, f"人物 {name} 的中文外貌描述"),
+        "appearance_desc_en": _check_text(row.get("appearance_desc_en"), 1200, f"人物 {name} 的英文外貌描述"),
+        "appearance_negative_zh": _check_text(row.get("appearance_negative_zh"), 800, f"人物 {name} 的中文负向说明"),
+        "appearance_negative_en": _check_text(row.get("appearance_negative_en"), 800, f"人物 {name} 的英文负向提示词"),
         "relationships": {
             _check_text(key, 60, f"人物 {name} 的关系对象", required=True): _check_text(note, 500, f"人物 {name} 的关系备注")
             for key, note in relationships.items()
@@ -2575,6 +2625,11 @@ def _clean_character_row(row, index: int) -> dict:
     if stock:
         entry["stock"] = stock
         entry["name"] = _stock_display_name(entry["name"], stock["label"])
+    # 新旧字段兼容：已有消费端只看 appearance_prompt / negative_prompt
+    if not entry["appearance_prompt"] and entry["appearance_desc_en"]:
+        entry["appearance_prompt"] = entry["appearance_desc_en"]
+    if not entry["negative_prompt"] and entry["appearance_negative_en"]:
+        entry["negative_prompt"] = entry["appearance_negative_en"]
     return entry
 
 
@@ -2772,7 +2827,7 @@ def _clean_character_entry(row: dict) -> dict:
     notes = state.get("relationship_notes")
     if not isinstance(notes, dict):
         notes = row.get("relationships") if isinstance(row.get("relationships"), dict) else {}
-    return {
+    entry = {
         "name": name,
         "role": role,
         "gender": gender,
@@ -2781,6 +2836,12 @@ def _clean_character_entry(row: dict) -> dict:
         "background": _check_text(row.get("background"), 2000, f"人物 {name} 的背景"),
         "appearance_prompt": _check_text(row.get("appearance_prompt"), 2000, f"人物 {name} 的外貌提示词"),
         "negative_prompt": _check_text(row.get("negative_prompt"), 1000, f"人物 {name} 的负向提示词"),
+        "voice_description_zh": _check_text(row.get("voice_description_zh"), 1000, f"人物 {name} 的中文音色描述"),
+        "voice_description_en": _check_text(row.get("voice_description_en"), 1000, f"人物 {name} 的英文音色描述"),
+        "appearance_desc_zh": _check_text(row.get("appearance_desc_zh"), 1200, f"人物 {name} 的中文外貌描述"),
+        "appearance_desc_en": _check_text(row.get("appearance_desc_en"), 1200, f"人物 {name} 的英文外貌描述"),
+        "appearance_negative_zh": _check_text(row.get("appearance_negative_zh"), 800, f"人物 {name} 的中文负向说明"),
+        "appearance_negative_en": _check_text(row.get("appearance_negative_en"), 800, f"人物 {name} 的英文负向提示词"),
         "state": {
             "relationship_notes": {
                 _check_text(key, 60, f"人物 {name} 的关系对象", required=True): _check_text(note, 500, f"人物 {name} 的关系备注")
@@ -2788,6 +2849,12 @@ def _clean_character_entry(row: dict) -> dict:
             }
         },
     }
+    # 新旧字段兼容：已有消费端只看 appearance_prompt / negative_prompt
+    if not entry["appearance_prompt"] and entry["appearance_desc_en"]:
+        entry["appearance_prompt"] = entry["appearance_desc_en"]
+    if not entry["negative_prompt"] and entry["appearance_negative_en"]:
+        entry["negative_prompt"] = entry["appearance_negative_en"]
+    return entry
 
 
 def _section_fields(section: str, generated: dict, bible: dict) -> dict:
@@ -2909,7 +2976,7 @@ def generate_section(
     existing_char = next((item for item in characters if item.get("id") == target_id), None) if target_id else None
     if target_id and existing_char is None:
         raise ValueError(f"角色不存在: {target_id}")
-    ask = "生成一个完整人物设定，字段：name/role/gender/age_range/personality/background/appearance_prompt/negative_prompt/state.relationship_notes；personality 写 3-5 个短标签，每个不超过 20 字。"
+    ask = "生成一个完整人物设定，字段：name/role/gender/age_range/personality/background/appearance_prompt/negative_prompt/state.relationship_notes；personality 写 3-5 个短标签，每个不超过 20 字。\n" + _CHARACTER_DESC_RULES
     if existing_char:
         ask += f"这是对已有角色「{existing_char.get('name')}」的改写，保持与现有设定的连贯。"
     if brief_text:

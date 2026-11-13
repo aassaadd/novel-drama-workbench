@@ -501,12 +501,14 @@ def cmd_voice_design(args, config: AppConfig) -> int:
         elif stage == "generating":
             print(f"  生成中 {meta.get('done')}/{meta.get('total')}")
         time.sleep(3)
-    if meta.get("status") != "ready":
+    if meta.get("status") not in ("ready", "partial"):
         print(f"[failed] {meta.get('error') or '生成超时'}")
         return EXIT_FAILED
 
     for item in meta.get("candidates") or []:
         print(f"  候选 {item['index']}: {item['duration_ms'] / 1000:.1f}s  seed={item.get('seed')}")
+    for item in meta.get("failures") or []:
+        print(f"  [失败] 候选 {item.get('index')}: {item.get('message')}")
     print(f"候选目录: {voice_design.batch_dir(store, batch_id)}")
     if not args.select:
         print(f"未指定 --select；候选保留 {design.get('max_keep_days', 7)} 天，可稍后在页面采用。")

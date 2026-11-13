@@ -23,6 +23,15 @@ def _clean(text: str | None) -> str:
     return (text or "").strip()
 
 
+def _usable(line: dict) -> bool:
+    """判断旧台词行能否参与复用与插回。
+
+    文本含换行的行无法在正文里按原文定位（历史切分把两个自然段并成了一行），
+    保留它会让「行内改词」永久报「正文已变更」，因此重切时直接丢弃。
+    """
+    return "\n" not in (line.get("text") or "")
+
+
 def line_has_audio(line: dict) -> bool:
     """判断一条台词是否已有配音产物（有资产或状态为 ready）。"""
     tts = line.get("tts") or {}
@@ -41,7 +50,7 @@ def classify_lines(existing: list[dict], drafts: list[dict]) -> tuple[list[tuple
         - matched: [(旧行, 对应草案)]，文本完全相同，可原样复用；
         - manual: [(旧行, 中文原因)]，文本对不上或说话人与规则不同。
     """
-    pool = list(existing)
+    pool = [row for row in existing if _usable(row)]
     matched: list[tuple[dict, dict]] = []
     for draft in drafts:
         for index, row in enumerate(pool):
@@ -68,7 +77,7 @@ def merge_manual_lines(existing: list[dict], drafts: list[dict], scene_id: str) 
     返回:
         合并后的台词行列表，index 已重排为 0..N-1。
     """
-    remaining = [copy.deepcopy(item) for item in existing]
+    remaining = [copy.deepcopy(item) for item in existing if _usable(item)]
     merged: list[dict] = []
     for draft in drafts:
         picked = None

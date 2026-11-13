@@ -171,7 +171,7 @@
     const chapters = conflicts[id] || [];
     if (!chapters.length) return "";
     const items = chapters
-      .map((chapter) => `<li>${esc(chapter.title || chapter.id || "未命名章节")}${chapter.id ? `（${esc(chapter.id)}）` : ""}</li>`)
+      .map((chapter) => `<li>${esc(stripTitleIndex(chapter.title) || chapter.id || "未命名章节")}${chapter.id ? `（${esc(chapter.id)}）` : ""}</li>`)
       .join("");
     return `<div class="world-conflict">该世界仍被 ${chapters.length} 个章节引用，请先到大纲页解绑：<ul>${items}</ul></div>`;
   }

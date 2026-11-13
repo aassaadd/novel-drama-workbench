@@ -270,6 +270,17 @@
           ${amplifyButton("负面提示词")}
         </span>
       </div>
+      <div class="stack">描述性字段（后续配音 / 出图直接取用）
+        <span class="muted">六项都会随人物落盘；英文外貌 / 负向留空时，保存会自动同步到上面的出图提示词</span>
+        <div class="form-grid">
+          <label class="stack">中文音色描述<textarea data-edit="voice_description_zh" rows="3" placeholder="音色质感、语速、语气、年龄感、口音">${esc(item.voice_description_zh || "")}</textarea></label>
+          <label class="stack">英文音色描述<textarea data-edit="voice_description_en" rows="3" placeholder="English voice prompt: timbre, pace, tone, age feel, accent">${esc(item.voice_description_en || "")}</textarea></label>
+          <label class="stack">中文外貌描述<textarea data-edit="appearance_desc_zh" rows="3" placeholder="脸型、五官、发型、身形、惯常着装与气质">${esc(item.appearance_desc_zh || "")}</textarea></label>
+          <label class="stack">英文外貌描述<textarea data-edit="appearance_desc_en" rows="3" placeholder="English image prompt with concrete visible features">${esc(item.appearance_desc_en || "")}</textarea></label>
+          <label class="stack">中文负向说明<textarea data-edit="appearance_negative_zh" rows="2" placeholder="出图应排除的元素：眼镜、胡须、伤疤">${esc(item.appearance_negative_zh || "")}</textarea></label>
+          <label class="stack">英文负向提示词<textarea data-edit="appearance_negative_en" rows="2" placeholder="glasses, beard, scar, watermark">${esc(item.appearance_negative_en || "")}</textarea></label>
+        </div>
+      </div>
       <div class="stack">关系备注
         <span class="muted">每行选一个人物并填写备注；删除行后保存会一并清除该关系</span>
         <div data-rel-block>${relationshipListHtml(notes, item.id || "")}</div>
@@ -428,6 +439,12 @@
       background: read("background"),
       appearance_prompt: read("appearance_prompt"),
       negative_prompt: read("negative_prompt"),
+      voice_description_zh: read("voice_description_zh"),
+      voice_description_en: read("voice_description_en"),
+      appearance_desc_zh: read("appearance_desc_zh"),
+      appearance_desc_en: read("appearance_desc_en"),
+      appearance_negative_zh: read("appearance_negative_zh"),
+      appearance_negative_en: read("appearance_negative_en"),
       relationships: rel.notes,
       removed_relationships: Array.from(new Set(rel.removed)),
     };
@@ -546,6 +563,16 @@
     set("background", fields.background || "");
     set("appearance_prompt", fields.appearance_prompt || "");
     set("negative_prompt", fields.negative_prompt || "");
+    for (const key of [
+      "voice_description_zh",
+      "voice_description_en",
+      "appearance_desc_zh",
+      "appearance_desc_en",
+      "appearance_negative_zh",
+      "appearance_negative_en",
+    ]) {
+      set(key, fields[key] || "");
+    }
     const notes = (fields.state && fields.state.relationship_notes) || fields.relationships || {};
     const block = card.querySelector("[data-rel-block]");
     if (block) block.innerHTML = relationshipListHtml(notes, card.dataset.id || "");
@@ -604,6 +631,15 @@
       age_range: row.age_range || "",
       personality: row.personality || [],
       background: row.background || "",
+      // 生成阶段已产出的描述必须一起落盘，否则「逐人补全」等于白做
+      appearance_prompt: row.appearance_prompt || "",
+      negative_prompt: row.negative_prompt || "",
+      voice_description_zh: row.voice_description_zh || "",
+      voice_description_en: row.voice_description_en || "",
+      appearance_desc_zh: row.appearance_desc_zh || "",
+      appearance_desc_en: row.appearance_desc_en || "",
+      appearance_negative_zh: row.appearance_negative_zh || "",
+      appearance_negative_en: row.appearance_negative_en || "",
       relationships: row.relationships || (row.state && row.state.relationship_notes) || {},
       voice_profile: row.voice_profile || undefined,
       stock: row.stock || undefined,
@@ -1409,6 +1445,7 @@
       <button class="btn small" type="button" id="castEditBtn">编辑音色编排</button>
       <button class="btn small" type="button" id="castCheckBtn">音色编排检查</button>
       <button class="btn small" type="button" id="castBackfillBtn">批量生成音色描述</button>
+      <button class="btn small" type="button" id="castDescFillBtn">补全缺失描述</button>
       <span class="muted" id="castResult"></span>`;
     list.parentNode.insertBefore(panel, list);
     const editor = document.createElement("div");
@@ -1418,6 +1455,31 @@
     editor.addEventListener("input", handleCastEdit);
     editor.addEventListener("change", handleCastEdit);
     editor.addEventListener("click", handleCastEdit);
+    panel.querySelector("#castDescFillBtn").addEventListener("click", async () => {
+      const out = document.getElementById("castResult");
+      out.textContent = "补全中…";
+      try {
+        const result = await NW.api("/api/ui/characters/descriptions/fill", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ path: NW.state.path }),
+          busy: "正在补全人物描述…",
+        });
+        const updated = (result.updated || []).length;
+        const failures = result.failures || [];
+        out.textContent = failures.length
+          ? `已补 ${updated} 个，失败 ${failures.length} 个（可重跑只补失败项）`
+          : `已补 ${updated} 个角色`;
+        if (failures.length) {
+          NW.toast(`补全失败：${failures.slice(0, 2).map((item) => `${item.name}（${item.message}）`).join("；")}`);
+        } else if (!updated) {
+          NW.toast("所有角色的描述都已齐全，无需补全", true);
+        }
+        load();
+      } catch (error) {
+        out.textContent = `补全失败：${error.message}`;
+      }
+    });
     panel.querySelector("#castEditBtn").addEventListener("click", async () => {
       const box = document.getElementById("castEditor");
       if (box && !box.hidden) {

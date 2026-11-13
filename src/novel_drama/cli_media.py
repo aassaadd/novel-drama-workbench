@@ -135,7 +135,26 @@ def _line_filter(store: ProjectStore, chapters: list[dict], args, config) -> tup
     return {row["line"]["id"] for row in picked}, bool(args.include_ready) or ("ready" in statuses)
 
 
-def _planned_counts(store: ProjectStore, chapters: list[dict], characters: list[dict], args, config) -> list[dict]:
+def _line_locator(chapter: dict) -> dict[str, tuple[int, int]]:
+    """建立「行 ID → (场景序号, 场景内行号)」，两个序号均从 1 开始。
+
+    参数:
+        chapter: 章节 dict。
+
+    返回:
+        行定位映射；供「跳过行」清单给出人类可读位置。
+    """
+    mapping: dict[str, tuple[int, int]] = {}
+    scenes = sorted(chapter.get("scenes") or [], key=lambda item: item.get("index") or 0)
+    for scene_no, scene in enumerate(scenes, start=1):
+        lines = sorted(scene.get("lines") or [], key=lambda item: item.get("index") or 0)
+        for line_no, line in enumerate(lines, start=1):
+            if line.get("id"):
+                mapping[str(line["id"])] = (scene_no, line_no)
+    return mapping
+
+
+def _planned_counts(store: ProjectStore, chapters: list[dict], characters: list[dict], args, config) -> tuple[list[dict], list[dict]]:
     """按与正式批量完全相同的条件预演每章待合成行数。
 
     参数:
@@ -146,13 +165,16 @@ def _planned_counts(store: ProjectStore, chapters: list[dict], characters: list[
         config: 本机配置。
 
     返回:
-        `[{chapter_id, title, rows}]`，用于进度条的分母。
+        `(counts, skipped_rows)`：counts 为 `[{chapter_id, title, rows}]` 用于进度条分母；
+        skipped_rows 为因说话人未识别被排除的行（含场景/行号定位）。
     """
     from .tts import line_state
     from .tts.batch import plan_batch
 
     line_ids, include_ready = _line_filter(store, chapters, args, config)
+    skip_ids = _unknown_line_ids(store, chapters, args)
     counts: list[dict] = []
+    skipped_rows: list[dict] = []
     for chapter in chapters:
         rows = plan_batch(
             chapter,
@@ -165,9 +187,60 @@ def _planned_counts(store: ProjectStore, chapters: list[dict], characters: list[
             engine=line_state.engine_params(config),
             live_ids=line_state.live_line_ids(store),
             line_ids=line_ids,
+            skip_line_ids=skip_ids,
         )
+        if skip_ids:
+            # 被跳过的行必须本来就在本次待补范围内，才算「跳过 N 行」
+            planned = plan_batch(
+                chapter,
+                characters,
+                scene_ids=args.scene,
+                include_ready=include_ready,
+                limit=args.limit,
+                snapshots=line_state.load_snapshots(store.root, chapter),
+                root=store.root,
+                engine=line_state.engine_params(config),
+                live_ids=line_state.live_line_ids(store),
+                line_ids=line_ids,
+            )
+            locator = _line_locator(chapter)
+            for row in planned:
+                line = row["line"]
+                if line.get("id") not in skip_ids:
+                    continue
+                scene_no, line_no = locator.get(str(line.get("id")), (0, 0))
+                skipped_rows.append(
+                    {
+                        "chapter_id": chapter.get("id"),
+                        "chapter_title": chapter.get("title"),
+                        "scene_id": row.get("scene_id"),
+                        "scene_index": scene_no,
+                        "line_id": line.get("id"),
+                        "line_index": line_no,
+                        "speaker_id": line.get("speaker_id"),
+                        "text": line.get("text"),
+                    }
+                )
         counts.append({"chapter_id": chapter.get("id"), "title": chapter.get("title"), "rows": len(rows)})
-    return counts
+    return counts, skipped_rows
+
+
+def _unknown_line_ids(store: ProjectStore, chapters: list[dict], args) -> set[str]:
+    """取本次范围内「说话人无法归属」的行 ID（未显式跳过时返回空集）。
+
+    参数:
+        store: 工程。
+        chapters: 本次要处理的章节。
+        args: 已解析参数（读取 `--skip-unknown-speakers`）。
+
+    返回:
+        行 ID 集合；未开启跳过时为 `set()`。
+    """
+    if not getattr(args, "skip_unknown_speakers", False):
+        return set()
+    from .store.voice_cast import unresolved_speaker_lines
+
+    return {row["line_id"] for row in unresolved_speaker_lines(store, [chapter.get("id") for chapter in chapters])}
 
 
 def _write_progress(path: str | None, payload: dict) -> None:
@@ -198,11 +271,16 @@ def cmd_tts_batch(args, config: AppConfig) -> int:
     chapters = [store.load_chapter(chapter_id) for chapter_id in chapter_ids]
     characters = store.load_characters()["characters"]
     line_ids, include_ready = _line_filter(store, chapters, args, config)
+    # 说话人无法归属的行：显式跳过时不再参与合成，也不会因它们阻断整章
+    skip_ids = _unknown_line_ids(store, chapters, args)
     if not getattr(args, "skip_cast_check", False):
         from .store.voice_cast import check_cast
 
         gate = check_cast(store, chapter_ids[0]) if len(chapter_ids) == 1 else check_cast(store)
         errors = [item for item in gate["findings"] if item["level"] == "error"]
+        if skip_ids:
+            # 这些行已由用户显式选择跳过（保持原样不动），不再计入阻断项
+            errors = [item for item in errors if item.get("line_id") not in skip_ids]
         if errors:
             detail = "\n".join(f"- {item['code']}: {item['message']}" for item in errors[:8])
             raise PreconditionError(
@@ -215,6 +293,8 @@ def cmd_tts_batch(args, config: AppConfig) -> int:
         lines: list[str] = []
         total = 0
         lines_total = 0
+        skipped_unknown = 0
+        unknown_rows: list[dict] = []
         per_chapter: list[dict] = []
         for chapter in chapters:
             rows = plan_batch(
@@ -236,6 +316,29 @@ def cmd_tts_batch(args, config: AppConfig) -> int:
                 for line in scene.get("lines") or []
                 if (line.get("text") or "").strip()
             )
+            if skip_ids:
+                locator = _line_locator(chapter)
+                kept = []
+                for row in rows:
+                    line = row["line"]
+                    if line.get("id") not in skip_ids:
+                        kept.append(row)
+                        continue
+                    scene_no, line_no = locator.get(str(line.get("id")), (0, 0))
+                    unknown_rows.append(
+                        {
+                            "chapter_id": chapter.get("id"),
+                            "chapter_title": chapter.get("title"),
+                            "scene_id": row.get("scene_id"),
+                            "scene_index": scene_no,
+                            "line_id": line.get("id"),
+                            "line_index": line_no,
+                            "speaker_id": line.get("speaker_id"),
+                            "text": line.get("text"),
+                        }
+                    )
+                skipped_unknown += len(rows) - len(kept)
+                rows = kept
             total += len(rows)
             lines_total += chapter_lines
             per_chapter.append(
@@ -251,16 +354,21 @@ def cmd_tts_batch(args, config: AppConfig) -> int:
                 lines.append(
                     f"{chapter.get('id')}  {row['line']['id']}  {row['line'].get('speaker_id')}  {row['line']['text'][:24]}"
                 )
+        head = f"[dry-run] 待合成 {total} 行（{len(chapters)} 章，跳过 {max(0, lines_total - total)} 行"
+        if skipped_unknown:
+            head += f"，其中说话人未识别 {skipped_unknown} 行"
         _emit(
             args,
-            f"[dry-run] 待合成 {total} 行（{len(chapters)} 章，跳过 {max(0, lines_total - total)} 行）：\n"
-            + "\n".join(lines),
+            head + f"）：\n" + "\n".join(lines),
             {
                 "rows": total,
                 "chapters": chapter_ids,
                 "per_chapter": per_chapter,
                 "lines_total": lines_total,
                 "skipped": max(0, lines_total - total),
+                "skipped_unknown": skipped_unknown,
+                "unknown_rows": unknown_rows,
+                "unknown_line_ids": sorted(skip_ids),
             },
         )
         return EXIT_OK
@@ -272,17 +380,22 @@ def cmd_tts_batch(args, config: AppConfig) -> int:
         "total": 0,
         "done": 0,
         "failed": 0,
+        "skipped": 0,
+        "skipped_rows": [],
         "failed_rows": [],
         "current_chapter": None,
         "started_at": now_iso(),
         "finished": False,
     }
-    if progress_file:
+    if progress_file or skip_ids:
         # 进度分母提前算好：run_chapters 是逐章规划的，不预先汇总页面就无法显示 X/Y
-        counts = _planned_counts(store, chapters, characters, args, config)
+        counts, skipped_rows = _planned_counts(store, chapters, characters, args, config)
         progress["total"] = sum(item["rows"] for item in counts)
         progress["chapters"] = counts
-        _write_progress(progress_file, progress)
+        progress["skipped"] = len(skipped_rows)
+        progress["skipped_rows"] = skipped_rows
+        if progress_file:
+            _write_progress(progress_file, progress)
 
     def reporter(chapter_no: int, chapter: dict, batch_no: int, batch_results: list[dict], stats: dict) -> None:
         """打印章节内批次进度，并在需要时刷新进度文件。"""
@@ -326,6 +439,7 @@ def cmd_tts_batch(args, config: AppConfig) -> int:
             include_ready=include_ready,
             limit=args.limit,
             line_ids=line_ids,
+            skip_line_ids=skip_ids,
         )
     except Exception as exc:  # noqa: BLE001 - 进度文件要记录中断原因，再原样抛出
         progress.update({"finished": True, "error": str(exc), "updated_at": now_iso()})
@@ -345,9 +459,10 @@ def cmd_tts_batch(args, config: AppConfig) -> int:
         )
         _write_progress(progress_file, progress)
     stats = report["stats"]
+    skip_note = f"，跳过 {progress['skipped']} 行（说话人未识别）" if progress.get("skipped") else ""
     text = (
         f"批量合成完成：{stats['chapters']} 章 / 请求 {stats['requested']} 行，成功 {stats['succeeded']}"
-        f"（缓存命中 {stats['cache_hits']}），失败 {stats['failed']}；"
+        f"（缓存命中 {stats['cache_hits']}），失败 {stats['failed']}{skip_note}；"
         f"累计音频 {stats['audio_ms'] / 1000:.1f}s；总耗时 {report['elapsed_ms'] / 1000:.1f}s；"
         f"峰值内存 {report['peak_rss_mb']}MB\n报告 {report['report_path']}"
     )
@@ -529,16 +644,21 @@ def cmd_export(args, config: AppConfig) -> int:
         print(f"[warn] 音色/BGM 编排提示 {len(cast_warnings)} 条：{detail}", file=sys.stderr)
     silences = _silence_events(store, chapter["id"])
     if getattr(args, "format", "srt") == "jianying":
-        from .media import export_jianying
+        from .media import JianyingExportError, export_jianying
 
-        result = export_jianying(
-            store,
-            chapter,
-            timeline,
-            drafts_root=config.get("export.jianying.drafts_root"),
-            ffprobe=config.get("ffmpeg.probe_binary", "ffprobe"),
-            out_dir=(Path(args.out_dir) if args.out_dir else store.root / "exports" / "jianying"),
-        )
+        try:
+            result = export_jianying(
+                store,
+                chapter,
+                timeline,
+                drafts_root=config.get("export.jianying.drafts_root"),
+                ffprobe=config.get("ffmpeg.probe_binary", "ffprobe"),
+                out_dir=(Path(args.out_dir) if args.out_dir else store.root / "exports" / "jianying"),
+            )
+        except JianyingExportError as error:
+            # 素材缺失等属于前置条件未满足：转成 PreconditionError，
+            # 命令行与网页都能拿到可读原因，而不是 500 或裸异常。
+            raise PreconditionError(str(error)) from error
         counts = result["counts"]
         reconcile = result["reconcile"]
         lines = [

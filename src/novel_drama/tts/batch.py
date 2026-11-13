@@ -46,6 +46,7 @@ def plan_batch(
     engine: dict | None = None,
     live_ids: set[str] | None = None,
     line_ids: set[str] | None = None,
+    skip_line_ids: set[str] | None = None,
 ) -> list[dict]:
     """规划本章需要合成的行。
 
@@ -60,6 +61,7 @@ def plan_batch(
         engine: 当前配置导出的引擎侧参数；改接缝裁切配置后据此判过期。
         live_ids: 当前队列里活跃的行 ID；用于僵尸态降级。
         line_ids: 只保留这些行（范围选择器的结果）；为空表示整章。
+        skip_line_ids: 不参与本次合成的行（说话人未识别且用户选择跳过）；为空表示不跳过。
 
     返回:
         [{scene_id, scene_index, line}]，保持章内顺序。
@@ -72,6 +74,8 @@ def plan_batch(
             continue
         for line in sorted(scene.get("lines") or [], key=lambda item: item.get("index") or 0):
             if line_ids is not None and line.get("id") not in line_ids:
+                continue
+            if skip_line_ids and line.get("id") in skip_line_ids:
                 continue
             if not include_ready and not is_line_stale(
                 line, index, snapshot_index.get(line.get("id")), root=root, live_ids=live_ids, engine=engine
@@ -699,6 +703,7 @@ def run_chapters(
     include_ready: bool = False,
     limit: int | None = None,
     line_ids: set[str] | None = None,
+    skip_line_ids: set[str] | None = None,
 ) -> dict:
     """跨章节批量合成：逐章调用 `run_batch`，最后汇总成一份报告。
 
@@ -713,6 +718,7 @@ def run_chapters(
         include_ready: 连已完成的行一起重跑。
         limit: 每章最多多少行。
         line_ids: 只处理这些行（范围选择器的结果）；为空表示按场景/整章。
+        skip_line_ids: 不参与本次合成的行（说话人未识别且用户选择跳过）。
 
     返回:
         汇总报告（写入 `.ndw/tts_batches/<batch_id>.json`）。
@@ -745,6 +751,7 @@ def run_chapters(
             root=store.root,
             engine=engine,
             line_ids=line_ids,
+            skip_line_ids=skip_line_ids,
         )
         if not rows:
             per_chapter.append({"chapter_id": chapter.get("id"), "title": chapter.get("title"), "rows": 0, "stats": None})

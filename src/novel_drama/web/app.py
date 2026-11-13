@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -33,6 +34,7 @@ from ..writing.summarize import apply_summary, summarize_chapter
 from .actions import fail_body, run
 from .models_api import register_models_routes, resolve_llm_settings
 from .voice_tools_api import register_voice_tools_routes
+from .character_desc_api import register_character_desc_routes
 from .continue_api import register_continue_routes
 from .outline_edit_api import register_outline_edit_routes
 from .stream_api import register_stream_routes
@@ -2214,6 +2216,12 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
             ("aliases", "--aliases"),
             ("appearance_prompt", "--appearance-prompt"),
             ("negative_prompt", "--negative-prompt"),
+            ("voice_description_zh", "--voice-description-zh"),
+            ("voice_description_en", "--voice-description-en"),
+            ("appearance_desc_zh", "--appearance-desc-zh"),
+            ("appearance_desc_en", "--appearance-desc-en"),
+            ("appearance_negative_zh", "--appearance-negative-zh"),
+            ("appearance_negative_en", "--appearance-negative-en"),
             ("situation", "--situation"),
             ("voice_profile", "--voice-profile"),
             ("stock", "--stock"),
@@ -2283,6 +2291,11 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
                     "name": item["name"],
                     "role": item.get("role"),
                     "gender": item.get("gender"),
+                    # 供「按角色设定生成音色」面板带入描述，只读展示，不参与写回
+                    "age_range": item.get("age_range"),
+                    "personality": item.get("personality") or [],
+                    "background": item.get("background"),
+                    "speech_style": item.get("speech_style") or {},
                     # 兼容 v2 voice_library_id、v1 voice_id、变体 ID 与旧版内置名称
                     "voice_id": _resolve_voice_binding(item.get("voice_binding"), binding_index),
                 }
@@ -2723,6 +2736,195 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
             raise HTTPException(status_code=404, detail={"code": 3, "message": "批次不存在", "batch_id": batch_id})
         return meta
 
+    @app.post("/api/ui/voices/design/batches/{batch_id}/cancel")
+    def ui_voices_design_cancel(batch_id: str, body: dict) -> dict:
+        """停止批次后续候选：保留已完成候选，返回 stopped 状态。
+
+        参数:
+            batch_id: 批次 ID。
+            body: `{path}`。
+
+        异常:
+            HTTPException 404: 批次不存在。
+        """
+        from ..tts import voice_design
+
+        meta = voice_design.cancel_batch(_store(body.get("path")), batch_id)
+        if not meta:
+            raise HTTPException(status_code=404, detail={"code": 3, "message": "批次不存在", "batch_id": batch_id})
+        return {"batch": meta}
+
+    @app.post("/api/ui/voices/design/batches/{batch_id}/retry")
+    def ui_voices_design_retry(batch_id: str, body: dict) -> dict:
+        """单条重试：重新生成指定序号的失败/缺失候选。
+
+        参数:
+            batch_id: 批次 ID。
+            body: `{path, index}`。
+
+        异常:
+            HTTPException 400: 批次仍在生成或该候选不需要重试。
+        """
+        from ..tts import voice_design
+
+        store = _store(body.get("path"))
+        try:
+            return voice_design.retry_candidate(store, _tts_config(), batch_id, int(body.get("index") or 0))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"code": 2, "message": str(exc)}) from exc
+
+    @app.post("/api/ui/voices/design/batch/plan")
+    def ui_voices_batch_plan(body: dict) -> dict:
+        """预览批量生成范围：待生成 N 个、跳过 M 个及原因，附带可选章节。
+
+        参数:
+            body: `{path, scope, chapter_id?}`。
+        """
+        from ..tts import voice_batch
+
+        store = _store(body.get("path"))
+        try:
+            return voice_batch.plan(store, str(body.get("scope") or "unbound"), body.get("chapter_id"))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"code": 2, "message": str(exc)}) from exc
+
+    @app.post("/api/ui/voices/design/batch")
+    def ui_voices_batch_start(body: dict) -> dict:
+        """启动一键批量生成音色（逐角色串行）。
+
+        参数:
+            body: `{path, scope, chapter_id?, count?}`。
+        """
+        from ..tts import voice_batch
+
+        store = _store(body.get("path"))
+        try:
+            return voice_batch.start_job(
+                store,
+                _tts_config(),
+                str(body.get("scope") or "unbound"),
+                body.get("chapter_id"),
+                body.get("count"),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"code": 2, "message": str(exc)}) from exc
+
+    @app.get("/api/ui/voices/design/batch/latest")
+    def ui_voices_batch_latest(path: str | None = None) -> dict:
+        """最近一次批量任务：页面刷新后据状态展示或续跑。"""
+        from ..tts import voice_batch
+
+        return {"job": voice_batch.latest_job(_store(path))}
+
+    @app.post("/api/ui/voices/design/batch/{job_id}/cancel")
+    def ui_voices_batch_cancel(job_id: str, body: dict) -> dict:
+        """停止批量任务：当前角色停止，已完成角色保留。"""
+        from ..tts import voice_batch
+
+        job = voice_batch.cancel_job(_store(body.get("path")), job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail={"code": 3, "message": "批量任务不存在"})
+        return {"job": job}
+
+    @app.post("/api/ui/voices/design/batch/{job_id}/resume")
+    def ui_voices_batch_resume(job_id: str, body: dict) -> dict:
+        """续跑或重试批量任务：只处理未完成与失败的角色。
+
+        参数:
+            body: `{path, character_ids?}`；character_ids 为空时重试全部失败项。
+        """
+        from ..tts import voice_batch
+
+        try:
+            job = voice_batch.resume_job(
+                _store(body.get("path")), _tts_config(), job_id, body.get("character_ids")
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"code": 2, "message": str(exc)}) from exc
+        return {"job": job}
+
+    @app.get("/api/ui/voices/casting/overview")
+    def ui_voices_casting_overview(
+        path: str = Query(...), q: str = "", filter_name: str = Query("need", alias="filter")
+    ) -> dict:
+        """音色编排总览：默认只返回需要处理的角色，正常角色只给摘要。
+
+        参数:
+            path: 工程目录。
+            q: 搜索词（角色名或当前音色名）。
+            filter_name: need/unbound/chapter/duplicate/all。
+        """
+        from ..tts import voice_casting
+
+        store = _store(path)
+        data = voice_casting.overview(store, q, filter_name)
+        data["undo"] = voice_casting.undo_state(store)
+        return data
+
+    @app.post("/api/ui/voices/casting/preview")
+    def ui_voices_casting_preview(body: dict) -> dict:
+        """自动编排预览：每个角色匹配到哪个音色、为什么，以及需对齐的章节覆盖。"""
+        from ..tts import voice_casting
+
+        return voice_casting.preview(_store(body.get("path")))
+
+    @app.post("/api/ui/voices/casting/apply")
+    def ui_voices_casting_apply(body: dict) -> dict:
+        """应用自动编排建议并写撤销日志。
+
+        参数:
+            body: `{path, character_ids?}`；为空时应用全部有变化的角色。
+        """
+        from ..tts import voice_casting
+
+        store = _store(body.get("path"))
+        result = voice_casting.apply(store, body.get("character_ids"))
+        return {
+            **result,
+            "overview": voice_casting.overview(store, "", "need"),
+            "undo": voice_casting.undo_state(store),
+        }
+
+    @app.post("/api/ui/voices/casting/bind")
+    def ui_voices_casting_bind(body: dict) -> dict:
+        """单行替换角色音色（voice_id 为空表示解绑），并写撤销日志。
+
+        异常:
+            HTTPException 400/404: 角色或音色不存在 / 没有可用变体。
+        """
+        from ..tts import voice_casting
+
+        store = _store(body.get("path"))
+        try:
+            result = voice_casting.bind_one(store, body.get("character_id"), body.get("voice_id"))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"code": 2, "message": str(exc)}) from exc
+        return {
+            **result,
+            "overview": voice_casting.overview(store, "", "need"),
+            "undo": voice_casting.undo_state(store),
+        }
+
+    @app.post("/api/ui/voices/undo/last")
+    def ui_voices_undo_last(body: dict) -> dict:
+        """撤销最近一次自动编排 / 自动生成 / 单行替换。
+
+        参数:
+            body: `{path, kind?}`；kind 为空时撤销最近一条记录。
+        """
+        from ..tts import voice_casting
+
+        store = _store(body.get("path"))
+        try:
+            result = voice_casting.undo_last(store, body.get("kind") or None)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"code": 2, "message": str(exc)}) from exc
+        return {
+            **result,
+            "overview": voice_casting.overview(store, "", "need"),
+            "undo": voice_casting.undo_state(store),
+        }
+
     @app.get("/api/ui/voices/design/history")
     def ui_voices_design_history(path: str = Query(...), character_id: str = Query(...)) -> dict:
         """从磁盘恢复某角色的历史候选批次（页面刷新后使用）。
@@ -2965,6 +3167,8 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
     register_models_routes(app, config_path)
     # 单行重录 / 版本对比 / Casting 试听 / 整本批量（独立模块）
     register_voice_tools_routes(app, config_path)
+    # 人物音色 / 外貌中英文描述补全（独立模块）
+    register_character_desc_routes(app, config_path)
     # 章节/大纲续写（独立模块）
     register_continue_routes(app, config_path)
     # 大纲编辑：删除节拍 / 删除整章（独立模块）

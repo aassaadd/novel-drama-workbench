@@ -192,6 +192,8 @@ async function refreshBatch() {
   }
   const progress = await readBatchProgress(false);
   if (progress && progress.running) {
+    const skipButton = $("batchSkipUnknown");
+    if (skipButton) skipButton.hidden = true;
     renderBatchProgress(progress);
     startBatchPolling();
     return;
@@ -201,7 +203,9 @@ async function refreshBatch() {
     if (batch.scope === "chapter") query.chapter = state.chapter;
     const plan = await api(`/api/ui/tts/batch-all/plan?${qs(query)}`);
     batch.plan = plan;
+    const unknownTotal = plan.unknown_total || 0;
     const parts = [`跳过 ${plan.skipped || 0} 行`, `待补 ${plan.total} 行`];
+    if (unknownTotal) parts.push(`说话人未识别 ${unknownTotal} 行`);
     if (plan.total > 0) {
       parts.push(
         plan.eta_ms
@@ -211,38 +215,87 @@ async function refreshBatch() {
     }
     if (plan.blockers && plan.blockers.length) parts.push(`阻断项 ${plan.blockers.length} 个`);
     if (!plan.ready) parts.push(plan.ready_reason || "provider 不可用");
-    $("batchPlanInfo").textContent = plan.total > 0 || plan.blockers?.length ? parts.join(" · ") : "当前范围没有缺失，无需补齐";
-    $("batchStart").disabled = !plan.ready || plan.total <= 0 || (plan.blockers || []).length > 0;
+    $("batchPlanInfo").textContent = plan.total > 0 || plan.blockers?.length || unknownTotal ? parts.join(" · ") : "当前范围没有缺失，无需补齐";
+    const blocked = !plan.ready || plan.total <= 0 || (plan.blockers || []).length > 0;
+    // 说话人未识别的行默认不跳过：主按钮保持禁用，由次要按钮显式选择跳过
+    $("batchStart").disabled = blocked || unknownTotal > 0;
+    renderBatchUnknown(plan.unknown_rows || [], unknownTotal, blocked);
     $("batchProgress").textContent = (plan.blockers || []).length
       ? `先修正音色编排：${plan.blockers.slice(0, 3).join("；")}`
-      : "";
+      : unknownTotal
+        ? plan.total > 0
+          ? `有 ${unknownTotal} 行说话人未识别，默认不跳过：先到章节页修说话人（修好后回来点「开始补齐」只会补这些行），或点「跳过这 ${unknownTotal} 行，先配其余行」。`
+          : `有 ${unknownTotal} 行说话人未识别，且没有其余可补的行：先到章节页修说话人（下方清单可逐条定位）。`
+        : "";
     $("batchFailures").innerHTML = "";
     renderBatchFill(0, plan.total);
     $("batchEta").textContent = "";
   } catch (error) {
     $("batchPlanInfo").textContent = `读取失败：${error.message}`;
     $("batchStart").disabled = true;
+    renderBatchUnknown([], 0, true);
   }
 }
 
-/* 启动「补齐缺失」（后台进程），随后进入轮询。 */
-async function startBatch() {
+/* 渲染「说话人未识别」清单：只做提示与定位，不在这里改数据。 */
+function renderBatchUnknown(rows, total, blocked) {
+  const box = $("batchUnknown");
+  const skipButton = $("batchSkipUnknown");
+  if (!box) return;
+  if (skipButton) {
+    skipButton.hidden = total <= 0;
+    skipButton.disabled = blocked || total <= 0;
+    skipButton.textContent = `跳过这 ${total} 行，先配其余行`;
+  }
+  if (!rows.length) {
+    box.innerHTML = "";
+    return;
+  }
+  const MAX_ROWS = 6;
+  const items = rows.slice(0, MAX_ROWS).map((row) => {
+    const snippet = String(row.text || "").replace(/\s+/g, " ").slice(0, 18);
+    const where = `${row.chapter_title || row.chapter_id || ""} · 场景 ${row.scene_index || "?"} · 第 ${row.line_index || "?"} 行`;
+    return (
+      `<div class="batch-failure">` +
+      `<span class="where">${escapeHtml(where)}</span>` +
+      `<span class="why">${escapeHtml(snippet)}${String(row.text || "").length > 18 ? "…" : ""}</span>` +
+      `<button class="btn small" type="button" data-batch-goto="${escapeHtml(row.chapter_id || "")}" data-batch-line="${escapeHtml(
+        row.line_id || ""
+      )}">去修说话人</button>` +
+      `</div>`
+    );
+  });
+  const rest = total > MAX_ROWS ? `<div class="batch-meta">另有 ${total - MAX_ROWS} 行未列出，修完上面这些后清单会继续更新。</div>` : "";
+  box.innerHTML =
+    `<div class="batch-meta">跳过 ${total} 行：说话人未识别（保持原样，不写音频、不改说话人）</div>` +
+    items.join("") +
+    rest;
+}
+
+/* 启动「补齐缺失」（后台进程），随后进入轮询。
+ * 参数：options.skipUnknown 为真时跳过说话人未识别的行（用户显式选择）。 */
+async function startBatch(options = {}) {
   if (!state.path) return;
-  $("batchStart").disabled = true;
+  const skipUnknown = !!options.skipUnknown;
+  const trigger = $(skipUnknown ? "batchSkipUnknown" : "batchStart");
+  if (trigger) trigger.disabled = true;
   try {
     const body = { path: state.path, scope: batch.scope };
     if (batch.scope === "chapter") body.chapter = state.chapter;
+    if (skipUnknown) body.skip_unknown = true;
     const result = await api("/api/ui/tts/batch-all", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
-    $("batchProgress").textContent = `已开始补齐：共 ${result.total} 行，等待第一行完成…`;
+    $("batchProgress").textContent = skipUnknown
+      ? `已跳过 ${(batch.plan && batch.plan.unknown_total) || 0} 行说话人未识别，开始补齐 ${result.total} 行，等待第一行完成…`
+      : `已开始补齐：共 ${result.total} 行，等待第一行完成…`;
     $("batchFailures").innerHTML = "";
     startBatchPolling();
   } catch (error) {
     $("batchProgress").textContent = `启动失败：${error.message}`;
-    $("batchStart").disabled = false;
+    if (trigger) trigger.disabled = false;
   }
 }
 
@@ -281,8 +334,10 @@ async function pollBatch() {
   } else if (progress.finished) {
     await loadLines();
     await loadPlan();
+    await refreshBatch();
     toast(
-      `补齐结束：完成 ${progress.done}/${progress.total}，失败 ${progress.failed}`,
+      `补齐结束：已配 ${Math.max(0, (progress.done || 0) - (progress.failed || 0))} 行` +
+        `，跳过 ${progress.skipped || 0} 行（说话人未识别），失败 ${progress.failed || 0}`,
       progress.failed === 0
     );
   }
@@ -308,6 +363,7 @@ function renderBatchProgress(progress) {
   $("batchProgress").textContent =
     `完成 ${done}/${total}` +
     (progress.failed ? `（失败 ${progress.failed}）` : "") +
+    (progress.skipped ? ` · 跳过 ${progress.skipped} 行（说话人未识别）` : "") +
     (progress.running && progress.current_chapter ? ` · 当前 ${progress.current_chapter}` : "") +
     (progress.finished && !progress.running ? " · 已结束" : "");
   const eta = $("batchEta");
@@ -384,6 +440,7 @@ function injectBatchPanel() {
       </select>
       <span class="batch-meta" id="batchPlanInfo">读取中…</span>
       <button class="btn small primary" type="button" id="batchStart" disabled>开始补齐</button>
+      <button class="btn small" type="button" id="batchSkipUnknown" hidden>跳过这些行，先配其余行</button>
       <button class="btn small" type="button" id="batchRefresh">刷新</button>
       <button class="btn small" type="button" id="batchClose">收起</button>
     </div>
@@ -393,6 +450,7 @@ function injectBatchPanel() {
     </div>
     <div class="batch-meta" id="batchProgress" style="margin-top:6px"></div>
     <div class="batch-meta" style="margin-top:4px">只补未生成/失败/过期的行，已有音频跳过；中途停止后再点「开始补齐」会接着跑。</div>
+    <div class="batch-failures" id="batchUnknown"></div>
     <div class="batch-failures" id="batchFailures"></div>`;
   // 顶部徽标下方：面板打开时不挤在底部运行栏之外
   const badges = view.querySelector(".badges");
@@ -406,6 +464,7 @@ function injectBatchPanel() {
   });
   panel.addEventListener("click", async (event) => {
     if (event.target.id === "batchStart") return startBatch();
+    if (event.target.id === "batchSkipUnknown") return startBatch({ skipUnknown: true });
     if (event.target.id === "batchRefresh") return refreshBatch();
     if (event.target.id === "batchClose") {
       panel.hidden = true;

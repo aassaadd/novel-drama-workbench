@@ -255,7 +255,7 @@
       const chapter = snap ? (snap.chapters || []).find((item) => item.id === state.chapter) : null;
       if (!state.path) tip.textContent = "先打开工程";
       else if (!chapter) tip.textContent = "本章还没建：先在大纲「落地成章节」";
-      else tip.textContent = `${chapter.index}. ${chapter.title}`;
+      else tip.textContent = `${chapter.index}. ${stripTitleIndex(chapter.title)}`;
     }
 
     renderBottom();
@@ -286,7 +286,7 @@
     box.innerHTML = [
       `<span>工程 <b>${esc(shortPath(state.path))}</b></span>`,
       chapter
-        ? `<span>章节 <b>${esc(chapter.index)}. ${esc(chapter.title || "")}</b></span>`
+        ? `<span>章节 <b>${esc(chapter.index)}. ${esc(stripTitleIndex(chapter.title))}</b></span>`
         : "<span class='muted'>未选章节</span>",
       scene ? `<span>场景 <b>${esc(scene.title || scene.location || "")}</b></span>` : "",
       `<span>正文 <b>${esc(chapter ? chapter.word_count || 0 : 0)}</b> 字</span>`,

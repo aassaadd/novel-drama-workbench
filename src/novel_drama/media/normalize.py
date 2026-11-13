@@ -218,7 +218,14 @@ def normalize_audio(
         f"aresample={sample_rate},"
         f"loudnorm=I={cfg['target_lufs']}:TP={cfg['true_peak_db']}:LRA={cfg['lra']}"
     )
-    if measured.get("input_i"):
+    # 静音/近静音时 loudnorm 测得 input_i=-inf，这个值不能作为线性归一参数
+    # （ffmpeg 会报 "Value -inf for parameter 'measured_I' out of range"）；
+    # 低于 -90 LUFS 视为静音，退回动态 loudnorm，避免整条编排在混音阶段中断。
+    try:
+        input_i = float(str(measured.get("input_i") or "").strip())
+    except (TypeError, ValueError):
+        input_i = float("-inf")
+    if input_i > -90:
         chain += (
             f":measured_I={measured.get('input_i')}:measured_TP={measured.get('input_tp')}"
             f":measured_LRA={measured.get('input_lra')}:measured_thresh={measured.get('input_thresh')}"

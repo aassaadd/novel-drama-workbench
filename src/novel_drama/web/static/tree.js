@@ -132,7 +132,7 @@
     (tree.acts || []).forEach((act, index) => {
       const chapters = (act.chapters || []).map((item) => byId.get(item.id)).filter(Boolean);
       chapters.forEach((item) => used.add(item.id));
-      if (chapters.length) groups.push({ key: `act:${act.id || index}`, title: act.title || `第 ${index + 1} 幕`, chapters });
+      if (chapters.length) groups.push({ key: `act:${act.id || index}`, title: stripTitleIndex(act.title) || `第 ${index + 1} 幕`, chapters });
     });
 
     const rest = tree.chapters.filter((item) => !used.has(item.id));
@@ -211,7 +211,7 @@
               kind: "chapter",
               key,
               level: 2,
-              label: `${chapter.index}. ${chapter.title || ""}`,
+              label: `${chapter.index}. ${stripTitleIndex(chapter.title)}`,
               caret: open ? "▾" : "▸",
               state: chapterState(chapter),
               meta: statsMeta(chapter),
