@@ -1475,6 +1475,12 @@ def build_parser() -> argparse.ArgumentParser:
         dest="skip_cast_check",
         help="跳过配音前的音色/BGM 一致性门禁（有 error 时默认阻断）",
     )
+    q.add_argument(
+        "--skip-unknown-speakers",
+        action="store_true",
+        dest="skip_unknown_speakers",
+        help="跳过说话人未识别的行先配其余行（这些行保持原样，不写音频、不改说话人）",
+    )
     q.set_defaults(func=cmd_tts_batch)
 
     p_sub.add_parser("providers", help="列出 provider 可用性与许可").set_defaults(func=cmd_tts_providers)

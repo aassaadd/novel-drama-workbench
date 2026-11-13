@@ -676,6 +676,15 @@ def register_voice_tools_routes(app, config_path: str | None = None) -> None:
             "--skip-cast-check",
             "--skip-unknown-speakers",
         )
+        if result.code != 0:
+            # 计划读不出来时必须把 CLI 的中文说明透给页面：
+            # 页面只显示「HTTP 500」时用户无从判断是没切分、缺音色还是模型没就绪。
+            message = (result.stderr or result.text or "").strip()
+            if result.code == 2:
+                message = "补齐接口的参数未被识别（页面可能还是旧版本）：请刷新页面后重试。"
+            if not message:
+                message = f"读取补齐计划失败（CLI 退出码 {result.code}）"
+            raise HTTPException(status_code=result.status, detail={"code": result.code, "message": message})
         plan = result.payload if isinstance(result.payload, dict) else {}
         total = int(plan.get("rows") or 0)
         unknown_rows = plan.get("unknown_rows") or []
@@ -692,15 +701,22 @@ def register_voice_tools_routes(app, config_path: str | None = None) -> None:
         if not ready:
             ready_reason = "没有可用的 TTS provider（先运行 ndw models list / verify 确认权重就位）"
 
-        cast = _cli(config_path, "--project", str(store.root), "--json", "cast", "check")
+        # 音色检查按同一范围做：只看本章时不要把别的章节的缺失算成本章阻断项
+        cast_args = ["--project", str(store.root), "--json", "cast", "check"]
+        if scope != "all" and chapter:
+            cast_args += ["--chapter", chapter]
+        cast = _cli(config_path, *cast_args)
         findings: list[dict] = []
         if isinstance(cast.payload, dict):
             findings = cast.payload.get("findings") or []
-        blockers = [
-            f"{item.get('code')}: {item.get('message')}"
-            for item in findings
-            if item.get("level") == "error" and item.get("line_id") not in unknown_ids
-        ]
+        # 同一个角色的同类问题会按行重复几十条，去重后才是用户能读懂的阻断项
+        blockers = list(
+            dict.fromkeys(
+                f"{item.get('code')}: {item.get('message')}"
+                for item in findings
+                if item.get("level") == "error" and item.get("line_id") not in unknown_ids
+            )
+        )
         return {
             "scope": scope,
             "chapter": chapter,

@@ -980,10 +980,99 @@
     ["female_elder", "老年女声", "female", "elderly"],
   ];
 
+  /* 稳定键 → 中文展示名：只用于页面展示与提示，存储结构与字段值一律不改。 */
+  const CAST_SLOT_LABELS = {
+    male_young: "青年男声",
+    male_mid: "中年男声",
+    male_elder: "老年男声",
+    female_young: "青年女声",
+    female_mid: "中年女声",
+    female_elder: "老年女声",
+  };
+  const CAST_GENDER_LABELS = { male: "男", female: "女", other: "其他" };
+  const CAST_BAND_LABELS = { young: "青年", mid: "中年", elder: "老年" };
+  const CAST_AGE_FEEL_OPTIONS = [
+    ["young_adult", "青年感"],
+    ["adult", "中年感"],
+    ["elderly", "老年感"],
+  ];
+
+  /* 音色池槽位稳定键 → 中文名（male_young → 青年男声）。
+   * 参数：slot 存储键。
+   * 返回：中文展示名；无法识别时回退到池里的自定义名称。
+   */
+  function castSlotLabel(slot) {
+    const key = String(slot || "");
+    if (CAST_SLOT_LABELS[key]) return CAST_SLOT_LABELS[key];
+    const parts = key.split("_");
+    if (parts.length === 2 && CAST_GENDER_LABELS[parts[0]] && CAST_BAND_LABELS[parts[1]]) {
+      return `${CAST_BAND_LABELS[parts[1]]}${CAST_GENDER_LABELS[parts[0]]}声`;
+    }
+    const item = ((castDraft && castDraft.voice_pool) || []).find((row) => row.slot === key);
+    if (item && item.label && !/[A-Za-z]/.test(item.label)) return item.label;
+    return "自定义音色槽位";
+  }
+
+  /* 龙套映射键 → 中文名：优先职业名称，其次池槽位名。
+   * 参数：key 映射键（可能是职业槽位或池槽位）。
+   * 返回：中文展示名。
+   */
+  function castStockKeyLabel(key) {
+    const meta = (castMeta.stockSlots || []).find((item) => item.slot === key);
+    if (meta && meta.label) return meta.label;
+    const slotLabel = castSlotLabel(key);
+    return slotLabel === "自定义音色槽位" ? "职业槽位" : slotLabel;
+  }
+
+  /* 旁白人格展示名：老工程可能没有名称，用序号兜底。
+   * 参数：item 人格对象；index 序号（从 0 开始）。
+   * 返回：中文展示名。
+   */
+  function castPersonaLabel(item, index) {
+    const label = String((item && item.label) || "").trim();
+    if (label && !/^npr_[A-Za-z0-9]+$/.test(label)) return label;
+    return `旁白人格 ${index + 1}`;
+  }
+
+  /* 年龄感下拉：已保存的未知值保留为原值，但展示成「其他年龄感」。
+   * 参数：selected 当前值。
+   * 返回：<option> HTML 字符串。
+   */
+  function castAgeFeelOptions(selected) {
+    const value = String(selected || "");
+    const known = CAST_AGE_FEEL_OPTIONS.some(([key]) => key === value);
+    const rows = CAST_AGE_FEEL_OPTIONS.map(
+      ([key, label]) => `<option value="${key}"${key === value ? " selected" : ""}>${label}</option>`
+    );
+    const extra = value && !known ? `<option value="${esc(value)}" selected>其他年龄感</option>` : "";
+    return extra + rows.join("");
+  }
+
+  /* 把历史任务里残留的稳定键换成中文（旧 job.json 与校验错误仍可能带英文）。
+   * 参数：text 原文。
+   * 返回：中文化后的文案。
+   */
+  function localizeCastText(text) {
+    let out = String(text || "");
+    out = out.replace(/龙套映射\s+([A-Za-z0-9_:-]+)/g, (whole, key) => `龙套映射 ${castStockKeyLabel(key)}`);
+    out = out.replace(/音色池槽位\s+([A-Za-z0-9_:-]+)/g, (whole, key) => `音色池槽位 ${castSlotLabel(key)}`);
+    out = out.replace(/\b(male|female|other)_(young|mid|elder)\b/g, (whole, gender, band) => {
+      return CAST_SLOT_LABELS[`${gender}_${band}`] || whole;
+    });
+    out = out.replace(/\b(male|female|other):(child|youth|adult|middle|senior)\b/g, (whole, gender, band) => {
+      const bands = { child: "少年", youth: "青年", adult: "中年", middle: "中年", senior: "老年" };
+      return `${CAST_GENDER_LABELS[gender] || gender}·${bands[band] || band}`;
+    });
+    return out;
+  }
+
   /* 下拉选项：音色库。 */
   function castVoiceOptions(selected) {
     const rows = castMeta.voices.map(
-      (item) => `<option value="${esc(item.id)}"${item.id === selected ? " selected" : ""}>${esc(item.name || item.id)}</option>`
+      (item) =>
+        `<option value="${esc(item.id)}"${item.id === selected ? " selected" : ""}>${esc(
+          item.name || "未命名音色"
+        )}</option>`
     );
     return `<option value=""${selected ? "" : " selected"}>（未绑定）</option>${rows.join("")}`;
   }
@@ -991,7 +1080,10 @@
   /* 下拉选项：试听候选音色（空值表示跟随角色当前绑定）。 */
   function castCandidateOptions(selected) {
     const rows = castMeta.voices.map(
-      (item) => `<option value="${esc(item.id)}"${item.id === selected ? " selected" : ""}>${esc(item.name || item.id)}</option>`
+      (item) =>
+        `<option value="${esc(item.id)}"${item.id === selected ? " selected" : ""}>${esc(
+          item.name || "未命名音色"
+        )}</option>`
     );
     return `<option value=""${selected ? "" : " selected"}>（跟随角色当前音色）</option>${rows.join("")}`;
   }
@@ -1002,9 +1094,9 @@
       .filter((item) => item.role !== "narrator")
       .map(
         (item) =>
-          `<option value="${esc(item.id)}"${item.id === selected ? " selected" : ""}>${esc(item.name || item.id)}${
-            item.voice_id ? "" : "（未绑音色）"
-          }</option>`
+          `<option value="${esc(item.id)}"${item.id === selected ? " selected" : ""}>${esc(
+            item.name || "未命名角色"
+          )}${item.voice_id ? "" : "（未绑音色）"}</option>`
       );
     return rows.join("");
   }
@@ -1027,7 +1119,10 @@
   /* 下拉选项：旁白人格。 */
   function castPersonaOptions(selected) {
     const rows = (castDraft.narrators || []).map(
-      (item) => `<option value="${esc(item.id)}"${item.id === selected ? " selected" : ""}>${esc(item.label || item.id)}</option>`
+      (item, index) =>
+        `<option value="${esc(item.id)}"${item.id === selected ? " selected" : ""}>${esc(
+          castPersonaLabel(item, index)
+        )}</option>`
     );
     return `<option value=""${selected ? "" : " selected"}>（未指定）</option>${rows.join("")}`;
   }
@@ -1083,12 +1178,12 @@
         const target =
           item.action === "manual"
             ? '<span class="muted">保持原样，不会写入</span>'
-            : `<b>${esc(item.proposed_name || item.proposed || "—")}</b>`;
+            : `<b>${esc(item.proposed_name || "已选音色")}</b>`;
         return `<div class="cast-autofill-item">
-          <span class="tag">${esc(sectionLabels[item.section] || item.section)}</span>
+          <span class="tag">${esc(sectionLabels[item.section] || "音色编排")}</span>
           <div class="cast-autofill-main">
-            <div>${esc(item.label || item.key)} ${badge} → ${target}</div>
-            <div class="muted">${esc(item.reason || "")}</div>
+            <div>${esc(item.label || "该项目")} ${badge} → ${target}</div>
+            <div class="muted">${esc(localizeCastText(item.reason || ""))}</div>
           </div>
         </div>`;
       })
@@ -1181,35 +1276,77 @@
     renderAutoFillState();
   }
 
-  /* 一键补齐：任务是否还有可自动补齐的剩余角色。 */
+  /* 一键补齐：任务是否还有可自动补齐的剩余项（角色或龙套池）。 */
   function fillHasRemaining(job) {
     if (!job) return false;
-    return (job.items || []).some(
+    const chars = (job.items || []).some(
       (item) => (item.plan === "reuse" || item.plan === "generate") && ["pending", "failed"].includes(item.status)
     );
+    const pools = (job.pool_items || []).some(
+      (item) => (item.action === "reuse" || item.action === "generate") && ["pending", "failed"].includes(item.status)
+    );
+    return chars || pools;
   }
 
-  /* 一键补齐的进度文案：绑定 / 生成阶段「第 k/N 个」；结束给四项统计。 */
-  function fillProgressText(data) {
-    const head = `${data.stage === "bind" ? "绑定中" : "生成中"} 第 ${data.index || 0}/${data.total || 0} 个：${
-      data.name || "角色"
-    }`;
-    if (data.stage === "bind") return `${head} → ${data.voice_name || "复用音色"}`;
-    const parts = [head];
+  /* 生成阶段的文字尾巴：候选序号 + 已接收字数。 */
+  function fillVoiceParts(data, parts) {
     if (data.sub_index && data.sub_total) parts.push(`候选 ${data.sub_index}/${data.sub_total}`);
     parts.push(`已接收 ${formatChars(data.chars || 0)} 字`);
     return parts.join(" · ");
   }
 
-  /* 一键补齐的收尾统计文案。 */
-  function fillSummary(job) {
-    const stats = (job && job.stats) || {};
-    return `直接绑定 ${stats.bound || 0} · 新生成 ${stats.generated || 0} · 跳过 ${stats.skipped || 0} · 失败 ${
-      stats.failed || 0
+  /* 一键补齐的进度文案：池 / 绑定 / 生成三个阶段各自「第 k/N 个」。 */
+  function fillProgressText(data) {
+    if (data.stage === "pool") {
+      const head = `${data.action === "reuse" ? "配置" : "生成"}龙套音色池 第 ${data.index || 0}/${
+        data.total || 0
+      } 个：${data.name || "龙套分组"}`;
+      if (data.action === "reuse") return head;
+      return fillVoiceParts(data, [head]);
+    }
+    const head = `${data.stage === "bind" ? "绑定中" : "生成中"} 第 ${data.index || 0}/${data.total || 0} 个：${
+      data.name || "角色"
     }`;
+    if (data.stage === "bind") return `${head} → ${data.voice_name || "复用音色"}`;
+    return fillVoiceParts(data, [head]);
   }
 
-  /* 渲染一键补齐面板：主按钮文案、扫描统计、进度条、逐角色结果与失败重试。 */
+  /* 一键补齐的收尾统计文案（角色 + 龙套池）。 */
+  function fillSummary(job) {
+    const stats = (job && job.stats) || {};
+    const parts = [
+      `直接绑定 ${stats.bound || 0}`,
+      `新生成 ${stats.generated || 0}`,
+      `跳过 ${stats.skipped || 0}`,
+      `失败 ${stats.failed || 0}`,
+    ];
+    if (stats.pool_total) {
+      parts.push(`龙套池生成 ${stats.pools_generated || 0} 组 / 配置 ${stats.pools_configured || 0} 组`);
+    }
+    return parts.join(" · ");
+  }
+
+  /* 补齐面板的状态标签（角色与龙套池共用，池有专属说法）。 */
+  const FILL_STATUS_LABELS = {
+    ready: "已就绪",
+    pending: "待补齐",
+    binding: "绑定中",
+    bound: "已绑定",
+    generating: "生成中",
+    generated: "已生成",
+    manual: "需要人工",
+    failed: "失败",
+    configuring: "配置池中",
+    configured: "池已配置",
+  };
+  const FILL_POOL_STATUS_LABELS = {
+    ...FILL_STATUS_LABELS,
+    ready: "池已就绪",
+    pending: "池待生成",
+    generating: "生成池音色中",
+  };
+
+  /* 渲染一键补齐面板：主按钮文案、扫描统计、进度条、龙套池与逐角色结果。 */
   function renderFill() {
     const btn = el("castFillBtn");
     if (btn) {
@@ -1229,51 +1366,89 @@
       scan.textContent = job
         ? `共 ${stats.total || 0} 个角色需要音色：可复用 ${stats.reuse || 0}、需生成 ${stats.generate || 0}、已就绪 ${
             stats.ready || 0
-          }、需要人工 ${stats.manual || 0}`
+          }、需要人工 ${stats.manual || 0}；龙套池 ${stats.pool_total || 0} 组（生成 ${
+            stats.pool_generate || 0
+          }、复用 ${stats.pool_reuse || 0}、已就绪 ${stats.pool_ready || 0}）`
         : "";
     }
     const stop = el("castFillStop");
     if (stop) stop.hidden = !castFill.running;
     const bar = el("castFillBarWrap");
     if (bar) {
-      const done = (stats.bound || 0) + (stats.generated || 0) + (stats.failed || 0);
-      const total = (stats.reuse || 0) + (stats.generate || 0);
+      const done =
+        (stats.bound || 0) +
+        (stats.generated || 0) +
+        (stats.pools_configured || 0) +
+        (stats.pools_generated || 0) +
+        (stats.failed || 0);
+      const total =
+        (stats.reuse || 0) + (stats.generate || 0) + (stats.pool_reuse || 0) + (stats.pool_generate || 0);
       bar.hidden = !(castFill.running && total);
       const inner = el("castFillBar");
       if (inner) inner.style.width = `${total ? Math.min(100, (done / total) * 100) : 0}%`;
     }
     const itemsBox = el("castFillItems");
     if (itemsBox) {
-      const labels = { bound: "已绑定", generated: "已生成", failed: "失败", manual: "需要人工", pending: "待补齐" };
-      const rows = (job && job.items ? job.items : [])
-        .filter((item) => ["bound", "generated", "failed", "manual", "pending"].includes(item.status))
+      // 龙套池排在最前：先看池子有没有建好，再看角色绑定
+      const poolRows = (job && job.pool_items ? job.pool_items : [])
+        .map((item) => {
+          const detail =
+            ["failed", "manual"].includes(item.status)
+              ? item.error || item.reason || ""
+              : item.voice_name || item.reason || "";
+          const statusLabel =
+            item.status === "pending" && item.action === "reuse"
+              ? "池待配置"
+              : FILL_POOL_STATUS_LABELS[item.status] || item.status;
+          return `<div class="cast-fill-row">
+            <span class="cast-fill-name">${esc(item.label || "龙套音色池")} <span class="muted">（${(
+            item.character_ids || []
+          ).length} 个龙套）</span></span>
+            <span class="tag">${esc(statusLabel)}</span>
+            <span class="muted cast-fill-detail">${esc(localizeCastText(detail))}</span>
+          </div>`;
+        })
+        .join("");
+      const charRows = (job && job.items ? job.items : [])
         .map((item) => {
           const detail =
             ["failed", "manual"].includes(item.status)
               ? item.error || item.reason || ""
               : item.voice_name || item.reason || "";
           return `<div class="cast-fill-row">
-            <span class="cast-fill-name">${esc(item.name || item.character_id)}</span>
-            <span class="tag">${labels[item.status] || esc(item.status)}</span>
-            <span class="muted cast-fill-detail">${esc(detail)}</span>
+            <span class="cast-fill-name">${esc(item.name || "未命名角色")}</span>
+            <span class="tag">${esc(FILL_STATUS_LABELS[item.status] || item.status)}</span>
+            <span class="muted cast-fill-detail">${esc(localizeCastText(detail))}</span>
           </div>`;
         })
         .join("");
-      itemsBox.innerHTML = rows;
+      itemsBox.innerHTML = poolRows + charRows;
     }
     const failures = el("castFillFailures");
     if (failures) {
-      const failed = (job && job.items ? job.items : []).filter((item) => item.status === "failed");
-      failures.innerHTML = failed.length
-        ? `<div class="cast-fill-failure-head">失败 ${failed.length} 个，可单独重试：</div>${failed
-            .map(
-              (item) => `<div class="cast-fill-row">
-                <span class="cast-fill-name">${esc(item.name || item.character_id)}</span>
-                <span class="muted cast-fill-detail">${esc(item.error || "补齐失败")}</span>
-                <button class="btn small" type="button" data-fill-retry="${esc(item.character_id)}">重试</button>
-              </div>`
-            )
-            .join("")}`
+      const failedChars = (job && job.items ? job.items : []).filter((item) => item.status === "failed");
+      const failedPools = (job && job.pool_items ? job.pool_items : []).filter((item) => item.status === "failed");
+      const charRows = failedChars
+        .map(
+          (item) => `<div class="cast-fill-row">
+            <span class="cast-fill-name">${esc(item.name || "未命名角色")}</span>
+            <span class="muted cast-fill-detail">${esc(localizeCastText(item.error || "补齐失败"))}</span>
+            <button class="btn small" type="button" data-fill-retry="${esc(item.character_id)}">重试</button>
+          </div>`
+        )
+        .join("");
+      const poolRows = failedPools
+        .map(
+          (item) => `<div class="cast-fill-row">
+            <span class="cast-fill-name">${esc(item.label || "龙套音色池")}</span>
+            <span class="muted cast-fill-detail">${esc(localizeCastText(item.error || "龙套池补齐失败"))}</span>
+            <button class="btn small" type="button" data-fill-pool-retry="${esc(item.slot)}">重试</button>
+          </div>`
+        )
+        .join("");
+      const count = failedChars.length + failedPools.length;
+      failures.innerHTML = count
+        ? `<div class="cast-fill-failure-head">失败 ${count} 项，可单独重试：</div>${poolRows}${charRows}`
         : "";
     }
   }
@@ -1324,20 +1499,35 @@
             castFill.stats = data.stats || castFill.stats;
             if (castFill.job) castFill.job.stats = data.stats || castFill.job.stats;
             if (data.stats) {
-              castFill.text = `扫描完成：共 ${data.stats.total || 0} 个角色需要音色，可复用 ${
-                data.stats.reuse || 0
-              }、需生成 ${data.stats.generate || 0}、已就绪 ${data.stats.ready || 0}、需要人工 ${
-                data.stats.manual || 0
-              }`;
+              const stats = data.stats;
+              castFill.text = `扫描完成：共 ${stats.total || 0} 个角色需要音色（可复用 ${
+                stats.reuse || 0
+              }、需生成 ${stats.generate || 0}、已就绪 ${stats.ready || 0}、需要人工 ${
+                stats.manual || 0
+              }）；龙套池 ${stats.pool_total || 0} 组（生成 ${stats.pool_generate || 0}、复用 ${
+                stats.pool_reuse || 0
+              }、已就绪 ${stats.pool_ready || 0}）`;
             }
           } else if (event === "progress") {
             castFill.text = fillProgressText(data);
+          } else if (event === "pool") {
+            const item = data.pool || data;
+            if (!castFill.job) castFill.job = { items: [], pool_items: [] };
+            const pools = castFill.job.pool_items || [];
+            const index = pools.findIndex((row) => row.slot === item.slot);
+            if (index >= 0) pools[index] = item;
+            else pools.push(item);
+            castFill.job.pool_items = pools;
+            castFill.text = `龙套音色池「${item.label || "龙套分组"}」${
+              item.status === "failed" ? "未完成" : "已就绪"
+            }`;
           } else if (event === "item") {
+            const item = data.item || data;
             if (!castFill.job) castFill.job = { items: [] };
             const items = castFill.job.items || [];
-            const index = items.findIndex((item) => item.character_id === data.character_id);
-            if (index >= 0) items[index] = data;
-            else items.push(data);
+            const index = items.findIndex((row) => row.character_id === item.character_id);
+            if (index >= 0) items[index] = item;
+            else items.push(item);
             castFill.job.items = items;
           } else if (event === "finished") {
             castFill.job = data.job || castFill.job;
@@ -1444,6 +1634,24 @@
     }
   }
 
+  /* 单个失败龙套池重试：重新建池并补好映射。 */
+  async function retryFillPool(slot) {
+    if (!NW.state.path) return;
+    try {
+      const data = await NW.api("/api/ui/cast/fill/resume", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: NW.state.path, pool_slots: [slot] }),
+      });
+      castFill.job = data.job || castFill.job;
+      castFill.hasRemaining = fillHasRemaining(castFill.job);
+      castFill.text = "正在重试龙套音色池…";
+      streamFill();
+    } catch (error) {
+      NW.toast(`重试失败：${error.message}`);
+    }
+  }
+
   /* 渲染本章音色覆盖的章节下拉、行与状态。 */
   function renderCastOverrides() {
     const select = el("castOverrideChapter");
@@ -1485,7 +1693,7 @@
       .map(
         (item) =>
           `<option value="${esc(item.id)}"${override && String(item.id) === String(override.voice_id) ? " selected" : ""}>${esc(
-            item.name || item.id
+            item.name || "未命名音色"
           )}</option>`
       )
       .join("");
@@ -1607,7 +1815,7 @@
     const poolRows = pool
       .map(
         (item, index) => `<tr>
-          <td><input class="input" data-cast-section="pool" data-index="${index}" data-key="slot" value="${esc(item.slot)}" /></td>
+          <td><span class="cast-slot-label">${esc(castSlotLabel(item.slot))}</span></td>
           <td><input class="input" data-cast-section="pool" data-index="${index}" data-key="label" value="${esc(item.label)}" /></td>
           <td><select class="input" data-cast-section="pool" data-index="${index}" data-key="voice_id">${castVoiceOptions(item.voice_id)}</select></td>
           <td><select class="input" data-cast-section="pool" data-index="${index}" data-key="gender">
@@ -1616,7 +1824,7 @@
             <option value="female"${item.gender === "female" ? " selected" : ""}>女</option>
             <option value="other"${item.gender === "other" ? " selected" : ""}>其他</option>
           </select></td>
-          <td><input class="input" data-cast-section="pool" data-index="${index}" data-key="age_feel" value="${esc(item.age_feel || "")}" placeholder="young_adult" /></td>
+          <td><select class="input" data-cast-section="pool" data-index="${index}" data-key="age_feel">${castAgeFeelOptions(item.age_feel)}</select></td>
           <td><button class="btn small" type="button" data-cast-del="pool" data-index="${index}">删除</button></td>
         </tr>`
       )
@@ -1625,7 +1833,7 @@
       .map((key) => {
         const meta = castMeta.stockSlots.find((item) => item.slot === key);
         return `<tr>
-          <td><code>${esc(key)}</code></td>
+          <td>${esc(castStockKeyLabel(key))}</td>
           <td>${esc((meta && meta.label) || "")}${meta ? `（${meta.count} 个角色）` : ""}</td>
           <td><select class="input" data-cast-section="stock" data-stock-key="${esc(key)}">${castVoiceOptions(defaults[key] || "")}</select></td>
         </tr>`;
@@ -1634,7 +1842,7 @@
     const personaRows = personas
       .map(
         (item, index) => `<tr>
-          <td><code>${esc(item.id)}</code></td>
+          <td><span class="cast-slot-label">人格 ${index + 1}</span></td>
           <td><input class="input" data-cast-section="persona" data-index="${index}" data-key="label" value="${esc(item.label)}" /></td>
           <td><select class="input" data-cast-section="persona" data-index="${index}" data-key="voice_id">${castVoiceOptions(item.voice_id)}</select></td>
           <td><button class="btn small" type="button" data-cast-del="persona" data-index="${index}">删除</button></td>
@@ -1693,7 +1901,7 @@
           </div>
           <span class="muted cast-toolbar-state" id="castAutoFillState"></span>
         </div>
-        <p class="muted cast-panel-note">一键补齐：扫描全部需要音色的角色，能复用的直接绑定，库中没有的自动生成候选并采用第 1 条；可随时停止，再点「继续补齐」只补剩余。旁白只走固定人格，性别或档案不足的角色标「需要人工」。</p>
+        <p class="muted cast-panel-note">一键补齐：先建龙套音色池（池里没音色就自动生成并写好映射），再绑定可复用音色，最后为缺音色的角色各生成 4 条候选并自动采用第 1 条；可随时停止，再点「继续补齐」只补剩余。旁白只走固定人格，性别或档案不足的角色标「需要人工」。</p>
         <div id="castAutoFillPreview" hidden></div>
         <div class="cast-fill" id="castFillPanel" hidden>
           <div class="cast-fill-head">
@@ -1730,7 +1938,7 @@
         <details class="cast-section" data-cast-section="pool"${detailsOpen("pool", poolReady)}>
           <summary><span class="cast-section-title"><b>音色池</b> ${sectionTag(poolReady)} <span class="muted">${poolSlots.length} 个槽位，${poolFilled} 个已定音</span></span></summary>
           <div class="cast-section-body">
-            <p class="muted cast-panel-note">槽位键是稳定键，保存后不要随意改名；同一槽位可被多个职业龙套复用。</p>
+            <p class="muted cast-panel-note">槽位按性别与年龄感固定分组，保存后不要随意改名；同一槽位可被多个职业龙套复用。</p>
             <div class="cast-table-wrap">
               <table class="table"><thead><tr><th>槽位</th><th>名称</th><th>音色</th><th>性别</th><th>年龄感</th><th></th></tr></thead>
               <tbody>${poolRows || '<tr><td colspan="6" class="muted">还没有音色池槽位</td></tr>'}</tbody></table>
@@ -1742,7 +1950,7 @@
         <details class="cast-section" data-cast-section="stock"${detailsOpen("stock", stockReady)}>
           <summary><span class="cast-section-title"><b>龙套职业映射</b> ${sectionTag(stockReady)} <span class="muted">${stockCount} 个映射</span></span></summary>
           <div class="cast-section-body">
-            <p class="muted cast-panel-note">键可以是音色池槽位（如 male_mid），也可以是具体职业槽位（如 waiter）；职业槽位优先。</p>
+            <p class="muted cast-panel-note">键可以是龙套分组槽位（如青年男声），也可以是具体职业槽位（如服务员）；职业槽位优先。</p>
             <div class="cast-table-wrap">
               <table class="table"><thead><tr><th>键</th><th>来源</th><th>音色</th></tr></thead><tbody>${
                 stockRows || '<tr><td colspan="3" class="muted">还没有可映射的槽位</td></tr>'
@@ -1755,7 +1963,7 @@
           <summary><span class="cast-section-title"><b>旁白人格</b> ${sectionTag(personaReady)} <span class="muted">${(castDraft.narrators || []).length} 个人格</span></span></summary>
           <div class="cast-section-body">
             <div class="cast-table-wrap">
-              <table class="table"><thead><tr><th>ID</th><th>名称</th><th>音色</th><th></th></tr></thead>
+              <table class="table"><thead><tr><th>序号</th><th>名称</th><th>音色</th><th></th></tr></thead>
               <tbody>${personaRows || '<tr><td colspan="4" class="muted">还没有旁白人格</td></tr>'}</tbody></table>
             </div>
             <div class="cast-section-actions">
@@ -1783,7 +1991,7 @@
         <div id="castPlanPreview" class="muted">—</div>
 
         <h3>角色试听（用本书真实台词）</h3>
-        <p class="muted cast-panel-note">优先取当前章节的一句台词，按所选音色合成到 <code>.ndw/cast_previews/</code>（只保留最近 12 条，不写章节、不进时间轴）。换几个候选音色连续点「试听这句」即可横向对比。</p>
+        <p class="muted cast-panel-note">优先取当前章节的一句台词，按所选音色合成试听音频（只保留最近 12 条，不写章节、不进时间轴）。换几个候选音色连续点「试听这句」即可横向对比。</p>
         <div class="cast-preview">
           <div class="cast-preview-row">
             <select class="input" id="castPreviewCharacter">${castPreviewCharacterOptions(castPreview.character)}</select>
@@ -1813,9 +2021,9 @@
         (item) =>
           `<div class="item">` +
           `<button class="btn small" type="button" data-preview-play="${esc(item.audio)}">▶</button>` +
-          `<b>${esc(item.voice_name || item.voice_id)}</b>` +
+          `<b>${esc(item.voice_name || "未命名音色")}</b>` +
           `<span>${esc(summary(item.text || "", 24))}</span>` +
-          `<span class="muted">${esc(item.chapter_title || item.chapter_id || "")} · ${esc(item.line_id || "")}</span>` +
+          `<span class="muted">${esc(item.chapter_title || "未命名章节")}</span>` +
           `</div>`
       )
       .join("");
@@ -1905,7 +2113,11 @@
     const box = el("castErrors");
     if (!box) return;
     const list = errors || [];
-    box.innerHTML = list.length ? `<b>未保存，请先修正：</b><ul>${list.map((item) => `<li>${esc(item)}</li>`).join("")}</ul>` : "";
+    box.innerHTML = list.length
+      ? `<b>未保存，请先修正：</b><ul>${list
+          .map((item) => `<li>${esc(localizeCastText(item))}</li>`)
+          .join("")}</ul>`
+      : "";
   }
 
   /* 打开编辑器：拉取当前 cast 与章节/音色。 */
@@ -2058,6 +2270,11 @@
       retryFillCharacter(fillRetry);
       return;
     }
+    const fillPoolRetry = target.getAttribute("data-fill-pool-retry");
+    if (fillPoolRetry) {
+      retryFillPool(fillPoolRetry);
+      return;
+    }
     if (target.id === "castAutoFillBtn") {
       loadAutoFillPlan();
       return;
@@ -2150,7 +2367,8 @@
     const findings = (result && result.findings) || [];
     const errors = findings.filter((item) => item.level === "error").length;
     const warns = findings.filter((item) => item.level === "warn").length;
-    if (out) out.textContent = `结论 ${(result && result.level) || "ok"}：error ${errors}，warn ${warns}`;
+    const level = (result && result.level) || "ok";
+    if (out) out.textContent = `检查结论：${level === "ok" ? "通过" : "发现问题"}（错误 ${errors} 项，提醒 ${warns} 项）`;
   }
 
   /* 在补全蒙版的卡片里挂「停止补全」按钮，结束后由调用方移除。

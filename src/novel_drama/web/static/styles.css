@@ -358,6 +358,12 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); }
 
 .row:hover { background: #1c2027; }
 .row.selected { background: #24304a; box-shadow: inset 2px 0 0 var(--accent); }
+/* 从告警定位过来的行短暂闪烁，方便在一长串台词里一眼看到 */
+.row.row-flash { animation: row-flash 0.8s ease-out 2; }
+@keyframes row-flash {
+  0% { background: #3a3120; box-shadow: inset 2px 0 0 #d9a441; }
+  100% { background: transparent; box-shadow: inset 2px 0 0 transparent; }
+}
 
 .row .c-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .row .c-num, .row .c-index { font-variant-numeric: tabular-nums; }
@@ -372,14 +378,22 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); }
 .row .c-speaker.unknown { color: var(--stale); }
 .row .c-check, .thead .c-check { display: flex; align-items: center; justify-content: center; }
 .row .c-check input { margin: 0; cursor: pointer; }
-/* 多选工具条：勾选两行以上时出现，避免常驻占位 */
+/* 多选工具条：勾选后才出现，做成一条轻量「已选动作条」，
+ * 与「批量补齐」卡片区分开，避免两条同权重横条堆在一起 */
 .multibar {
   display: flex;
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
-  padding: 6px 2px 2px;
+  padding: 6px 10px;
+  margin: 0 var(--sp-4) var(--sp-2);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 32%, transparent);
+  border-radius: var(--radius);
 }
+/* hidden 属性要压过 display:flex，否则「选 0 行」的空工具条也会显示 */
+.multibar[hidden] { display: none; }
+.multibar #multiInfo { color: var(--text); font-weight: 600; }
 .multibar select { min-width: 140px; }
 #fSpeaker.is-unknown { border-color: var(--stale); color: var(--stale); }
 .badge.unknown-badge.active { color: var(--stale); }
@@ -557,9 +571,12 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); }
   padding: var(--sp-2) var(--sp-4);
   background: var(--panel);
   border-top: 1px solid var(--line);
+  /* 窄窗口下整条底栏换行，按钮保持单行文字，不被挤成竖排 */
+  flex-wrap: wrap;
+  row-gap: var(--sp-2);
 }
 
-.run-info { color: var(--muted); }
+.run-info { color: var(--muted); min-width: 0; overflow-wrap: anywhere; }
 
 .run-meter {
   flex: 0 1 260px;
@@ -590,8 +607,8 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); }
 }
 
 .run-progress { color: var(--text); font-variant-numeric: tabular-nums; }
-.runbar .btn { margin-left: 0; }
-.run-actions { margin-left: auto; display: flex; align-items: center; gap: var(--sp-2); }
+.runbar .btn { margin-left: 0; white-space: nowrap; }
+.run-actions { margin-left: auto; display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; }
 
 /* ---------------- 台词试听 ---------------- */
 
@@ -706,6 +723,62 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); }
 }
 
 .warn-box ul { margin: var(--sp-2) 0 0; padding-left: var(--sp-5); }
+
+/* 告警可点击定位：整条做成按钮，右侧标出会跳到哪里 */
+.warn-tip { margin-left: var(--sp-2); color: var(--muted); font-size: var(--fs-xs); }
+.warn-list { list-style: none; margin: var(--sp-2) 0 0; padding: 0; display: flex; flex-direction: column; gap: var(--sp-1); }
+.warn-list li { margin: 0; }
+.warn-link {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  width: 100%;
+  padding: var(--sp-1) var(--sp-2);
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.warn-link:hover,
+.warn-link:focus-visible { background: #3a3120; border-color: #6b5a30; outline: none; }
+.warn-link .warn-text { flex: 1; min-width: 0; word-break: break-word; }
+.warn-link .warn-go { flex: none; color: #ffd98a; font-size: var(--fs-xs); white-space: nowrap; }
+
+/* 定位后的短暂高亮：告警区 / 标注镜头 / 台词行 */
+.warn-box.is-warn-target { animation: warn-flash 1.2s ease-out 2; }
+.shot.is-warn-target { border-color: #d9a441; box-shadow: 0 0 0 1px #d9a441 inset; }
+.mk-line.is-warn-line { background: #3a3120; box-shadow: inset 2px 0 0 #d9a441; }
+.warn-snippet {
+  display: flex;
+  gap: var(--sp-2);
+  align-items: baseline;
+  flex-wrap: wrap;
+  margin: var(--sp-1) 0;
+  padding: var(--sp-1) var(--sp-2);
+  border-left: 2px solid #d9a441;
+  background: #2a2418;
+  border-radius: 0 6px 6px 0;
+  font-size: var(--fs-xs);
+  color: #ffe7b8;
+}
+.warn-snippet-text { color: var(--text); word-break: break-word; }
+/* 章节级降级说明：明确告诉用户为什么只能定位到告警区 */
+.warn-level-note {
+  margin-bottom: var(--sp-2);
+  padding: var(--sp-1) var(--sp-2);
+  border-left: 2px solid #d9a441;
+  background: #3a3120;
+  border-radius: 0 6px 6px 0;
+  font-size: var(--fs-xs);
+  color: #ffe7b8;
+}
+@keyframes warn-flash {
+  0% { box-shadow: 0 0 0 0 rgba(217, 164, 65, 0.7); }
+  100% { box-shadow: 0 0 0 6px rgba(217, 164, 65, 0); }
+}
 
 /* 统一错误态：媒体/产物加载失败时的可见提示（不静默空白） */
 .error-box {
@@ -2382,15 +2455,36 @@ select.gen-input {
 .cast-preview-log .item { display: flex; gap: var(--sp-2); align-items: center; }
 
 .batch-panel {
-  border-top: 1px solid var(--line);
+  border: 1px solid var(--line);
+  border-radius: 8px;
   background: var(--panel);
   padding: var(--sp-3) var(--sp-4);
-  max-height: 42vh;
+  margin: var(--sp-2) var(--sp-4) var(--sp-3);
+  max-height: 46vh;
   overflow: auto;
+  min-width: 0;
 }
 .batch-panel[hidden] { display: none; }
-.batch-head { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; }
-.batch-meta { color: var(--muted); font-size: var(--fs-sm); }
+.batch-head { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; row-gap: var(--sp-2); }
+.batch-head b { white-space: nowrap; }
+/* 标题行的下拉与按钮不参与压缩，窄宽度时整行换行而不是把文字挤成竖排 */
+.batch-head select,
+.batch-head .btn,
+.batch-controls .btn,
+.multibar .btn { flex: none; white-space: nowrap; }
+.batch-head .batch-meta { flex: 1 1 220px; min-width: 0; overflow-wrap: anywhere; }
+.batch-spacer { flex: 1 1 0; min-width: 0; }
+.batch-controls {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  row-gap: var(--sp-2);
+  margin-top: var(--sp-2);
+}
+.batch-controls .batch-meta { flex: 1 1 260px; min-width: 0; overflow-wrap: anywhere; }
+.batch-panel .run-meter { margin-top: var(--sp-2); }
+.batch-meta { color: var(--muted); font-size: var(--fs-sm); white-space: pre-wrap; }
 .batch-failures { display: flex; flex-direction: column; gap: var(--sp-1); margin-top: var(--sp-2); }
 .batch-failure {
   display: flex;
@@ -2524,3 +2618,5 @@ select.gen-input {
 .cast-fill-detail { flex: 1 1 160px; min-width: 0; }
 .cast-fill-failures { display: flex; flex-direction: column; }
 .cast-fill-failure-head { color: var(--danger, #d9534f); font-weight: 600; }
+/* 音色池槽位与旁白人格序号：稳定键只做数据存储，页面显示中文名 */
+.cast-slot-label { color: var(--fg-muted, #6b7280); white-space: nowrap; }

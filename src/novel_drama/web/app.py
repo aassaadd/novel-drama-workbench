@@ -1508,15 +1508,40 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
 
     @app.get("/api/ui/script")
     def ui_script(path: str = Query(...), chapter: str = Query(...)) -> dict:
-        """导演标注文本与脚本文件状态（读落盘产物，不重算）。"""
+        """导演标注文本与脚本文件状态（读落盘产物，不重算）。
+
+        额外解析落盘标注，返回 `warnings` 与结构化 `warning_items`，
+        让页面重进后仍能看到告警并点击定位；解析失败只影响告警展示，不影响标注回显。
+        """
         store = _store(path)
         markup_path = store.root / "scripts" / f"{chapter}.markup.txt"
         script_path = store.script_path(chapter)
+        markup = markup_path.read_text(encoding="utf-8") if markup_path.exists() else ""
+        warnings: list[str] = []
+        warning_items: list[dict] = []
+        if markup.strip():
+            try:
+                from ..director.markup import parse_markup
+
+                warning_items = []
+                script = parse_markup(
+                    markup,
+                    store.load_chapter(chapter),
+                    store.load_characters()["characters"],
+                    store.settings(),
+                    diagnostics=warning_items,
+                )
+                warnings = script.get("warnings") or []
+            except Exception:  # noqa: BLE001 - 告警展示失败不阻断标注回显
+                warnings = []
+                warning_items = []
         return {
             "markup_path": str(markup_path),
-            "markup": markup_path.read_text(encoding="utf-8") if markup_path.exists() else "",
+            "markup": markup,
             "script_path": str(script_path),
             "has_script": script_path.exists(),
+            "warnings": warnings,
+            "warning_items": warning_items,
         }
 
     @app.post("/api/ui/script/suggest")
@@ -2239,10 +2264,10 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
 
     @app.post("/api/ui/cast/fill/resume")
     def ui_cast_fill_resume(body: dict) -> dict:
-        """继续补齐剩余角色，或重试指定角色。
+        """继续补齐剩余角色，或重试指定角色 / 龙套音色池。
 
         参数:
-            body: `{path, character_ids?}`；character_ids 为空时补齐全部未完成与失败项。
+            body: `{path, character_ids?, pool_slots?}`；两者都为空时补齐全部未完成与失败项。
 
         返回:
             `{job}`。
@@ -2250,7 +2275,12 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         from ..tts import voice_fill
 
         try:
-            job = voice_fill.resume_job(_store(body.get("path")), _tts_config(), body.get("character_ids"))
+            job = voice_fill.resume_job(
+                _store(body.get("path")),
+                _tts_config(),
+                body.get("character_ids"),
+                body.get("pool_slots"),
+            )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail={"code": 2, "message": str(exc)}) from exc
         return {"job": job}

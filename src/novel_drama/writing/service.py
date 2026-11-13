@@ -1150,8 +1150,12 @@ def suggest_script(
             detail={"failures": failures},
         )
     markup = "\n\n".join(batch["markup"] for batch in done_batches).strip()
+    #: 硬告警的结构化定位信息（页面点击告警直接跳转用）；信息级提示不写入
+    warning_items: list[dict] = []
     try:
-        script = parse_markup(markup, chapter, characters, store.settings())
+        script = parse_markup(
+            markup, chapter, characters, store.settings(), diagnostics=warning_items
+        )
     except ValueError as exc:
         raise AdapterError(ErrorCode.INVALID_INPUT, f"导演标注无法解析：{exc}", detail={"raw": markup[:2000]}) from exc
     if not failures:
@@ -1163,6 +1167,7 @@ def suggest_script(
         "markup": markup,
         "script": script,
         "warnings": script.get("warnings") or [],
+        "warning_items": warning_items,
         "shots": len(script.get("shots") or []),
         "lines": sum(len(shot.get("lines") or []) for shot in script.get("shots") or []),
         "provider": getattr(last_result, "model", "") or getattr(adapter, "model", "") or "offline-writing",

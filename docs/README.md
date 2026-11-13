@@ -37,6 +37,8 @@
 | [spec-r28-outline-inline-edit.md](spec-r28-outline-inline-edit.md) | 大纲页就地编辑幕/章标题与概要和节拍文本 | 已实现；桩验证校验与不写章节文件，未做页面实测 |
 | [spec-r29-character-desc-fill-stream.md](spec-r29-character-desc-fill-stream.md) | 补全人物描述流式进度（逐角色、可停止） | 已实现；桩验证事件序列/失败隔离/取消保留，未做页面实测 |
 | [spec-r30-script-warning-noise.md](spec-r30-script-warning-noise.md) | 导演标注告警降噪：说话人归一化、越界夹紧、告警分级与合并 | 已实现；桩验证 + 真实工程重跑 45→0 条告警 |
+| [spec-r31-anchor-orphan-fix.md](spec-r31-anchor-orphan-fix.md) | 标注锚点误判 orphan（游标漂移 / 标点差异）修复 | 已实现；真实工程副本 orphan 148→0 |
+| [spec-r32-warning-locator.md](spec-r32-warning-locator.md) | 标注/配音告警点击定位：台词行 / 镜头 / 告警区三级跳转与降级说明 | 已实现；真实浏览器验证三类目标与降级 |
 
 ## 调研（只作依据，不改生产代码）
 

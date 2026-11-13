@@ -28,6 +28,16 @@ from .voice_casting import _score, age_band
 _BAND_SLOT = {"child": "young", "youth": "young", "adult": "mid", "middle": "mid", "senior": "elder"}
 #: 槽位后缀 → 中文年龄段
 _SLOT_LABEL = {"young": "青年", "mid": "中年", "elder": "老年"}
+
+#: 池槽位稳定键 → 中文展示名（只用于展示，不改变存储键）
+_POOL_SLOT_LABEL = {
+    "male_young": "青年男声",
+    "male_mid": "中年男声",
+    "male_elder": "老年男声",
+    "female_young": "青年女声",
+    "female_mid": "中年女声",
+    "female_elder": "老年女声",
+}
 #: 性别 → 中文
 _GENDER_LABEL = {"male": "男", "female": "女"}
 #: 动作中文名（页面展示用）
@@ -146,10 +156,10 @@ def _plan_pool(characters: list[dict], voices: list[dict], cast: dict) -> tuple[
     for slot, group in groups.items():
         suffix = group["suffix"]
         names = "、".join(str(item.get("name") or item.get("id")) for item in group["characters"][:3])
-        label = f"{_GENDER_LABEL[group['gender']]}{_SLOT_LABEL.get(suffix, '中年')}声"
+        label = f"{_SLOT_LABEL.get(suffix, '中年')}{_GENDER_LABEL[group['gender']]}声"
         voice, reason = _rank_for_group(voices, group["characters"], usage)
         existing = by_slot.get(slot)
-        basis = f"龙套 {names}（{group['gender']}:{suffix}）共用；{reason}"
+        basis = f"龙套 {names}（{_GENDER_LABEL[group['gender']]}·{_SLOT_LABEL.get(suffix, '中年')}）共用；{reason}"
         if existing is None:
             if voice is None:
                 manual.append({"section": "pool", "key": slot, "message": f"{label}：{reason}，需要人工指定"})
@@ -247,6 +257,7 @@ def _plan_pool(characters: list[dict], voices: list[dict], cast: dict) -> tuple[
             continue
         stock_groups.setdefault(key, {"characters": []})["characters"].append(character)
     for key, group in stock_groups.items():
+        key_label = _stock_key_label(key, characters, by_slot)
         names = "、".join(str(item.get("name") or item.get("id")) for item in group["characters"][:3])
         current = str(stock_defaults.get(key) or "")
         if current:
@@ -255,7 +266,7 @@ def _plan_pool(characters: list[dict], voices: list[dict], cast: dict) -> tuple[
                     "section": "stock",
                     "key": key,
                     "action": "keep",
-                    "label": f"龙套映射 {key}",
+                    "label": f"龙套映射 {key_label}",
                     "current": current,
                     "proposed": current,
                     "proposed_name": _voice_name({str(item.get("id")): item for item in voices}, current),
@@ -273,13 +284,15 @@ def _plan_pool(characters: list[dict], voices: list[dict], cast: dict) -> tuple[
                 proposed = group_voice[slot]
                 break
         if not proposed:
-            manual.append({"section": "stock", "key": key, "message": f"龙套映射 {key}：没有可复用的池音色，需要人工指定"})
+            manual.append(
+                {"section": "stock", "key": key, "message": f"龙套映射 {key_label}：没有可复用的池音色，需要人工指定"}
+            )
             items.append(
                 {
                     "section": "stock",
                     "key": key,
                     "action": "manual",
-                    "label": f"龙套映射 {key}",
+                    "label": f"龙套映射 {key_label}",
                     "current": None,
                     "proposed": None,
                     "proposed_name": "",
@@ -293,7 +306,7 @@ def _plan_pool(characters: list[dict], voices: list[dict], cast: dict) -> tuple[
                 "section": "stock",
                 "key": key,
                 "action": "fill",
-                "label": f"龙套映射 {key}",
+                "label": f"龙套映射 {key_label}",
                 "current": None,
                 "proposed": proposed,
                 "proposed_name": _voice_name({str(item.get("id")): item for item in voices}, proposed),
@@ -310,6 +323,34 @@ def _reason_no_pool(characters: list[dict]) -> str:
         if character.get("gender") not in ("male", "female"):
             return f"「{character.get('name') or character.get('id')}」性别未定"
     return "同组音色池未定音"
+
+
+def _stock_key_label(key: str, characters: list[dict], by_slot: dict) -> str:
+    """把龙套映射的稳定键转成中文展示名（只用于展示，不改变存储键）。
+
+    参数:
+        key: 职业槽位或音色池槽位键。
+        characters: 全部人物档案（用于取职业槽位的中文名）。
+        by_slot: 现有音色池槽位映射。
+
+    返回:
+        中文名，例如「中年男声」或「服务员」；未知时返回「职业槽位」。
+    """
+    text = str(key or "")
+    item = by_slot.get(text)
+    if item and item.get("label"):
+        return str(item["label"])
+    if text in _POOL_SLOT_LABEL:
+        return _POOL_SLOT_LABEL[text]
+    if "_" in text:
+        gender, suffix = text.split("_", 1)
+        if gender in _GENDER_LABEL and suffix in _SLOT_LABEL:
+            return f"{_SLOT_LABEL[suffix]}{_GENDER_LABEL[gender]}声"
+    for character in characters:
+        stock = character.get("stock") or {}
+        if (stock.get("slot") == text or stock.get("voice_slot") == text) and stock.get("label"):
+            return str(stock["label"])
+    return "职业槽位"
 
 
 def _plan_narrator(characters: list[dict], voices: list[dict], cast: dict) -> tuple[list[dict], list[dict], dict]:

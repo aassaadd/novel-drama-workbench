@@ -236,10 +236,24 @@ async function refreshBatch() {
     renderBatchFill(0, plan.total);
     $("batchEta").textContent = "";
   } catch (error) {
+    // 面板里必须给出「为什么读不出来 + 下一步去哪」，不能只留一个 HTTP 状态码
     $("batchPlanInfo").textContent = `读取失败：${error.message}`;
+    $("batchProgress").textContent = batchErrorHint(error.message);
     $("batchStart").disabled = true;
     renderBatchUnknown([], 0, true);
   }
+}
+
+/* 把补齐失败的中文原因归类成下一步指引（只做关键词归类，判定仍在后端）。 */
+function batchErrorHint(message) {
+  const text = String(message || "");
+  if (/刷新|旧版本|参数/.test(text)) return "下一步：刷新页面（⌘R / Ctrl+R）后重新打开本面板。";
+  if (/章节不存在|未找到|NOT_FOUND/.test(text)) return "下一步：这一章可能已被删除或重新生成，回到「章节」页重新选章后再点「刷新」。";
+  if (/切分|场景|scenes?/i.test(text)) return "下一步：到「章节」页把这章切分成场景与台词，回来点「刷新」。";
+  if (/音色|绑定|voice/i.test(text)) return "下一步：到「人物」页给相关角色绑定音色，回来点「刷新」。";
+  if (/provider|模型|权重|NOT_IMPLEMENTED|未就绪/i.test(text)) return "下一步：到「设置」页确认配音 provider 与模型已就绪，回来点「刷新」。";
+  if (/说话人|chr_unknown|unknown/i.test(text)) return "下一步：到「章节」页修说话人，回来点「刷新」。";
+  return "下一步：先点「刷新」重试；如果一直失败，把这条提示连同服务端日志一起反馈。";
 }
 
 /* 渲染「说话人未识别」清单：只做提示与定位，不在这里改数据。 */
@@ -299,7 +313,7 @@ async function startBatch(options = {}) {
     $("batchFailures").innerHTML = "";
     startBatchPolling();
   } catch (error) {
-    $("batchProgress").textContent = `启动失败：${error.message}`;
+    $("batchProgress").textContent = `启动失败：${error.message}\n${batchErrorHint(error.message)}`;
     if (trigger) trigger.disabled = false;
   }
 }
@@ -444,17 +458,20 @@ function injectBatchPanel() {
         <option value="all">全书缺失</option>
       </select>
       <span class="batch-meta" id="batchPlanInfo">读取中…</span>
-      <button class="btn small primary" type="button" id="batchStart" disabled>开始补齐</button>
-      <button class="btn small" type="button" id="batchSkipUnknown" hidden>跳过这些行，先配其余行</button>
+      <span class="batch-spacer"></span>
       <button class="btn small" type="button" id="batchRefresh">刷新</button>
       <button class="btn small" type="button" id="batchClose">收起</button>
     </div>
-    <div class="run-meter" style="margin-top:8px">
+    <div class="batch-controls">
+      <button class="btn small primary" type="button" id="batchStart" disabled>开始补齐</button>
+      <button class="btn small" type="button" id="batchSkipUnknown" hidden>跳过这些行，先配其余行</button>
+      <span class="batch-meta">只补未生成/失败/过期的行，已有音频跳过；中途停止后再点「开始补齐」会接着跑。</span>
+    </div>
+    <div class="run-meter">
       <div class="run-track"><div class="run-fill" id="batchFill"></div></div>
       <span class="run-eta" id="batchEta" hidden></span>
     </div>
-    <div class="batch-meta" id="batchProgress" style="margin-top:6px"></div>
-    <div class="batch-meta" style="margin-top:4px">只补未生成/失败/过期的行，已有音频跳过；中途停止后再点「开始补齐」会接着跑。</div>
+    <div class="batch-meta" id="batchProgress"></div>
     <div class="batch-failures" id="batchUnknown"></div>
     <div class="batch-failures" id="batchFailures"></div>`;
   // 顶部徽标下方：面板打开时不挤在底部运行栏之外
@@ -575,6 +592,17 @@ function renderTable() {
   }
   layer.innerHTML = html.join("");
   layer.style.height = `${(end - start) * ROW_H}px`;
+  // 浏览器会记住上一次的勾选外观：渲染后按内存里的选中集合校正一次，
+  // 避免出现「看着满屏勾选、实际已选 0 行」这种状态错位。
+  layer.querySelectorAll("[data-check]").forEach((box) => {
+    box.checked = state.checked.has(box.dataset.check);
+  });
+  const checkAll = $("checkAll");
+  if (checkAll) {
+    // 表头全选跟随当前可见行：全勾=选中，部分勾=半选
+    checkAll.checked = rows.length > 0 && rows.every((row) => state.checked.has(row.line_id));
+    checkAll.indeterminate = !checkAll.checked && rows.some((row) => state.checked.has(row.line_id));
+  }
 }
 
 /* kindLabel / fmt / escapeHtml 已下沉到 core.js（本页仍按同名全局函数调用）。 */
@@ -639,19 +667,25 @@ function speakerOptionsHtml(selected, { withUnknown = true } = {}) {
   return options.join("");
 }
 
-/* 填「说话人」下拉：右栏单行 + 工具栏批量。 */
+/* 填「说话人」下拉：右栏单行 + 工具栏批量（批量用占位项，避免误选成旁白）。 */
 function fillSpeakerSelects(selected) {
   const single = $("fSpeaker");
   if (single) {
     single.innerHTML = speakerOptionsHtml(selected);
     single.value = selected || "";
   }
+  fillMultiSpeaker();
+}
+
+/* 批量说话人下拉：始终带「选择要设置的说话人」占位项，选中前不能点批量按钮。 */
+function fillMultiSpeaker() {
   const multi = $("multiSpeaker");
-  if (multi) {
-    const keep = multi.value;
-    multi.innerHTML = speakerOptionsHtml("", { withUnknown: false });
-    if (keep) multi.value = keep;
-  }
+  if (!multi) return;
+  const keep = multi.value;
+  multi.innerHTML =
+    '<option value="">选择要设置的说话人</option>' + speakerOptionsHtml("", { withUnknown: false });
+  const exists = [...multi.options].some((option) => option.value === keep);
+  multi.value = keep && exists ? keep : "";
 }
 
 /* 右栏「说话人」提示：未知角色/未登记角色/人物缺音色都用可见文案点出来。 */
@@ -824,6 +858,8 @@ async function loadLines() {
     state.unknownCount = state.onlyUnknown
       ? state.rows.length
       : state.rows.filter((row) => row.speaker_id === "chr_unknown" || !row.speaker_id).length;
+    await ensureVoiceCast();
+    fillMultiSpeaker();
     if (state.selected && !state.rows.some((row) => row.line_id === state.selected)) state.selected = null;
     state.scrollTop = $("viewport").scrollTop;
     renderBadges();
@@ -944,7 +980,7 @@ async function applyMultiSpeaker() {
   const lines = [...state.checked];
   if (!lines.length) return;
   await ensureVoiceCast();
-  if ($("multiSpeaker") && !$("multiSpeaker").options.length) fillSpeakerSelects("");
+  fillMultiSpeaker();
   const speaker = $("multiSpeaker").value;
   if (!speaker) return;
   const button = $("btnMultiApply");
@@ -960,6 +996,7 @@ async function applyMultiSpeaker() {
     const tail = missing.length ? `，${missing.length} 行未更新：${missing[0].message}` : "";
     toast(`已设置 ${counts.updated ?? 0} 行说话人${tail}`, missing.length === 0);
     state.checked.clear();
+    $("multiSpeaker").value = "";
     await loadLines();
   } catch (error) {
     toast(`批量设置失败：${error.message}`);
@@ -1636,6 +1673,13 @@ async function boot() {
   injectBatchPanel();
   // 章节切换只有一个入口：任何地方切章都只发 `chapter` 事件，由 applyChapter 统一落库到界面
   NW.on("chapter", applyChapter);
+  // 重新进入配音页时清掉上一轮残留的勾选：没有用户主动点全选，就不该显示「已选 N 行」
+  NW.on("view", (name) => {
+    if (name !== "voice" || !state.checked.size) return;
+    state.checked.clear();
+    updateMultiBar();
+    renderTable();
+  });
   // 右栏「在配音页校对」：切到配音视图并选中该行
   NW.on("focusLine", async (lineId) => {
     if (!lineId) return;

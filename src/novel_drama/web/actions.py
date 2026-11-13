@@ -71,7 +71,12 @@ def run(*argv: str) -> CliResult:
     out, err = io.StringIO(), io.StringIO()
     with _RUN_LOCK:
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            code = main([str(item) for item in argv if item is not None])
+            try:
+                code = main([str(item) for item in argv if item is not None])
+            except SystemExit as error:
+                # argparse 参数错误会直接 SystemExit；不接住会把 500 抛给页面。
+                # 参数说明已写进 stderr（上面已重定向），这里只转成退出码。
+                code = error.code if isinstance(error.code, int) else 2
     text = out.getvalue().strip()
     payload = None
     if text.startswith(("{", "[")):

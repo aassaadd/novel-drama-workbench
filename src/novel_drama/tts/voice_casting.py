@@ -115,6 +115,25 @@ def pool_key(character: dict) -> str:
     return f"{character.get('gender') or 'unknown'}:{age_band(character.get('age_range')) or 'adult'}"
 
 
+def pool_key_label(key: str) -> str:
+    """把音色池稳定键转成中文可读名（只用于展示，不改变存储键）。
+
+    参数:
+        key: `性别:年龄段`，例如 `male:adult`。
+
+    返回:
+        中文名，例如「男·中年」；无法识别时保留原值。
+    """
+    gender, _, band = str(key or "").partition(":")
+    gender_label = {"male": "男", "female": "女", "other": "其他", "unknown": "未知"}.get(gender)
+    band_label = {"child": "少年", "youth": "青年", "adult": "中年", "middle": "中年", "senior": "老年"}.get(band)
+    if gender_label and band_label:
+        return f"{gender_label}·{band_label}"
+    if gender_label:
+        return gender_label
+    return str(key or "")
+
+
 def bound_voice(store, character: dict, table: dict | None = None) -> dict | None:
     """角色当前绑定的可用音色。
 
@@ -239,7 +258,7 @@ def _suggest(store, character: dict, voices: list[dict], usage: dict[str, int], 
                 return None
             voice = max(ranked, key=lambda item: (item[0], str(item[1].get("id"))))[1]
         pool[key] = voice.get("id")
-        return {"voice_id": voice.get("id"), "voice_name": voice.get("name"), "reason": f"龙套池 {key} 复用，保证跨章节不串音"}
+        return {"voice_id": voice.get("id"), "voice_name": voice.get("name"), "reason": f"龙套池「{pool_key_label(key)}」复用，保证跨章节不串音"}
     scored = []
     for voice in voices:
         pair = _score(character, voice, usage)
