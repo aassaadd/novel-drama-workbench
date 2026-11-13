@@ -2383,3 +2383,124 @@ select.gen-input {
 }
 .batch-failure .where { color: var(--muted); min-width: 10em; }
 .batch-failure .why { flex: 1; overflow: hidden; text-overflow: ellipsis; }
+
+/* ---------- R31 音色编排面板：单列纵向布局，工具条 / 覆盖表用栅格，避免窄区域挤压 ---------- */
+.cast-panel { display: block; }
+.cast-panel h3 { margin: var(--sp-4) 0 var(--sp-2); font-size: var(--fs-md); }
+.cast-panel h3:first-child { margin-top: 0; }
+.cast-panel-note { max-width: 68ch; margin: 0 0 var(--sp-2); line-height: var(--lh-loose); }
+
+.cast-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2) var(--sp-3);
+  align-items: center;
+  margin-bottom: var(--sp-2);
+}
+.cast-toolbar-actions { display: flex; flex-wrap: wrap; gap: var(--sp-2); }
+.cast-toolbar .btn { flex: 0 0 auto; white-space: nowrap; }
+.cast-toolbar-state { flex: 1 1 240px; min-width: 0; }
+
+.cast-override-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2) var(--sp-3);
+  align-items: center;
+  margin-bottom: var(--sp-2);
+}
+.cast-override-chapter { display: inline-flex; flex: 0 0 auto; gap: var(--sp-2); align-items: center; white-space: nowrap; }
+.cast-override-chapter select { min-width: 220px; }
+.cast-override-bar .btn { flex: 0 0 auto; white-space: nowrap; }
+
+.cast-override-list { display: flex; flex-direction: column; gap: var(--sp-2); }
+.cast-override-row {
+  display: grid;
+  grid-template-columns: minmax(96px, 1.1fr) minmax(56px, auto) minmax(170px, 1.5fr) minmax(200px, 2fr) minmax(120px, auto);
+  gap: var(--sp-2) var(--sp-3);
+  align-items: center;
+  min-width: 0;
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--panel-2);
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+}
+.cast-override-row select { width: 100%; min-width: 0; }
+.cast-override-name { overflow: hidden; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.cast-override-source { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; min-width: 0; }
+.cast-override-source .muted { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.cast-override-action .btn { white-space: nowrap; }
+.cast-override-hint { grid-column: 1 / -1; }
+
+@media (max-width: 900px) {
+  .cast-override-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .cast-override-row .cast-override-source,
+  .cast-override-row select,
+  .cast-override-row .cast-override-action { grid-column: 1 / -1; }
+  .cast-override-chapter { flex: 1 1 100%; }
+  .cast-override-chapter select { min-width: 0; width: 100%; }
+}
+
+.cast-section { margin-top: var(--sp-4); padding-top: var(--sp-2); border-top: 1px solid var(--line-soft); }
+.cast-section > summary { cursor: pointer; }
+.cast-section-title { display: inline-flex; flex-wrap: wrap; gap: var(--sp-2); align-items: center; }
+.cast-section-title > .tag { margin: 0; }
+.cast-section-body { display: flex; flex-direction: column; gap: var(--sp-2); align-items: flex-start; padding-top: var(--sp-2); }
+.cast-section-body > .cast-panel-note { margin: 0; }
+.cast-section-body > .cast-table-wrap { width: 100%; }
+.cast-section-actions { display: flex; flex-wrap: wrap; gap: var(--sp-2) var(--sp-3); align-items: center; }
+.cast-inline-field { display: inline-flex; gap: var(--sp-2); align-items: center; white-space: nowrap; }
+.cast-inline-field select { min-width: 200px; }
+.cast-table-wrap { max-width: 100%; overflow-x: auto; }
+
+.cast-preview-row { display: flex; flex-wrap: wrap; gap: var(--sp-2); align-items: center; }
+.cast-preview-row select { min-width: 180px; }
+.cast-preview-row .btn { white-space: nowrap; }
+.cast-preview #castPreviewHint { margin: var(--sp-2) 0 0; }
+
+.cast-errors { margin-top: var(--sp-3); color: var(--danger, #d9534f); }
+.cast-footer { margin-top: var(--sp-3); }
+
+.cast-autofill-preview {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-3);
+  margin: var(--sp-2) 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.cast-autofill-head { display: flex; flex-wrap: wrap; gap: var(--sp-2); align-items: center; }
+.cast-autofill-item { display: flex; gap: var(--sp-2); align-items: flex-start; padding: var(--sp-1) 0; border-bottom: 1px solid var(--line-soft); }
+.cast-autofill-item:last-child { border-bottom: 0; }
+.cast-autofill-main { flex: 1 1 auto; min-width: 0; }
+.cast-autofill-actions { display: flex; flex-wrap: wrap; gap: var(--sp-2); }
+
+.cast-fill {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-3);
+  margin: var(--sp-2) 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.cast-fill-head { display: flex; flex-wrap: wrap; gap: var(--sp-2); align-items: center; }
+.cast-fill-text { flex: 1 1 auto; min-width: 0; }
+.cast-fill-head .btn { flex: 0 0 auto; white-space: nowrap; }
+.cast-fill-scan { margin: 0; max-width: 72ch; line-height: var(--lh-loose); }
+.cast-fill-bar { height: 6px; border-radius: 3px; background: var(--line-soft); overflow: hidden; }
+.cast-fill-bar > span { display: block; width: 0; height: 100%; background: var(--accent); transition: width 0.2s ease; }
+.cast-fill-items { display: flex; flex-direction: column; max-height: 220px; overflow-y: auto; }
+.cast-fill-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  align-items: center;
+  padding: var(--sp-1) 0;
+  border-bottom: 1px solid var(--line-soft);
+}
+.cast-fill-row:last-child { border-bottom: 0; }
+.cast-fill-name { font-weight: 600; }
+.cast-fill-detail { flex: 1 1 160px; min-width: 0; }
+.cast-fill-failures { display: flex; flex-direction: column; }
+.cast-fill-failure-head { color: var(--danger, #d9534f); font-weight: 600; }

@@ -471,6 +471,34 @@ def register_stream_routes(app, config_path: str | None = None) -> None:
 
         return StreamingResponse(events_iter(), media_type="text/event-stream", headers=_SSE_HEADERS)
 
+    @app.post("/api/ui/cast/fill/stream")
+    def ui_cast_fill_stream(body: dict) -> StreamingResponse:
+        """一键补齐全部音色（流式）：扫描 → 复用绑定 → 缺失生成。
+
+        参数:
+            body: `{path}`。
+
+        返回:
+            SSE：start → scan/item/progress* → finished(job, stats)；
+            断线只退订，不会取消服务端任务（停止请调用 fill/stop）。
+        """
+        from ..tts import voice_fill
+
+        store = _store(body.get("path"))
+        if not voice_fill.read_job(store):
+            raise HTTPException(status_code=404, detail="补齐任务不存在")
+
+        def events_iter():
+            """把补齐任务事件转成 SSE。"""
+            yield _sse("start", {"ok": True})
+            try:
+                for event, data in voice_fill.job_events(store):
+                    yield _sse(event, data)
+            except Exception as exc:  # noqa: BLE001 - 统一转成 error 事件
+                yield _sse("error", {"message": _error_message(exc)})
+
+        return StreamingResponse(events_iter(), media_type="text/event-stream", headers=_SSE_HEADERS)
+
     @app.post("/api/ui/voices/design/batches/{batch_id}/stream")
     def ui_voices_design_stream(batch_id: str, body: dict) -> StreamingResponse:
         """音色候选抽卡（流式）：逐条透出已完成候选与生成进度。

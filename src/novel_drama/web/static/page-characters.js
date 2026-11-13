@@ -959,6 +959,17 @@
   let castOverride = { chapter: "", rows: [], voices: [], loaded: false, busy: false, message: "" };
   /* 按角色自动补齐：预览计划、是否展开、撤回状态 */
   let castAutoFill = { plan: null, open: false, undo: { available: false }, loading: false, state: "" };
+  /* 一键补齐全部音色：任务快照、流式状态、进度文案 */
+  let castFill = {
+    job: null,
+    hasRemaining: false,
+    running: false,
+    scanning: false,
+    text: "",
+    stats: null,
+    token: 0,
+    abort: null,
+  };
 
   const CAST_DEFAULT_POOL = [
     ["male_young", "青年男声", "male", "young_adult"],
@@ -1073,9 +1084,9 @@
           item.action === "manual"
             ? '<span class="muted">保持原样，不会写入</span>'
             : `<b>${esc(item.proposed_name || item.proposed || "—")}</b>`;
-        return `<div style="display:flex;gap:8px;align-items:flex-start;padding:6px 0;border-bottom:1px solid #f1f1f1">
+        return `<div class="cast-autofill-item">
           <span class="tag">${esc(sectionLabels[item.section] || item.section)}</span>
-          <div style="flex:1">
+          <div class="cast-autofill-main">
             <div>${esc(item.label || item.key)} ${badge} → ${target}</div>
             <div class="muted">${esc(item.reason || "")}</div>
           </div>
@@ -1083,13 +1094,13 @@
       })
       .join("");
     box.hidden = false;
-    box.innerHTML = `<div class="card" style="padding:12px;margin:8px 0;border:1px solid #e5e5e5">
-      <div class="row" style="gap:8px;align-items:center;flex-wrap:wrap">
+    box.innerHTML = `<div class="cast-autofill-preview">
+      <div class="cast-autofill-head">
         <b>自动补齐预览</b>
         <span class="muted">将改动 ${stats.changed || 0} 项 · 保持不动 ${stats.keep || 0} 项 · 需要人工 ${stats.manual || 0} 项</span>
       </div>
-      <div style="margin-top:6px">${rows || '<p class="muted">没有可推断的项</p>'}</div>
-      <div style="margin-top:10px">
+      <div>${rows || '<p class="muted">没有可推断的项</p>'}</div>
+      <div class="cast-autofill-actions">
         <button class="btn" type="button" id="castAutoFillApply">确认应用</button>
         <button class="btn small" type="button" id="castAutoFillCancel">取消</button>
       </div>
@@ -1170,6 +1181,269 @@
     renderAutoFillState();
   }
 
+  /* 一键补齐：任务是否还有可自动补齐的剩余角色。 */
+  function fillHasRemaining(job) {
+    if (!job) return false;
+    return (job.items || []).some(
+      (item) => (item.plan === "reuse" || item.plan === "generate") && ["pending", "failed"].includes(item.status)
+    );
+  }
+
+  /* 一键补齐的进度文案：绑定 / 生成阶段「第 k/N 个」；结束给四项统计。 */
+  function fillProgressText(data) {
+    const head = `${data.stage === "bind" ? "绑定中" : "生成中"} 第 ${data.index || 0}/${data.total || 0} 个：${
+      data.name || "角色"
+    }`;
+    if (data.stage === "bind") return `${head} → ${data.voice_name || "复用音色"}`;
+    const parts = [head];
+    if (data.sub_index && data.sub_total) parts.push(`候选 ${data.sub_index}/${data.sub_total}`);
+    parts.push(`已接收 ${formatChars(data.chars || 0)} 字`);
+    return parts.join(" · ");
+  }
+
+  /* 一键补齐的收尾统计文案。 */
+  function fillSummary(job) {
+    const stats = (job && job.stats) || {};
+    return `直接绑定 ${stats.bound || 0} · 新生成 ${stats.generated || 0} · 跳过 ${stats.skipped || 0} · 失败 ${
+      stats.failed || 0
+    }`;
+  }
+
+  /* 渲染一键补齐面板：主按钮文案、扫描统计、进度条、逐角色结果与失败重试。 */
+  function renderFill() {
+    const btn = el("castFillBtn");
+    if (btn) {
+      const running = castFill.running || castFill.scanning;
+      btn.disabled = running;
+      btn.textContent = running ? "补齐中…" : fillHasRemaining(castFill.job) ? "继续补齐" : "一键补齐全部音色";
+    }
+    const panel = el("castFillPanel");
+    if (!panel) return;
+    const job = castFill.job;
+    panel.hidden = !job && !castFill.running && !castFill.scanning;
+    const stats = (job && job.stats) || castFill.stats || {};
+    const text = el("castFillText");
+    if (text) text.textContent = castFill.running ? castFill.text || "准备中…" : fillSummary(job);
+    const scan = el("castFillScan");
+    if (scan) {
+      scan.textContent = job
+        ? `共 ${stats.total || 0} 个角色需要音色：可复用 ${stats.reuse || 0}、需生成 ${stats.generate || 0}、已就绪 ${
+            stats.ready || 0
+          }、需要人工 ${stats.manual || 0}`
+        : "";
+    }
+    const stop = el("castFillStop");
+    if (stop) stop.hidden = !castFill.running;
+    const bar = el("castFillBarWrap");
+    if (bar) {
+      const done = (stats.bound || 0) + (stats.generated || 0) + (stats.failed || 0);
+      const total = (stats.reuse || 0) + (stats.generate || 0);
+      bar.hidden = !(castFill.running && total);
+      const inner = el("castFillBar");
+      if (inner) inner.style.width = `${total ? Math.min(100, (done / total) * 100) : 0}%`;
+    }
+    const itemsBox = el("castFillItems");
+    if (itemsBox) {
+      const labels = { bound: "已绑定", generated: "已生成", failed: "失败", manual: "需要人工", pending: "待补齐" };
+      const rows = (job && job.items ? job.items : [])
+        .filter((item) => ["bound", "generated", "failed", "manual", "pending"].includes(item.status))
+        .map((item) => {
+          const detail =
+            ["failed", "manual"].includes(item.status)
+              ? item.error || item.reason || ""
+              : item.voice_name || item.reason || "";
+          return `<div class="cast-fill-row">
+            <span class="cast-fill-name">${esc(item.name || item.character_id)}</span>
+            <span class="tag">${labels[item.status] || esc(item.status)}</span>
+            <span class="muted cast-fill-detail">${esc(detail)}</span>
+          </div>`;
+        })
+        .join("");
+      itemsBox.innerHTML = rows;
+    }
+    const failures = el("castFillFailures");
+    if (failures) {
+      const failed = (job && job.items ? job.items : []).filter((item) => item.status === "failed");
+      failures.innerHTML = failed.length
+        ? `<div class="cast-fill-failure-head">失败 ${failed.length} 个，可单独重试：</div>${failed
+            .map(
+              (item) => `<div class="cast-fill-row">
+                <span class="cast-fill-name">${esc(item.name || item.character_id)}</span>
+                <span class="muted cast-fill-detail">${esc(item.error || "补齐失败")}</span>
+                <button class="btn small" type="button" data-fill-retry="${esc(item.character_id)}">重试</button>
+              </div>`
+            )
+            .join("")}`
+        : "";
+    }
+  }
+
+  /* 读取服务端补齐任务；运行中则继续接上事件流（刷新页面也能接着看）。 */
+  async function loadFillState() {
+    if (!NW.state.path) return;
+    try {
+      const data = await NW.api(`/api/ui/cast/fill?path=${encodeURIComponent(NW.state.path)}`);
+      castFill.job = data.job && data.job.job_id ? data.job : null;
+      castFill.hasRemaining = Boolean(data.has_remaining);
+      castFill.stats = (castFill.job || {}).stats || null;
+      if (castFill.job && castFill.job.status === "running") {
+        castFill.running = true;
+        castFill.scanning = false;
+        castFill.text = castFill.text || "正在补齐…";
+        renderFill();
+        streamFill();
+      } else {
+        castFill.running = false;
+        castFill.text = "";
+        renderFill();
+      }
+    } catch (error) {
+      castFill.job = null;
+      renderFill();
+    }
+  }
+
+  /* 流式接收补齐任务：扫描统计 → 绑定/生成进度 → 逐角色结果 → 收尾统计。 */
+  async function streamFill() {
+    const path = NW.state.path;
+    if (!path) return;
+    castFill.token += 1;
+    const token = castFill.token;
+    if (castFill.abort) castFill.abort.abort();
+    const abort = new AbortController();
+    castFill.abort = abort;
+    castFill.running = true;
+    renderFill();
+    try {
+      await NW.streamPost(
+        "/api/ui/cast/fill/stream",
+        { path },
+        (event, data) => {
+          if (token !== castFill.token) return;
+          if (event === "scan") {
+            castFill.stats = data.stats || castFill.stats;
+            if (castFill.job) castFill.job.stats = data.stats || castFill.job.stats;
+            if (data.stats) {
+              castFill.text = `扫描完成：共 ${data.stats.total || 0} 个角色需要音色，可复用 ${
+                data.stats.reuse || 0
+              }、需生成 ${data.stats.generate || 0}、已就绪 ${data.stats.ready || 0}、需要人工 ${
+                data.stats.manual || 0
+              }`;
+            }
+          } else if (event === "progress") {
+            castFill.text = fillProgressText(data);
+          } else if (event === "item") {
+            if (!castFill.job) castFill.job = { items: [] };
+            const items = castFill.job.items || [];
+            const index = items.findIndex((item) => item.character_id === data.character_id);
+            if (index >= 0) items[index] = data;
+            else items.push(data);
+            castFill.job.items = items;
+          } else if (event === "finished") {
+            castFill.job = data.job || castFill.job;
+            castFill.stats = data.stats || (castFill.job || {}).stats || castFill.stats;
+            castFill.hasRemaining = fillHasRemaining(castFill.job);
+            castFill.text = "";
+          } else if (event === "error") {
+            castFill.text = `补齐中断：${data.message || "未知错误"}`;
+          }
+          renderFill();
+        },
+        abort.signal
+      );
+      if (token !== castFill.token) return;
+      castFill.running = false;
+      castFill.hasRemaining = fillHasRemaining(castFill.job);
+      castFill.text = "";
+      renderFill();
+      loadCastOverrides(castOverride.chapter);
+    } catch (error) {
+      if (error.name === "AbortError" || token !== castFill.token) return;
+      castFill.running = false;
+      castFill.text = `补齐中断：${error.message}`;
+      renderFill();
+    } finally {
+      if (token === castFill.token) castFill.abort = null;
+    }
+  }
+
+  /* 点主按钮：没有剩余任务就新开一轮，有剩余就继续补齐。 */
+  async function startOrResumeFill() {
+    if (!NW.state.path) {
+      NW.toast("先打开工程");
+      return;
+    }
+    const resume = fillHasRemaining(castFill.job) && castFill.job && castFill.job.status !== "running";
+    castFill.scanning = true;
+    castFill.running = false;
+    castFill.text = resume ? "正在继续补齐…" : "正在扫描需要音色的角色…";
+    renderFill();
+    try {
+      const url = resume ? "/api/ui/cast/fill/resume" : "/api/ui/cast/fill/start";
+      const data = await NW.api(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: NW.state.path }),
+      });
+      castFill.scanning = false;
+      castFill.job = data.job || castFill.job;
+      castFill.hasRemaining = fillHasRemaining(castFill.job);
+      castFill.text = "已开始补齐";
+      streamFill();
+    } catch (error) {
+      castFill.scanning = false;
+      castFill.running = false;
+      castFill.text = `无法开始补齐：${error.message}`;
+      renderFill();
+      NW.toast(`无法开始补齐：${error.message}`);
+    }
+  }
+
+  /* 停止补齐：先停流，再通知服务端停止当前角色；已完成的结果保留。 */
+  async function stopFill() {
+    castFill.token += 1;
+    if (castFill.abort) {
+      castFill.abort.abort();
+      castFill.abort = null;
+    }
+    castFill.running = false;
+    if (!NW.state.path) return;
+    try {
+      const data = await NW.api("/api/ui/cast/fill/stop", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: NW.state.path }),
+      });
+      castFill.job = data.job || castFill.job;
+      castFill.hasRemaining = fillHasRemaining(castFill.job);
+      castFill.text = "";
+      renderFill();
+      loadCastOverrides(castOverride.chapter);
+      NW.toast("已停止补齐，可点「继续补齐」补完剩余", true);
+    } catch (error) {
+      castFill.text = `停止失败：${error.message}`;
+      renderFill();
+    }
+  }
+
+  /* 单个失败角色重试：只补齐这一个。 */
+  async function retryFillCharacter(characterId) {
+    if (!NW.state.path) return;
+    try {
+      const data = await NW.api("/api/ui/cast/fill/resume", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: NW.state.path, character_ids: [characterId] }),
+      });
+      castFill.job = data.job || castFill.job;
+      castFill.hasRemaining = fillHasRemaining(castFill.job);
+      castFill.text = "正在重试…";
+      streamFill();
+    } catch (error) {
+      NW.toast(`重试失败：${error.message}`);
+    }
+  }
+
   /* 渲染本章音色覆盖的章节下拉、行与状态。 */
   function renderCastOverrides() {
     const select = el("castOverrideChapter");
@@ -1201,12 +1475,12 @@
     const voiceName = override
       ? override.voice_name || "音色缺失"
       : inherited.voice_name || "未定音";
-    const sourceLabel = override
-      ? override.valid
-        ? "本章覆盖"
-        : "本章覆盖（未生效）"
-      : inherited.source_label || "未定音";
-    const modeTag = override ? `<span class="tag">${esc(sourceLabel)}</span>` : '<span class="tag">跟随全局</span>';
+    const modeText = override ? (override.valid ? "本章覆盖" : "本章覆盖（未生效）") : "跟随全局";
+    const detail = override
+      ? voiceName
+      : inherited.voice_name
+        ? `${inherited.source_label || "未定音"} · ${inherited.voice_name}`
+        : inherited.source_label || "未定音";
     const options = (castOverride.voices || [])
       .map(
         (item) =>
@@ -1216,20 +1490,20 @@
       )
       .join("");
     const disabled = row.overridable ? "" : " disabled";
-    const hint = row.overridable ? "" : '<span class="muted">仅旁白 / 龙套支持本章覆盖</span>';
+    const hint = row.overridable ? "" : '<span class="muted cast-override-hint">仅旁白 / 龙套支持本章覆盖</span>';
     const reset = override
       ? `<button class="btn small" type="button" data-override-reset="${esc(row.character_id)}">恢复为跟随全局</button>`
       : "";
-    return `<div class="voice-bind-row" data-override-row="${esc(row.character_id)}">
-      <span class="voice-bind-name">${esc(row.name)}</span>
+    return `<div class="cast-override-row" data-override-row="${esc(row.character_id)}">
+      <span class="cast-override-name" title="${esc(row.name)}">${esc(row.name)}</span>
       <span class="tag">${esc(roleLabel(row.role))}</span>
-      ${modeTag}
-      <span class="muted">来源：${esc(sourceLabel)} · ${esc(voiceName)}</span>
-      <select data-override-select="${esc(row.character_id)}"${disabled}>
+      <span class="cast-override-source"><span class="tag">${esc(modeText)}</span> <span class="muted">${esc(detail)}</span></span>
+      <select class="input" data-override-select="${esc(row.character_id)}"${disabled}>
         <option value=""${override ? "" : " selected"}>跟随全局（${esc(inherited.voice_name || "未定音")}）</option>
         ${options}
       </select>
-      ${hint}${reset}
+      <span class="cast-override-action">${reset}</span>
+      ${hint}
     </div>`;
   }
 
@@ -1410,87 +1684,124 @@
       return open ? " open" : "";
     };
     box.innerHTML = `
-      <div class="card" style="padding:12px;margin-top:8px">
-        <div class="row" style="gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
-          <button class="btn" type="button" id="castAutoFillBtn">按角色自动补齐</button>
-          <button class="btn small" type="button" id="castAutoFillUndo"${castAutoFill.undo.available ? "" : " hidden"}>撤回本次自动补齐</button>
-          <span class="muted" id="castAutoFillState"></span>
+      <div class="card cast-panel">
+        <div class="cast-toolbar">
+          <div class="cast-toolbar-actions">
+            <button class="btn" type="button" id="castFillBtn">一键补齐全部音色</button>
+            <button class="btn small" type="button" id="castAutoFillBtn">按角色自动补齐</button>
+            <button class="btn small" type="button" id="castAutoFillUndo"${castAutoFill.undo.available ? "" : " hidden"}>撤回本次自动补齐</button>
+          </div>
+          <span class="muted cast-toolbar-state" id="castAutoFillState"></span>
         </div>
-        <p class="muted" style="margin:0 0 8px">全局绑定由「音色库」自动流程维护；标「自动」的区块默认折叠，需要手改时再展开。自动补齐只补空项，不覆盖已填好的值。</p>
+        <p class="muted cast-panel-note">一键补齐：扫描全部需要音色的角色，能复用的直接绑定，库中没有的自动生成候选并采用第 1 条；可随时停止，再点「继续补齐」只补剩余。旁白只走固定人格，性别或档案不足的角色标「需要人工」。</p>
         <div id="castAutoFillPreview" hidden></div>
+        <div class="cast-fill" id="castFillPanel" hidden>
+          <div class="cast-fill-head">
+            <b>补齐进度</b>
+            <span class="muted cast-fill-text" id="castFillText"></span>
+            <button class="btn small" type="button" id="castFillStop" hidden>停止</button>
+          </div>
+          <p class="muted cast-fill-scan" id="castFillScan"></p>
+          <div class="cast-fill-bar" id="castFillBarWrap" hidden><span id="castFillBar"></span></div>
+          <div class="cast-fill-items" id="castFillItems"></div>
+          <div class="cast-fill-failures" id="castFillFailures"></div>
+        </div>
 
-        <h3 style="margin:8px 0 8px">本章音色覆盖（默认跟随全局）</h3>
-        <p class="muted" style="margin:0 0 8px">打开即按全局音色编排带入：每行显示该角色当前生效的音色与来源。只有你改动的行才写入本章覆盖，没动过的行不写；可单行或整章恢复为跟随全局。</p>
-        <div class="row" style="gap:8px;align-items:center;flex-wrap:wrap">
-          <label>章节 <select class="input" id="castOverrideChapter">${
-            (castMeta.chapters || []).length ? castChapterOptions(castOverride.chapter, false) : '<option value="">（还没有章节）</option>'
-          }</select></label>
+        <h3>本章音色覆盖（默认跟随全局）</h3>
+        <p class="muted cast-panel-note">打开即按全局音色编排带入：每行显示该角色当前生效的音色与来源。只有你改动的行才写入本章覆盖，没动过的行不写；可单行或整章恢复为跟随全局。</p>
+        <div class="cast-override-bar">
+          <label class="cast-override-chapter">章节
+            <select class="input" id="castOverrideChapter">${
+              (castMeta.chapters || []).length ? castChapterOptions(castOverride.chapter, false) : '<option value="">（还没有章节）</option>'
+            }</select>
+          </label>
           <button class="btn small" type="button" id="castOverrideResetAll">全部恢复跟随全局</button>
           <span class="muted" id="castOverrideState"></span>
         </div>
-        <div id="castOverrideRows" class="voice-bind-list" style="margin-top:8px"></div>
+        <div id="castOverrideRows" class="cast-override-list"></div>
 
-        <details data-cast-section="binding" style="margin-top:16px"${detailsOpen("binding", true)}>
-          <summary><b>角色 → 全局绑定</b> <span class="tag">自动</span> <span class="muted">${boundCount}/${castCharacters.length} 个角色已绑定，由「音色库」维护</span></summary>
-          <p class="muted" style="margin:8px 0">全局绑定不在这里逐行手填：到「音色库」用一键自动编排 / 批量生成维护；本章需要例外时用上方的「本章音色覆盖」。</p>
+        <details class="cast-section" data-cast-section="binding"${detailsOpen("binding", true)}>
+          <summary><span class="cast-section-title"><b>角色 → 全局绑定</b> <span class="tag">自动</span> <span class="muted">${boundCount}/${castCharacters.length} 个角色已绑定，由「音色库」维护</span></span></summary>
+          <div class="cast-section-body">
+            <p class="muted cast-panel-note">全局绑定不在这里逐行手填：到「音色库」用一键自动编排 / 批量生成维护；本章需要例外时用上方的「本章音色覆盖」。</p>
+          </div>
         </details>
 
-        <details data-cast-section="pool" style="margin-top:16px"${detailsOpen("pool", poolReady)}>
-          <summary><b>音色池</b> ${sectionTag(poolReady)} <span class="muted">${poolSlots.length} 个槽位，${poolFilled} 个已定音</span></summary>
-          <p class="muted" style="margin:8px 0">槽位键是稳定键，保存后不要随意改名；同一槽位可被多个职业龙套复用。</p>
-          <table class="table"><thead><tr><th>槽位</th><th>名称</th><th>音色</th><th>性别</th><th>年龄感</th><th></th></tr></thead>
-          <tbody>${poolRows || '<tr><td colspan="6" class="muted">还没有音色池槽位</td></tr>'}</tbody></table>
-          <button class="btn small" type="button" id="castPoolAdd">新增音色槽位</button>
+        <details class="cast-section" data-cast-section="pool"${detailsOpen("pool", poolReady)}>
+          <summary><span class="cast-section-title"><b>音色池</b> ${sectionTag(poolReady)} <span class="muted">${poolSlots.length} 个槽位，${poolFilled} 个已定音</span></span></summary>
+          <div class="cast-section-body">
+            <p class="muted cast-panel-note">槽位键是稳定键，保存后不要随意改名；同一槽位可被多个职业龙套复用。</p>
+            <div class="cast-table-wrap">
+              <table class="table"><thead><tr><th>槽位</th><th>名称</th><th>音色</th><th>性别</th><th>年龄感</th><th></th></tr></thead>
+              <tbody>${poolRows || '<tr><td colspan="6" class="muted">还没有音色池槽位</td></tr>'}</tbody></table>
+            </div>
+            <button class="btn small" type="button" id="castPoolAdd">新增音色槽位</button>
+          </div>
         </details>
 
-        <details data-cast-section="stock" style="margin-top:12px"${detailsOpen("stock", stockReady)}>
-          <summary><b>龙套职业映射</b> ${sectionTag(stockReady)} <span class="muted">${stockCount} 个映射</span></summary>
-          <p class="muted" style="margin:8px 0">键可以是音色池槽位（如 male_mid），也可以是具体职业槽位（如 waiter）；职业槽位优先。</p>
-          <table class="table"><thead><tr><th>键</th><th>来源</th><th>音色</th></tr></thead><tbody>${
-            stockRows || '<tr><td colspan="3" class="muted">还没有可映射的槽位</td></tr>'
-          }</tbody></table>
+        <details class="cast-section" data-cast-section="stock"${detailsOpen("stock", stockReady)}>
+          <summary><span class="cast-section-title"><b>龙套职业映射</b> ${sectionTag(stockReady)} <span class="muted">${stockCount} 个映射</span></span></summary>
+          <div class="cast-section-body">
+            <p class="muted cast-panel-note">键可以是音色池槽位（如 male_mid），也可以是具体职业槽位（如 waiter）；职业槽位优先。</p>
+            <div class="cast-table-wrap">
+              <table class="table"><thead><tr><th>键</th><th>来源</th><th>音色</th></tr></thead><tbody>${
+                stockRows || '<tr><td colspan="3" class="muted">还没有可映射的槽位</td></tr>'
+              }</tbody></table>
+            </div>
+          </div>
         </details>
 
-        <details data-cast-section="persona" style="margin-top:12px"${detailsOpen("persona", personaReady)}>
-          <summary><b>旁白人格</b> ${sectionTag(personaReady)} <span class="muted">${(castDraft.narrators || []).length} 个人格</span></summary>
-          <table class="table" style="margin-top:8px"><thead><tr><th>ID</th><th>名称</th><th>音色</th><th></th></tr></thead>
-          <tbody>${personaRows || '<tr><td colspan="4" class="muted">还没有旁白人格</td></tr>'}</tbody></table>
-          <button class="btn small" type="button" id="castPersonaAdd">新增旁白人格</button>
-          <label style="margin-left:12px">默认旁白：
-            <select class="input" id="castDefaultPersona">${castPersonaOptions(castDraft.default_narrator_id)}</select>
-          </label>
+        <details class="cast-section" data-cast-section="persona"${detailsOpen("persona", personaReady)}>
+          <summary><span class="cast-section-title"><b>旁白人格</b> ${sectionTag(personaReady)} <span class="muted">${(castDraft.narrators || []).length} 个人格</span></span></summary>
+          <div class="cast-section-body">
+            <div class="cast-table-wrap">
+              <table class="table"><thead><tr><th>ID</th><th>名称</th><th>音色</th><th></th></tr></thead>
+              <tbody>${personaRows || '<tr><td colspan="4" class="muted">还没有旁白人格</td></tr>'}</tbody></table>
+            </div>
+            <div class="cast-section-actions">
+              <button class="btn small" type="button" id="castPersonaAdd">新增旁白人格</button>
+              <label class="cast-inline-field">默认旁白：
+                <select class="input" id="castDefaultPersona">${castPersonaOptions(castDraft.default_narrator_id)}</select>
+              </label>
+            </div>
+          </div>
         </details>
 
-        <details data-cast-section="switch" style="margin-top:12px"${detailsOpen("switch", switchReady)}>
-          <summary><b>旁白切换点</b> ${sectionTag(switchReady)} <span class="muted">${(castDraft.narrator_switches || []).length} 个切换点</span></summary>
-          <p class="muted" style="margin:8px 0">区间含首尾；结束章留空表示延续到下一个切换点之前。区间不允许重叠或中间断开。无法从角色档案推断时保持「需要人工指定」。</p>
-          <table class="table"><thead><tr><th>起始章</th><th>结束章</th><th>人格</th><th>理由</th><th></th></tr></thead>
-          <tbody>${switchRows || '<tr><td colspan="5" class="muted">没有切换点，全书使用默认旁白</td></tr>'}</tbody></table>
-          <button class="btn small" type="button" id="castSwitchAdd">新增切换点</button>
+        <details class="cast-section" data-cast-section="switch"${detailsOpen("switch", switchReady)}>
+          <summary><span class="cast-section-title"><b>旁白切换点</b> ${sectionTag(switchReady)} <span class="muted">${(castDraft.narrator_switches || []).length} 个切换点</span></span></summary>
+          <div class="cast-section-body">
+            <p class="muted cast-panel-note">区间含首尾；结束章留空表示延续到下一个切换点之前。区间不允许重叠或中间断开。无法从角色档案推断时保持「需要人工指定」。</p>
+            <div class="cast-table-wrap">
+              <table class="table"><thead><tr><th>起始章</th><th>结束章</th><th>人格</th><th>理由</th><th></th></tr></thead>
+              <tbody>${switchRows || '<tr><td colspan="5" class="muted">没有切换点，全书使用默认旁白</td></tr>'}</tbody></table>
+            </div>
+            <button class="btn small" type="button" id="castSwitchAdd">新增切换点</button>
+          </div>
         </details>
 
-        <h3 style="margin:16px 0 8px">每章旁白预览（当前已保存配置）</h3>
+        <h3>每章旁白预览（当前已保存配置）</h3>
         <div id="castPlanPreview" class="muted">—</div>
 
-        <h3 style="margin:16px 0 8px">角色试听（用本书真实台词）</h3>
-        <p class="muted" style="margin:0 0 8px">优先取当前章节的一句台词，按所选音色合成到 <code>.ndw/cast_previews/</code>（只保留最近 12 条，不写章节、不进时间轴）。换几个候选音色连续点「试听这句」即可横向对比。</p>
+        <h3>角色试听（用本书真实台词）</h3>
+        <p class="muted cast-panel-note">优先取当前章节的一句台词，按所选音色合成到 <code>.ndw/cast_previews/</code>（只保留最近 12 条，不写章节、不进时间轴）。换几个候选音色连续点「试听这句」即可横向对比。</p>
         <div class="cast-preview">
-          <div class="row">
+          <div class="cast-preview-row">
             <select class="input" id="castPreviewCharacter">${castPreviewCharacterOptions(castPreview.character)}</select>
             <select class="input" id="castPreviewVoice">${castCandidateOptions(castPreview.voice)}</select>
             <button class="btn small" type="button" id="castPreviewRun">试听这句</button>
             <button class="btn small" type="button" id="castPreviewClear">清空试听缓存</button>
           </div>
-          <p class="muted" id="castPreviewHint" style="margin:8px 0 0">—</p>
+          <p class="muted" id="castPreviewHint">—</p>
           <div class="cast-preview-log" id="castPreviewLog"></div>
         </div>
 
-        <div id="castErrors" style="margin-top:10px;color:#c0392b"></div>
-        <div style="margin-top:10px"><button class="btn" type="button" id="castSave">保存并检查</button></div>
+        <div id="castErrors" class="cast-errors"></div>
+        <div class="cast-footer"><button class="btn" type="button" id="castSave">保存并检查</button></div>
       </div>`;
     renderCastPreviewLog();
     renderCastOverrides();
     renderAutoFillState();
+    renderFill();
   }
 
   /* 渲染试听历史（最多 6 条，方便 A/B 对比；页面刷新即清空）。 */
@@ -1644,11 +1955,23 @@
         message: "",
       };
       castAutoFill = { plan: null, open: false, undo: { available: false }, loading: false, state: "" };
+      if (castFill.abort) castFill.abort.abort();
+      castFill = {
+        job: null,
+        hasRemaining: false,
+        running: false,
+        scanning: false,
+        text: "",
+        stats: null,
+        token: 0,
+        abort: null,
+      };
       renderCastEditor();
       renderCastPlan(data.plan);
       renderCastErrors(data.errors);
       loadCastOverrides(castOverride.chapter);
       loadAutoFillMeta();
+      loadFillState();
     } catch (error) {
       if (box) box.textContent = `读取失败：${error.message}`;
     }
@@ -1720,6 +2043,19 @@
     }
     if (target.id === "castSave") {
       saveCast();
+      return;
+    }
+    if (target.id === "castFillBtn") {
+      startOrResumeFill();
+      return;
+    }
+    if (target.id === "castFillStop") {
+      stopFill();
+      return;
+    }
+    const fillRetry = target.getAttribute("data-fill-retry");
+    if (fillRetry) {
+      retryFillCharacter(fillRetry);
       return;
     }
     if (target.id === "castAutoFillBtn") {
@@ -1842,14 +2178,15 @@
     if (!list || document.getElementById("castPanel")) return;
     const panel = document.createElement("div");
     panel.id = "castPanel";
-    panel.className = "row";
-    panel.style.cssText = "gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap";
+    panel.className = "cast-toolbar";
     panel.innerHTML = `
-      <button class="btn small" type="button" id="castEditBtn">编辑音色编排</button>
-      <button class="btn small" type="button" id="castCheckBtn">音色编排检查</button>
-      <button class="btn small" type="button" id="castBackfillBtn">批量生成音色描述</button>
-      <button class="btn small" type="button" id="castDescFillBtn">补全缺失描述</button>
-      <span class="muted" id="castResult"></span>`;
+      <div class="cast-toolbar-actions">
+        <button class="btn small" type="button" id="castEditBtn">编辑音色编排</button>
+        <button class="btn small" type="button" id="castCheckBtn">音色编排检查</button>
+        <button class="btn small" type="button" id="castBackfillBtn">批量生成音色描述</button>
+        <button class="btn small" type="button" id="castDescFillBtn">补全缺失描述</button>
+      </div>
+      <span class="muted cast-toolbar-state" id="castResult"></span>`;
     list.parentNode.insertBefore(panel, list);
     const editor = document.createElement("div");
     editor.id = "castEditor";

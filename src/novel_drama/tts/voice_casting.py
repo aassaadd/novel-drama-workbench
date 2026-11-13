@@ -103,6 +103,37 @@ def _voice_options(voices: list[dict]) -> list[dict]:
     ]
 
 
+def pool_key(character: dict) -> str:
+    """龙套音色池键：`性别:年龄段`。
+
+    参数:
+        character: 人物档案。
+
+    返回:
+        稳定键，例如 `female:youth`；缺失字段时按 `unknown:adult`。
+    """
+    return f"{character.get('gender') or 'unknown'}:{age_band(character.get('age_range')) or 'adult'}"
+
+
+def bound_voice(store, character: dict, table: dict | None = None) -> dict | None:
+    """角色当前绑定的可用音色。
+
+    参数:
+        store: 工程。
+        character: 人物档案。
+        table: 已加载的音色库（可选，批量扫描时复用，避免重复读盘）。
+
+    返回:
+        音色 dict；未绑定、音色不存在或没有可用变体时返回 None。
+    """
+    binding = character.get("voice_binding") or {}
+    voice_id = binding.get("voice_id") or binding.get("voice_library_id")
+    if not voice_id:
+        return None
+    voice = find_voice(table or store.load_voices(), str(voice_id))
+    return voice if voice and _usable(voice) else None
+
+
 def load_minor_pool(store) -> dict:
     """读取龙套音色池（`assets/voice/casting.json`）。"""
     try:
@@ -196,7 +227,7 @@ def _suggest(store, character: dict, voices: list[dict], usage: dict[str, int], 
             return None
         return {"voice_id": voice.get("id"), "voice_name": voice.get("name"), "reason": "旁白固定音色，不参与匹配"}
     if role == "minor":
-        key = f"{character.get('gender') or 'unknown'}:{age_band(character.get('age_range')) or 'adult'}"
+        key = pool_key(character)
         voice = find_voice({"voices": voices}, pool.get(key) or "")
         if voice is None:
             ranked = []
@@ -294,7 +325,7 @@ def _problems(
     if character.get("role") != "minor" and int(usage.get(str(voice_id)) or 0) > _DUPLICATE_LIMIT:
         problems.append({"code": "duplicate", "message": f"音色被 {usage[str(voice_id)]} 个角色重复使用"})
     if character.get("role") == "minor":
-        key = f"{character.get('gender') or 'unknown'}:{age_band(character.get('age_range')) or 'adult'}"
+        key = pool_key(character)
         if key not in pool:
             problems.append({"code": "pool", "message": "龙套音色池缺少该性别/年龄段"})
     return problems
@@ -534,8 +565,15 @@ def apply(store, character_ids: list[str] | None = None) -> dict:
     return {"applied": applied, "undo_id": undo_id}
 
 
-def bind_one(store, character_id: str, voice_id: str | None) -> dict:
-    """单行替换角色音色并写撤销日志（voice_id 为空表示解绑）。"""
+def bind_one(store, character_id: str, voice_id: str | None, record_undo: bool = True) -> dict:
+    """单行替换角色音色并写撤销日志（voice_id 为空表示解绑）。
+
+    参数:
+        store: 工程。
+        character_id: 角色 ID。
+        voice_id: 目标音色；为空表示解绑。
+        record_undo: 是否写撤销日志；批量补齐自行记录整批快照时传 False。
+    """
     characters = store.load_characters()
     character = next((item for item in characters["characters"] if item.get("id") == character_id), None)
     if character is None:
@@ -549,7 +587,7 @@ def bind_one(store, character_id: str, voice_id: str | None) -> dict:
     else:
         character["voice_binding"] = _binding_for(voice, character.get("voice_binding"))
     character["updated_at"] = _now()
-    undo_id = _write_undo(store, "manual", undo_characters)
+    undo_id = _write_undo(store, "manual", undo_characters) if record_undo else None
     store.save_characters(characters)
     return {"character_id": character_id, "voice_id": (voice or {}).get("id"), "undo_id": undo_id}
 

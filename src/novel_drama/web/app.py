@@ -2162,6 +2162,73 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         except (ValueError, OSError) as exc:
             raise HTTPException(status_code=400, detail={"code": 2, "message": str(exc)})
 
+    @app.get("/api/ui/cast/fill")
+    def ui_cast_fill_state(path: str = Query(...)) -> dict:
+        """一键补齐音色的当前状态：任务快照与是否还有剩余角色。
+
+        参数:
+            path: 工程根目录。
+
+        返回:
+            `{job, has_remaining}`。
+        """
+        from ..tts import voice_fill
+
+        return voice_fill.state(_store(path))
+
+    @app.post("/api/ui/cast/fill/start")
+    def ui_cast_fill_start(body: dict) -> dict:
+        """启动一键补齐全部音色（扫描 → 复用绑定 → 缺失生成）。
+
+        参数:
+            body: `{path, count?}`。
+
+        返回:
+            `{job}`。
+        """
+        from ..tts import voice_fill
+
+        try:
+            job = voice_fill.start_job(_store(body.get("path")), _tts_config(), body.get("count"))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"code": 2, "message": str(exc)}) from exc
+        return {"job": job}
+
+    @app.post("/api/ui/cast/fill/resume")
+    def ui_cast_fill_resume(body: dict) -> dict:
+        """继续补齐剩余角色，或重试指定角色。
+
+        参数:
+            body: `{path, character_ids?}`；character_ids 为空时补齐全部未完成与失败项。
+
+        返回:
+            `{job}`。
+        """
+        from ..tts import voice_fill
+
+        try:
+            job = voice_fill.resume_job(_store(body.get("path")), _tts_config(), body.get("character_ids"))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"code": 2, "message": str(exc)}) from exc
+        return {"job": job}
+
+    @app.post("/api/ui/cast/fill/stop")
+    def ui_cast_fill_stop(body: dict) -> dict:
+        """停止补齐：已绑定/已生成的结果保留，未完成的可续跑。
+
+        参数:
+            body: `{path}`。
+
+        返回:
+            `{job}`。
+        """
+        from ..tts import voice_fill
+
+        job = voice_fill.cancel_job(_store(body.get("path")))
+        if not job:
+            raise HTTPException(status_code=404, detail={"code": 3, "message": "补齐任务不存在"})
+        return {"job": job}
+
     @app.post("/api/ui/cast")
     def ui_cast_save(body: dict) -> dict:
         """保存音色池与旁白切换点；校验不通过时返回错误列表且不落盘。
