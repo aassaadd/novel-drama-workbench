@@ -317,9 +317,20 @@
       }
       const warnings = result.warnings || [];
       const box = el("scWarnings");
+      const infoPrefix = "【已自动修正】";
+      const info = warnings.filter((item) => String(item).startsWith(infoPrefix));
+      const hard = warnings.filter((item) => !String(item).startsWith(infoPrefix));
       if (warnings.length) {
         box.hidden = false;
-        box.innerHTML = `<strong>告警 ${warnings.length} 条</strong><ul>${warnings.map((item) => `<li>${esc(item)}</li>`).join("")}</ul>`;
+        const hardHtml = hard.length
+          ? `<strong>告警 ${hard.length} 条</strong><ul>${hard.map((item) => `<li>${esc(item)}</li>`).join("")}</ul>`
+          : "<strong>没有需要人工处理的告警</strong>";
+        const infoHtml = info.length
+          ? `<details><summary>已自动修正 ${info.length} 项</summary><ul>${info
+              .map((item) => `<li>${esc(String(item).replace(infoPrefix, ""))}</li>`)
+              .join("")}</ul></details>`
+          : "";
+        box.innerHTML = hardHtml + infoHtml;
       } else {
         box.hidden = true;
       }

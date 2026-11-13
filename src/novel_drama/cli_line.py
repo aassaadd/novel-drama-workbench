@@ -16,6 +16,56 @@ from .tts import line_state
 _CONTENT_MISMATCH = "正文已变更，请先重新切分"
 
 
+def normalize_chapter_indexes(store, chapter: dict) -> bool:
+    """把场景/台词的 index 按当前顺序重排为连续序号，必要时回写一次。
+
+    `index` 的语义不变：场景 index 是章内场景序号（0 基），台词 index 是场景内行号（0 基）。
+    这里只修负数、重复、跳号这类历史脏数据；不改 line_id、不改 tts/音频引用，
+    因此已配音行不会失联，重编号也不会触发重新合成。
+
+    参数:
+        store: 工程（用于回写）。
+        chapter: 章节 dict（就地修改）。
+
+    返回:
+        是否发生了改动并已回写。
+    """
+    changed = False
+    for scene_no, scene in enumerate(chapter.get("scenes") or []):
+        if scene.get("index") != scene_no:
+            scene["index"] = scene_no
+            changed = True
+        for line_no, line in enumerate(scene.get("lines") or []):
+            if line.get("index") != line_no:
+                line["index"] = line_no
+                changed = True
+    if changed:
+        # 只重排序号，不动 updated_at 之外的任何字段；save_chapter 会校验 schema 并原子写盘
+        store.save_chapter(chapter)
+    return changed
+
+
+def ordinal_map(chapter: dict) -> dict[str, tuple[int, int, int]]:
+    """建立「行 ID → (全章序号, 场景序号, 场景内行号)」，三个序号均从 1 开始。
+
+    参数:
+        chapter: 章节 dict。
+
+    返回:
+        行 ID 到三段序号的映射；供台词表新增的展示列使用（不写入 schema）。
+    """
+    mapping: dict[str, tuple[int, int, int]] = {}
+    ordinal = 0
+    for scene_no, scene in enumerate(chapter.get("scenes") or [], start=1):
+        for line_no, line in enumerate(scene.get("lines") or [], start=1):
+            line_id = line.get("id")
+            if not line_id:
+                continue
+            ordinal += 1
+            mapping[str(line_id)] = (ordinal, scene_no, line_no)
+    return mapping
+
+
 # ---------------- scene / line ----------------
 
 
@@ -104,6 +154,9 @@ def cmd_line_list(args, config: AppConfig) -> int:
     """
     store = _resolve_store(args, config)
     chapter = store.load_chapter(args.chapter)
+    # 历史数据自愈：按当前场景/行顺序重排 index（脏号只修一次，之后不再写盘）
+    normalize_chapter_indexes(store, chapter)
+    ordinals = ordinal_map(chapter)
     characters = {item["id"]: item for item in store.load_characters()["characters"]}
     snapshots = line_state.load_snapshots(store.root, chapter)
     live_ids = line_state.live_line_ids(store)
@@ -124,11 +177,16 @@ def cmd_line_list(args, config: AppConfig) -> int:
     rows = []
     for row in picked:
         line = row["line"]
+        ordinal, scene_ordinal, scene_line_ordinal = ordinals.get(str(line.get("id")), (0, 0, 0))
         rows.append(
             {
                 "scene_id": row["scene_id"],
                 "line_id": line["id"],
                 "index": line.get("index"),
+                # 展示用派生字段：全章连续序号与「第 N 场 · 第 M 行」，不落盘、不进 schema
+                "ordinal": ordinal,
+                "scene_ordinal": scene_ordinal,
+                "scene_line_ordinal": scene_line_ordinal,
                 "kind": line.get("kind"),
                 "speaker": entities.speaker_display_name(line.get("speaker_id"), characters),
                 "speaker_id": line.get("speaker_id"),
@@ -258,40 +316,101 @@ def cmd_line_revert(args, config: AppConfig) -> int:
 
 
 def cmd_line_set(args, config: AppConfig) -> int:
-    """修改台词行的说话人/情绪/强度/交付说明/语速/停顿/文本。"""
+    """修改台词行的说话人/情绪/强度/交付说明/语速/停顿/文本。
+
+    支持 `--line` 单行与 `--lines a,b,c` 批量；批量时说话人变更会同步台词类型
+    （旁白 ↔ 对白，内心独白保持不变），与章节页行内编辑保持一致。
+
+    参数:
+        args: 参数（chapter/line/lines/speaker/emotion/...）。
+        config: 本机配置。
+
+    返回:
+        退出码。
+    """
     store = _resolve_store(args, config)
     chapter = store.load_chapter(args.chapter)
-    _, line, _ = store.find_line(chapter, args.line)
-    changed = False
+    raw_lines = getattr(args, "lines", None)
+    if raw_lines:
+        targets = [item.strip() for item in str(raw_lines).split(",") if item.strip()]
+    elif getattr(args, "line", None):
+        targets = [args.line]
+    else:
+        raise ValueError("请用 --line 指定一行，或用 --lines 批量指定（逗号分隔）")
+    if not targets:
+        raise ValueError("--lines 里没有有效的行 ID")
+
+    updates: dict = {}
     for field_name, attr in (
         ("speaker_id", "speaker"),
         ("emotion", "emotion"),
         ("text", "text"),
         ("kind", "kind"),
         ("delivery_note", "delivery_note"),
-    ):
-        value = getattr(args, attr, None)
-        if value is not None and line.get(field_name) != value:
-            line[field_name] = value
-            changed = True
-    for field_name, attr in (
         ("speed", "speed"),
         ("pause_before_ms", "pause_before"),
         ("pause_after_ms", "pause_after"),
         ("emotion_intensity", "emotion_intensity"),
     ):
         value = getattr(args, attr, None)
-        if value is not None and line.get(field_name) != value:
-            line[field_name] = value
-            changed = True
-    if not changed:
+        if value is not None:
+            updates[field_name] = value
+
+    updated: list[str] = []
+    not_found: list[dict] = []
+    last_line: dict | None = None
+    for line_id in targets:
+        try:
+            _, line, _ = store.find_line(chapter, line_id)
+        except (KeyError, ValueError) as error:
+            message = error.args[0] if getattr(error, "args", None) else str(error)
+            not_found.append({"line_id": line_id, "message": str(message)})
+            continue
+        changed = False
+        for field_name, value in updates.items():
+            if line.get(field_name) != value:
+                line[field_name] = value
+                changed = True
+        # 说话人变更时同步类型：旁白 → narration，人物 → dialogue；内心独白保持不动
+        if "speaker_id" in updates and "kind" not in updates and line.get("kind") in ("narration", "dialogue"):
+            auto_kind = "narration" if updates["speaker_id"] == entities.NARRATOR_ID else "dialogue"
+            if line.get("kind") != auto_kind:
+                line["kind"] = auto_kind
+                changed = True
+        if changed:
+            line["revision"] = int(line.get("revision") or 1) + 1
+            # 不再把 tts.status 打回 pending：过期与否由读取时按参数指纹/说话人比对派生，
+            # revision 只承担并发锁职责（见 docs/tts-line-state-and-seams.md §4.3）
+            updated.append(line_id)
+            last_line = line
+
+    if not updated and not not_found:
         _emit(args, "没有字段变化", {"changed": False})
         return EXIT_OK
-    line["revision"] = int(line.get("revision") or 1) + 1
-    # 不再把 tts.status 打回 pending：过期与否由读取时按参数指纹派生，
-    # revision 只承担并发锁职责（见 docs/tts-line-state-and-seams.md §4.3）
-    store.save_chapter(chapter)
-    _emit(args, f"已更新 {line['id']}（revision={line['revision']}，读取时按参数指纹判定是否过期）", line)
+    if updated:
+        store.save_chapter(chapter)
+
+    if raw_lines:
+        _emit(
+            args,
+            f"已批量更新 {len(updated)} 行"
+            + (f"，{len(not_found)} 行不存在：{', '.join(item['line_id'] for item in not_found[:5])}" if not_found else ""),
+            {
+                "changed": bool(updated),
+                "updated": updated,
+                "not_found": not_found,
+                "counts": {"updated": len(updated), "missing": len(not_found)},
+            },
+        )
+        return EXIT_OK
+    if last_line is None:
+        _emit(args, "没有字段变化", {"changed": False})
+        return EXIT_OK
+    _emit(
+        args,
+        f"已更新 {last_line['id']}（revision={last_line['revision']}，读取时按参数指纹判定是否过期）",
+        last_line,
+    )
     return EXIT_OK
 
 

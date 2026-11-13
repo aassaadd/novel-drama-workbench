@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 from .cli_common import EXIT_FAILED, EXIT_OK, PreconditionError, _emit, _resolve_store, _tts_service
@@ -377,6 +378,12 @@ def cmd_script(args, config: AppConfig) -> int:
     raise PreconditionError(f"未知的 script 操作: {args.action}")
 
 
+def _text_key(text: str) -> str:
+    """台词比较键：忽略空白与首尾引号差异，用于复用旧行。"""
+    value = re.sub(r"\s+", "", str(text or ""))
+    return value.strip("“”\"'「」『』")
+
+
 def _apply_script_to_chapter(store: ProjectStore, chapter: dict, script: dict) -> dict:
     """把导演脚本的镜头/台词同步进章节（只增改台词，不动物理产物）。
 
@@ -419,6 +426,29 @@ def _apply_script_to_chapter(store: ProjectStore, chapter: dict, script: dict) -
                     existing["revision"] = int(existing.get("revision") or 1) + 1
                     if (existing.get("tts") or {}).get("status") == "ready":
                         existing["tts"]["status"] = "stale"
+                    updated += 1
+                continue
+            # 旧行是 chr_unknown、文本只是空白/引号差异时，按新映射结果更新旧行，避免叠加新行
+            key = _text_key(line.get("text"))
+            fallback = None
+            if key and line.get("speaker_id") not in (None, "", entities.UNKNOWN_SPEAKER_ID):
+                for candidate in scene.get("lines") or []:
+                    if candidate.get("speaker_id") != entities.UNKNOWN_SPEAKER_ID:
+                        continue
+                    if _text_key(candidate.get("text")) == key:
+                        fallback = candidate
+                        break
+            if fallback is not None:
+                changed = False
+                for key_name in ("speaker_id", "emotion", "kind", "text"):
+                    if line.get(key_name) is not None and fallback.get(key_name) != line[key_name]:
+                        fallback[key_name] = line[key_name]
+                        changed = True
+                if changed:
+                    fallback["revision"] = int(fallback.get("revision") or 1) + 1
+                    if (fallback.get("tts") or {}).get("status") == "ready":
+                        fallback["tts"]["status"] = "stale"
+                    fallback["inferred"] = False
                     updated += 1
                 continue
             new_line = entities.new_line(

@@ -282,6 +282,7 @@ def _line_params(line: dict, requirement, voice, instruct: str | None, voice_id:
     """
     return {
         "text": line.get("text"),
+        "speaker_id": line.get("speaker_id"),
         "emotion": line.get("emotion") or requirement.emotion,
         "emotion_intensity": line.get("emotion_intensity"),
         "delivery_note": line.get("delivery_note"),

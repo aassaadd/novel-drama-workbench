@@ -30,6 +30,23 @@ from ..config import load_config
 from ..models import new_id
 from ..models.entities import EMOTIONS, NARRATOR_ID, UNKNOWN_SPEAKER_ID
 from ..models.ids import now_iso
+from ..text.names import match_speaker, normalize_speaker_name
+
+#: 信息级提示前缀：可自动修复的问题归到这里，页面折叠显示「已自动修正 N 项」
+INFO_PREFIX = "【已自动修正】"
+
+#: 模型常见的音效类型别写，自动归到合法枚举，避免整章解析失败
+SFX_KIND_ALIASES = {
+    "silence": "ambience",
+    "none": "ambience",
+    "ambient": "ambience",
+    "effect": "foley",
+    "effects": "foley",
+    "sfx": "foley",
+    "bgm": "music_sting",
+    "music": "music_sting",
+    "whoosh": "transition",
+}
 
 TIMES = ("dawn", "morning", "day", "dusk", "night", "unknown")
 SFX_KINDS = ("ambience", "foley", "impact", "transition", "music_sting")
@@ -136,7 +153,7 @@ def _parse_kv(tokens: list[str]) -> dict:
 
 
 def _resolve_speaker(name: str, characters: list[dict]) -> tuple[str, float]:
-    """把标注里的说话人解析成角色 ID。
+    """把标注里的说话人解析成角色 ID（先归一化再匹配）。
 
     参数:
         name: 标注里的名字（可为空，表示旁白）。
@@ -145,34 +162,75 @@ def _resolve_speaker(name: str, characters: list[dict]) -> tuple[str, float]:
     返回:
         (角色 ID, 置信度)；未识别返回 chr_unknown 与 0.0。
     """
-    if not name or name.strip() in ("旁白", "narrator"):
+    key = normalize_speaker_name(name)
+    if not key or key in ("旁白", "narrator", "narration"):
         return NARRATOR_ID, 1.0
-    key = name.strip()
-    for character in characters:
-        if character.get("role") == "narrator":
-            continue
-        names = [character.get("name") or ""] + list(character.get("aliases") or [])
-        if key in names:
-            return character["id"], 1.0
+    matched = match_speaker(name, characters)
+    if matched is not None:
+        return matched
     return UNKNOWN_SPEAKER_ID, 0.0
 
 
-def _parse_position(token: str, line_ids: list[str], warnings: list[str], where: str) -> dict:
-    """解析位置标记：before-line=N / after-line=N / during-line=N / shot-start / shot-end。"""
+def _parse_position(
+    token: str,
+    line_ids: list[str],
+    warnings: list[str],
+    where: str,
+    info_counts: dict[tuple[str, str], int] | None = None,
+) -> dict:
+    """解析位置标记：before-line=N / after-line=N / during-line=N / shot-start / shot-end。
+
+    序号越界（正数）时自动夹紧到当前镜头有效范围并累计到信息级合并计数；
+    序号为 0/负数属于数据问题，保留告警。
+
+    参数:
+        token: 位置标记。
+        line_ids: 当前镜头的台词行 ID（按镜头内顺序）。
+        warnings: 告警列表（原地追加）。
+        where: 定位前缀（如「镜头 3 音效」）。
+        info_counts: 信息级合并计数，键为 (定位, 原因)。
+
+    返回:
+        位置 dict。
+    """
     token = token.strip()
     if token in ("shot-start", "shot_start"):
         return {"mode": "shot_start", "line_id": line_ids[0] if line_ids else None, "offset_ms": 0}
     if token in ("shot-end", "shot_end"):
         return {"mode": "shot_end", "line_id": line_ids[-1] if line_ids else None, "offset_ms": 0}
-    match = re.match(r"^(before|after|during)[_-]line=(\d+)$", token)
+    match = re.match(r"^(before|after|during)[_-]line=(-?\d+)$", token)
     if not match:
-        warnings.append(f"{where} 位置标记无法识别：{token}（按 after_line 处理）")
+        warnings.append(INFO_PREFIX + f"{where} 位置标记无法识别：{token}（已按 after_line 处理）")
         return {"mode": "after_line", "line_id": line_ids[-1] if line_ids else None, "offset_ms": 0}
     mode, number = match.group(1) + "_line", int(match.group(2))
-    if 1 <= number <= len(line_ids):
+    if number < 1:
+        warnings.append(f"{where} 台词序号 {number} 无效（必须从 1 开始），已挂到末行")
+        return {"mode": mode, "line_id": line_ids[-1] if line_ids else None, "offset_ms": 0}
+    if number <= len(line_ids):
         return {"mode": mode, "line_id": line_ids[number - 1], "offset_ms": 0}
-    warnings.append(f"{where} 台词序号 {number} 超出当前镜头范围，挂到末行")
+    if info_counts is not None:
+        key = (where, "台词序号越界")
+        info_counts[key] = info_counts.get(key, 0) + 1
     return {"mode": mode, "line_id": line_ids[-1] if line_ids else None, "offset_ms": 0}
+
+
+def _flush_info_counts(info_counts: dict[tuple[str, str], int], warnings: list[str]) -> None:
+    """把自动修复的合并计数写成信息级提示（同一镜头同一原因只留一条）。
+
+    参数:
+        info_counts: {(定位, 原因): 次数}。
+        warnings: 告警列表（原地追加）。
+
+    返回:
+        无。
+    """
+    for (where, reason), count in info_counts.items():
+        if reason == "台词序号越界":
+            warnings.append(f"{INFO_PREFIX}{where}台词序号越界，已夹紧到本镜头有效范围（共 {count} 处）")
+        elif reason.endswith("非法") or "缺少" in reason:
+            warnings.append(f"{INFO_PREFIX}{where}出现「{reason}」（共 {count} 处），已自动处理")
+        else:
+            warnings.append(f"{INFO_PREFIX}{where}有 {count} 行{reason}，已标为 chr_unknown 待校对")
 
 
 def _tts_from_line(line: dict | None) -> dict:
@@ -236,6 +294,8 @@ def parse_markup(markup: str, chapter: dict, characters: list[dict], settings: d
     blocks = _block_index(content)
     search_from = 0
     warnings: list[str] = []
+    #: 可自动修复问题的合并计数：{(定位, 原因): 次数}
+    info_counts: dict[tuple[str, str], int] = {}
     templates = _template_ids(settings)
     template_image = templates["image"]
     from ..media.comfy_media import resolve_aspect
@@ -276,7 +336,7 @@ def parse_markup(markup: str, chapter: dict, characters: list[dict], settings: d
             extras = _parse_kv(tokens[3:])
             time_of_day = extras.get("time") or "unknown"
             if time_of_day not in TIMES:
-                warnings.append(f"镜头 {index} 的 time={time_of_day} 非法，已改为 unknown")
+                warnings.append(INFO_PREFIX + f"镜头 {index} 的 time={time_of_day} 非法，已改为 unknown")
                 time_of_day = "unknown"
             anchor, search_from, _ = _anchor(content, blocks, " ".join(tokens[2:]), search_from)
             current = {
@@ -315,6 +375,10 @@ def parse_markup(markup: str, chapter: dict, characters: list[dict], settings: d
                 if len(parts) < 4:
                     raise ValueError(f"音效需要「kind 时长 位置 中文描述 || 英文提示词」：{raw}")
                 kind, duration = parts[0], int(parts[1])
+                if kind not in SFX_KINDS and kind in SFX_KIND_ALIASES:
+                    key = (f"镜头 {shot['index']} 音效", f"音效类型 {kind} 非法")
+                    info_counts[key] = info_counts.get(key, 0) + 1
+                    kind = SFX_KIND_ALIASES[kind]
                 if kind not in SFX_KINDS:
                     raise ValueError(f"音效 kind 非法：{kind}（可选 {', '.join(SFX_KINDS)}）")
                 prompt_zh = " ".join(parts[3:]).strip()
@@ -325,7 +389,9 @@ def parse_markup(markup: str, chapter: dict, characters: list[dict], settings: d
                         "请重新生成标注描述"
                     )
                 line_ids = [item["id"] for item in shot["lines"]]
-                position = _parse_position(parts[2], line_ids, warnings, f"镜头 {shot['index']} 音效")
+                position = _parse_position(
+                    parts[2], line_ids, warnings, f"镜头 {shot['index']} 音效", info_counts
+                )
                 anchor = shot["anchor"]
                 shot["sfx_events"].append(
                     {
@@ -350,7 +416,7 @@ def parse_markup(markup: str, chapter: dict, characters: list[dict], settings: d
                 options = _parse_kv(parts)
                 mood = (options.get("mood") or "calm").strip()
                 if mood not in BGM_MOODS:
-                    warnings.append(f"镜头 {shot['index']} 的 BGM mood={mood} 非法，已改为 calm")
+                    warnings.append(INFO_PREFIX + f"镜头 {shot['index']} 的 BGM mood={mood} 非法，已改为 calm")
                     mood = "calm"
 
                 def opt_number(key: str, default=None):
@@ -361,7 +427,7 @@ def parse_markup(markup: str, chapter: dict, characters: list[dict], settings: d
                     try:
                         return float(raw_value)
                     except ValueError:
-                        warnings.append(f"镜头 {shot['index']} 的 BGM {key}={raw_value} 不是数字，已忽略")
+                        warnings.append(INFO_PREFIX + f"镜头 {shot['index']} 的 BGM {key}={raw_value} 不是数字，已忽略")
                         return default
 
                 if head == "bgm":
@@ -471,7 +537,10 @@ def parse_markup(markup: str, chapter: dict, characters: list[dict], settings: d
                     raise ValueError(f"动画时长必须在 500~5000ms：{duration}")
                 visual_id = shot["visuals"][-1]["id"] if shot["visuals"] else None
                 if mode == "i2v" and not visual_id:
-                    raise ValueError(f"i2v 动画必须在本镜头先声明 !visual：{raw}")
+                    # 没有关键图时退化为纯文生视频，避免整章解析失败
+                    key = (f"镜头 {shot['index']} 动画", "i2v 缺少关键图")
+                    info_counts[key] = info_counts.get(key, 0) + 1
+                    mode = "t2v"
                 shot["animations"].append(
                     {
                         "id": new_id("vid"),
@@ -494,6 +563,7 @@ def parse_markup(markup: str, chapter: dict, characters: list[dict], settings: d
 
         shot = require_shot(line_text)
         match = _LINE_RE.match(line_text)
+        explicit_prefix = bool(match)
         if match:
             head, text = match.group("head").strip(), match.group("body").strip()
         else:
@@ -504,16 +574,23 @@ def parse_markup(markup: str, chapter: dict, characters: list[dict], settings: d
         speaker_name = tokens[0].strip() if tokens else ""
         emotion = (tokens[1].strip() if len(tokens) > 1 and tokens[1].strip() else "neutral")
         kind = (tokens[2].strip() if len(tokens) > 2 and tokens[2].strip() else "")
-        speaker_id, confidence = _resolve_speaker(speaker_name, characters)
+        if explicit_prefix and not normalize_speaker_name(speaker_name):
+            # 模型按要求把无法判断的说话人留空：标为待校对，但不报硬告警
+            speaker_id, confidence = UNKNOWN_SPEAKER_ID, 0.0
+            key = (f"镜头 {shot['index']}", "未标注说话人")
+            info_counts[key] = info_counts.get(key, 0) + 1
+        else:
+            speaker_id, confidence = _resolve_speaker(speaker_name, characters)
         if emotion not in EMOTIONS:
-            warnings.append(f"镜头 {shot['index']} 情绪 {emotion} 非法，已改为 neutral")
+            warnings.append(INFO_PREFIX + f"镜头 {shot['index']} 情绪 {emotion} 非法，已改为 neutral")
             emotion = "neutral"
         if not kind:
             kind = "dialogue" if speaker_id != NARRATOR_ID else "narration"
         if kind not in ("dialogue", "narration", "inner_monologue"):
             raise ValueError(f"台词类型非法：{kind}")
-        if speaker_id == UNKNOWN_SPEAKER_ID:
-            warnings.append(f"镜头 {shot['index']} 说话人未识别：{speaker_name or '(空)'}，标记为 chr_unknown")
+        if speaker_id == UNKNOWN_SPEAKER_ID and speaker_name and explicit_prefix and normalize_speaker_name(speaker_name):
+            cleaned = normalize_speaker_name(speaker_name) or speaker_name[:20]
+            warnings.append(f"镜头 {shot['index']} 说话人未识别：{cleaned}，标记为 chr_unknown")
 
         anchor, search_from, exact = _anchor(content, blocks, text, search_from)
         if not exact:
@@ -554,9 +631,13 @@ def parse_markup(markup: str, chapter: dict, characters: list[dict], settings: d
                 if 1 <= anchor_index <= len(shot["lines"]):
                     segment["anchor_line_id"] = shot["lines"][anchor_index - 1]["id"]
                 else:
-                    warnings.append(f"镜头 {shot['index']} 的 BGM 段落锚点 {anchor_index} 超出范围，已改到镜首")
+                    warnings.append(INFO_PREFIX + f"镜头 {shot['index']} 的 BGM 段落锚点 {anchor_index} 超出范围，已改到镜首")
                     segment["anchor_line_id"] = shot["lines"][0]["id"]
-        shot["status"] = "ready" if not warnings else "draft"
+
+    _flush_info_counts(info_counts, warnings)
+    hard_warnings = [item for item in warnings if not item.startswith(INFO_PREFIX)]
+    for shot in shots:
+        shot["status"] = "ready" if not hard_warnings else "draft"
 
     content_hash = _sha(content)
     script = {
@@ -569,7 +650,7 @@ def parse_markup(markup: str, chapter: dict, characters: list[dict], settings: d
             "settings_revision": int((settings.get("settings_revision") or 1)),
             "content_hash": content_hash,
         },
-        "status": "draft" if warnings else "ready",
+        "status": "draft" if hard_warnings else "ready",
         "shots": shots,
         "warnings": warnings,
         "created_at": now_iso(),

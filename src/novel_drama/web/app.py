@@ -1189,6 +1189,49 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
                 argv += [flag, str(body[key])]
         return _respond(_cli(*argv))
 
+    @app.post("/api/ui/line/set-batch")
+    def ui_line_set_batch(body: dict) -> dict:
+        """批量改行参数（`line set --lines`）：返回成功/失败计数与失败原因。
+
+        参数:
+            body: `{path, chapter, lines: [行 ID], speaker?, kind?, ...}`。
+
+        返回:
+            `{changed, updated, not_found, counts}`。
+
+        异常:
+            HTTPException 400: 没有选中行。
+        """
+        lines = [str(item).strip() for item in (body.get("lines") or []) if str(item).strip()]
+        if not lines:
+            raise HTTPException(status_code=400, detail={"code": 2, "message": "没有选中任何行"})
+        argv = [
+            "--project",
+            body["path"],
+            "--json",
+            "line",
+            "set",
+            "--chapter",
+            body["chapter"],
+            "--lines",
+            ",".join(lines),
+        ]
+        mapping = {
+            "speaker": "--speaker",
+            "kind": "--kind",
+            "emotion": "--emotion",
+            "emotion_intensity": "--emotion-intensity",
+            "speed": "--speed",
+            "pause_before_ms": "--pause-before",
+            "pause_after_ms": "--pause-after",
+            "text": "--text",
+            "delivery_note": "--delivery-note",
+        }
+        for key, flag in mapping.items():
+            if body.get(key) is not None:
+                argv += [flag, str(body[key])]
+        return _respond(_cli(*argv))
+
     @app.post("/api/ui/line/edit")
     def ui_line_edit(body: dict) -> dict:
         """就地编辑台词文本，并同步回章节正文（`line edit --json`）。

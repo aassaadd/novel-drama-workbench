@@ -16,6 +16,7 @@ from __future__ import annotations
 import difflib
 from pathlib import Path
 
+from ..models import entities
 from . import sidecar
 from .fingerprint import line_fingerprint, normalize_value
 
@@ -46,6 +47,7 @@ FIELD_LABELS: dict[str, str] = {
     "emotion_intensity": "强度",
     "voice_id": "音色",
     "variant_id": "音色变体",
+    "speaker_id": "说话人",
     "speed": "语速",
     "delivery_note": "交付说明",
     "provider_id": "引擎",
@@ -489,6 +491,38 @@ def resolve_line_state(
     elif tts.get("synthesized_revision") != line.get("revision"):
         # 旧侧车（无指纹）走 revision 兜底，与改造前行为一致
         return {"state": "stale", "persisted": asked, "reason": "revision_changed", "changes": []}
+
+    # 说话人是否变过：换了人就把音频标为过期，避免留着旧音色的音频还显示「就绪」。
+    # 新侧车直接记 speaker_id；旧侧车没有该字段时，按音频音色反推归属者兜底。
+    current_speaker = line.get("speaker_id")
+    snapshot_speaker = (snapshot.get("params") or {}).get("speaker_id") if snapshot else None
+    used_voice = tts.get("voice_id")
+    if snapshot is not None and not snapshot_speaker and used_voice:
+        owners = [
+            character_id
+            for character_id, character in (characters or {}).items()
+            if ((character or {}).get("voice_binding") or {}).get("voice_id") == used_voice
+        ]
+        if owners and current_speaker not in owners:
+            snapshot_speaker = owners[0]
+    if snapshot_speaker and current_speaker != snapshot_speaker:
+        before_name = entities.speaker_display_name(snapshot_speaker, characters or {})
+        after_name = entities.speaker_display_name(current_speaker, characters or {})
+        return {
+            "state": "stale",
+            "persisted": asked,
+            "reason": "speaker_changed",
+            "changes": [
+                {
+                    "group": "音色",
+                    "field": "speaker_id",
+                    "label": FIELD_LABELS["speaker_id"],
+                    "from": snapshot_speaker,
+                    "to": current_speaker,
+                    "text": f"说话人 {before_name} → {after_name}",
+                }
+            ],
+        }
 
     binding = ((characters or {}).get(line.get("speaker_id")) or {}).get("voice_binding") or {}
     if binding.get("voice_id") and tts.get("voice_id") != binding.get("voice_id"):

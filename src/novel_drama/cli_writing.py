@@ -361,14 +361,19 @@ def cmd_script_suggest(args, config: AppConfig) -> int:
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(markup + "\n", encoding="utf-8")
 
+    from .director.markup import INFO_PREFIX
+
+    warnings = result["warnings"]
+    hard = [item for item in warnings if not item.startswith(INFO_PREFIX)]
+    info = [item for item in warnings if item.startswith(INFO_PREFIX)]
     lines = [
         (
-            f"标注建议：镜头 {result['shots']} 个，台词 {result['lines']} 行，告警 {len(result['warnings'])} 条"
-            f"（provider={result['provider']}，{result.get('rounds') or 1} 轮）"
+            f"标注建议：镜头 {result['shots']} 个，台词 {result['lines']} 行，告警 {len(hard)} 条"
+            f"，已自动修正 {len(info)} 项（provider={result['provider']}，{result.get('rounds') or 1} 轮）"
         ),
         f"标注文本: {out_path}",
     ]
-    lines.extend(f"  ! {item}" for item in result["warnings"])
+    lines.extend(f"  ! {item}" for item in warnings)
     failures = result.get("failures") or []
     for item in failures:
         lines.append(

@@ -92,12 +92,20 @@
         <!-- ---------------- 台词校对（原有页面，行为不变） ---------------- -->
         <section class="view" id="view-voice" hidden>
           <section class="badges" id="badges"></section>
+          <div class="multibar" id="multiBar" hidden>
+            <span class="batch-meta" id="multiInfo">已选 0 行</span>
+            <select id="multiSpeaker" aria-label="批量说话人"></select>
+            <button id="btnMultiApply" class="btn small primary" type="button" disabled>批量设置说话人</button>
+            <button id="btnMultiClear" class="btn small" type="button">取消选择</button>
+          </div>
 
           <main class="layout">
             <div class="table-wrap">
               <div class="table-inner">
                 <div class="thead" id="thead">
+                  <span class="c-check"><input type="checkbox" id="checkAll" aria-label="全选当前筛选" /></span>
                   <span class="c-index">序号</span>
+                  <span class="c-scene">场景 · 行</span>
                   <span class="c-kind">类型</span>
                   <span class="c-speaker">说话人</span>
                   <span class="c-text">文本</span>
@@ -129,6 +137,10 @@
                 <span id="lineState" class="state-badge"></span>
               </div>
               <div class="inspector-body" id="form" hidden>
+                <label class="stack">说话人
+                  <select id="fSpeaker"></select>
+                </label>
+                <div class="muted" id="fSpeakerHint" hidden></div>
                 <label class="stack">文本
                   <textarea id="fText" rows="4"></textarea>
                 </label>

@@ -936,7 +936,8 @@ def _scene_block(scene: dict, prefix: str = "") -> str:
     title = f"【{prefix}镜头 {scene['index'] + 1}】" if prefix else f"【镜头 {scene['index'] + 1}】"
     lines = [f"{title}{scene['title']}｜地点：{scene['location']}｜时间：{scene['time_of_day']}｜情绪：{scene['mood']}"]
     for line in scene["lines"]:
-        lines.append(f"{line['speaker_name'] or '未知'}：{line['text']}")
+        label = line["speaker_name"] or ("旁白" if line.get("kind") == "narration" else "（未标注）")
+        lines.append(f"{label}：{line['text']}")
     return "\n".join(lines)
 
 
@@ -1007,7 +1008,7 @@ def suggest_script(
 
     adapter = build_writing_adapter(config, bible)
     work_info = store.load_project().get("work") or {}
-    context = _project_context(work_info, bible)
+    context = _project_context(work_info, bible, characters)
     base_parts = [context] if context else []
     base_parts.append(
         f"作品《{chapter.get('title')}》导演标注任务：按镜头输出 NDW 标注文本"
@@ -1030,7 +1031,11 @@ def suggest_script(
         "同一镜头内情绪有明显变化时，追加 !bgm-seg mood=... anchor=镜头内台词序号 style=...；"
         "!silence 写成「!silence 800 after-line=N 原因」；"
         "!anim 的 mode 只能是 i2v/t2v，第二个参数是 500~5000 的毫秒数，第三个参数只能是 "
-        "static/slow_push_in/pan_left/pan_right/handheld；每个镜头至少一句台词；台词保留原文。"
+        "static/slow_push_in/pan_left/pan_right/handheld；每个镜头至少一句台词；台词保留原文。\n"
+        "说话人规则：必须原样取自角色表里的名字，不得自造、不得加 *、编号、括号注释或写「未知」；"
+        "某行显示为「（未标注）」时，先结合上下文与角色表推断最可能的说话人并只写名字，"
+        "确实无法判断时才把说话人留空写成「：台词」（系统会标为待校对）；"
+        "旁白固定写「旁白：」。音效位置 after-line=N 必须是本镜头内已出现的台词序号，不要超出。"
     )
     base_prompt = "\n\n".join(base_parts)
     system_prompt = (

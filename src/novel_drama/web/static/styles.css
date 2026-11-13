@@ -49,7 +49,7 @@
 
   --radius: 8px;
   --row-h: 46px;
-  --cols: 52px 64px 104px 1fr 72px 48px 48px 76px 56px 52px 52px 30px;
+  --cols: 34px 44px 128px 52px 92px 1fr 64px 42px 42px 70px 50px 46px 46px 28px;
 }
 
 * { box-sizing: border-box; }
@@ -362,7 +362,27 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); }
 .row .c-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .row .c-num, .row .c-index { font-variant-numeric: tabular-nums; }
 .row .c-index { color: var(--muted); }
+.row .c-scene, .thead .c-scene {
+  color: var(--muted);
+  font-size: var(--fs-xs);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .row .c-speaker.unknown { color: var(--stale); }
+.row .c-check, .thead .c-check { display: flex; align-items: center; justify-content: center; }
+.row .c-check input { margin: 0; cursor: pointer; }
+/* 多选工具条：勾选两行以上时出现，避免常驻占位 */
+.multibar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 6px 2px 2px;
+}
+.multibar select { min-width: 140px; }
+#fSpeaker.is-unknown { border-color: var(--stale); color: var(--stale); }
+.badge.unknown-badge.active { color: var(--stale); }
 
 .state-badge {
   display: inline-flex;

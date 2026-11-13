@@ -36,6 +36,11 @@ const state = {
   scrollTop: 0,
   start: 0,
   scenes: {},
+  cast: null,          // 角色表（说话人下拉用），每工程只读一次
+  castLoading: null,
+  checked: new Set(),  // 多选的行 ID
+  onlyUnknown: false,  // 只看「说话人未识别」
+  unknownCount: 0,
   ready: true,        // 配音链是否可开工（模型就位 + provider 可用）
   readyReason: "",
   flowData: { worlds: 0, characters: 0 },  // 流程条「世界 / 人物」完成数，后续任务填数，缺省按 0
@@ -489,7 +494,7 @@ function injectBatchPanel() {
 
 function renderBadges() {
   const total = state.rows.length;
-  const parts = [`<button class="badge ${state.filter.size ? "" : "active"}" data-state="">全部 <span class="num">${total}</span></button>`];
+  const parts = [`<button class="badge ${state.filter.size || state.onlyUnknown ? "" : "active"}" data-state="">全部 <span class="num">${total}</span></button>`];
   STATE_ORDER.forEach((name) => {
     const count = state.counts[name] ?? 0;
     const active = state.filter.has(name) ? "active" : "";
@@ -499,6 +504,10 @@ function renderBadges() {
       ` <span class="num">${count}</span></button>`
     );
   });
+  parts.push(
+    `<button class="badge unknown-badge ${state.onlyUnknown ? "active" : ""}" data-unknown="1">` +
+    `未知角色 <span class="num">${state.unknownCount}</span></button>`
+  );
   $("badges").innerHTML = parts.join("");
 }
 
@@ -519,7 +528,12 @@ function rowHtml(row, top) {
     : `<span class="c-num">${duration}</span>`;
   return (
     `<div class="row ${selected}" data-line="${row.line_id}" style="position:absolute;top:${top}px;left:0;right:0">` +
-    `<span class="c-index">${row.index ?? ""}</span>` +
+    `<span class="c-check"><input type="checkbox" data-check="${row.line_id}" ${
+      state.checked.has(row.line_id) ? "checked" : ""
+    } aria-label="选择第 ${row.ordinal ?? ""} 行" /></span>` +
+    `<span class="c-index" title="本章第 ${row.ordinal || "-"} 行">${row.ordinal ?? ""}</span>` +
+    `<span class="c-scene" title="第 ${row.scene_ordinal || "?"} 场 · 第 ${row.scene_line_ordinal || "?"} 行">` +
+    `第 ${row.scene_ordinal || "?"} 场 · 第 ${row.scene_line_ordinal || "?"} 行</span>` +
     `<span class="c-kind">${kindLabel(row.kind)}</span>` +
     `<span class="c-speaker ${unknown}">${escapeHtml(speakerLabel(row.speaker, row.speaker_id))}</span>` +
     `<span class="c-text" title="${text}">${text}</span>` +
@@ -567,6 +581,99 @@ function renderTable() {
 
 function fillEmotions() {
   $("fEmotion").innerHTML = EMOTIONS.map(([value, label]) => `<option value="${value}">${label}</option>`).join("");
+}
+
+/* 读角色表（旁白 + 人物 + 音色绑定），供「说话人」下拉与批量设置使用。
+ * 参数：force 为真时强制重读（人物页改了音色后返回本页可刷新）。
+ * 返回：Promise<角色数组>。
+ */
+async function ensureVoiceCast(force = false) {
+  if (!state.path) return [];
+  if (!force && state.cast) return state.cast;
+  if (state.castLoading) return state.castLoading;
+  state.castLoading = api(`/api/ui/characters?${qs({ path: state.path })}`)
+    .then((data) => {
+      state.cast = data.characters || [];
+      return state.cast;
+    })
+    .catch(() => {
+      state.cast = [];
+      return state.cast;
+    })
+    .finally(() => {
+      state.castLoading = null;
+    });
+  return state.castLoading;
+}
+
+/* 角色是否已绑定音色（缺音色的人也需要能选，只是标注出来）。 */
+function castHasVoice(row) {
+  return Boolean(row && (row.voice_binding || {}).voice_id);
+}
+
+/* 生成说话人下拉选项：旁白、全部人物（缺音色标注）、未知角色。
+ * 参数：selected 当前值；withUnknown 是否包含「未知角色」选项（批量设置不需要）。
+ * 返回：HTML 字符串。
+ */
+function speakerOptionsHtml(selected, { withUnknown = true } = {}) {
+  const options = [];
+  const seen = new Set();
+  const add = (id, text) => {
+    if (!id || seen.has(id)) return;
+    seen.add(id);
+    options.push(`<option value="${escapeHtml(id)}">${escapeHtml(text)}</option>`);
+  };
+  const cast = state.cast || [];
+  const narrator = cast.find((row) => row.id === "chr_narrator") || { id: "chr_narrator", name: "旁白" };
+  add("chr_narrator", `${narrator.name || "旁白"}${castHasVoice(narrator) ? "" : "（缺音色）"}`);
+  cast.forEach((row) => {
+    if (!row || !row.id || row.id === "chr_narrator") return;
+    add(row.id, `${row.name || row.id}${castHasVoice(row) ? "" : "（缺音色）"}`);
+  });
+  if (withUnknown) add("chr_unknown", "未知角色（未识别）");
+  if (!selected) {
+    options.unshift('<option value="">未登记说话人</option>');
+  } else {
+    add(selected, `未登记角色（${selected}）`);
+  }
+  return options.join("");
+}
+
+/* 填「说话人」下拉：右栏单行 + 工具栏批量。 */
+function fillSpeakerSelects(selected) {
+  const single = $("fSpeaker");
+  if (single) {
+    single.innerHTML = speakerOptionsHtml(selected);
+    single.value = selected || "";
+  }
+  const multi = $("multiSpeaker");
+  if (multi) {
+    const keep = multi.value;
+    multi.innerHTML = speakerOptionsHtml("", { withUnknown: false });
+    if (keep) multi.value = keep;
+  }
+}
+
+/* 右栏「说话人」提示：未知角色/未登记角色/人物缺音色都用可见文案点出来。 */
+function updateSpeakerHint(speakerId) {
+  const hint = $("fSpeakerHint");
+  const select = $("fSpeaker");
+  if (!hint || !select) return;
+  const cast = state.cast || [];
+  select.classList.toggle("is-unknown", speakerId === "chr_unknown");
+  if (speakerId === "chr_unknown" || !speakerId) {
+    hint.hidden = false;
+    hint.textContent = "这一行说话人未识别：音频会用兜底音色。改成实际说话人后保存，已有音频会被标记为待重配。";
+    return;
+  }
+  const row = cast.find((item) => item.id === speakerId);
+  if (cast.length && row && !castHasVoice(row)) {
+    hint.hidden = false;
+    hint.textContent = `「${row.name || row.id}」还没有绑定音色：先到人物页/音色库绑定，再保存这一行。`;
+    return;
+  }
+  hint.hidden = true;
+  hint.textContent = "";
 }
 
 async function loadProjects() {
@@ -672,9 +779,12 @@ async function applyChapter(chapterId) {
   clearTimeout(run.timer);
   state.chapter = chapterId;
   state.selected = null;
+  state.checked.clear();
+  state.onlyUnknown = false;
   if (select.value !== chapterId) select.value = chapterId; // 静默同步，不再派发 change
   $("form").hidden = true;
   $("lineId").textContent = "未选中行";
+  updateMultiBar();
   await loadChapter();
   NW.notifyChapter();
   // 切章后提示本章音色/BGM 编排问题，不阻断切换
@@ -703,14 +813,22 @@ async function loadChapter() {
 
 async function loadLines() {
   try {
-    const status = [...state.filter].join(",");
+    const status = state.onlyUnknown ? "unknown" : [...state.filter].join(",");
     const data = await api(`/api/ui/lines?${qs({ path: state.path, chapter: state.chapter, status })}`);
     state.rows = data.lines || [];
     state.counts = data.counts || {};
+    const present = new Set(state.rows.map((row) => row.line_id));
+    [...state.checked].forEach((lineId) => {
+      if (!present.has(lineId)) state.checked.delete(lineId);
+    });
+    state.unknownCount = state.onlyUnknown
+      ? state.rows.length
+      : state.rows.filter((row) => row.speaker_id === "chr_unknown" || !row.speaker_id).length;
     if (state.selected && !state.rows.some((row) => row.line_id === state.selected)) state.selected = null;
     state.scrollTop = $("viewport").scrollTop;
     renderBadges();
     renderTable();
+    updateMultiBar();
     if (state.selected) await selectLine(state.selected, false);
   } catch (error) {
     toast(`读取台词失败：${error.message}`);
@@ -736,6 +854,9 @@ async function selectLine(lineId, scrollIntoView = true) {
   $("fPauseBefore").value = row.pause_before_ms ?? 0;
   $("fPauseAfter").value = row.pause_after_ms ?? 0;
   $("fNote").value = row.delivery_note || "";
+  await ensureVoiceCast();
+  fillSpeakerSelects(row.speaker_id || "");
+  updateSpeakerHint(row.speaker_id || "");
   if (scrollIntoView) {
     const index = visibleRows().findIndex((item) => item.line_id === lineId);
     if (index >= 0) {
@@ -795,7 +916,56 @@ function collectChanges(row) {
     const before = row[key] === undefined ? null : row[key];
     if (String(before ?? "") !== String(value ?? "")) patch[key] = value;
   });
+  // 说话人变更：走 line set --speaker；旁白 ↔ 对白同步类型，内心独白保持不动
+  const speaker = $("fSpeaker") ? $("fSpeaker").value : "";
+  if (speaker && speaker !== (row.speaker_id || "")) {
+    patch.speaker = speaker;
+    if (row.kind === "narration" || row.kind === "dialogue") {
+      const autoKind = speaker === "chr_narrator" ? "narration" : "dialogue";
+      patch.kind = autoKind;
+      $("fKind").value = autoKind;
+    }
+  }
   return patch;
+}
+
+/* 多选工具条：显示已选行数，未选人时禁用「批量设置说话人」。 */
+function updateMultiBar() {
+  const bar = $("multiBar");
+  if (!bar) return;
+  const count = state.checked.size;
+  bar.hidden = count === 0;
+  $("multiInfo").textContent = `已选 ${count} 行`;
+  $("btnMultiApply").disabled = count === 0 || !$("multiSpeaker").value;
+}
+
+/* 批量设置说话人：一次改多行，按返回的成功/失败计数提示。 */
+async function applyMultiSpeaker() {
+  const lines = [...state.checked];
+  if (!lines.length) return;
+  await ensureVoiceCast();
+  if ($("multiSpeaker") && !$("multiSpeaker").options.length) fillSpeakerSelects("");
+  const speaker = $("multiSpeaker").value;
+  if (!speaker) return;
+  const button = $("btnMultiApply");
+  button.disabled = true;
+  try {
+    const result = await api("/api/ui/line/set-batch", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: state.path, chapter: state.chapter, lines, speaker }),
+    });
+    const counts = result.counts || {};
+    const missing = result.not_found || [];
+    const tail = missing.length ? `，${missing.length} 行未更新：${missing[0].message}` : "";
+    toast(`已设置 ${counts.updated ?? 0} 行说话人${tail}`, missing.length === 0);
+    state.checked.clear();
+    await loadLines();
+  } catch (error) {
+    toast(`批量设置失败：${error.message}`);
+  } finally {
+    updateMultiBar();
+  }
 }
 
 async function saveLine() {
@@ -1228,6 +1398,7 @@ function bumpCount(from, to) {
 function bindEvents() {
   $("btnOpen").addEventListener("click", openProject);
   $("btnReload").addEventListener("click", async () => {
+    await ensureVoiceCast(true);
     await loadLines();
     toast("已刷新", true);
   });
@@ -1235,9 +1406,18 @@ function bindEvents() {
     // 只发事件，真正的切章逻辑收敛在 applyChapter
     NW.emit("chapter", event.target.value);
   });
-  $("badges").addEventListener("click", (event) => {
+  $("badges").addEventListener("click", async (event) => {
     const badge = event.target.closest(".badge");
     if (!badge) return;
+    if (badge.dataset.unknown) {
+      // 「只看未知角色」是服务端筛选：直接按 speaker=chr_unknown 重拉
+      state.onlyUnknown = !state.onlyUnknown;
+      if (state.onlyUnknown) state.filter.clear();
+      await loadLines();
+      return;
+    }
+    const leavingUnknown = state.onlyUnknown;
+    state.onlyUnknown = false;
     const name = badge.dataset.state;
     if (!name) {
       state.filter.clear();
@@ -1245,6 +1425,11 @@ function bindEvents() {
       state.filter.delete(name);
     } else {
       state.filter.add(name);
+    }
+    if (leavingUnknown) {
+      // 当前表里只有未知角色的子集，退回全量必须重拉，不能只在前端重画
+      await loadLines();
+      return;
     }
     renderBadges();
     renderTable();
@@ -1254,6 +1439,15 @@ function bindEvents() {
     renderTable();
   });
   $("rows").addEventListener("click", (event) => {
+    const box = event.target.closest("[data-check]");
+    if (box) {
+      // 勾选框只切多选，不触发整行选中
+      event.stopPropagation();
+      if (box.checked) state.checked.add(box.dataset.check);
+      else state.checked.delete(box.dataset.check);
+      updateMultiBar();
+      return;
+    }
     const rerun = event.target.closest(".row-rerun");
     if (rerun) {
       // 重录按钮不触发整行选中
@@ -1274,6 +1468,37 @@ function bindEvents() {
   $("fIntensity").addEventListener("input", () => {
     $("oIntensity").textContent = fmt($("fIntensity").value);
   });
+  $("fSpeaker").addEventListener("change", () => {
+    const speaker = $("fSpeaker").value;
+    updateSpeakerHint(speaker);
+    // 与章节页行内编辑一致：旁白 ↔ 对白自动切类型，内心独白保持不动
+    const kind = $("fKind").value;
+    if (kind === "narration" || kind === "dialogue") {
+      $("fKind").value = speaker === "chr_narrator" ? "narration" : "dialogue";
+    }
+  });
+  const checkAll = $("checkAll");
+  if (checkAll) {
+    checkAll.addEventListener("change", (event) => {
+      const rows = visibleRows();
+      if (event.target.checked) rows.forEach((row) => state.checked.add(row.line_id));
+      else rows.forEach((row) => state.checked.delete(row.line_id));
+      renderTable();
+      updateMultiBar();
+    });
+  }
+  const multiApply = $("btnMultiApply");
+  if (multiApply) multiApply.addEventListener("click", applyMultiSpeaker);
+  const multiClear = $("btnMultiClear");
+  if (multiClear) {
+    multiClear.addEventListener("click", () => {
+      state.checked.clear();
+      renderTable();
+      updateMultiBar();
+    });
+  }
+  const multiSpeaker = $("multiSpeaker");
+  if (multiSpeaker) multiSpeaker.addEventListener("change", updateMultiBar);
   $("btnSave").addEventListener("click", saveLine);
   $("btnRevert").addEventListener("click", revertLine);
   $("btnStart").addEventListener("click", startGenerate);
