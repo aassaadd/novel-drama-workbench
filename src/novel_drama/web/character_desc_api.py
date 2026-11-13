@@ -8,10 +8,12 @@
 from __future__ import annotations
 
 from fastapi import HTTPException
+from fastapi.responses import StreamingResponse
 
 from ..config import load_config
 from ..store import ProjectStore
 from ..writing.character_plan import fill_character_descriptions
+from .stream_api import _progress_response
 
 
 def register_character_desc_routes(app, config_path: str | None = None) -> None:
@@ -63,3 +65,42 @@ def register_character_desc_routes(app, config_path: str | None = None) -> None:
             "failures": result.get("failures", []),
             "summary": result.get("summary", ""),
         }
+
+    @app.post("/api/ui/characters/descriptions/fill/stream")
+    def ui_character_descriptions_fill_stream(body: dict) -> StreamingResponse:
+        """补全缺失描述（流式进度）：逐角色推进，可中途停止。
+
+        事件：start → total{total,pending,skipped,narrator} →
+        (batch{index,total,name} → chars* → item{status})* → done(result) / error(message)。
+        item.status 取 done / skipped / failed；skipped 的 reason 为「已齐全」或「旁白」。
+        停止后已完成的角色已逐个落盘，重跑只会处理仍缺失的角色。
+
+        参数:
+            body: `{path, names?: string[]}`；names 为空表示全部非旁白角色。
+
+        返回:
+            StreamingResponse（text/event-stream）。
+
+        异常:
+            HTTPException 400: 缺少 path。
+            HTTPException 404: 工程不存在。
+        """
+        path = (body or {}).get("path")
+        if not path:
+            raise HTTPException(status_code=400, detail={"code": 2, "message": "缺少 path 参数"})
+        store = ProjectStore(path)
+        if not store.exists():
+            raise HTTPException(status_code=404, detail={"code": 3, "message": f"工程不存在: {store.root}"})
+        names = [str(item) for item in ((body or {}).get("names") or []) if str(item).strip()]
+        config = load_config(config_path) if config_path else load_config()
+
+        def task(on_progress):
+            """逐个角色补全并透出进度。"""
+            return fill_character_descriptions(
+                store,
+                config,
+                names=names or None,
+                on_progress=on_progress,
+            )
+
+        return _progress_response(task)

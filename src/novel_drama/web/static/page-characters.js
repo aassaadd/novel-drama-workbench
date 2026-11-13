@@ -32,6 +32,7 @@
   let loadedPath = "";      // 上次加载的工程，切工程时清空编辑态
   let wizardMask = null;    // 生成候选预览浮层
   let wizardRows = [];      // 当前预览的候选人物
+  let descFillAbort = null; // 补全描述流式请求的 AbortController（非空表示正在进行）
 
   const el = (id) => document.getElementById(id);
 
@@ -954,6 +955,10 @@
   let castMeta = { chapters: [], voices: [], characters: [], stockSlots: [] };
   /* Casting 试听：只存页面状态，音频落 .ndw/cast_previews，不进正式资产 */
   let castPreview = { character: "", voice: "", log: [] };
+  /* 本章音色覆盖：章节、行数据、音色选项；与全局 castDraft 分开维护 */
+  let castOverride = { chapter: "", rows: [], voices: [], loaded: false, busy: false, message: "" };
+  /* 按角色自动补齐：预览计划、是否展开、撤回状态 */
+  let castAutoFill = { plan: null, open: false, undo: { available: false }, loading: false, state: "" };
 
   const CAST_DEFAULT_POOL = [
     ["male_young", "青年男声", "male", "young_adult"],
@@ -1039,6 +1044,284 @@
     return Array.from(keys).sort();
   }
 
+  /* 更新自动补齐工具条：状态文案、撤回按钮与预览区。 */
+  function renderAutoFillState() {
+    const state = el("castAutoFillState");
+    if (state) state.textContent = castAutoFill.state || "";
+    const undo = el("castAutoFillUndo");
+    if (undo) undo.hidden = !castAutoFill.undo.available;
+    renderAutoFillPreview();
+  }
+
+  /* 渲染自动补齐预览：每项改成什么、依据、保持不动或需要人工。 */
+  function renderAutoFillPreview() {
+    const box = el("castAutoFillPreview");
+    if (!box) return;
+    const plan = castAutoFill.plan;
+    if (!castAutoFill.open || !plan) {
+      box.hidden = true;
+      box.innerHTML = "";
+      return;
+    }
+    const sectionLabels = { pool: "音色池", stock: "龙套映射", narrator: "旁白人格", switch: "旁白切换点" };
+    const actionLabels = { create: "新建", fill: "补齐", keep: "保持不动", manual: "需要人工指定" };
+    const stats = plan.stats || {};
+    const rows = (plan.items || [])
+      .map((item) => {
+        const badge = item.action === "manual" ? '<span class="tag">需要人工指定</span>' : `<span class="tag">${actionLabels[item.action] || item.action}</span>`;
+        const target =
+          item.action === "manual"
+            ? '<span class="muted">保持原样，不会写入</span>'
+            : `<b>${esc(item.proposed_name || item.proposed || "—")}</b>`;
+        return `<div style="display:flex;gap:8px;align-items:flex-start;padding:6px 0;border-bottom:1px solid #f1f1f1">
+          <span class="tag">${esc(sectionLabels[item.section] || item.section)}</span>
+          <div style="flex:1">
+            <div>${esc(item.label || item.key)} ${badge} → ${target}</div>
+            <div class="muted">${esc(item.reason || "")}</div>
+          </div>
+        </div>`;
+      })
+      .join("");
+    box.hidden = false;
+    box.innerHTML = `<div class="card" style="padding:12px;margin:8px 0;border:1px solid #e5e5e5">
+      <div class="row" style="gap:8px;align-items:center;flex-wrap:wrap">
+        <b>自动补齐预览</b>
+        <span class="muted">将改动 ${stats.changed || 0} 项 · 保持不动 ${stats.keep || 0} 项 · 需要人工 ${stats.manual || 0} 项</span>
+      </div>
+      <div style="margin-top:6px">${rows || '<p class="muted">没有可推断的项</p>'}</div>
+      <div style="margin-top:10px">
+        <button class="btn" type="button" id="castAutoFillApply">确认应用</button>
+        <button class="btn small" type="button" id="castAutoFillCancel">取消</button>
+      </div>
+    </div>`;
+  }
+
+  /* 读取自动补齐预览计划（只读，不落盘）。 */
+  async function loadAutoFillPlan() {
+    if (!NW.state.path) {
+      NW.toast("先打开工程");
+      return;
+    }
+    castAutoFill.loading = true;
+    castAutoFill.state = "正在分析角色档案与音色库…";
+    renderAutoFillState();
+    try {
+      const data = await NW.api(`/api/ui/cast/autofill?path=${encodeURIComponent(NW.state.path)}`);
+      castAutoFill.plan = data.plan || null;
+      castAutoFill.undo = data.undo || { available: false };
+      castAutoFill.open = true;
+      const stats = (data.plan || {}).stats || {};
+      castAutoFill.state = `将改动 ${stats.changed || 0} 项，保持不动 ${stats.keep || 0} 项，需要人工 ${stats.manual || 0} 项`;
+    } catch (error) {
+      castAutoFill.open = false;
+      castAutoFill.state = `分析失败：${error.message}`;
+    } finally {
+      castAutoFill.loading = false;
+      renderAutoFillState();
+    }
+  }
+
+  /* 应用自动补齐；后端会先存一份补齐前快照，供撤回。 */
+  async function applyAutoFill() {
+    if (!castAutoFill.plan) return;
+    try {
+      const data = await NW.api("/api/ui/cast/autofill", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: NW.state.path }),
+      });
+      if (!data.applied) {
+        NW.toast("没有可自动补齐的项");
+        castAutoFill.open = false;
+        renderAutoFillState();
+        return;
+      }
+      NW.toast(`已自动补齐 ${data.changed} 项，可撤回`, true);
+      await openCastEditor();
+    } catch (error) {
+      NW.toast(`自动补齐失败：${error.message}`);
+    }
+  }
+
+  /* 撤回上次自动补齐，恢复补齐前的全剧编排。 */
+  async function undoAutoFill() {
+    try {
+      await NW.api("/api/ui/cast/autofill/undo", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: NW.state.path }),
+      });
+      NW.toast("已撤回本次自动补齐", true);
+      await openCastEditor();
+    } catch (error) {
+      NW.toast(`撤回失败：${error.message}`);
+    }
+  }
+
+  /* 打开面板时只刷新撤回可用性，不主动弹预览。 */
+  async function loadAutoFillMeta() {
+    if (!NW.state.path) return;
+    try {
+      const data = await NW.api(`/api/ui/cast/autofill?path=${encodeURIComponent(NW.state.path)}`);
+      castAutoFill.undo = data.undo || { available: false };
+    } catch (error) {
+      castAutoFill.undo = { available: false };
+    }
+    renderAutoFillState();
+  }
+
+  /* 渲染本章音色覆盖的章节下拉、行与状态。 */
+  function renderCastOverrides() {
+    const select = el("castOverrideChapter");
+    if (select) {
+      select.innerHTML = (castMeta.chapters || []).length
+        ? castChapterOptions(castOverride.chapter, false)
+        : '<option value="">（还没有章节）</option>';
+    }
+    const box = el("castOverrideRows");
+    if (box) {
+      if (castOverride.busy) box.innerHTML = '<p class="muted">读取中…</p>';
+      else if (!castOverride.rows.length) {
+        box.innerHTML = `<p class="muted">${esc(castOverride.message || "本章还没有需要编排的角色")}</p>`;
+      } else box.innerHTML = castOverride.rows.map(castOverrideRow).join("");
+    }
+    const state = el("castOverrideState");
+    if (state) state.textContent = castOverride.message || "";
+    const resetAll = el("castOverrideResetAll");
+    if (resetAll) resetAll.disabled = !castOverride.rows.some((row) => row.override);
+  }
+
+  /* 单行渲染：显示跟随全局 / 本章覆盖、来源与生效音色。
+   * 参数：row 为 GET /api/ui/cast/chapter 返回的行。
+   * 返回：HTML 字符串。
+   */
+  function castOverrideRow(row) {
+    const inherited = row.inherited || {};
+    const override = row.override;
+    const voiceName = override
+      ? override.voice_name || "音色缺失"
+      : inherited.voice_name || "未定音";
+    const sourceLabel = override
+      ? override.valid
+        ? "本章覆盖"
+        : "本章覆盖（未生效）"
+      : inherited.source_label || "未定音";
+    const modeTag = override ? `<span class="tag">${esc(sourceLabel)}</span>` : '<span class="tag">跟随全局</span>';
+    const options = (castOverride.voices || [])
+      .map(
+        (item) =>
+          `<option value="${esc(item.id)}"${override && String(item.id) === String(override.voice_id) ? " selected" : ""}>${esc(
+            item.name || item.id
+          )}</option>`
+      )
+      .join("");
+    const disabled = row.overridable ? "" : " disabled";
+    const hint = row.overridable ? "" : '<span class="muted">仅旁白 / 龙套支持本章覆盖</span>';
+    const reset = override
+      ? `<button class="btn small" type="button" data-override-reset="${esc(row.character_id)}">恢复为跟随全局</button>`
+      : "";
+    return `<div class="voice-bind-row" data-override-row="${esc(row.character_id)}">
+      <span class="voice-bind-name">${esc(row.name)}</span>
+      <span class="tag">${esc(roleLabel(row.role))}</span>
+      ${modeTag}
+      <span class="muted">来源：${esc(sourceLabel)} · ${esc(voiceName)}</span>
+      <select data-override-select="${esc(row.character_id)}"${disabled}>
+        <option value=""${override ? "" : " selected"}>跟随全局（${esc(inherited.voice_name || "未定音")}）</option>
+        ${options}
+      </select>
+      ${hint}${reset}
+    </div>`;
+  }
+
+  /* 读取某章的覆盖表；chapter 为空时用当前章节或第一章。
+   * 参数：chapterId 章节 ID（可选）。
+   * 返回：Promise<void>。
+   */
+  async function loadCastOverrides(chapterId) {
+    if (!NW.state.path) return;
+    const chapter =
+      chapterId || castOverride.chapter || NW.state.chapter || ((castMeta.chapters || [])[0] || {}).id || "";
+    if (!chapter) {
+      castOverride = { chapter: "", rows: [], voices: [], loaded: true, busy: false, message: "还没有章节" };
+      renderCastOverrides();
+      return;
+    }
+    castOverride.chapter = chapter;
+    castOverride.busy = true;
+    renderCastOverrides();
+    try {
+      const data = await NW.api(
+        `/api/ui/cast/chapter?path=${encodeURIComponent(NW.state.path)}&chapter=${encodeURIComponent(chapter)}`
+      );
+      castOverride.rows = data.rows || [];
+      castOverride.voices = data.voices || [];
+      castOverride.loaded = true;
+      castOverride.message = "";
+    } catch (error) {
+      castOverride.rows = [];
+      castOverride.loaded = true;
+      castOverride.message = `读取失败：${error.message}`;
+    } finally {
+      castOverride.busy = false;
+      renderCastOverrides();
+    }
+  }
+
+  /* 保存单行覆盖（voiceId 为空 = 恢复跟随全局）。只提交这一行，没改的行不写。
+   * 参数：characterId 角色 ID；voiceId 目标音色 ID 或空。
+   * 返回：Promise<void>。
+   */
+  async function saveCastOverride(characterId, voiceId) {
+    if (!castOverride.chapter) return;
+    try {
+      const data = await NW.api("/api/ui/cast/chapter", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          path: NW.state.path,
+          chapter: castOverride.chapter,
+          character_id: characterId,
+          voice_id: voiceId || null,
+        }),
+      });
+      castOverride.rows = data.rows || castOverride.rows;
+      castOverride.voices = data.voices || castOverride.voices;
+      castOverride.message = "";
+      renderCastOverrides();
+      NW.toast(voiceId ? "已写入本章覆盖" : "已恢复为跟随全局", true);
+    } catch (error) {
+      NW.toast(`保存失败：${error.message}`);
+      await loadCastOverrides(castOverride.chapter);
+    }
+  }
+
+  /* 整章恢复跟随全局（清空本章所有覆盖）。
+   * 参数：无。
+   * 返回：Promise<void>。
+   */
+  async function resetAllCastOverrides() {
+    if (!castOverride.chapter) return;
+    const count = castOverride.rows.filter((row) => row.override).length;
+    if (!count) {
+      NW.toast("本章没有覆盖项");
+      return;
+    }
+    if (!window.confirm(`把本章 ${count} 个角色的覆盖全部清掉，恢复为跟随全局？`)) return;
+    try {
+      const data = await NW.api("/api/ui/cast/chapter", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: NW.state.path, chapter: castOverride.chapter, all: true }),
+      });
+      castOverride.rows = data.rows || castOverride.rows;
+      castOverride.voices = data.voices || castOverride.voices;
+      renderCastOverrides();
+      NW.toast("本章已全部恢复跟随全局", true);
+    } catch (error) {
+      NW.toast(`恢复失败：${error.message}`);
+    }
+  }
+
   /* 渲染整块编辑器。 */
   function renderCastEditor() {
     const box = el("castEditor");
@@ -1105,33 +1388,86 @@
         </tr>`
       )
       .join("");
+    const poolSlots = castDraft.voice_pool || [];
+    const poolFilled = poolSlots.filter((item) => item.voice_id).length;
+    const poolReady = poolSlots.length > 0 && poolFilled === poolSlots.length;
+    const stockCount = Object.keys(castDraft.stock_defaults || {}).length;
+    const stockReady = stockCount > 0;
+    const personaReady = (castDraft.narrators || []).some((item) => item.voice_id);
+    const switchReady = (castDraft.narrator_switches || []).length > 0;
+    const castCharacters = castMeta.characters || [];
+    const boundCount = castCharacters.filter((item) => item.voice_id).length;
+    const sectionTag = (ready) => (ready ? '<span class="tag">自动</span>' : '<span class="tag">需人工</span>');
+    // 重渲染会重建 <details>：先记住展开状态，避免改一个字段就自动收起
+    const sectionOpen = {};
+    if (typeof box.querySelectorAll === "function") {
+      box.querySelectorAll("details[data-cast-section]").forEach((node) => {
+        sectionOpen[node.dataset.castSection] = node.open;
+      });
+    }
+    const detailsOpen = (key, ready) => {
+      const open = key in sectionOpen ? sectionOpen[key] : !ready;
+      return open ? " open" : "";
+    };
     box.innerHTML = `
       <div class="card" style="padding:12px;margin-top:8px">
-        <h3 style="margin:0 0 8px">音色池（6 个槽位起步）</h3>
-        <p class="muted" style="margin:0 0 8px">槽位键是稳定键，保存后不要随意改名；同一槽位可被多个职业龙套复用。</p>
-        <table class="table"><thead><tr><th>槽位</th><th>名称</th><th>音色</th><th>性别</th><th>年龄感</th><th></th></tr></thead>
-        <tbody>${poolRows || '<tr><td colspan="6" class="muted">还没有音色池槽位</td></tr>'}</tbody></table>
-        <button class="btn small" type="button" id="castPoolAdd">新增音色槽位</button>
+        <div class="row" style="gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
+          <button class="btn" type="button" id="castAutoFillBtn">按角色自动补齐</button>
+          <button class="btn small" type="button" id="castAutoFillUndo"${castAutoFill.undo.available ? "" : " hidden"}>撤回本次自动补齐</button>
+          <span class="muted" id="castAutoFillState"></span>
+        </div>
+        <p class="muted" style="margin:0 0 8px">全局绑定由「音色库」自动流程维护；标「自动」的区块默认折叠，需要手改时再展开。自动补齐只补空项，不覆盖已填好的值。</p>
+        <div id="castAutoFillPreview" hidden></div>
 
-        <h3 style="margin:16px 0 8px">龙套职业映射</h3>
-        <p class="muted" style="margin:0 0 8px">键可以是音色池槽位（如 male_mid），也可以是具体职业槽位（如 waiter）；职业槽位优先。</p>
-        <table class="table"><thead><tr><th>键</th><th>来源</th><th>音色</th></tr></thead><tbody>${
-          stockRows || '<tr><td colspan="3" class="muted">还没有可映射的槽位</td></tr>'
-        }</tbody></table>
+        <h3 style="margin:8px 0 8px">本章音色覆盖（默认跟随全局）</h3>
+        <p class="muted" style="margin:0 0 8px">打开即按全局音色编排带入：每行显示该角色当前生效的音色与来源。只有你改动的行才写入本章覆盖，没动过的行不写；可单行或整章恢复为跟随全局。</p>
+        <div class="row" style="gap:8px;align-items:center;flex-wrap:wrap">
+          <label>章节 <select class="input" id="castOverrideChapter">${
+            (castMeta.chapters || []).length ? castChapterOptions(castOverride.chapter, false) : '<option value="">（还没有章节）</option>'
+          }</select></label>
+          <button class="btn small" type="button" id="castOverrideResetAll">全部恢复跟随全局</button>
+          <span class="muted" id="castOverrideState"></span>
+        </div>
+        <div id="castOverrideRows" class="voice-bind-list" style="margin-top:8px"></div>
 
-        <h3 style="margin:16px 0 8px">旁白人格</h3>
-        <table class="table"><thead><tr><th>ID</th><th>名称</th><th>音色</th><th></th></tr></thead>
-        <tbody>${personaRows || '<tr><td colspan="4" class="muted">还没有旁白人格</td></tr>'}</tbody></table>
-        <button class="btn small" type="button" id="castPersonaAdd">新增旁白人格</button>
-        <label style="margin-left:12px">默认旁白：
-          <select class="input" id="castDefaultPersona">${castPersonaOptions(castDraft.default_narrator_id)}</select>
-        </label>
+        <details data-cast-section="binding" style="margin-top:16px"${detailsOpen("binding", true)}>
+          <summary><b>角色 → 全局绑定</b> <span class="tag">自动</span> <span class="muted">${boundCount}/${castCharacters.length} 个角色已绑定，由「音色库」维护</span></summary>
+          <p class="muted" style="margin:8px 0">全局绑定不在这里逐行手填：到「音色库」用一键自动编排 / 批量生成维护；本章需要例外时用上方的「本章音色覆盖」。</p>
+        </details>
 
-        <h3 style="margin:16px 0 8px">旁白切换点</h3>
-        <p class="muted" style="margin:0 0 8px">区间含首尾；结束章留空表示延续到下一个切换点之前。区间不允许重叠或中间断开。</p>
-        <table class="table"><thead><tr><th>起始章</th><th>结束章</th><th>人格</th><th>理由</th><th></th></tr></thead>
-        <tbody>${switchRows || '<tr><td colspan="5" class="muted">没有切换点，全书使用默认旁白</td></tr>'}</tbody></table>
-        <button class="btn small" type="button" id="castSwitchAdd">新增切换点</button>
+        <details data-cast-section="pool" style="margin-top:16px"${detailsOpen("pool", poolReady)}>
+          <summary><b>音色池</b> ${sectionTag(poolReady)} <span class="muted">${poolSlots.length} 个槽位，${poolFilled} 个已定音</span></summary>
+          <p class="muted" style="margin:8px 0">槽位键是稳定键，保存后不要随意改名；同一槽位可被多个职业龙套复用。</p>
+          <table class="table"><thead><tr><th>槽位</th><th>名称</th><th>音色</th><th>性别</th><th>年龄感</th><th></th></tr></thead>
+          <tbody>${poolRows || '<tr><td colspan="6" class="muted">还没有音色池槽位</td></tr>'}</tbody></table>
+          <button class="btn small" type="button" id="castPoolAdd">新增音色槽位</button>
+        </details>
+
+        <details data-cast-section="stock" style="margin-top:12px"${detailsOpen("stock", stockReady)}>
+          <summary><b>龙套职业映射</b> ${sectionTag(stockReady)} <span class="muted">${stockCount} 个映射</span></summary>
+          <p class="muted" style="margin:8px 0">键可以是音色池槽位（如 male_mid），也可以是具体职业槽位（如 waiter）；职业槽位优先。</p>
+          <table class="table"><thead><tr><th>键</th><th>来源</th><th>音色</th></tr></thead><tbody>${
+            stockRows || '<tr><td colspan="3" class="muted">还没有可映射的槽位</td></tr>'
+          }</tbody></table>
+        </details>
+
+        <details data-cast-section="persona" style="margin-top:12px"${detailsOpen("persona", personaReady)}>
+          <summary><b>旁白人格</b> ${sectionTag(personaReady)} <span class="muted">${(castDraft.narrators || []).length} 个人格</span></summary>
+          <table class="table" style="margin-top:8px"><thead><tr><th>ID</th><th>名称</th><th>音色</th><th></th></tr></thead>
+          <tbody>${personaRows || '<tr><td colspan="4" class="muted">还没有旁白人格</td></tr>'}</tbody></table>
+          <button class="btn small" type="button" id="castPersonaAdd">新增旁白人格</button>
+          <label style="margin-left:12px">默认旁白：
+            <select class="input" id="castDefaultPersona">${castPersonaOptions(castDraft.default_narrator_id)}</select>
+          </label>
+        </details>
+
+        <details data-cast-section="switch" style="margin-top:12px"${detailsOpen("switch", switchReady)}>
+          <summary><b>旁白切换点</b> ${sectionTag(switchReady)} <span class="muted">${(castDraft.narrator_switches || []).length} 个切换点</span></summary>
+          <p class="muted" style="margin:8px 0">区间含首尾；结束章留空表示延续到下一个切换点之前。区间不允许重叠或中间断开。无法从角色档案推断时保持「需要人工指定」。</p>
+          <table class="table"><thead><tr><th>起始章</th><th>结束章</th><th>人格</th><th>理由</th><th></th></tr></thead>
+          <tbody>${switchRows || '<tr><td colspan="5" class="muted">没有切换点，全书使用默认旁白</td></tr>'}</tbody></table>
+          <button class="btn small" type="button" id="castSwitchAdd">新增切换点</button>
+        </details>
 
         <h3 style="margin:16px 0 8px">每章旁白预览（当前已保存配置）</h3>
         <div id="castPlanPreview" class="muted">—</div>
@@ -1153,6 +1489,8 @@
         <div style="margin-top:10px"><button class="btn" type="button" id="castSave">保存并检查</button></div>
       </div>`;
     renderCastPreviewLog();
+    renderCastOverrides();
+    renderAutoFillState();
   }
 
   /* 渲染试听历史（最多 6 条，方便 A/B 对比；页面刷新即清空）。 */
@@ -1296,9 +1634,21 @@
         castPreview.character = previewable.length ? previewable[0].id : "";
         castPreview.voice = "";
       }
+      // 本章覆盖默认跟随当前章节；没有当前章节时用第一章
+      castOverride = {
+        chapter: NW.state.chapter || ((castMeta.chapters || [])[0] || {}).id || "",
+        rows: [],
+        voices: [],
+        loaded: false,
+        busy: false,
+        message: "",
+      };
+      castAutoFill = { plan: null, open: false, undo: { available: false }, loading: false, state: "" };
       renderCastEditor();
       renderCastPlan(data.plan);
       renderCastErrors(data.errors);
+      loadCastOverrides(castOverride.chapter);
+      loadAutoFillMeta();
     } catch (error) {
       if (box) box.textContent = `读取失败：${error.message}`;
     }
@@ -1372,6 +1722,42 @@
       saveCast();
       return;
     }
+    if (target.id === "castAutoFillBtn") {
+      loadAutoFillPlan();
+      return;
+    }
+    if (target.id === "castAutoFillCancel") {
+      castAutoFill.open = false;
+      castAutoFill.plan = null;
+      renderAutoFillState();
+      return;
+    }
+    if (target.id === "castAutoFillApply") {
+      applyAutoFill();
+      return;
+    }
+    if (target.id === "castAutoFillUndo") {
+      undoAutoFill();
+      return;
+    }
+    if (target.id === "castOverrideChapter") {
+      loadCastOverrides(target.value);
+      return;
+    }
+    if (target.id === "castOverrideResetAll") {
+      resetAllCastOverrides();
+      return;
+    }
+    const overrideSelect = target.getAttribute("data-override-select");
+    if (overrideSelect) {
+      saveCastOverride(overrideSelect, target.value);
+      return;
+    }
+    const overrideReset = target.getAttribute("data-override-reset");
+    if (overrideReset) {
+      saveCastOverride(overrideReset, "");
+      return;
+    }
     const del = target.getAttribute("data-cast-del");
     if (del) {
       const index = Number(target.getAttribute("data-index"));
@@ -1431,6 +1817,23 @@
     if (out) out.textContent = `结论 ${(result && result.level) || "ok"}：error ${errors}，warn ${warns}`;
   }
 
+  /* 在补全蒙版的卡片里挂「停止补全」按钮，结束后由调用方移除。
+   * 参数：controller 当前请求的 AbortController。
+   * 返回：按钮元素；蒙版不存在时返回 null。
+   */
+  function attachDescStop(controller) {
+    const card = document.querySelector("#busyMask .busy-card");
+    if (!card) return null;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "btn small";
+    button.textContent = "停止补全";
+    button.style.marginTop = "10px";
+    button.addEventListener("click", () => controller.abort());
+    card.appendChild(button);
+    return button;
+  }
+
   /* 注入音色编排工具条（不改 index.html，避免与并行改动冲突）。
    * 返回：无。
    */
@@ -1457,27 +1860,67 @@
     editor.addEventListener("click", handleCastEdit);
     panel.querySelector("#castDescFillBtn").addEventListener("click", async () => {
       const out = document.getElementById("castResult");
+      const button = panel.querySelector("#castDescFillBtn");
+      if (descFillAbort) {
+        descFillAbort.abort();
+        return;
+      }
+      const controller = new AbortController();
+      descFillAbort = controller;
+      const progress = NW.progressInit();
+      let total = 0;       // 本轮待处理角色总数（含已齐全与旁白）
+      let pending = 0;     // 仍需补全的角色数
+      let completed = 0;   // 已成功补全的角色数
+      let skippedCount = 0;
+      const original = button.textContent;
+      button.textContent = "停止补全";
       out.textContent = "补全中…";
+      NW.busyShow("正在补全人物描述…", "正在读取角色档案…");
+      const maskStop = attachDescStop(controller);
       try {
-        const result = await NW.api("/api/ui/characters/descriptions/fill", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ path: NW.state.path }),
-          busy: "正在补全人物描述…",
-        });
+        const result = await NW.streamPost(
+          "/api/ui/characters/descriptions/fill/stream",
+          { path: NW.state.path },
+          (event, data) => {
+            if (event === "total") {
+              total = Number(data.total) || 0;
+              pending = Number(data.pending) || 0;
+              skippedCount = Number(data.skipped) || 0;
+              NW.busyDetail(
+                `共 ${total} 个角色（待补 ${pending}、已齐全 ${skippedCount}、旁白 ${Number(data.narrator) || 0}）`
+              );
+            } else if (event === "batch" || event === "chars") {
+              NW.busyDetail(NW.progressApply(progress, data));
+            } else if (event === "item") {
+              if (data.status === "done") completed += 1;
+              if (data.status === "done" || data.status === "failed") pending = Math.max(0, pending - 1);
+            }
+          },
+          controller.signal
+        );
         const updated = (result.updated || []).length;
-        const failures = result.failures || [];
-        out.textContent = failures.length
-          ? `已补 ${updated} 个，失败 ${failures.length} 个（可重跑只补失败项）`
-          : `已补 ${updated} 个角色`;
-        if (failures.length) {
-          NW.toast(`补全失败：${failures.slice(0, 2).map((item) => `${item.name}（${item.message}）`).join("；")}`);
+        const failed = (result.failures || []).length;
+        const skipped = (result.skipped || []).length;
+        out.textContent = `已补 ${updated} 个、已齐全 ${skipped} 个${failed ? `、失败 ${failed} 个（可重跑只补缺失项）` : ""}`;
+        if (failed) {
+          NW.toast(`补全失败：${(result.failures || []).slice(0, 2).map((item) => `${item.name}（${item.message}）`).join("；")}`);
         } else if (!updated) {
           NW.toast("所有角色的描述都已齐全，无需补全", true);
         }
         load();
       } catch (error) {
-        out.textContent = `补全失败：${error.message}`;
+        if (controller.signal.aborted) {
+          NW.toast(`已停止补全：已补全 ${completed} 个，剩余 ${pending} 个可再点`, true);
+          out.textContent = `已停止：已补 ${completed} 个，剩余 ${pending} 个可再点`;
+          load();
+        } else {
+          out.textContent = `补全失败：${error.message}`;
+        }
+      } finally {
+        if (maskStop) maskStop.remove();
+        if (descFillAbort === controller) descFillAbort = null;
+        button.textContent = original;
+        NW.busyHide();
       }
     });
     panel.querySelector("#castEditBtn").addEventListener("click", async () => {

@@ -594,6 +594,197 @@ def resolve_cast_voice(store, characters_table: dict, chapter: dict, line: dict,
     return _empty()
 
 
+#: 解析层 source → 页面展示的中文来源名（章节覆盖表用）。
+SOURCE_LABELS = {
+    "chapter_override": "本章覆盖",
+    "character_binding": "全局绑定",
+    "stock_pool": "龙套池",
+    "narrator_persona": "旁白固定",
+    "minor_fallback": "龙套兜底",
+    "narrator_fallback": "旁白兜底",
+    "unknown_fallback": "路人兜底",
+    "project_default": "工程默认",
+    "line_voice": "行级指定",
+    "line_variant": "行级变体",
+    "missing": "未定音",
+}
+
+#: 页面手动覆盖写入的 reason。schema 要求必填，页面不再让用户逐行写理由。
+UI_OVERRIDE_REASON = "页面手动指定（本章覆盖）"
+
+
+def _visible_override(character: dict) -> bool:
+    """角色是否允许章节覆盖（旁白或带 stock 的龙套），与解析层保持一致。"""
+    return character.get("role") == "narrator" or bool(character.get("stock"))
+
+
+def _resolve_one(store, characters_table: dict, chapter: dict, character_id: str, voices: dict, voice_names: dict) -> dict:
+    """解析单个角色在本章的生效音色（章节覆盖表的一行）。
+
+    参数:
+        store: ProjectStore。
+        characters_table: 角色表。
+        chapter: 章节 dict（可带 voice_overrides）。
+        character_id: 角色 ID。
+        voices: 音色库文档。
+        voice_names: 音色 ID → 名称。
+
+    返回:
+        `{voice_id, voice_name, source, source_label, issue}`。
+    """
+    entry = resolve_cast_voice(store, characters_table, chapter, {"speaker_id": character_id}, voices)
+    source = entry.get("source") or "missing"
+    voice_id = entry.get("voice_id")
+    return {
+        "voice_id": voice_id,
+        "voice_name": voice_names.get(str(voice_id)) if voice_id else None,
+        "source": source,
+        "source_label": SOURCE_LABELS.get(source, source),
+        "issue": entry.get("issue"),
+    }
+
+
+def chapter_override_rows(store, chapter_id: str) -> dict:
+    """构造某章的章节音色覆盖表（读取用）。
+
+    每行默认给出该角色「跟随全局」时的生效音色与来源，只有确实存在
+    `chapter.voice_overrides` 时 mode 才是 override；历史覆盖原样回显。
+
+    参数:
+        store: ProjectStore。
+        chapter_id: 章节 ID。
+
+    返回:
+        `{chapter, rows, voices}`；rows 元素见函数内注释。
+    """
+    chapter = store.load_chapter(chapter_id)
+    characters_table = store.load_characters()
+    characters = characters_table.get("characters") or []
+    by_id = {item.get("id"): item for item in characters}
+    voices_doc = store.load_voices()
+    voices = voices_doc.get("voices") or []
+    voice_names = {str(item.get("id")): item.get("name") for item in voices}
+    overrides = chapter.get("voice_overrides") or {}
+
+    # 本章说话的角色，按首次出现排序；旁白置顶；历史覆盖即使角色已不出场也保留一行
+    order: list[str] = []
+    for scene in chapter.get("scenes") or []:
+        for line in scene.get("lines") or []:
+            speaker = line.get("speaker_id")
+            if speaker and speaker in by_id and speaker not in order:
+                order.append(speaker)
+    if NARRATOR_ID in by_id:
+        order = [NARRATOR_ID] + [item for item in order if item != NARRATOR_ID]
+    for character_id in overrides:
+        if character_id not in order:
+            order.append(character_id)
+
+    # 「跟随全局」的基线：临时清空覆盖，复用同一个解析入口，不复制优先级逻辑
+    base_chapter = dict(chapter)
+    base_chapter["voice_overrides"] = {}
+
+    rows = []
+    for character_id in order:
+        character = by_id.get(character_id) or {}
+        override = overrides.get(character_id)
+        override = override if isinstance(override, dict) else None
+        effective = _resolve_one(store, characters_table, chapter, character_id, voices_doc, voice_names)
+        inherited = _resolve_one(store, characters_table, base_chapter, character_id, voices_doc, voice_names)
+        rows.append(
+            {
+                "character_id": character_id,
+                "name": character.get("name") or ("旁白" if character_id == NARRATOR_ID else "（角色已删除）"),
+                "role": character.get("role"),
+                "stock_slot": (character.get("stock") or {}).get("slot"),
+                "overridable": _visible_override(character) if character else False,
+                # override：本章覆盖行；inherited：跟随全局
+                "mode": "override" if override else "inherited",
+                "override": (
+                    {
+                        "voice_id": override.get("voice_id"),
+                        "voice_name": voice_names.get(str(override.get("voice_id"))),
+                        "reason": override.get("reason") or "",
+                        # 解析层只认带 reason 且音色可用的覆盖；无效的仍回显，避免历史数据消失
+                        "valid": effective["source"] == "chapter_override",
+                    }
+                    if override
+                    else None
+                ),
+                "inherited": inherited,
+                "effective": effective,
+            }
+        )
+    return {
+        "chapter": {"id": chapter.get("id"), "index": chapter.get("index"), "title": chapter.get("title")},
+        "rows": rows,
+        "voices": [{"id": item.get("id"), "name": item.get("name"), "gender": item.get("gender")} for item in voices],
+    }
+
+
+def set_chapter_override(store, chapter_id: str, character_id: str, voice_id: str | None) -> dict:
+    """写入或清除单个角色的章节覆盖。
+
+    voice_id 为空表示清除该行（恢复跟随全局）；只写这一行，不改动其它键。
+
+    参数:
+        store: ProjectStore。
+        chapter_id: 章节 ID。
+        character_id: 角色 ID。
+        voice_id: 覆盖音色 ID；空值表示清除。
+
+    返回:
+        刷新后的 `chapter_override_rows` 结构。
+
+    异常:
+        ValueError: 角色不存在、角色不支持覆盖或音色不存在。
+    """
+    chapter = store.load_chapter(chapter_id)
+    characters = {item.get("id"): item for item in store.load_characters().get("characters") or []}
+    character = characters.get(character_id)
+    overrides = chapter.get("voice_overrides") or {}
+
+    # 清除优先：即使角色已被删除，也允许清掉历史残留覆盖
+    if not voice_id:
+        if character_id in overrides:
+            overrides.pop(character_id, None)
+            if overrides:
+                chapter["voice_overrides"] = overrides
+            else:
+                chapter.pop("voice_overrides", None)
+            store.save_chapter(chapter)
+        return chapter_override_rows(store, chapter_id)
+
+    if not character:
+        raise ValueError(f"角色不存在：{character_id}")
+    if not _visible_override(character):
+        raise ValueError("章节覆盖只允许旁白或龙套角色；普通角色请改全局绑定")
+    voices_doc = store.load_voices()
+    if find_voice(voices_doc, voice_id) is None:
+        raise ValueError(f"音色不存在：{voice_id}")
+
+    overrides[character_id] = {"voice_id": voice_id, "reason": UI_OVERRIDE_REASON}
+    chapter["voice_overrides"] = overrides
+    store.save_chapter(chapter)
+    return chapter_override_rows(store, chapter_id)
+
+
+def clear_chapter_overrides(store, chapter_id: str) -> dict:
+    """清空整章覆盖（全部恢复跟随全局）。
+
+    参数:
+        store: ProjectStore。
+        chapter_id: 章节 ID。
+
+    返回:
+        刷新后的 `chapter_override_rows` 结构。
+    """
+    chapter = store.load_chapter(chapter_id)
+    if chapter.get("voice_overrides"):
+        chapter.pop("voice_overrides", None)
+        store.save_chapter(chapter)
+    return chapter_override_rows(store, chapter_id)
+
+
 def _voice_of(entry: dict) -> str | None:
     """从解析结果里取音色 ID（仅当有可用参考音频时视为「已定音」）。"""
     return entry.get("voice_id") if entry.get("ref_audio") else None

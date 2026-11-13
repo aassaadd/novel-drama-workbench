@@ -2060,6 +2060,108 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
             "plan": narrator_plan(cast, chapters),
         }
 
+    @app.get("/api/ui/cast/chapter")
+    def ui_cast_chapter_get(path: str = Query(...), chapter: str = Query(...)) -> dict:
+        """读取某章的章节音色覆盖表（每行默认给出跟随全局时的生效音色）。
+
+        参数:
+            path: 工程根目录。
+            chapter: 章节 ID。
+
+        返回:
+            `{chapter, rows, voices}`；rows 含 mode / inherited / override / effective。
+        """
+        from ..store.voice_cast import chapter_override_rows
+
+        try:
+            return chapter_override_rows(_store(path), chapter)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail={"code": 4, "message": str(exc)})
+
+    @app.post("/api/ui/cast/chapter")
+    def ui_cast_chapter_save(body: dict) -> dict:
+        """写入/清除章节覆盖。
+
+        参数:
+            body: `{path, chapter, character_id?, voice_id?, all?}`；
+                  `all=true` 清空整章，`voice_id` 为空清除单行。
+
+        返回:
+            `{ok, chapter, rows, voices}`。
+        """
+        from ..store.voice_cast import clear_chapter_overrides, set_chapter_override
+
+        chapter_id = str(body.get("chapter") or "").strip()
+        if not chapter_id:
+            raise HTTPException(status_code=400, detail={"code": 2, "message": "缺少章节 ID"})
+        store = _store(body.get("path"))
+        try:
+            if body.get("all"):
+                data = clear_chapter_overrides(store, chapter_id)
+            else:
+                data = set_chapter_override(
+                    store,
+                    chapter_id,
+                    str(body.get("character_id") or "").strip(),
+                    body.get("voice_id") or None,
+                )
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail={"code": 4, "message": str(exc)})
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"code": 2, "message": str(exc)})
+        return {"ok": True, **data}
+
+    @app.get("/api/ui/cast/autofill")
+    def ui_cast_autofill_preview(path: str = Query(...)) -> dict:
+        """预览「按角色自动补齐」计划（只读，不落盘）。
+
+        参数:
+            path: 工程根目录。
+
+        返回:
+            `{plan, undo}`；plan.items 每项含 action / proposed / reason。
+        """
+        from ..tts.cast_autofill import build_plan, undo_state
+
+        store = _store(path)
+        return {"plan": build_plan(store), "undo": undo_state(store)}
+
+    @app.post("/api/ui/cast/autofill")
+    def ui_cast_autofill_apply(body: dict) -> dict:
+        """应用自动补齐，并保留一份补齐前的快照供撤回。
+
+        参数:
+            body: `{path}`。
+
+        返回:
+            `{applied, changed, plan, undo}`。
+        """
+        from ..tts.cast_autofill import apply
+
+        store = _store(body.get("path"))
+        try:
+            return apply(store)
+        except (ValueError, OSError) as exc:
+            raise HTTPException(status_code=400, detail={"code": 2, "message": str(exc)})
+
+    @app.post("/api/ui/cast/autofill/undo")
+    def ui_cast_autofill_undo(body: dict) -> dict:
+        """撤回上次自动补齐，恢复补齐前的 cast。
+
+        参数:
+            body: `{path}`。
+
+        返回:
+            `{restored, undo}`。
+        """
+        from ..tts.cast_autofill import undo_last
+
+        store = _store(body.get("path"))
+        try:
+            return undo_last(store)
+        except (ValueError, OSError) as exc:
+            raise HTTPException(status_code=400, detail={"code": 2, "message": str(exc)})
+
     @app.post("/api/ui/cast")
     def ui_cast_save(body: dict) -> dict:
         """保存音色池与旁白切换点；校验不通过时返回错误列表且不落盘。

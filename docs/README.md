@@ -35,6 +35,7 @@
 | [spec-r26-resplit-scene-line.md](spec-r26-resplit-scene-line.md) | 重新切分场景 / 台词：影响清单、人工修改保护、章节页与标注页入口 | 已实现；桩验证保留模式与 CLI impact，未做页面实测 |
 | [spec-r27-character-descriptions.md](spec-r27-character-descriptions.md) | 人物阶段一次产出音色 / 外貌描述（中英文 + 负向）与存量补全 | 已实现；桩验证清洗兼容、补全与重跑，消费端未接入 |
 | [spec-r28-outline-inline-edit.md](spec-r28-outline-inline-edit.md) | 大纲页就地编辑幕/章标题与概要和节拍文本 | 已实现；桩验证校验与不写章节文件，未做页面实测 |
+| [spec-r29-character-desc-fill-stream.md](spec-r29-character-desc-fill-stream.md) | 补全人物描述流式进度（逐角色、可停止） | 已实现；桩验证事件序列/失败隔离/取消保留，未做页面实测 |
 
 ## 调研（只作依据，不改生产代码）
 

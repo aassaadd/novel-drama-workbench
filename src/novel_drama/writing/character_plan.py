@@ -479,7 +479,9 @@ def fill_character_descriptions(
         store: 工程。
         config: 本机配置。
         names: 只处理指定角色（ID 或姓名）；为空表示全部非旁白角色。
-        on_progress: 进度回调，事件 `batch{index,total,name}` / `chars{...}`。
+        on_progress: 进度回调。事件依次为 `total{total,pending,skipped,narrator}`、
+            `batch{index,total,name}`、`chars{chars,index,total,name}`、
+            `item{status,reason?|message?}`；跳过项也会出现在 batch 与 item 里。
 
     返回:
         {"total", "updated", "skipped", "failures", "summary"}。
@@ -495,27 +497,53 @@ def fill_character_descriptions(
     adapter = build_writing_adapter(config, bible)
 
     wanted: list[dict] = []
+    steps: list[dict] = []
     updated: list[str] = []
     skipped: list[str] = []
     failures: list[dict] = []
+    keys = {str(item).strip() for item in (names or []) if str(item).strip()}
     for character in characters:
-        if character.get("role") == "narrator":
-            continue
-        if names:
-            keys = {str(item).strip() for item in names if str(item).strip()}
-            if character.get("id") not in keys and character.get("name") not in keys:
-                continue
         name = str(character.get("name") or character.get("id") or "")
+        if character.get("role") == "narrator":
+            # 旁白不补描述，但进度里要体现，避免看起来像被静默漏掉
+            steps.append({"character": character, "name": name, "skip": "旁白"})
+            continue
+        if keys and character.get("id") not in keys and character.get("name") not in keys:
+            continue
         if missing_description_fields(character):
             wanted.append(character)
+            steps.append({"character": character, "name": name, "skip": ""})
         else:
             skipped.append(name)
+            steps.append({"character": character, "name": name, "skip": "已齐全"})
 
     total = len(wanted)
-    for index, character in enumerate(wanted, start=1):
-        name = str(character.get("name") or character.get("id") or "")
+    progress_total = len(steps)
+    emit = on_progress if on_progress is not None else (lambda event: None)
+    # 进度口径用「全部待处理角色」（含跳过项），返回值 total 仍只统计需要补全的角色
+    emit({
+        "type": "total",
+        "total": progress_total,
+        "pending": total,
+        "skipped": len(skipped),
+        "narrator": sum(1 for step in steps if step["skip"] == "旁白"),
+    })
+    for index, step in enumerate(steps, start=1):
+        character = step["character"]
+        name = step["name"]
+        # 直接用 on_progress 上报，让页面断开时的取消异常能中断生成（_progress 会吞异常）
+        emit({"type": "batch", "index": index, "total": progress_total, "name": name})
+        if step["skip"]:
+            emit({
+                "type": "item",
+                "index": index,
+                "total": progress_total,
+                "name": name,
+                "status": "skipped",
+                "reason": step["skip"],
+            })
+            continue
         missing = missing_description_fields(character)
-        _progress(on_progress, {"type": "batch", "index": index, "total": total, "name": name})
         profile = {
             key: value
             for key, value in character.items()
@@ -548,15 +576,25 @@ def fill_character_descriptions(
         state = {"chars": 0}
 
         def on_delta(text: str) -> None:
-            """累计接收长度并上报。"""
+            """累计接收长度并上报（直接调用回调，断开时可中断）。"""
             if not text:
                 return
             state["chars"] += len(str(text))
-            _progress(on_progress, {"type": "chars", "chars": state["chars"], "index": index, "total": total})
+            emit({
+                "type": "chars",
+                "chars": state["chars"],
+                "index": index,
+                "total": progress_total,
+                "name": name,
+            })
 
         try:
             payload = _generate_json(adapter, req, "character", on_delta=on_delta if on_progress else None)
-            raw = payload.get("character") if isinstance(payload.get("character"), dict) else payload
+            # 兼容两种工具返回：{"character": {...}} 与 {"characters": [{...}]}（离线适配器走后者）
+            raw = payload.get("character")
+            if not isinstance(raw, dict):
+                rows = payload.get("characters")
+                raw = rows[0] if isinstance(rows, list) and rows and isinstance(rows[0], dict) else payload
             changed = 0
             for field in missing:
                 value = str((raw or {}).get(field) or "").strip()
@@ -572,10 +610,34 @@ def fill_character_descriptions(
                 character["updated_at"] = now_iso()
                 store.save_characters(table)
                 updated.append(name)
+                emit({
+                    "type": "item",
+                    "index": index,
+                    "total": progress_total,
+                    "name": name,
+                    "status": "done",
+                    "fields": changed,
+                })
             else:
                 failures.append({"name": name, "message": "模型没有返回缺失字段"})
+                emit({
+                    "type": "item",
+                    "index": index,
+                    "total": progress_total,
+                    "name": name,
+                    "status": "failed",
+                    "message": "模型没有返回缺失字段",
+                })
         except Exception as exc:  # 单人失败不影响其他人
             failures.append({"name": name, "message": str(exc) or exc.__class__.__name__})
+            emit({
+                "type": "item",
+                "index": index,
+                "total": progress_total,
+                "name": name,
+                "status": "failed",
+                "message": str(exc) or exc.__class__.__name__,
+            })
     failed_text = "；".join(f"{item['name']}：{item['message']}" for item in failures)
     summary = f"补全 {len(updated)}、失败 {len(failures)}"
     if failures:
