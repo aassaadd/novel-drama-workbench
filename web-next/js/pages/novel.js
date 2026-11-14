@@ -674,6 +674,9 @@ function ctxHTML() {
           <span class="mono novel-act-index">第 ${Number(act.index || actIndex + 1)} 幕</span>
           <span class="novel-act-title" title="${esc(act.title || '')}">${esc(act.title || '未命名幕')}</span>
           ${originBadge(act.origin)}
+          <button class="btn icon sm" data-act="novel-act-generate" data-id="${esc(act.id || '')}"
+            data-index="${Number(act.index || actIndex + 1)}" data-pos="${actIndex + 1}"
+            title="生成整幕正文：按章节顺序一次跑完，可选只补缺失或重新生成已有正文">${icon('spark', 12)}</button>
           <span class="n">${chapters.length} 章</span>
         </div>
         ${
@@ -2581,7 +2584,7 @@ async function applyOutline() {
 /** 黄金三章检查：结果放主区顶部，不阻断流程 */
 async function checkOutline() {
   cache.check = await run('黄金三章检查', () => getJSON('/api/ui/outline/check', { path: cache.path }));
-  const issues = cache.check?.issues || [];
+  const issues = checkIssues();
   toast(issues.length ? `发现 ${issues.length} 个问题（见主区）` : '黄金三章检查通过', issues.length ? 'warn' : 'ok');
   paint();
 }
@@ -2766,6 +2769,206 @@ async function runGenerate(body, hadBody = false) {
     if (!settled) panel.fail({ message: '连接已中断，没有收到生成结果', retry: () => runGenerate(body) });
   } catch (error) {
     if (!settled) panel.fail({ message: `生成失败：${error.message}`, retry: () => runGenerate(body) });
+  }
+}
+
+/**
+ * 整幕正文生成：确认模式后按章节顺序一次跑完本幕所有章。
+ * @param {object} act 幕对象
+ * @param {number} actIndex 幕序号（从 1 开始）
+ */
+function openActGenerateDialog(act, actIndex) {
+  const chapters = act.chapters || [];
+  if (!chapters.length) return toast('这一幕还没有章节，先补齐大纲', 'warn');
+  const landed = chapters.filter((chapter) => landedChapter(chapter.id));
+  const hasBody = chapters.filter((chapter) => Number(landedChapter(chapter.id)?.word_count || 0) > 0);
+  const modeKey = 'act.generate';
+  const fallback = hasBody.length ? 'fill' : 'regen';
+  openDialog({
+    title: `生成整幕正文 · 第 ${actIndex} 幕《${act.title || '未命名幕'}》`,
+    body: `
+      ${modeSwitchHTML(modeKey, { fallback })}
+      <div class="summary-line"><span>本幕章节</span><span class="right mono">${chapters.length} 章</span></div>
+      <div class="summary-line"><span>已落成章节</span><span class="right mono">${landed.length} / ${chapters.length} 章</span></div>
+      <div class="summary-line"><span>已有正文</span><span class="right mono">${hasBody.length} / ${chapters.length} 章</span></div>
+      ${
+        landed.length < chapters.length
+          ? `<div class="banner warn" style="margin-top:8px">${icon('warn', 13)} 有 ${
+              chapters.length - landed.length
+            } 章还没落成章节文件，生成时会记为失败；可先回大纲点左上角「落地成章节」。</div>`
+          : ''
+      }
+      <div class="hint" style="margin-top:8px">按章节顺序逐章生成，复用单章链路（按节拍推进、滚动摘要、版本历史）；单章失败不中断整幕；「只补缺失」会跳过已有正文并计入结果。</div>`,
+    foot: `<div class="right"><button class="btn" data-dlg-close>取消</button>
+      <button class="btn primary" data-ag-run>${icon('spark', 12)} 开始生成整幕</button></div>`,
+    onMount: (mask) => {
+      const modeOf = bindModeSwitch(mask, modeKey, {
+        fallback,
+        action: mask.querySelector('[data-ag-run]'),
+        labels: { fill: '只补缺失并开始', regen: '重新生成并开始' },
+      });
+      mask.querySelector('[data-ag-run]').addEventListener('click', () => {
+        const mode = modeOf();
+        closeDialog();
+        runActGenerate(act, actIndex, mode);
+      });
+    },
+  });
+}
+
+/**
+ * 执行整幕正文生成（SSE）：逐章展示第 k/N 章与整体进度，支持停止。
+ * @param {object} act 幕对象
+ * @param {number} actIndex 幕序号（从 1 开始）
+ * @param {'fill'|'regen'} mode 只补缺失 / 重新生成已有正文
+ */
+async function runActGenerate(act, actIndex, mode) {
+  const total = (act.chapters || []).length;
+  const counters = { succeeded: 0, skipped: 0, failed: 0 };
+  const failures = [];
+  let settled = false;
+  let jobId = '';
+  const aborter = new AbortController();
+  const panel = openProgress({
+    title: `正在生成第 ${actIndex} 幕正文…`,
+    hint: `共 ${total} 章 · 按章节顺序 · ${mode === 'regen' ? '重新生成已有正文' : '只补缺失'}`,
+    stage: '已提交生成请求，准备第 1 章…',
+    onStop: async () => {
+      // 停止只终止后续章节：已生成完成的章已由单章链路落盘
+      if (!jobId) {
+        aborter.abort();
+        finishStopped();
+        return;
+      }
+      await postJSON('/api/ui/jobs/cancel', { path: cache.path, id: jobId });
+      window.setTimeout(() => {
+        if (!settled) {
+          aborter.abort();
+          finishStopped();
+        }
+      }, 3000);
+    },
+  });
+  panel.update({ percent: 0 });
+
+  /** 本地兜底：停止后即使没收到 canceled 事件，也给出明确结果 */
+  function finishStopped() {
+    if (settled) return;
+    settled = true;
+    panel.fail({
+      message: '已停止生成',
+      detail: `已完成章节已保存。本次已处理：成功 ${counters.succeeded} 章 / 跳过 ${counters.skipped} 章 / 失败 ${counters.failed} 章`,
+    });
+  }
+
+  /** 生成结束后刷新章节目录与当前正文 */
+  async function refreshAfterAct() {
+    try {
+      cache.chapters = await getJSON('/api/ui/chapters', { path: cache.path });
+      if (ui.sel.kind === 'chapter') await loadBody(ui.sel.id);
+      paint();
+      toast('章节目录与正文已刷新', 'ok', 1600);
+    } catch (error) {
+      toast(`刷新失败：${error.message}`, 'bad', 3600);
+    }
+  }
+
+  try {
+    await streamJSON(
+      '/api/ui/act/generate/stream',
+      {
+        path: cache.path,
+        act: act.id || '',
+        act_index: actIndex,
+        mode,
+      },
+      (event, data) => {
+        if (event === 'start') {
+          jobId = data?.job_id || '';
+          panel.update({ stage: '已提交生成请求，准备第 1 章…', percent: 0 });
+        } else if (event === 'act_start') {
+          panel.update({ stage: `本幕共 ${Number(data?.total || total)} 章 · 按章节顺序生成`, percent: 0 });
+        } else if (event === 'chapter_start') {
+          const index = Number(data?.index || 1);
+          const count = Number(data?.total || total);
+          panel.update({
+            stage: `第 ${index}/${count} 章 · 正在生成《${data?.title || ''}》`,
+            percent: Math.round(((index - 1) / Math.max(1, count)) * 100),
+            current: '',
+          });
+        } else if (event === 'delta') {
+          panel.append(data?.text || '');
+        } else if (event === 'chapter_skip') {
+          counters.skipped += 1;
+          panel.note(`第 ${Number(data?.index || 0)}/${Number(data?.total || total)} 章《${data?.title || ''}》已有正文，已跳过`);
+        } else if (event === 'chapter_done') {
+          counters.succeeded += 1;
+          const count = Number(data?.total || total);
+          const index = Number(data?.index || 0);
+          panel.update({
+            stage: `第 ${index}/${count} 章《${data?.title || ''}》完成 · ${Number(data?.words || 0)} 字`,
+            percent: Math.round((index / Math.max(1, count)) * 100),
+            current: '',
+          });
+        } else if (event === 'chapter_error') {
+          counters.failed += 1;
+          failures.push(`第 ${Number(data?.index || 0)} 章《${data?.title || ''}》：${data?.message || '未知原因'}`);
+        } else if (event === 'done') {
+          settled = true;
+          const result = data?.result || {};
+          const failedRows = (result.chapters || []).filter((row) => row.status === 'failed');
+          panel.finish({
+            message: `整幕生成完成：成功 ${Number(result.succeeded || 0)} 章 / 跳过 ${Number(
+              result.skipped || 0
+            )} 章 / 失败 ${Number(result.failed || 0)} 章`,
+            detail: failedRows.length
+              ? `失败章节：${failedRows
+                  .map((row) => `第 ${row.index} 章《${row.title || ''}》${row.message || '未知原因'}`)
+                  .join('；')}`
+              : '已完成的章节已写入正文，旧正文自动存档，可在「版本记录」里回退。',
+            actions: [{ label: '刷新目录与正文', primary: true, onClick: refreshAfterAct }],
+          });
+        } else if (event === 'canceled') {
+          settled = true;
+          const result = data?.result || {};
+          const stats = result.total
+            ? `成功 ${Number(result.succeeded || 0)} 章 / 跳过 ${Number(result.skipped || 0)} 章 / 失败 ${Number(
+                result.failed || 0
+              )} 章`
+            : `成功 ${counters.succeeded} 章 / 跳过 ${counters.skipped} 章 / 失败 ${counters.failed} 章`;
+          panel.fail({
+            message: '已停止生成',
+            detail: `已完成章节已保存。本次已处理：${stats}`,
+          });
+        } else if (event === 'error') {
+          settled = true;
+          const detail = failures.length ? `已处理：${failures.join('；')}` : '';
+          panel.fail({
+            message: data?.message || '整幕生成失败',
+            detail,
+            retry: () => runActGenerate(act, actIndex, mode),
+          });
+        }
+      },
+      { signal: aborter.signal }
+    );
+    if (!settled) {
+      settled = true;
+      panel.fail({
+        message: '连接已中断，没有收到整幕生成结果',
+        detail: `本次已处理：成功 ${counters.succeeded} 章 / 跳过 ${counters.skipped} 章 / 失败 ${counters.failed} 章`,
+        retry: () => runActGenerate(act, actIndex, mode),
+      });
+    }
+  } catch (error) {
+    // 主动停止后断开连接属于预期路径，不当作失败重复提示
+    if (settled) return;
+    settled = true;
+    panel.fail({
+      message: `整幕生成失败：${error.message}`,
+      detail: `本次已处理：成功 ${counters.succeeded} 章 / 跳过 ${counters.skipped} 章 / 失败 ${counters.failed} 章`,
+      retry: () => runActGenerate(act, actIndex, mode),
+    });
   }
 }
 
@@ -2999,23 +3202,71 @@ async function reloadAfterBodyChange(chapterId) {
 
 // ---------------- 渲染与事件 ----------------
 
-/** 检查结果条：只在大纲视图且有结果时出现 */
+/**
+ * 归一化黄金三章检查明细：只保留有可展示文案的条目。
+ * 数量与明细同源，避免出现「有数无内容」。
+ * @returns {Array<{index: number, id: string, title: string, problem: string, hint: string}>}
+ */
+function checkIssues() {
+  return (cache.check?.issues || [])
+    .map((item) => ({
+      index: Number(item?.chapter_index || 0),
+      id: String(item?.chapter_id || ''),
+      title: String(item?.chapter_title || ''),
+      problem: String(item?.problem || ''),
+      hint: String(item?.hint || ''),
+    }))
+    .filter((row) => row.problem || row.hint);
+}
+
+/**
+ * 从检查明细定位到大纲章节：展开所属幕并选中该章。
+ * @param {string} id 章节 ID
+ */
+function gotoCheckChapter(id) {
+  const hit = findOutlineChapter(id);
+  if (!hit) return;
+  const index = (cache.outline?.acts || []).indexOf(hit.act);
+  materializeCollapse();
+  collapse.acts.delete(actKey(hit.act, index));
+  saveCollapse();
+  ui.sel = { kind: 'chapter', id };
+  ui.draftWorld = false;
+  ui.draftEntry = false;
+  paint();
+  loadBody(id);
+  loadPlan(id);
+}
+
+/** 检查结果条：有大纲检查结果时出现在主区顶部 */
 function checkBannerHTML() {
   const check = cache.check;
   if (!check) return '';
-  const issues = check.issues || [];
+  const issues = checkIssues();
   if (!issues.length) {
+    // 未通过但没有可展示明细时只保留通过态，不显示带数量的空提示
+    if (check.passed === false) return '';
     return `<div class="banner ok" style="margin:10px 16px 0">${icon('check', 13)} 黄金三章检查通过</div>`;
   }
+  const rows = issues
+    .map((row) => {
+      const label = `${row.index > 0 ? `第 ${row.index} 章` : '大纲章节'}${row.title ? `《${row.title}》` : ''}`;
+      const body = `
+        <span class="bi-head"><b>${esc(label)}</b>${row.problem ? `<span class="bi-problem">· ${esc(row.problem)}</span>` : ''}</span>
+        ${row.hint ? `<span class="bi-why">${esc(row.hint)}</span>` : ''}`;
+      if (!row.id || !findOutlineChapter(row.id)) return `<div class="banner-issue">${body}</div>`;
+      return `<button class="banner-issue" data-act="novel-goto-check-chapter" data-id="${esc(row.id)}"
+        title="定位到第 ${row.index} 章">${body}<span class="bi-jump">定位章节 ›</span></button>`;
+    })
+    .join('');
   return `
     <div class="banner warn" style="margin:10px 16px 0">
-      ${icon('warn', 13)} 黄金三章检查发现 ${issues.length} 个问题
-      <details style="margin-top:6px"><summary style="cursor:pointer">展开明细</summary>
-        ${issues
-          .slice(0, 20)
-          .map((item) => `<div class="hint" style="margin-top:4px">${esc(item.message || item.code || '')}</div>`)
-          .join('')}
-      </details>
+      <div style="min-width:0;flex:1">
+        <div>${icon('warn', 13)} 黄金三章检查发现 ${issues.length} 个问题</div>
+        <details style="margin-top:6px"><summary style="cursor:pointer">展开明细</summary>
+          <div class="banner-issues">${rows}</div>
+        </details>
+      </div>
     </div>`;
 }
 
@@ -3296,6 +3547,16 @@ async function onClick(event) {
   }
   if (act === 'novel-toggle-world-group') return toggleWorldGroup(el.dataset.group);
   if (act === 'novel-toggle-act') return toggleAct(el.dataset.key);
+  if (act === 'novel-act-generate') {
+    const actId = el.dataset.id || '';
+    const index = Number(el.dataset.index) || 0;
+    const position = Number(el.dataset.pos) || index;
+    const hit = (cache.outline?.acts || []).find((row, offset) =>
+      actId ? String(row.id || '') === actId : offset === position - 1
+    );
+    if (!hit) return toast('找不到该幕，先刷新大纲', 'warn');
+    return openActGenerateDialog(hit, index || position || 1);
+  }
   if (act === 'novel-entry-new') return newEntry(el.dataset.category);
   if (act === 'novel-sel-chapter') {
     ui.sel = { kind: 'chapter', id: el.dataset.id };
@@ -3319,6 +3580,7 @@ async function onClick(event) {
   if (act === 'novel-outline-expand') return openOutlineExpand();
   if (act === 'novel-outline-apply') return applyOutline();
   if (act === 'novel-outline-check') return checkOutline();
+  if (act === 'novel-goto-check-chapter') return gotoCheckChapter(el.dataset.id);
   if (act === 'novel-beat-delete') return deleteBeat(Number(el.dataset.index));
   if (act === 'novel-chapter-delete') return deleteChapter();
   if (act === 'novel-body-save') return saveBody();

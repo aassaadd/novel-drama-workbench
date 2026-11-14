@@ -29,7 +29,8 @@ def cmd_outline_check(args, config: AppConfig) -> int:
     else:
         lines = [f"黄金三章检查未通过：{len(result['issues'])} 项"]
         for issue in result["issues"]:
-            lines.append(f"  第 {issue['chapter']} 章：{issue['problem']}——{issue['hint']}")
+            title = f"《{issue['chapter_title']}》" if issue.get("chapter_title") else ""
+            lines.append(f"  第 {issue['chapter_index']} 章{title}：{issue['problem']}——{issue['hint']}")
         text = "\n".join(lines)
     _emit(args, text, {**result, "settings_revision": bible.get("settings_revision")})
     return 0

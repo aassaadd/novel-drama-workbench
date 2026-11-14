@@ -28,6 +28,7 @@ from ..cancel import GenerationCanceled
 from ..config import load_config
 from ..store import ProjectStore
 from .job_tracker import UiJob
+from ..writing.act_batch import ActBatchCanceled, generate_act_chapters, resolve_act
 from ..writing.character_plan import generate_from_plan, load_plan, plan_characters
 from ..writing.continuation import continue_chapter
 from ..writing.expand import expand_outline
@@ -65,6 +66,39 @@ def _sse(event: str, data: dict) -> str:
         `event: ...\\ndata: ...\\n\\n` 字符串。
     """
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+def _start_payload(job: UiJob | None) -> dict:
+    """构造 start 事件负载；任务 ID 供页面「停止」与任务队列定位。
+
+    参数:
+        job: 本次生成登记的任务（可为 None）。
+
+    返回:
+        `{ok, job_id?}`。
+    """
+    payload = {"ok": True}
+    job_id = str(((job.job if job else None) or {}).get("id") or "")
+    if job_id:
+        payload["job_id"] = job_id
+    return payload
+
+
+def _wait_job(job: UiJob | None, timeout: float = 1.0) -> None:
+    """等后台线程登记好任务再发 start，保证 start 里带得上任务 ID。
+
+    参数:
+        job: 本次生成登记的任务（可为 None）。
+        timeout: 最长等待秒数。
+
+    返回:
+        无。
+    """
+    if not job:
+        return
+    deadline = time.monotonic() + timeout
+    while not job.job and time.monotonic() < deadline:
+        time.sleep(0.01)
 
 
 def _store(path: str | None) -> ProjectStore:
@@ -244,7 +278,8 @@ def _stream_response(task, job=None) -> StreamingResponse:
     def events_iter():
         """按队列顺序产出 SSE 事件。"""
         try:
-            yield _sse("start", {"ok": True})
+            _wait_job(job)
+            yield _sse("start", _start_payload(job))
             while True:
                 item = events.get()
                 if item is None:
@@ -315,6 +350,11 @@ def _progress_response(task, job=None) -> StreamingResponse:
             if job:
                 job.finish("生成完成")
             events.put(("done", {"result": result}))
+        except ActBatchCanceled as exc:
+            if job:
+                job.cancel("用户已停止生成")
+            # 整幕批量：把已完成的章节汇总带回去，页面停止后仍能看到进度与结果
+            events.put(("canceled", {"message": "已停止生成，已完成章节已保存", "result": exc.result}))
         except _Cancelled:
             if job:
                 # 用户主动停止优先记为「用户已停止生成」；断线仍用默认文案
@@ -338,7 +378,8 @@ def _progress_response(task, job=None) -> StreamingResponse:
     def events_iter():
         """按队列顺序产出 SSE 事件。"""
         try:
-            yield _sse("start", {"ok": True})
+            _wait_job(job)
+            yield _sse("start", _start_payload(job))
             while True:
                 item = events.get()
                 if item is None:
@@ -395,6 +436,60 @@ def register_stream_routes(app, config_path: str | None = None) -> None:
             )
 
         return _stream_response(task, UiJob(store, "chapter", _chapter_target(store, chapter_id), "生成本章正文"))
+
+    @app.post("/api/ui/act/generate/stream")
+    def ui_act_generate_stream(body: dict) -> StreamingResponse:
+        """按幕一键生成整幕正文（流式）：按章节顺序逐章复用单章生成链路。
+
+        参数:
+            body: `{path, act 幕 ID, act_index 幕序号, mode fill|regen,
+                   multi_turn?, beats_per_round?, max_rounds?}`。
+
+        返回:
+            SSE：start(job_id) → act_start → chapter_start / delta* /
+            chapter_skip / chapter_done / chapter_error* → done(result) /
+            canceled(result) / error(message)。
+        """
+        store = _store(body.get("path"))
+        act_id = str(body.get("act") or "")
+        try:
+            act_index = int(body.get("act_index") or 0) or None
+        except (TypeError, ValueError):
+            act_index = None
+        mode = str(body.get("mode") or "fill")
+        if mode not in ("fill", "regen"):
+            raise HTTPException(status_code=400, detail="mode 只能是 fill（只补缺失）或 regen（重新生成）")
+        try:
+            act_info = resolve_act(store, act_id, act_index)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        config = load_config(config_path)
+        act = act_info["act"]
+        act_title = str(act.get("title") or "")
+        target = {
+            "label": f"第 {act_info['act_index']} 幕 · {act_title}".rstrip(" ·"),
+            "act_id": str(act.get("id") or act_id),
+            "chapter_total": len(act_info["chapters"]),
+        }
+        job = UiJob(store, "act", target, f"生成整幕正文 · 第 {act_info['act_index']} 幕")
+
+        def task(on_progress):
+            """逐章生成；增量转成 delta 事件，章间用任务取消标志判断是否停止。"""
+            return generate_act_chapters(
+                store,
+                config,
+                act_id=str(act.get("id") or act_id),
+                act_index=act_info["act_index"],
+                mode=mode,
+                on_event=on_progress,
+                on_delta=lambda text: on_progress({"type": "delta", "text": text}),
+                is_canceled=job.cancel_requested,
+                multi_turn=body.get("multi_turn"),
+                beats_per_round=body.get("beats_per_round"),
+                max_rounds=body.get("max_rounds"),
+            )
+
+        return _progress_response(task, job)
 
     @app.post("/api/ui/chapter/continue/stream")
     def ui_chapter_continue_stream(body: dict) -> StreamingResponse:

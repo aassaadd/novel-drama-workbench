@@ -158,13 +158,15 @@ export async function patchJSON(url, body = {}, options = {}) {
  * @param {string} url 接口路径
  * @param {object} body 请求体
  * @param {(event: string, data: any) => void} onEvent 事件回调（start / delta / done / error）
+ * @param {{signal?: AbortSignal}} [options] 可选：传入 AbortSignal 以便页面主动断开长流
  * @returns {Promise<void>}
  */
-export async function streamJSON(url, body, onEvent) {
+export async function streamJSON(url, body, onEvent, options = {}) {
   const response = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
     body: JSON.stringify(body),
+    signal: options.signal,
   });
   if (!response.ok) {
     const text = await response.text();

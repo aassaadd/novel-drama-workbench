@@ -86,7 +86,10 @@ def cmd_outline(args, config: AppConfig) -> int:
         hints = ""
         if not golden["passed"]:
             hints = "\n黄金三章提示（不阻断）：\n" + "\n".join(
-                f"  第 {issue['chapter']} 章：{issue['problem']}——{issue['hint']}" for issue in golden["issues"]
+                f"  第 {issue['chapter_index']} 章"
+                + (f"《{issue['chapter_title']}》" if issue.get("chapter_title") else "")
+                + f"：{issue['problem']}——{issue['hint']}"
+                for issue in golden["issues"]
             )
         _emit(
             args,

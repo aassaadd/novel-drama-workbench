@@ -16,6 +16,7 @@ const QUEUE_LABEL = {
   video: '视频',
   render: '渲染',
   chapter: '章节正文',
+  act: '整幕正文',
   'chapter.continue': '正文续写',
   world: '世界观',
   outline: '大纲',
