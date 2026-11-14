@@ -53,3 +53,9 @@ tools/parity/
 **/parity/
 *.parity.json
 docs/screenshots/
+
+# 本机标注验收 / 预览的临时产物（临时配置、临时工程与缓存、运行日志、预览文本，均不入库）
+config/config.annotate_check.yaml
+var/annotate_check_*
+var/annotate_preview_*.log
+var/preview_markup.txt
