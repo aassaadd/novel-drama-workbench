@@ -55,7 +55,6 @@ WEB_NEXT_DIR = Path(__file__).resolve().parents[3] / "web-next"
 SECTION_LABEL = {
     "premise": "故事内核",
     "style": "文风",
-    "world": "世界观",
     "character": "人物设定",
 }
 
@@ -366,7 +365,6 @@ SETTING_SCALARS = (
     "ending_intent",
     "target_audience",
     "target_length",
-    "era",
     "tone",
     "pov",
     "tense",
@@ -2453,22 +2451,6 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
             raise HTTPException(status_code=400, detail={"code": 2, "message": "没有要修改的字段"})
         return _respond(_cli(*argv))
 
-    @app.post("/api/ui/setting/world")
-    def ui_setting_world(body: dict) -> dict:
-        """增补世界设定（`setting world`）。"""
-        argv = ["--project", body["path"], "--json", "setting", "world"]
-        for rule in body.get("rules") or []:
-            if rule:
-                argv += ["--add-rule", rule]
-        for faction in body.get("factions") or []:
-            if faction:
-                argv += ["--add-faction", faction]
-        if body.get("location"):
-            argv += ["--add-location", body["location"]]
-        if body.get("glossary"):
-            argv += ["--add-glossary", body["glossary"]]
-        return _respond(_cli(*argv))
-
     @app.get("/api/ui/outline")
     def ui_outline(path: str = Query(...)):
         """大纲（`outline show --json`）。"""
@@ -3601,10 +3583,10 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         store = _store(path)
         section = str(body.get("section") or "").strip()
         if section:
-            if section not in ("premise", "style", "world", "character"):
+            if section not in ("premise", "style", "character"):
                 raise HTTPException(
                     status_code=400,
-                    detail={"code": 2, "message": "section 必须是 premise / style / world / character"},
+                    detail={"code": 2, "message": "section 必须是 premise / style / character（世界观请用世界模块）"},
                 )
             argv = ["--project", path, "--json", "setting", "generate", "--section", section, "--dry-run"]
             if body.get("brief"):
@@ -3630,8 +3612,8 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
             job.finish("生成完成")
             return payload
         step = str(body.get("step") or "").strip()
-        if step not in ("world", "premise", "style"):
-            raise HTTPException(status_code=400, detail={"code": 2, "message": "step 必须是 world / premise / style"})
+        if step not in ("premise", "style"):
+            raise HTTPException(status_code=400, detail={"code": 2, "message": "step 必须是 premise / style（世界观请用世界模块）"})
         argv = ["--project", path, "--json", "setting", "generate", "--step", step, "--dry-run"]
         if body.get("overwrite"):
             argv.append("--overwrite")
@@ -3650,7 +3632,7 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         """把前端确认后的字段合并写入设定库分区（`setting apply --file`）。
 
         参数:
-            body: `{path, section: world|premise|style, fields: {...}}`。
+            body: `{path, section: premise|style, fields: {...}}`。
 
         异常:
             HTTPException 400: section / fields 不合法。
@@ -3658,8 +3640,8 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         path = body.get("path")
         _store(path)
         section = str(body.get("section") or "").strip()
-        if section not in ("world", "premise", "style"):
-            raise HTTPException(status_code=400, detail={"code": 2, "message": "section 必须是 world / premise / style"})
+        if section not in ("premise", "style"):
+            raise HTTPException(status_code=400, detail={"code": 2, "message": "section 必须是 premise / style（世界观请用世界模块）"})
         fields = body.get("fields")
         if not isinstance(fields, dict) or not fields:
             raise HTTPException(status_code=400, detail={"code": 2, "message": "fields 必须是非空对象"})
@@ -5097,13 +5079,13 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
 
     @app.get("/api/ui/worlds")
     def ui_worlds(path: str = Query(...)) -> dict:
-        """世界条目列表与人物数量（`world list` / `character list`）。
+        """世界模块（`world list`）与人物数量。
 
         参数:
             path: 工程目录。
 
         返回:
-            `{worlds, count, characters}`；characters 供前端流程条展示人物数量。
+            `{worlds, count, characters}`；worlds 每项含世界观总述与地点/势力/术语/其它条目。
         """
         _store(path)
         payload = _respond_business(_cli("--project", path, "--json", "world", "list")) or {}
@@ -5141,20 +5123,20 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
 
     @app.post("/api/ui/worlds/delete")
     def ui_worlds_delete(body: dict) -> dict:
-        """删除世界条目（`world remove`）；被引用时返回 409 与引用章节列表。
+        """删除整套世界（`world remove`）：总述 + 分类条目，并解除章节/场景绑定。
 
         参数:
-            body: `{path, id}`。
+            body: `{path, id}`；id 为世界 ID。
 
         异常:
             HTTPException 400: 缺少 id。
-            HTTPException 409: 仍被大纲章节引用。
+            HTTPException 404: 世界不存在。
         """
         path = body.get("path")
         _store(path)
         world_id = body.get("id")
         if not world_id:
-            raise HTTPException(status_code=400, detail={"code": 2, "message": "缺少 id 参数"})
+            raise HTTPException(status_code=400, detail={"code": 2, "message": "缺少世界 id 参数"})
         return _respond_business(_cli("--project", path, "--json", "world", "remove", "--id", str(world_id)))
 
     @app.post("/api/ui/worlds/generate")

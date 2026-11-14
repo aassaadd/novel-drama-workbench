@@ -24,7 +24,7 @@ from ..text.context import POV_LABELS, ContextAssembler
 from ..text.dialogue import normalize_dialogue
 from ..text.titles import strip_index_prefix
 from .worlds import build_art_prompt as _build_art_prompt
-from .worlds import clean_world_entry, normalize_locations, worlds_digest
+from .worlds import clean_world_entry, worlds_digest
 
 # 默认每章目标字数
 DEFAULT_CHAPTER_WORDS = 1200
@@ -195,7 +195,14 @@ def generate_outline(
     progress_state = {"chars": 0}
     if multi_turn:
         raw_acts = _generate_outline_acts(
-            adapter, req, acts, chapters_per_act, acts_per_round, on_progress=on_progress
+            adapter,
+            req,
+            acts,
+            chapters_per_act,
+            beats_per_chapter,
+            acts_per_round,
+            config=config,
+            on_progress=on_progress,
         )
         outline_rounds = (max(1, int(acts)) + max(1, int(acts_per_round)) - 1) // max(1, int(acts_per_round))
     else:
@@ -272,7 +279,14 @@ def generate_outline(
 
 
 def _generate_outline_acts(
-    adapter, req: TextGenRequest, acts: int, chapters_per_act: int, acts_per_round: int, on_progress=None
+    adapter,
+    req: TextGenRequest,
+    acts: int,
+    chapters_per_act: int,
+    beats_per_chapter: int,
+    acts_per_round: int,
+    config: AppConfig | None = None,
+    on_progress=None,
 ) -> list[dict]:
     """按幕分批调用 `emit_act`，合并为完整幕列表。
 
@@ -284,7 +298,10 @@ def _generate_outline_acts(
         req: 单轮大纲请求（system 与首条 user 作为固定前缀）。
         acts: 计划总幕数。
         chapters_per_act: 每幕章节数（写进本轮提示）。
+        beats_per_chapter: 每章节拍数（用于估算单幕输出预算）。
         acts_per_round: 每轮计划生成的幕数（每次工具调用产出一幕）。
+        config: 本机配置，用于读取 `omlx.max_tokens`；可为 None。
+        on_progress: 进度回调。
 
     返回:
         合并后的幕对象列表，顺序与生成顺序一致。
@@ -443,9 +460,11 @@ def build_chapter_context(store: ProjectStore, config: AppConfig, chapter: dict)
     world_ids = list((entry or {}).get("world_ids") or [])
     world_store = WorldStore(store.root)
     world_context = _worlds_digest(world_store.find_many(world_ids) if (world_ids and world_store.exists()) else [], world_ids)
-    if world_context is None:
-        # 未绑定世界时回退设定库摘要，保持旧章节的上下文口味
-        world_context = _bible_digest(bible)
+    if world_context is None and world_store.exists():
+        # 未绑定世界时回退到世界库里的第一套世界（总述 + 分类条目），写作设定不再保存世界观
+        all_worlds = world_store.list_worlds()
+        if all_worlds:
+            world_context = _worlds_digest(all_worlds, [str(all_worlds[0].get("id") or "")])
 
     character_payload = _characters_payload(characters)
     speaker_ids: list[str] | None = None
@@ -1193,14 +1212,12 @@ def suggest_script(
 
 # ---------------- AI 生书：设定 / 人物 / 润色 ----------------
 
-#: 设定生成步骤
-SETTING_STEPS = ("world", "premise", "style")
+#: 设定生成步骤（世界观归世界库，写作设定只管故事层）
+SETTING_STEPS = ("premise", "style")
 #: 梗概分区字段（与 setting-bible.schema.json 对齐）
 PREMISE_FIELDS = ("logline", "theme", "core_conflict", "ending_intent", "target_audience", "target_length")
 #: 文风分区字段
 STYLE_FIELDS = ("tone", "pov", "tense", "prose_style", "forbidden", "visual_style")
-#: 世界分区字段
-WORLD_FIELDS = ("era", "rules", "factions", "locations", "glossary")
 #: 标量字段长度上限（来自 schema）
 SCALAR_LIMITS = {
     "logline": 500,
@@ -1208,14 +1225,9 @@ SCALAR_LIMITS = {
     "core_conflict": 1000,
     "ending_intent": 1000,
     "target_audience": 200,
-    "era": 200,
     "tone": 300,
     "prose_style": 1000,
     "visual_style": 500,
-    "world.name": 120,
-    "world.era": 200,
-    "world.summary": 2000,
-    "world.visual_style": 500,
     "character.appearance_prompt": 2000,
     "character.negative_prompt": 1000,
 }
@@ -1255,25 +1267,16 @@ CHOICE_ALIASES = {
     "其他": "other",
     "未知": "unknown",
 }
-#: 单字段润色白名单
+#: 单字段润色白名单（世界观文本由世界库维护，不在写作设定里润色）
 POLISH_FIELDS = (
     "logline",
     "theme",
     "core_conflict",
     "ending_intent",
     "target_audience",
-    "era",
     "tone",
     "prose_style",
     "visual_style",
-    "world.name",
-    "world.era",
-    "world.summary",
-    "world.visual_style",
-    "world.rule",
-    "world.faction",
-    "world.location",
-    "world.glossary",
     "character.background",
     "character.personality",
     "character.appearance_prompt",
@@ -1310,13 +1313,13 @@ def _extract_json_object(text: str) -> dict:
 
 # ---------- 结构化生成工具（LLM function calling） ----------
 
-#: 世界条目参数 schema（单条与批量共用）
+#: 世界条目参数 schema（单条与批量共用；世界库负责总述与分类条目）
 _WORLD_TOOL_SCHEMA = {
     "type": "object",
     "properties": {
         "name": {"type": "string", "description": "世界/时代名称，80 字以内"},
         "era": {"type": "string", "description": "时代背景，200 字以内"},
-        "summary": {"type": "string", "description": "世界概述，500 字以内"},
+        "summary": {"type": "string", "description": "世界观总述，500 字以内"},
         "rules": {"type": "array", "items": {"type": "string"}, "description": "世界规则/力量体系，每条 120 字以内"},
         "factions": {"type": "array", "items": {"type": "string"}, "description": "主要势力，每条 120 字以内"},
         "locations": {
@@ -1331,6 +1334,18 @@ _WORLD_TOOL_SCHEMA = {
                 "required": ["name"],
             },
             "description": "关键地点：JSON 数组，每个元素必须是对象（不要写成字符串），含 name/description/atmosphere",
+        },
+        "others": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "description": {"type": "string"},
+                },
+                "required": ["name"],
+            },
+            "description": "其它条目（关键物件、习俗、生物等未归类内容）：对象数组，含 name/description",
         },
         "glossary": {
             "type": "array",
@@ -1712,11 +1727,6 @@ def _gen_tool(step: str | None) -> dict | None:
             "type": "function",
             "function": {"name": "emit_style", "description": "输出文风设定", "parameters": _STYLE_TOOL_SCHEMA},
         }
-    if step == "world":
-        return {
-            "type": "function",
-            "function": {"name": "emit_world", "description": "输出一条完整世界设定", "parameters": _WORLD_TOOL_SCHEMA},
-        }
     if step == "worlds":
         return {
             "type": "function",
@@ -1974,114 +1984,11 @@ def _clean_str_list(rows, item_limit: int, label: str) -> list[str]:
     return result
 
 
-def _clean_locations(rows) -> list[dict]:
-    """清洗世界地点数组。
-
-    先复用 `normalize_locations` 把数组 / 单对象 / 名称映射 / 字符串归一化成
-    对象数组，再校验字段长度，避免模型返回对象形态时整次生成失败。
-
-    参数:
-        rows: 原始地点字段。
-
-    返回:
-        [{name, description, atmosphere}]。
-
-    异常:
-        ValueError: 归一化后仍无法识别结构（错误信息带实际类型）。
-    """
-    if rows is None:
-        return []
-    result = []
-    for index, item in enumerate(normalize_locations(rows)):
-        result.append(
-            {
-                "name": _check_text(item.get("name"), 120, f"locations 第 {index + 1} 项名称", required=True),
-                "description": _check_text(item.get("description"), 1000, f"locations 第 {index + 1} 项描述"),
-                "atmosphere": _check_text(item.get("atmosphere"), 300, f"locations 第 {index + 1} 项氛围"),
-            }
-        )
-    return result
-
-
-def _clean_glossary(rows) -> list[dict]:
-    """清洗世界观词条数组。
-
-    参数:
-        rows: 原始词条数组。
-
-    返回:
-        [{term, meaning, aliases}]。
-
-    异常:
-        ValueError: 结构或长度不合法。
-    """
-    if rows is None:
-        return []
-    if isinstance(rows, str):
-        # 模型有时把词条写成整段文本，按换行/分号拆成多项
-        rows = [part.strip() for part in rows.replace("；", "\n").replace(";", "\n").splitlines() if part.strip()]
-    if isinstance(rows, dict):
-        # 单个词条对象，或「术语→释义」映射，统一成数组；释义可能是对象 / 数组
-        if any(key in rows for key in ("term", "name", "word")):
-            rows = [rows]
-        else:
-            mapped = []
-            for key, value in rows.items():
-                if isinstance(value, dict):
-                    # 值本身是词条对象：保留 meaning/aliases 等字段，只补 term
-                    item = {sub_key: sub_value for sub_key, sub_value in value.items() if sub_key != "term"}
-                    item["term"] = key
-                    mapped.append(item)
-                    continue
-                if isinstance(value, list):
-                    meaning = "、".join(str(entry).strip() for entry in value if str(entry).strip())
-                else:
-                    meaning = value
-                mapped.append({"term": key, "meaning": meaning})
-            rows = mapped
-    if not isinstance(rows, list):
-        raise ValueError(f"glossary 必须是数组或对象（实际收到 {type(rows).__name__}）")
-    result = []
-    for index, item in enumerate(rows):
-        if isinstance(item, str):
-            # 模型常把词条写成「术语：释义」字符串，这里拆成对象
-            text = str(item).strip()
-            for sep in ("：", ":", "——", " - ", "—"):
-                if sep in text:
-                    term, meaning = text.split(sep, 1)
-                    item = {"term": term.strip(), "meaning": meaning.strip()}
-                    break
-            else:
-                item = {"term": text, "meaning": text}
-        if not isinstance(item, dict):
-            # 无法识别的项直接跳过，不让整次生成失败
-            continue
-        # 模型常用 name/definition 等别名，统一成 term/meaning
-        term = item.get("term") or item.get("name") or item.get("word")
-        meaning = item.get("meaning") or item.get("definition") or item.get("description") or item.get("desc")
-        if not str(meaning or "").strip():
-            # 只有术语没有释义时跳过，不让整次生成失败
-            continue
-        entry = {
-            "term": _check_text(term, 120, f"glossary 第 {index + 1} 项术语", required=True),
-            "meaning": _check_text(meaning, 1000, f"glossary 第 {index + 1} 项释义", required=True),
-        }
-        aliases = _clean_str_list(item.get("aliases"), 120, f"glossary 第 {index + 1} 项别名")
-        if aliases:
-            # 模型有时把多个别名写成一个字符串（顿号/逗号分隔），拆开保留
-            expanded = []
-            for alias in aliases:
-                expanded.extend(part.strip() for part in re.split(r"[、,，]", alias) if part.strip())
-            entry["aliases"] = [alias[:120] for alias in expanded]
-        result.append(entry)
-    return result
-
-
 def _clean_setting_fields(step: str, payload: dict) -> dict:
     """按步骤清洗并校验生成字段。
 
     参数:
-        step: world / premise / style。
+        step: premise / style。
         payload: 模型返回的 JSON 对象。
 
     返回:
@@ -2120,29 +2027,21 @@ def _clean_setting_fields(step: str, payload: dict) -> dict:
                 fields["visual_style"] = visual
         return fields
 
-    fields = {"era": _check_text(payload.get("era"), 200, "era", required=True)}
-    if "rules" in payload:
-        fields["rules"] = _clean_str_list(payload.get("rules"), 500, "rules")
-    if "factions" in payload:
-        fields["factions"] = _clean_str_list(payload.get("factions"), 200, "factions")
-    if "locations" in payload:
-        fields["locations"] = _clean_locations(payload.get("locations"))
-    if "glossary" in payload:
-        fields["glossary"] = _clean_glossary(payload.get("glossary"))
-    return fields
+    raise ValueError(f"不支持的设定生成步骤: {step}")
 
 
 def _bible_digest(bible: dict) -> dict:
-    """整理已有设定摘要，供提示词与增量生成使用。
+    """整理写作设定（故事层）摘要，供提示词与增量生成使用。
+
+    世界观与地点已归世界库，这里只保留故事内核与文风。
 
     参数:
         bible: 设定库 dict（可为空）。
 
     返回:
-        {logline, theme, era, tone, rules, factions, locations, glossary}。
+        {logline, theme, core_conflict, target_length, target_words, tone, pov}。
     """
     premise = bible.get("premise") or {}
-    world = bible.get("world") or {}
     style = bible.get("style") or {}
     return {
         "logline": premise.get("logline"),
@@ -2150,13 +2049,8 @@ def _bible_digest(bible: dict) -> dict:
         "core_conflict": premise.get("core_conflict"),
         "target_length": premise.get("target_length"),
         "target_words": premise.get("target_words"),
-        "era": world.get("era"),
         "tone": style.get("tone"),
         "pov": style.get("pov"),
-        "rules": (world.get("rules") or [])[:8],
-        "factions": (world.get("factions") or [])[:8],
-        "locations": [item.get("name") for item in (world.get("locations") or []) if item.get("name")][:8],
-        "glossary": [item.get("term") for item in (world.get("glossary") or []) if item.get("term")][:8],
     }
 
 
@@ -2170,16 +2064,15 @@ def _project_context(
 
     参数:
         work: 作品信息（title/author/genre）。
-        bible: 设定库（premise/style/world）。
+        bible: 设定库（premise/style）。
         characters: 已有角色表，用于避免重名并呼应既有关系。
-        worlds: 世界库条目，用于交代时代、规则与关键地点。
+        worlds: 世界库（每套含世界观总述与分类条目）。
 
     返回:
         多行上下文文本；一条信息都没有时返回空串。
     """
     premise = bible.get("premise") or {}
     style = bible.get("style") or {}
-    world = bible.get("world") or {}
     lines: list[str] = []
 
     title = work.get("title") or "未命名"
@@ -2199,23 +2092,32 @@ def _project_context(
         lines.append(f"叙事基调：{style['tone']}")
     if style.get("prose_style"):
         lines.append(f"文笔风格：{str(style['prose_style'])[:200]}")
-    if world.get("era"):
-        lines.append(f"时代背景：{world['era']}")
-    if world.get("rules"):
-        lines.append("世界规则：" + "；".join(str(item) for item in world["rules"][:6]))
-    if world.get("factions"):
-        lines.append("主要势力：" + "、".join(str(item) for item in world["factions"][:6]))
-    location_names = [str(item.get("name")) for item in (world.get("locations") or []) if item.get("name")][:6]
-    if location_names:
-        lines.append("关键地点：" + "、".join(location_names))
-    for item in (worlds or [])[:3]:
-        summary = str(item.get("summary") or "").strip()[:200]
-        parts = [f"世界「{item.get('name') or '未命名'}」"]
-        if item.get("era"):
-            parts.append(f"时代 {item['era']}")
-        if summary:
-            parts.append(summary)
-        lines.append("；".join(parts))
+
+    world = next((item for item in (worlds or []) if isinstance(item, dict)), None) or {}
+    if world:
+        if world.get("era"):
+            lines.append(f"时代与舞台：{world['era']}")
+        if world.get("summary"):
+            lines.append(f"世界观总述：{str(world['summary'])[:600]}")
+        rules = [str(item) for item in (world.get("rules") or []) if str(item).strip()]
+        if rules:
+            lines.append("世界规则：" + "；".join(rules[:6]))
+
+        def _names(key: str, label: str, name_key: str) -> None:
+            """把某一类条目压成名称列表追加到上下文。"""
+            values = [
+                str(item.get(name_key)).strip()
+                for item in (world.get(key) or [])
+                if isinstance(item, dict) and str(item.get(name_key) or "").strip()
+            ]
+            if values:
+                lines.append(f"{label}：" + "、".join(values[:8]))
+
+        _names("factions", "主要势力", "name")
+        _names("locations", "关键地点", "name")
+        _names("glossary", "专有名词", "term")
+        _names("others", "其它设定", "name")
+
     names = [str(item.get("name")) for item in (characters or []) if item.get("name") and item.get("role") != "narrator"]
     if names:
         lines.append("已有角色（不要重名，可呼应既有关系）：" + "、".join(names[:20]))
@@ -2313,7 +2215,7 @@ def generate_worlds(
     world_store = WorldStore(store.root)
     world_items = world_store.list_worlds() if world_store.exists() else []
     existing = [{"name": item.get("name"), "era": item.get("era")} for item in world_items]
-    ask = "生成世界设定列表，每条包含 name/era/summary/rules/factions/locations/glossary/visual_style；locations/glossary 必须是数组，元素为对象，不要用字符串包裹。"
+    ask = "生成世界设定列表，每条包含 name/era/summary/rules/factions/locations/glossary/others/visual_style；locations/glossary/others 必须是数组，元素为对象，不要用字符串包裹。summary 写世界观总述，factions/locations/glossary 是总述之下的分类条目。"
     if wanted:
         ask += f"共 {wanted} 条世界。"
     if brief_text:
@@ -2451,12 +2353,12 @@ def _ensure_visual_style(adapter, req: TextGenRequest, fields: dict) -> None:
 
 
 def generate_settings(store: ProjectStore, config: AppConfig, step: str, overwrite: bool = False, brief: str | None = None, seed: int | None = None) -> dict:
-    """生成世界 / 梗概 / 文风设定（只返回结果，不写盘）。
+    """生成梗概 / 文风设定（只返回结果，不写盘）。
 
     参数:
         store: 工程。
         config: 本机配置。
-        step: world|premise|style。
+        step: premise|style。
         overwrite: True 时用生成值整体替换该分区；False 时保留已有非空值并记入 skipped。
         brief: 可选的用户补充要求（拼进提示词与请求元信息）。
         seed: 显式固定随机种子；None 表示每次由服务端随机采样（默认）。
@@ -2468,7 +2370,7 @@ def generate_settings(store: ProjectStore, config: AppConfig, step: str, overwri
         ValueError: step 非法、模型输出不是合法 JSON 或字段校验失败。
     """
     if step not in SETTING_STEPS:
-        raise ValueError(f"未知设定步骤: {step}（可选 world / premise / style）")
+        raise ValueError(f"未知设定步骤: {step}（可选 premise / style）")
     settings_store = SettingsStore(store.root)
     bible = settings_store.load_or_none() or {}
     project = store.load_project()
@@ -2476,8 +2378,8 @@ def generate_settings(store: ProjectStore, config: AppConfig, step: str, overwri
     skeleton = settings_store.build_skeleton(work)
     adapter = build_writing_adapter(config, bible)
 
-    label = {"world": "世界设定", "premise": "故事梗概", "style": "文风设定"}[step]
-    allowed = {"world": WORLD_FIELDS, "premise": PREMISE_FIELDS, "style": STYLE_FIELDS}[step]
+    label = {"premise": "故事梗概", "style": "文风设定"}[step]
+    allowed = {"premise": PREMISE_FIELDS, "style": STYLE_FIELDS}[step]
     target_length = (bible.get("premise") or {}).get("target_length") or (skeleton.get("premise") or {}).get("target_length")
     brief_text = str(brief or "").strip()
     ask = f"为《{work.get('title') or '未命名'}》生成{label}，字段：{', '.join(allowed)}。"
@@ -3042,7 +2944,7 @@ def generate_section(
         ValueError: section 非法、目标条目不存在或模型输出不合法。
     """
     key = str(section or "").strip()
-    if key not in ("premise", "style", "world", "character"):
+    if key not in ("premise", "style", "character"):
         raise ValueError(f"不支持的生成区块: {section}")
 
     settings_store = SettingsStore(store.root)
@@ -3062,48 +2964,6 @@ def generate_section(
     adapter = build_writing_adapter(config, bible)
     brief_text = str(brief or "").strip()
     work_payload = {"title": work.get("title"), "author": work.get("author"), "genre": work.get("genre") or []}
-
-    if key == "world":
-        world_store = WorldStore(store.root)
-        world_store.ensure()
-        worlds = world_store.list_worlds()
-        existing = world_store.get(target_id) if target_id else None
-        if target_id and existing is None:
-            raise ValueError(f"世界条目不存在: {target_id}")
-        ask = "生成一条完整世界设定，字段：name/era/summary/rules/factions/locations/glossary/visual_style；locations/glossary 必须是数组，元素为对象，不要用字符串包裹。"
-        if brief_text:
-            ask += f"补充要求：{brief_text}。"
-        if existing:
-            ask += f"这是对已有条目的改写，需保持连贯，现有内容：{json.dumps({field: existing.get(field) for field in ('name', 'era', 'summary')}, ensure_ascii=False)}。"
-        # 世界设定必须落在作品既有框架内：带上梗概、文风与已有世界
-        context = _project_context(work, bible, None, worlds)
-        prompt = f"{context}\n\n任务：{ask}" if context else ask
-        req = TextGenRequest(
-            task="setting",
-            system="你是中文小说的世界观编辑，世界设定必须与给定的作品设定一致，只按工具参数输出，不要解释。",
-            messages=[Message("user", prompt)],
-            stream=True,
-            temperature=0.7,
-            max_tokens=_tool_max_tokens(config, "world", 1),
-            metadata={
-                "step": "world",
-                "work": work_payload,
-                "existing": _bible_digest(bible),
-                "existing_world": existing,
-                "worlds": [{"name": item.get("name"), "era": item.get("era")} for item in worlds],
-                "brief": brief_text,
-                "seed": work.get("id"),
-            },
-        )
-        payload = _generate_json(adapter, req, "world")
-        if isinstance(payload.get("world"), dict):
-            payload = payload["world"]
-        entry = clean_world_entry(payload)
-        if existing:
-            entry["id"] = existing.get("id") or entry["id"]
-            entry["created_at"] = existing.get("created_at") or entry["created_at"]
-            entry["cover_asset"] = existing.get("cover_asset")
-        return {"section": "world", "fields": entry, "target_id": target_id}
 
     characters = store.load_characters()["characters"]
     world_store = WorldStore(store.root)

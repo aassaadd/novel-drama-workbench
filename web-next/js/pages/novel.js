@@ -16,13 +16,17 @@ import { railbar, topbar, goChapter, goProjects } from '../shell.js';
 
 /** 本页局部状态：选中对象、忙碌标记与最近一次 AI 预览 */
 const ui = {
-  /** 选中对象：`setting` 写作设定 / `world` 世界条目 / `chapter` 大纲章 */
+  /** 选中对象：setting 写作设定 / worldOverview 世界观总述 / worldEntry 分类条目 / chapter 大纲章 */
   sel: { kind: 'setting', id: '' },
+  /** 当前世界模块 ID（多套世界时由下拉切换） */
+  worldId: '',
   busy: '',
   /** AI 世界生成预览（未采纳前不落盘） */
   worldPreview: null,
   /** 是否正在新建世界（表单空白但尚未落盘） */
   draftWorld: false,
+  /** 是否正在新建分类条目（表单空白但尚未落盘） */
+  draftEntry: false,
 };
 
 /** 页面数据缓存，切章或写操作后整体重载 */
@@ -97,6 +101,50 @@ async function loadAll(path, keepCheck = false) {
 function findWorld(id) {
   return cache.worlds.find((item) => item.id === id) || null;
 }
+
+/**
+ * 世界模块的分区定义：分类键 → 世界字段、中文名、空态说明。
+ * 顶层是「世界观总述」，下层是这四类条目。
+ */
+const CATEGORY_META = {
+  location: { field: 'locations', label: '地点', hint: '故事发生的主要场景，可写氛围与来源章节' },
+  faction: { field: 'factions', label: '势力', hint: '阵营、组织、家族等推动冲突的群体' },
+  term: { field: 'glossary', label: '术语', hint: '专有名词、设定术语及其释义' },
+  other: { field: 'others', label: '其它', hint: '关键物件、习俗、生物等未归类内容' },
+};
+
+/** 当前选中的世界模块（未选中时取第一套） */
+function activeWorld() {
+  return findWorld(ui.worldId) || cache.worlds[0] || null;
+}
+
+/** 取某套世界里某一类条目 */
+function categoryEntries(category, world = activeWorld()) {
+  const meta = CATEGORY_META[category];
+  return meta && world ? world[meta.field] || [] : [];
+}
+
+/** 条目显示名：术语用 term，其它分类用 name */
+function entryName(category, item) {
+  if (category === 'term') return String(item?.term || item?.name || '').trim();
+  return String(item?.name || '').trim();
+}
+
+/** 条目一句话说明 */
+function entryDesc(category, item) {
+  if (category === 'term') return String(item?.meaning || item?.description || '').trim();
+  if (category === 'location' && item?.atmosphere) {
+    return [item.description, `氛围：${item.atmosphere}`].filter(Boolean).join(' · ');
+  }
+  return String(item?.description || '').trim();
+}
+
+/** 章节 ID → 可读标题（用于来源章节标签） */
+function chapterTitleOf(id) {
+  const hit = outlineChapters().find((row) => row.chapter.id === id);
+  return hit?.chapter?.title || String(id || '');
+}
+
 
 /** 展开大纲里的所有章节，附带所属幕 */
 function outlineChapters() {
@@ -251,47 +299,6 @@ function asLocationList(value) {
 }
 
 /**
- * 归一化名词表：兼容对象数组、JSON 字符串、单对象、`词条→释义` 映射与文本行。
- * @param {any} value 原始值
- * @returns {Array<object>} 词条（保留未知字段）
- */
-function asGlossaryList(value) {
-  let rows = value;
-  if (typeof rows === 'string') {
-    const parsed = parseJSONish(rows);
-    if (parsed !== null) rows = parsed;
-    else return splitLines(rows).map((line) => {
-      const [term = '', meaning = '', aliasText = ''] = line.split('|').map((part) => part.trim());
-      return { term, meaning, ...(aliasText ? { aliases: splitAliases(aliasText) } : {}) };
-    });
-  }
-  if (rows && !Array.isArray(rows) && typeof rows === 'object') {
-    if ('term' in rows || '词条' in rows || 'name' in rows) rows = [rows];
-    else rows = Object.entries(rows).map(([term, meaning]) => ({ term, meaning: readableText(meaning) }));
-  }
-  const list = [];
-  for (const item of Array.isArray(rows) ? rows : []) {
-    if (item && typeof item === 'object' && !Array.isArray(item)) {
-      list.push({
-        ...item,
-        term: readableText(item.term ?? item.词条 ?? item.name ?? ''),
-        meaning: readableText(item.meaning ?? item.definition ?? item.释义 ?? ''),
-        aliases: splitAliases(item.aliases),
-      });
-      continue;
-    }
-    const parsed = parseJSONish(item);
-    if (parsed !== null) {
-      list.push(...asGlossaryList(parsed));
-      continue;
-    }
-    const [term = '', meaning = '', aliasText = ''] = String(item ?? '').split('|').map((part) => part.trim());
-    if (term || meaning) list.push({ term, meaning, aliases: splitAliases(aliasText) });
-  }
-  return list;
-}
-
-/**
  * 别名归一化：数组直接展开，字符串按顿号/逗号/分号拆分。
  * @param {any} value 原始别名
  * @returns {string[]} 别名数组
@@ -305,135 +312,15 @@ function splitAliases(value) {
     .filter(Boolean);
 }
 
-/**
- * 地点转一行中文文本（只读展示用，例如世界生成预览）。
- * @param {object|string} item 地点对象或历史字符串
- */
-function locationLine(item) {
-  if (typeof item === 'string') {
-    const parsed = parseJSONish(item);
-    if (parsed === null) return item;
-  }
-  const row = asLocationList([item])[0] || {};
-  return [row.name, row.description, row.atmosphere].filter(Boolean).join(' | ');
-}
-
-/**
- * 单条地点/词条的编辑行。
- * @param {'locations'|'glossary'} kind 条目类型
- * @param {object} item 条目数据
- * @param {number} orig 原始下标（-1 表示新增）
- * @returns {string} HTML
- */
-function itemRowHTML(kind, item = {}, orig = -1) {
-  const ops = `
-    <div class="novel-item-ops">
-      <button class="btn icon sm" data-act="novel-item-move" data-dir="-1" title="上移">↑</button>
-      <button class="btn icon sm" data-act="novel-item-move" data-dir="1" title="下移">↓</button>
-      <button class="btn icon sm" data-act="novel-item-del" title="删除这条">${icon('trash', 12)}</button>
-    </div>`;
-  if (kind === 'glossary') {
-    return `
-      <div class="novel-item" data-row data-orig="${orig}">
-        <div class="novel-item-grid">
-          <input class="input" data-f="term" placeholder="词条" value="${esc(item.term || '')}" />
-          <input class="input" data-f="aliases" placeholder="别名（逗号分隔，可留空）"
-            value="${esc((item.aliases || []).join('，'))}" />
-          <textarea class="textarea" data-f="meaning" rows="2" placeholder="释义"
-            style="grid-column:1/-1">${esc(item.meaning || '')}</textarea>
-        </div>
-        ${ops}
-      </div>`;
-  }
-  return `
-    <div class="novel-item" data-row data-orig="${orig}">
-      <div class="novel-item-grid">
-        <input class="input" data-f="name" placeholder="名称" value="${esc(item.name || '')}" />
-        <input class="input" data-f="atmosphere" placeholder="氛围" value="${esc(item.atmosphere || '')}" />
-        <textarea class="textarea" data-f="description" rows="2" placeholder="描述"
-          style="grid-column:1/-1">${esc(item.description || '')}</textarea>
-      </div>
-      ${ops}
-    </div>`;
-}
-
-/**
- * 地点 / 名词表的条目编辑器（增删、上下移动都在原地完成，不重绘整页）。
- * @param {'locations'|'glossary'} kind 条目类型
- * @param {Array<object>} list 条目数组
- * @returns {string} HTML
- */
-function itemsEditorHTML(kind, list) {
-  const label = kind === 'locations' ? '关键地点' : '名词表';
-  const addLabel = kind === 'locations' ? '新增地点' : '新增词条';
-  const rows = list.map((item, index) => itemRowHTML(kind, item, index)).join('');
-  return `
-    <div class="field novel-items" data-rows="${kind}">
-      <div class="novel-items-head">
-        <label>${label}（<span data-count>${list.length}</span>）</label>
-        <button class="btn sm" data-act="novel-item-add" data-kind="${kind}">${addLabel}</button>
-      </div>
-      <div class="novel-items-body" data-rows-body>${rows}</div>
-      <div class="hint" data-empty-hint ${list.length ? 'hidden' : ''}>还没有条目，点「${addLabel}」添加一条</div>
-    </div>`;
-}
-
-/**
- * 同步条目编辑器的计数与空态提示。
- * @param {HTMLElement} container 编辑器容器（`[data-rows]`）
- */
-function syncItemsHead(container) {
-  if (!container) return;
-  const count = container.querySelectorAll('[data-row]').length;
-  const counter = container.querySelector('[data-count]');
-  if (counter) counter.textContent = String(count);
-  const hint = container.querySelector('[data-empty-hint]');
-  if (hint) hint.hidden = count > 0;
-}
-
-/**
- * 从编辑器里收集条目数组；按 `data-orig` 找回原对象，保留未知字段。
- * @param {HTMLElement|Document} scope 查找范围（整页或弹窗）
- * @param {'locations'|'glossary'} kind 条目类型
- * @param {Array<object>} originals 原始数组
- * @returns {Array<object>} 新数组
- */
-function collectItems(scope, kind, originals = []) {
-  const container = scope.querySelector(`[data-rows="${kind}"]`);
-  const body = container?.querySelector('[data-rows-body]');
-  if (!body) return [];
-  const list = [];
-  for (const row of body.querySelectorAll('[data-row]')) {
-    const orig = Number(row.dataset.orig);
-    const base =
-      Number.isInteger(orig) && orig >= 0 && originals[orig] && typeof originals[orig] === 'object'
-        ? originals[orig]
-        : {};
-    const field = (name) => row.querySelector(`[data-f="${name}"]`)?.value.trim() || '';
-    if (kind === 'glossary') {
-      const term = field('term');
-      const meaning = field('meaning');
-      if (!term && !meaning) continue;
-      const aliases = splitAliases(field('aliases'));
-      const item = { ...base, term, meaning };
-      if (aliases.length) item.aliases = aliases;
-      else delete item.aliases;
-      list.push(item);
-      continue;
-    }
-    const name = field('name');
-    const description = field('description');
-    const atmosphere = field('atmosphere');
-    if (!name && !description && !atmosphere) continue;
-    list.push({ ...base, name, description, atmosphere });
-  }
-  return list;
-}
-
 /** 当前选中对象的标题（用于顶栏/空状态） */
 function selectionTitle() {
   if (ui.sel.kind === 'setting') return '写作设定';
-  if (ui.sel.kind === 'world') return findWorld(ui.sel.id)?.name || '世界设定';
+  if (ui.sel.kind === 'worldOverview') return `${activeWorld()?.name || '世界'} · 世界观总述`;
+  if (ui.sel.kind === 'worldEntry') {
+    const meta = CATEGORY_META[ui.sel.category] || {};
+    const item = (activeWorld()?.[meta.field] || []).find((row) => row.id === ui.sel.id);
+    return `${activeWorld()?.name || '世界'} · ${meta.label || '条目'}${item ? ` · ${entryName(ui.sel.category, item)}` : ''}`;
+  }
   const hit = findOutlineChapter(ui.sel.id);
   return hit ? `${hit.chapter.index ? `第 ${hit.chapter.index} 章 · ` : ''}${hit.chapter.title || '未命名'}` : '分层大纲';
 }
@@ -463,34 +350,233 @@ function ctxBlockHTML(key, emptyText) {
   return emptyText;
 }
 
-/** 左侧面板：写作设定入口 + 世界列表 + 分层大纲树 */
+/**
+ * 左栏折叠状态：世界分区与大纲幕，按工程路径持久化到 localStorage。
+ * 用户还没手动操作过时不写盘，按「当前选中项」算默认值（只展开选中的分类/幕）。
+ */
+const collapse = {
+  /** 状态所属工程路径，切换工程时重新读取 */
+  path: '',
+  /** 是否已有用户操作过的持久化状态 */
+  stored: false,
+  /** 折叠的世界分区键：overview / location / faction / term / other */
+  world: new Set(),
+  /** 折叠的幕键（大纲幕 ID，缺失时用位置） */
+  acts: new Set(),
+};
+
+/** 折叠状态在 localStorage 里的键（按工程隔离） */
+function collapseKey(path) {
+  return `ndw.novel.collapse.${path || ''}`;
+}
+
+/**
+ * 读取指定工程的折叠状态；没有记录时保持未初始化，由默认值接管。
+ * @param {string} path 工程目录
+ */
+function loadCollapse(path) {
+  collapse.path = path;
+  collapse.stored = false;
+  collapse.world = new Set();
+  collapse.acts = new Set();
+  try {
+    const raw = JSON.parse(localStorage.getItem(collapseKey(path)) || 'null');
+    if (!raw || typeof raw !== 'object') return;
+    collapse.stored = true;
+    collapse.world = new Set((raw.world || []).map(String));
+    collapse.acts = new Set((raw.acts || []).map(String));
+  } catch {
+    // 隐私模式或坏数据：忽略，回落到默认折叠
+  }
+}
+
+/** 把当前折叠状态写回 localStorage（失败不影响本次会话内的折叠） */
+function saveCollapse() {
+  try {
+    localStorage.setItem(
+      collapseKey(cache.path || collapse.path),
+      JSON.stringify({ world: [...collapse.world], acts: [...collapse.acts] })
+    );
+  } catch {
+    // 写不进去时只在本次会话内生效
+  }
+}
+
+/** 幕的稳定键：优先用大纲里的幕 ID，缺失时用位置序号 */
+function actKey(act, index) {
+  return String(act?.id || `#${index}`);
+}
+
+/** 默认只展开「当前选中的世界分区」，其余折叠 */
+function defaultCollapsedWorld() {
+  const active = ui.sel.kind === 'worldEntry' && CATEGORY_META[ui.sel.category] ? ui.sel.category : 'overview';
+  return new Set(['overview', ...Object.keys(CATEGORY_META)].filter((key) => key !== active));
+}
+
+/** 默认只展开「当前章节所在的幕」，没有选中章节时展开第一幕 */
+function defaultCollapsedActs() {
+  const acts = cache.outline?.acts || [];
+  const current = ui.sel.kind === 'chapter' ? ui.sel.id : '';
+  let keep = acts.findIndex((act) => (act.chapters || []).some((chapter) => chapter.id === current));
+  if (keep < 0) keep = 0;
+  return new Set(acts.map((act, index) => actKey(act, index)).filter((key, index) => index !== keep));
+}
+
+/** 首次折叠操作前把默认值固化，避免只记住一半状态 */
+function materializeCollapse() {
+  if (collapse.stored) return;
+  collapse.world = defaultCollapsedWorld();
+  collapse.acts = defaultCollapsedActs();
+  collapse.stored = true;
+}
+
+/** 世界分区是否展开 */
+function worldGroupOpen(key) {
+  if (!collapse.stored) return !defaultCollapsedWorld().has(key);
+  return !collapse.world.has(key);
+}
+
+/** 某一幕是否展开 */
+function actOpen(act, index) {
+  const key = actKey(act, index);
+  if (!collapse.stored) return !defaultCollapsedActs().has(key);
+  return !collapse.acts.has(key);
+}
+
+/** 切换世界分区折叠：只翻转这一项，不影响其它分区 */
+function toggleWorldGroup(key) {
+  materializeCollapse();
+  if (collapse.world.has(key)) collapse.world.delete(key);
+  else collapse.world.add(key);
+  saveCollapse();
+  paint();
+}
+
+/** 切换某一幕的折叠：只翻转这一项 */
+function toggleAct(key) {
+  materializeCollapse();
+  if (collapse.acts.has(key)) collapse.acts.delete(key);
+  else collapse.acts.add(key);
+  saveCollapse();
+  paint();
+}
+
+/** 确保某个世界分区展开（新增条目时用，避免表单落在折叠区里看不到） */
+function openWorldGroup(key) {
+  materializeCollapse();
+  if (!collapse.world.has(key)) return;
+  collapse.world.delete(key);
+  saveCollapse();
+}
+
+/**
+ * 左侧「世界」模块：世界观总述入口 + 地点/势力/术语/其它四类条目。
+ * 总述与条目都归属于当前选中的世界；切换世界用总述上方的下拉。
+ * 每个分区（总述与四类条目）都可折叠，折叠状态按工程记住。
+ * @returns {string} HTML
+ */
+function worldModuleHTML() {
+  const world = activeWorld();
+  if (!world) {
+    return `<div class="hint" style="padding:6px 12px;display:grid;gap:4px">
+      <div>还没有世界</div>
+      <div style="color:var(--text-4)">点上方「+」新建一套世界，或点「✨」让 AI 生成世界观总述与分类条目；写作设定只保留故事内核与文风。</div>
+    </div>`;
+  }
+  const picker =
+    cache.worlds.length > 1
+      ? `<div style="padding:6px 12px 2px">
+          <select class="select" id="novel-world-pick" data-world-pick title="切换当前世界">
+            ${cache.worlds
+              .map(
+                (item) =>
+                  `<option value="${esc(item.id)}" ${item.id === world.id ? 'selected' : ''}>${esc(
+                    item.name || '未命名世界'
+                  )}</option>`
+              )
+              .join('')}
+          </select>
+        </div>`
+      : '';
+  const overviewOpen = worldGroupOpen('overview');
+  const overview = `
+    <div class="ctx-group toggle ${overviewOpen ? 'open' : ''}" data-act="novel-toggle-world-group" data-group="overview"
+      title="世界观总述：名称、时代、世界观文本与规则；点击${overviewOpen ? '折叠' : '展开'}">
+      <span class="novel-caret" aria-hidden="true">▸</span>
+      世界观总述 <span class="n">1</span>
+    </div>
+    ${
+      overviewOpen
+        ? `<div class="novel-group-body">
+      <button class="chap-row novel-row ${ui.sel.kind === 'worldOverview' ? 'on' : ''}" data-act="novel-sel-world-overview">
+        <span class="mono novel-row-icon">${icon('book', 12)}</span>
+        <span class="novel-world-body">
+          <b class="novel-world-name">世界观总述</b>
+          <span class="novel-world-desc">${esc(world.era || '时代与舞台待填写')} · 地点 ${categoryEntries(
+            'location',
+            world
+          ).length} / 势力 ${categoryEntries('faction', world).length}</span>
+        </span>
+      </button>
+    </div>`
+        : ''
+    }`;
+  const groups = Object.entries(CATEGORY_META)
+    .map(([category, meta]) => {
+      const rows = categoryEntries(category, world);
+      const open = worldGroupOpen(category);
+      const body = rows.length
+        ? `<div class="novel-group-body">${rows
+            .map(
+              (item) => `
+        <button class="chap-row novel-row ${
+          ui.sel.kind === 'worldEntry' && ui.sel.category === category && ui.sel.id === item.id ? 'on' : ''
+        }" data-act="novel-sel-world-entry" data-category="${category}" data-id="${esc(item.id)}">
+          <span class="mono novel-row-icon">${icon('image', 12)}</span>
+          <span class="novel-world-body">
+            <b class="novel-world-name">${esc(entryName(category, item) || '未命名条目')}</b>
+            <span class="novel-world-desc">${esc(entryDesc(category, item))}</span>
+          </span>
+        </button>`
+            )
+            .join('')}</div>`
+        : `<div class="hint" style="padding:4px 12px 6px">${esc(meta.hint)}</div>`;
+      return `
+      <div class="ctx-group toggle ${open ? 'open' : ''}" data-act="novel-toggle-world-group" data-group="${category}"
+        title="${esc(meta.hint)}；点击${open ? '折叠' : '展开'}">
+        <span class="novel-caret" aria-hidden="true">▸</span>
+        ${esc(meta.label)} <span class="n">${rows.length}</span>
+        <button class="btn icon sm" data-act="novel-entry-new" data-category="${category}" style="margin-left:auto"
+          title="新增${esc(meta.label)}条目">${icon('plus', 12)}</button>
+      </div>
+      ${open ? body : ''}`;
+    })
+    .join('');
+  return `${picker}${overview}${groups}`;
+}
+
+/** 左侧面板：写作设定入口 + 世界模块 + 分层大纲树 */
 function ctxHTML() {
   const counts = outlineCounts();
-  const worlds = cache.worlds
-    .map(
-      (world) => `
-      <button class="chap-row novel-row novel-world-row ${
-        ui.sel.kind === 'world' && ui.sel.id === world.id ? 'on' : ''
-      }" data-act="novel-sel-world" data-id="${esc(world.id)}">
-        <span class="mono novel-world-icon">${icon('image', 12)}</span>
-        <span class="novel-world-body">
-          <b class="novel-world-name">${esc(world.name || '未命名世界')}</b>
-          <span class="novel-world-desc">${esc(String(world.summary || world.era || ''))}</span>
-        </span>
-      </button>`
-    )
-    .join('');
   const acts = (cache.outline?.acts || [])
-    .map(
-      (act, actIndex) => `
+    .map((act, actIndex) => {
+      const open = actOpen(act, actIndex);
+      const chapters = act.chapters || [];
+      return `
       <div class="novel-act">
-        <div class="novel-act-head" title="${esc(act.summary || '')}">
+        <div class="novel-act-head toggle ${open ? 'open' : ''}" data-act="novel-toggle-act"
+          data-key="${esc(actKey(act, actIndex))}"
+          title="${esc(act.summary || '')}；点击${open ? '折叠' : '展开'}本章列表">
+          <span class="novel-caret" aria-hidden="true">▸</span>
           <span class="mono novel-act-index">第 ${Number(act.index || actIndex + 1)} 幕</span>
           <span class="novel-act-title" title="${esc(act.title || '')}">${esc(act.title || '未命名幕')}</span>
+          <span class="n">${chapters.length} 章</span>
         </div>
-        ${(act.chapters || [])
-          .map(
-            (chapter) => `
+        ${
+          open
+            ? `<div class="novel-act-body">${chapters
+                .map(
+                  (chapter) => `
           <button class="chap-row novel-row novel-chapter ${
             ui.sel.kind === 'chapter' && ui.sel.id === chapter.id ? 'on' : ''
           }" data-act="novel-sel-chapter" data-id="${esc(chapter.id)}">
@@ -500,10 +586,12 @@ function ctxHTML() {
             )}</span>
             ${landedChapter(chapter.id) ? '<span class="badge ok">已落章</span>' : ''}
           </button>`
-          )
-          .join('')}
-      </div>`
-    )
+                )
+                .join('')}</div>`
+            : ''
+        }
+      </div>`;
+    })
     .join('');
 
   return `
@@ -523,19 +611,16 @@ function ctxHTML() {
         <button class="chap-row novel-row ${ui.sel.kind === 'setting' ? 'on' : ''}" data-act="novel-sel-setting">
           <span class="mono novel-row-icon">${icon('gear', 12)}</span>
           <b class="novel-row-title">写作设定</b>
-          <span class="badge mute">内核 · 世界观 · 文风</span>
+          <span class="badge mute">故事内核 · 文风</span>
         </button>
-        <div class="ctx-group">
-          世界设定 <span class="n">${cache.worlds.length}</span>
-          <button class="btn icon sm" data-act="novel-world-ai" title="AI 生成世界条目" style="margin-left:auto">
-            ${icon('spark', 12)}
-          </button>
+        <div class="ctx-group" title="世界模块：上层是世界观总述，下层是地点/势力/术语/其它条目；写作设定不再包含世界观">
+          世界 <span class="n">${cache.worlds.length}</span>
+          <button class="btn icon sm" data-act="novel-world-new" style="margin-left:auto"
+            title="新建一套世界：先写世界观总述，再加分类条目">${icon('plus', 12)}</button>
+          <button class="btn icon sm" data-act="novel-world-ai"
+            title="AI 生成世界：世界观总述 + 地点/势力/术语条目，先预览再采用">${icon('spark', 12)}</button>
         </div>
-        ${boot.state.worlds === 'ok' ? worlds || '<div class="hint" style="padding:6px 12px">还没有世界条目，点上方 ✨ 让 AI 生成</div>' : ctxBlockHTML('worlds')}
-        <button class="chap-row novel-row novel-world-new" data-act="novel-world-new">
-          <span class="mono novel-row-icon">${icon('plus', 12)}</span>
-          <b class="novel-row-title">新建世界</b>
-        </button>
+        ${boot.state.worlds !== 'ok' ? ctxBlockHTML('worlds') : worldModuleHTML()}
         <div class="ctx-group">
           分层大纲
           <button class="btn icon sm" data-act="novel-outline-generate" title="AI 生成分层大纲" style="margin-left:auto">
@@ -557,10 +642,9 @@ function safePath() {
 
 // ---------------- 主区 ----------------
 
-/** 写作设定：故事内核 / 世界观 / 文风三张卡，均可保存与 AI 生成 */
+/** 写作设定：故事内核 / 文风两张卡，均可保存与 AI 生成；世界观归左侧「世界」模块 */
 function settingHTML() {
   const premise = cache.setting?.premise || {};
-  const world = cache.setting?.world || {};
   const style = cache.setting?.style || {};
   const text = (id, label, value, rows = 3, hint = '') => `
     <div class="field">
@@ -579,12 +663,11 @@ function settingHTML() {
     <div class="ed-head">
       <div style="min-width:0">
         <div class="et">写作设定</div>
-        <div class="em">AI 写小说时读取的内核、世界观与文风；改完保存即生效</div>
+        <div class="em">AI 写小说时读取的故事层设定（故事内核、文风）；世界观、地点、势力、术语统一在左侧「世界」模块编辑，改完保存即生效</div>
       </div>
       <div class="right">
         <button class="btn sm" data-act="novel-outline-check">${icon('check', 12)} 黄金三章检查</button>
         <button class="btn sm" data-act="novel-setting-ai" data-section="premise">${icon('spark', 12)} AI 补内核</button>
-        <button class="btn sm" data-act="novel-setting-ai" data-section="world">${icon('spark', 12)} AI 补世界观</button>
         <button class="btn sm" data-act="novel-setting-ai" data-section="style">${icon('spark', 12)} AI 补文风</button>
       </div>
     </div>
@@ -594,6 +677,7 @@ function settingHTML() {
           <div class="right"><button class="btn sm primary" data-act="novel-setting-save" data-section="premise">保存</button></div>
         </div>
         <div class="card-body" style="display:grid;gap:10px">
+          <div class="hint">故事内核属于写作设定，用来约束大纲与正文；它不进入左侧「世界」模块或角色库。</div>
           ${text('ns-logline', '一句话梗概', premise.logline, 2, '用一句话说清主角、欲望与阻力')}
           ${text('ns-theme', '主题', premise.theme, 2)}
           ${text('ns-conflict', '核心冲突', premise.core_conflict, 3)}
@@ -612,18 +696,6 @@ function settingHTML() {
                 value="${Number(premise.target_words) > 0 ? Number(premise.target_words) : ''}"
                 placeholder="例如 120000" title="可选；只作为字数约束参考，不影响上面的篇幅档位" /></div>
           </div>
-        </div>
-      </div>
-      <div class="card">
-        <div class="card-head"><span class="ct">世界观</span>
-          <div class="right"><button class="btn sm primary" data-act="novel-setting-save" data-section="world">保存</button></div>
-        </div>
-        <div class="card-body" style="display:grid;gap:10px">
-          ${text('ns-era', '时代与舞台', world.era, 2)}
-          ${text('ns-rules', '世界规则（每行一条）', joinLines(asStringList(world.rules)), 4)}
-          ${itemsEditorHTML('locations', asLocationList(world.locations))}
-          ${text('ns-factions', '阵营势力（每行一条）', joinLines(asStringList(world.factions)), 3)}
-          ${itemsEditorHTML('glossary', asGlossaryList(world.glossary))}
         </div>
       </div>
       <div class="card">
@@ -656,49 +728,172 @@ function settingHTML() {
     </div>`;
 }
 
-/** 世界条目详情：可编辑并保存；AI 只负责生成预览，采纳后才落盘 */
-function worldHTML() {
+/**
+ * 世界观总述页：世界名称 / 时代 / 总述 / 规则 / 画面风格。
+ * 下方按地点/势力/术语/其它列出条目，点击即可下钻到条目详情。
+ * @returns {string} HTML
+ */
+function worldOverviewHTML() {
   const world =
-    findWorld(ui.sel.id) ||
+    findWorld(ui.worldId) ||
     (ui.draftWorld
-      ? { name: '', era: '', summary: '', rules: [], factions: [], locations: [], glossary: [], visual_style: '' }
+      ? {
+          name: '',
+          era: '',
+          summary: '',
+          rules: [],
+          locations: [],
+          factions: [],
+          glossary: [],
+          others: [],
+          visual_style: '',
+        }
       : null);
   if (!world) {
-    return `<div class="empty" style="margin:auto">${icon('image', 22)}<b>还没有世界条目</b>
-      <span>点左侧 ✨ 让 AI 生成一版，或手动新建</span>
-      <button class="btn primary" data-act="novel-world-ai" style="margin-top:10px">${icon('spark', 12)} AI 生成世界</button></div>`;
+    return `<div class="empty" style="margin:auto">${icon('image', 22)}<b>还没有世界</b>
+      <span>世界模块上层是世界观总述，下层是地点/势力/术语/其它条目；写作设定不再保存世界观</span>
+      <span class="hint">点左侧「世界」标题栏的「+」新建，或点「✨」让 AI 生成完整世界；生成结果先预览，采用后才写入。</span></div>`;
   }
+  const categoryCards = Object.entries(CATEGORY_META)
+    .map(([category, meta]) => {
+      const rows = categoryEntries(category, world);
+      const chips = rows.length
+        ? `<div style="display:flex;flex-wrap:wrap;gap:6px">${rows
+            .map(
+              (item) => `<button class="btn sm" data-act="novel-sel-world-entry" data-category="${category}"
+                data-id="${esc(item.id)}" title="编辑${esc(meta.label)}条目${item.source_chapters?.length ? `；来源 ${item.source_chapters.length} 章` : ''}">
+                ${esc(entryName(category, item) || '未命名')}</button>`
+            )
+            .join('')}</div>`
+        : `<div class="hint">${esc(meta.hint)}</div>`;
+      return `<div class="card" style="box-shadow:none;border:1px solid var(--line-1)">
+        <div class="card-head"><span class="ct">${esc(meta.label)} <span class="n">${rows.length}</span></span>
+          <div class="right"><button class="btn sm" data-act="novel-entry-new" data-category="${category}">${icon(
+            'plus',
+            12
+          )} 新增</button></div>
+        </div>
+        <div class="card-body">${chips}</div>
+      </div>`;
+    })
+    .join('');
   return `
     <div class="ed-head">
       <div style="min-width:0">
-        <div class="et">${esc(world.name || '未命名世界')}</div>
-        <div class="em">世界条目会作为场景参考图与正文提示词的一部分</div>
+        <div class="et">${esc(world.name || '新世界')}</div>
+        <div class="em">世界 › 世界观总述：写世界的整体运行方式；地点、势力、术语在下方作为条目管理</div>
       </div>
       <div class="right">
-        <button class="btn sm primary" data-act="novel-world-save">保存</button>
-        <button class="btn sm" data-act="novel-world-delete" style="color:var(--bad)">删除</button>
+        ${ui.draftWorld ? '' : `<button class="btn sm" data-act="novel-world-delete" style="color:var(--bad)">删除世界</button>`}
+        <button class="btn sm primary" data-act="novel-world-overview-save">保存</button>
+      </div>
+    </div>
+    <div class="vw-body" style="padding:16px;overflow:auto;display:grid;gap:14px">
+      <div class="card">
+        <div class="card-head"><span class="ct">世界观总述</span></div>
+        <div class="card-body" style="display:grid;gap:10px">
+          <div class="hint">这里是世界观的上层文本，会随章节生成提供给模型；地点、势力、术语请放在下面的分类条目里，避免同一信息写两遍。多套世界可在左侧「世界」标题下切换。</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+            <div class="field"><label>世界名称</label><input class="input" id="nw-name" value="${esc(world.name || '')}" placeholder="例如：主世界 / 镜中城" /></div>
+            <div class="field"><label>时代与舞台</label><input class="input" id="nw-era" value="${esc(world.era || '')}" placeholder="例如：民国上海，租界与老城并存" /></div>
+          </div>
+          <div class="field"><label>世界观总述</label>
+            <textarea class="textarea" id="nw-summary" rows="6" placeholder="这个世界如何运转：力量来源、社会结构、核心矛盾与氛围">${esc(
+              world.summary || ''
+            )}</textarea></div>
+          <div class="field"><label>世界规则（每行一条）</label>
+            <textarea class="textarea" id="nw-rules" rows="4" placeholder="例如：听到器物记忆需要触碰且会损耗寿数">${esc(
+              joinLines(world.rules)
+            )}</textarea></div>
+          <div class="field"><label>画面风格（可选）</label>
+            <textarea class="textarea" id="nw-visual" rows="2" placeholder="供分镜与封面使用的统一视觉描述">${esc(
+              world.visual_style || ''
+            )}</textarea></div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-head"><span class="ct">分类条目</span></div>
+        <div class="card-body" style="display:grid;gap:10px">
+          <div class="hint">总述里提到的地点、势力、术语在这里以条目存在；点条目下钻编辑，条目页可返回总述并标记来源章节。</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">${categoryCards}</div>
+        </div>
+      </div>
+    </div>`;
+}
+
+/**
+ * 世界条目详情页：按分类编辑字段、标记来源章节，并可返回世界观总述。
+ * @returns {string} HTML
+ */
+function worldEntryHTML() {
+  const world = activeWorld();
+  const category = ui.sel.category || 'location';
+  const meta = CATEGORY_META[category];
+  if (!world || !meta) return worldOverviewHTML();
+  const base = ui.draftEntry ? {} : (world[meta.field] || []).find((item) => item.id === ui.sel.id);
+  if (!base) {
+    return `<div class="empty" style="margin:auto">${icon('image', 22)}<b>条目已不存在</b>
+      <span>它可能刚被删除，回到总述查看当前条目。</span>
+      <button class="btn sm" data-act="novel-sel-world-overview" style="margin-top:8px">返回世界观总述</button></div>`;
+  }
+  const sources = new Set(base.source_chapters || []);
+  const chapters = outlineChapters();
+  const chapterBox = chapters.length
+    ? `<div style="max-height:190px;overflow:auto;border:1px solid var(--line-1);border-radius:var(--radius-sm);padding:8px 10px;display:grid;gap:6px">
+        ${chapters
+          .map(
+            ({ act, chapter }) => `<label style="display:flex;align-items:center;gap:8px">
+              <input type="checkbox" data-source="${esc(chapter.id)}" ${sources.has(chapter.id) ? 'checked' : ''} />
+              <span>${esc(chapter.title || '未命名章节')}</span>
+              <span class="hint">${esc(act.title || '')}</span>
+            </label>`
+          )
+          .join('')}
+      </div>`
+    : `<div class="hint">分层大纲还没有章节；生成大纲后即可标记来源章节。</div>`;
+  const nameField =
+    category === 'term'
+      ? `<div class="field"><label>词条</label><input class="input" id="we-name" value="${esc(base.term || '')}" /></div>`
+      : `<div class="field"><label>名称</label><input class="input" id="we-name" value="${esc(base.name || '')}" /></div>`;
+  const detailFields =
+    category === 'term'
+      ? `<div class="field"><label>释义</label><textarea class="textarea" id="we-desc" rows="3">${esc(
+          base.meaning || ''
+        )}</textarea></div>
+         <div class="field"><label>别名（逗号 / 顿号分隔）</label><input class="input" id="we-aliases" value="${esc(
+           (base.aliases || []).join('、')
+         )}" /></div>`
+      : `<div class="field"><label>说明</label><textarea class="textarea" id="we-desc" rows="3">${esc(
+          base.description || ''
+        )}</textarea></div>
+         ${
+           category === 'location'
+             ? `<div class="field"><label>氛围（可选）</label><input class="input" id="we-atmos" value="${esc(
+                 base.atmosphere || ''
+               )}" placeholder="供音效与画面提示词使用" /></div>`
+             : ''
+         }`;
+  return `
+    <div class="ed-head">
+      <div style="min-width:0">
+        <div class="et">${esc(entryName(category, base) || `新建${meta.label}`)}</div>
+        <div class="em">世界「${esc(world.name || '未命名')}」 › ${esc(meta.label)}条目</div>
+      </div>
+      <div class="right">
+        <button class="btn sm" data-act="novel-sel-world-overview">${icon('back', 12)} 返回总述</button>
+        ${ui.draftEntry ? '' : `<button class="btn sm" data-act="novel-world-entry-delete" style="color:var(--bad)">删除</button>`}
+        <button class="btn sm primary" data-act="novel-world-entry-save">保存</button>
       </div>
     </div>
     <div class="vw-body" style="padding:16px;overflow:auto">
       <div class="card"><div class="card-body" style="display:grid;gap:10px">
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
-          <div class="field"><label>名称</label><input class="input" id="nw-name" value="${esc(world.name || '')}" /></div>
-          <div class="field"><label>时代</label><input class="input" id="nw-era" value="${esc(world.era || '')}" /></div>
+        <div class="hint">${esc(meta.hint)}；条目属于当前世界「${esc(world.name || '未命名')}」，保存后可在世界观总述里下钻查看。</div>
+        ${nameField}
+        ${detailFields}
+        <div class="field"><label>来源章节</label>
+          <div class="hint" style="margin-bottom:4px">标记该条目在哪些章节出现，生成正文时用于检索；可多选。</div>
+          ${chapterBox}
         </div>
-        <div class="field"><label>概要</label><textarea class="textarea" id="nw-summary" rows="3">${esc(
-          world.summary || ''
-        )}</textarea></div>
-        <div class="field"><label>规则（每行一条）</label><textarea class="textarea" id="nw-rules" rows="4">${esc(
-          joinLines(asStringList(world.rules))
-        )}</textarea></div>
-        <div class="field"><label>阵营（每行一条）</label><textarea class="textarea" id="nw-factions" rows="3">${esc(
-          joinLines(asStringList(world.factions))
-        )}</textarea></div>
-        ${itemsEditorHTML('locations', asLocationList(world.locations))}
-        ${itemsEditorHTML('glossary', asGlossaryList(world.glossary))}
-        <div class="field"><label>视觉风格</label><textarea class="textarea" id="nw-visual" rows="3">${esc(
-          world.visual_style || ''
-        )}</textarea></div>
       </div></div>
     </div>`;
 }
@@ -941,9 +1136,9 @@ function bodyCardHTML(chapter, landed) {
 
 /** 主区 HTML：按选中对象切换；对应数据块未就绪时先显示骨架或失败原因 */
 function mainHTML() {
-  if (ui.sel.kind === 'world') {
-    if (boot.state.worlds !== 'ok') return bootBlockHTML('worlds', '世界设定');
-    return worldHTML();
+  if (ui.sel.kind === 'worldOverview' || ui.sel.kind === 'worldEntry') {
+    if (boot.state.worlds !== 'ok') return bootBlockHTML('worlds', '世界');
+    return ui.sel.kind === 'worldEntry' ? worldEntryHTML() : worldOverviewHTML();
   }
   if (ui.sel.kind === 'chapter') {
     if (boot.state.outline !== 'ok') return bootBlockHTML('outline', '分层大纲');
@@ -1032,9 +1227,9 @@ function topRightHTML() {
 
 // ---------------- 写操作 ----------------
 
-/** 保存当前世界条目（无 id 时创建） */
-async function saveWorld() {
-  const base = findWorld(ui.sel.id) || {};
+/** 保存世界观总述（无 id 时创建新世界） */
+async function saveWorldOverview() {
+  const base = findWorld(ui.worldId) || {};
   const isNew = !base.id;
   const payload = {
     ...base,
@@ -1042,60 +1237,214 @@ async function saveWorld() {
     era: document.getElementById('nw-era')?.value.trim() || '',
     summary: document.getElementById('nw-summary')?.value.trim() || '',
     rules: splitLines(document.getElementById('nw-rules')?.value),
-    factions: splitLines(document.getElementById('nw-factions')?.value),
-    locations: collectItems(document, 'locations', asLocationList(base.locations)),
-    glossary: collectItems(document, 'glossary', asGlossaryList(base.glossary)),
     visual_style: document.getElementById('nw-visual')?.value.trim() || '',
-    // 系统字段界面上不展示，保存时按原值带回，避免被清空
+    // 分类条目与封面不属于总述表单，保存时按原值带回
+    factions: base.factions || [],
+    locations: base.locations || [],
+    glossary: base.glossary || [],
+    others: base.others || [],
     cover_asset: base.cover_asset ?? null,
     created_at: base.created_at,
     updated_at: base.updated_at,
   };
   if (!payload.name) return toast('世界名称不能为空', 'warn');
-  if (!payload.era) return toast('时代不能为空', 'warn');
+  if (!payload.era) return toast('时代与舞台不能为空', 'warn');
   await run('保存世界', () => postJSON('/api/ui/worlds', { path: cache.path, world: payload }));
-  const saved = (await getJSON('/api/ui/worlds', { path: cache.path }))?.worlds || [];
-  cache.worlds = saved;
+  cache.worlds = (await getJSON('/api/ui/worlds', { path: cache.path }))?.worlds || [];
   const matched = payload.id
-    ? saved.find((item) => item.id === payload.id)
-    : saved.find((item) => item.name === payload.name);
-  if (matched) ui.sel = { kind: 'world', id: matched.id };
-  ui.draftWorld = false;
-  toast('世界条目已保存', 'ok');
-  // 已有条目只就地更新标题与目录，不整页重绘，保住输入焦点与滚动位置
-  if (isNew) {
-    paint();
-    return;
+    ? cache.worlds.find((item) => item.id === payload.id)
+    : cache.worlds.find((item) => item.name === payload.name);
+  if (matched) {
+    ui.worldId = matched.id;
+    ui.sel = { kind: 'worldOverview', id: matched.id };
   }
+  ui.draftWorld = false;
+  toast('世界观总述已保存', 'ok');
+  // 新建世界需要重绘才能出现分类入口；已有世界只就地更新标题
+  if (isNew) return paint();
   const head = document.querySelector('#novel-main .ed-head .et');
   if (head) head.textContent = payload.name;
-  const row = document.querySelector(`[data-act="novel-sel-world"][data-id="${esc(payload.id)}"]`);
-  if (row) {
-    const nameNode = row.querySelector('.novel-world-name');
-    const descNode = row.querySelector('.novel-world-desc');
-    if (nameNode) nameNode.textContent = payload.name;
-    if (descNode) descNode.textContent = payload.summary || payload.era || '';
-  }
 }
 
-/** 删除当前世界条目 */
-async function deleteWorld() {
-  const world = findWorld(ui.sel.id);
-  if (!world) return;
-  if (!window.confirm(`删除世界「${world.name || '未命名'}」？已绑定的章节会失去参考。`)) return;
-  await run('删除世界', () => postJSON('/api/ui/worlds/delete', { path: cache.path, world: world.id }));
+/** 收集条目页勾选的来源章节 */
+function collectSources() {
+  return [...document.querySelectorAll('[data-source]')]
+    .filter((node) => node.checked)
+    .map((node) => node.dataset.source);
+}
+
+/** 保存当前分类条目（无 id 时追加到当前世界） */
+async function saveWorldEntry() {
+  const world = activeWorld();
+  if (!world) return toast('先创建或选择一个世界', 'warn');
+  const category = ui.sel.category;
+  const meta = CATEGORY_META[category];
+  if (!meta) return;
+  const isNew = ui.draftEntry;
+  const list = [...(world[meta.field] || [])];
+  const index = list.findIndex((item) => item.id === ui.sel.id);
+  const base = index >= 0 ? list[index] : {};
+  const name = document.getElementById('we-name')?.value.trim() || '';
+  if (!name) return toast(category === 'term' ? '词条不能为空' : '名称不能为空', 'warn');
+  const sources = collectSources();
+  const detail = document.getElementById('we-desc')?.value.trim() || '';
+  const entry =
+    category === 'term'
+      ? {
+          ...base,
+          term: name,
+          meaning: detail,
+          aliases: splitAliases(document.getElementById('we-aliases')?.value),
+          source_chapters: sources,
+        }
+      : {
+          ...base,
+          name,
+          description: detail,
+          ...(category === 'location'
+            ? { atmosphere: document.getElementById('we-atmos')?.value.trim() || '' }
+            : {}),
+          source_chapters: sources,
+        };
+  if (isNew) list.push(entry);
+  else list[index] = entry;
+  const payload = {
+    ...world,
+    [meta.field]: list,
+    cover_asset: world.cover_asset ?? null,
+    created_at: world.created_at,
+    updated_at: world.updated_at,
+  };
+  await run('保存条目', () => postJSON('/api/ui/worlds', { path: cache.path, world: payload }));
+  const saved = (await getJSON('/api/ui/worlds', { path: cache.path }))?.worlds || [];
+  cache.worlds = saved;
+  const fresh = saved.find((item) => item.id === world.id) || world;
+  const rows = fresh[meta.field] || [];
+  const matched = isNew
+    ? rows.find((row) => entryName(category, row) === name)
+    : rows.find((row) => row.id === ui.sel.id);
+  if (matched) ui.sel = { kind: 'worldEntry', category, id: matched.id };
+  ui.draftEntry = false;
+  toast('条目已保存', 'ok');
+  // 新建条目需要重绘才能出现在左侧分类里；编辑已有条目只更新标题
+  if (isNew) return paint();
+  const head = document.querySelector('#novel-main .ed-head .et');
+  if (head) head.textContent = name;
+}
+
+/** 删除当前分类条目（从所属世界的分类数组里移除） */
+async function deleteWorldEntry() {
+  const world = activeWorld();
+  const category = ui.sel.category;
+  const meta = CATEGORY_META[category];
+  if (!world || !meta) return;
+  const item = (world[meta.field] || []).find((row) => row.id === ui.sel.id);
+  if (!item) return;
+  if (!window.confirm(`删除${meta.label}条目「${entryName(category, item) || '未命名'}」？`)) return;
+  const payload = {
+    ...world,
+    [meta.field]: (world[meta.field] || []).filter((row) => row.id !== ui.sel.id),
+    cover_asset: world.cover_asset ?? null,
+    created_at: world.created_at,
+    updated_at: world.updated_at,
+  };
+  await run('删除条目', () => postJSON('/api/ui/worlds', { path: cache.path, world: payload }));
   cache.worlds = (await getJSON('/api/ui/worlds', { path: cache.path }))?.worlds || [];
-  ui.sel = { kind: 'setting', id: '' };
-  toast('世界条目已删除', 'ok');
+  ui.sel = { kind: 'worldOverview', id: world.id };
+  ui.draftEntry = false;
+  toast('条目已删除', 'ok');
   paint();
 }
 
-/** 新建空白世界：直接切到空白表单，保存时才落盘 */
+/** 删除整套世界：确认影响范围 → 进行中 → 成功刷新列表 / 失败保留弹窗并给出原因 */
+async function deleteWorld() {
+  const world = findWorld(ui.worldId);
+  if (!world) return toast('没有可删除的世界，请先在左侧选择一套世界', 'warn');
+  const isLast = cache.worlds.length <= 1;
+  const counts = Object.entries(CATEGORY_META)
+    .map(([category, meta]) => `${meta.label} ${(world[meta.field] || []).length}`)
+    .join(' · ');
+  const bound = outlineChapters().filter((row) => (row.chapter.world_ids || []).includes(world.id)).length;
+  const mask = openDialog({
+    title: '删除整套世界',
+    body: `
+      <div class="dlg-note bad">删除的是整套世界「${esc(world.name || '未命名')}」，不只是世界观总述。</div>
+      <div class="summary-line"><span>${esc(world.name || '未命名')}</span><span class="right">${esc(
+        world.era || '未填写时代'
+      )}</span></div>
+      <div class="hint">会同时删除：世界观总述、${esc(counts)}。${
+        bound ? `另有 ${bound} 个章节绑定该世界，删除后会解除绑定。` : ''
+      }删除后不可恢复。</div>
+      ${
+        isLast
+          ? '<div class="hint" style="color:var(--warn)">这是最后一套世界：删除后「世界」模块会变空，可以重新新建或让 AI 生成。</div>'
+          : ''
+      }`,
+    foot: `<div class="right"><button class="btn" id="world-del-cancel" data-dlg-close>取消</button>
+      <button class="btn danger" id="world-del-ok">删除世界</button></div>`,
+  });
+  const button = mask.querySelector('#world-del-ok');
+  const cancel = mask.querySelector('#world-del-cancel');
+  button.addEventListener('click', async () => {
+    button.disabled = true;
+    cancel.disabled = true;
+    button.textContent = '删除中…';
+    let result;
+    try {
+      result = await postJSON('/api/ui/worlds/delete', { path: cache.path, id: world.id });
+    } catch (error) {
+      // 删除失败不关弹窗：保留影响说明，按钮可重试，原因直接显示
+      button.disabled = false;
+      cancel.disabled = false;
+      button.textContent = '重试删除';
+      toast(`删除失败：${error.message}`, 'bad', 4600);
+      return;
+    }
+    closeDialog();
+    // 先从本地缓存移除，保证列表立刻刷新；再拉取一次完整数据校准
+    cache.worlds = cache.worlds.filter((item) => item.id !== world.id);
+    try {
+      const fresh = await getJSON('/api/ui/worlds', { path: cache.path });
+      if (Array.isArray(fresh?.worlds)) cache.worlds = fresh.worlds;
+    } catch (error) {
+      toast(`世界已删除，但列表刷新失败：${error.message}`, 'warn', 4600);
+    }
+    const next = cache.worlds[0];
+    ui.worldId = next?.id || '';
+    ui.draftWorld = false;
+    ui.draftEntry = false;
+    // 删掉最后一套世界时保留「世界总述」空态，避免用户以为模块消失了
+    ui.sel = next ? { kind: 'worldOverview', id: next.id } : { kind: 'worldOverview', id: '' };
+    const unbound = result?.unbound?.outline_chapters || 0;
+    toast(
+      `已删除世界「${world.name || '未命名'}」及其全部条目${unbound ? `，并解除 ${unbound} 个章节绑定` : ''}`,
+      'ok',
+      3400
+    );
+    paint();
+  });
+}
+
+/** 新建空白世界：直接切到空白总述表单，保存时才落盘 */
 function newWorld() {
-  ui.sel = { kind: 'world', id: '' };
+  ui.worldId = '';
+  ui.sel = { kind: 'worldOverview', id: '' };
   ui.draftWorld = true;
+  ui.draftEntry = false;
   paint();
   document.getElementById('nw-name')?.focus();
+}
+
+/** 在指定分类下新建条目：先显示空白表单，保存时落盘 */
+function newEntry(category) {
+  if (!CATEGORY_META[category]) return;
+  if (!activeWorld()) return toast('先创建或选择一个世界', 'warn');
+  openWorldGroup(category);
+  ui.sel = { kind: 'worldEntry', category, id: '' };
+  ui.draftWorld = false;
+  ui.draftEntry = true;
+  paint();
+  document.getElementById('we-name')?.focus();
 }
 
 /** 读取设定分区表单并保存（数组字段按行拆分） */
@@ -1114,15 +1463,6 @@ async function saveSetting(section) {
       // 目标总字数是可选数字字段：0 表示清空，但仍要写入以覆盖旧值
       target_words: Number.isFinite(words) && words > 0 ? Math.round(words) : 0,
     });
-  } else if (section === 'world') {
-    const current = cache.setting?.world || {};
-    Object.assign(fields, {
-      era: read('ns-era'),
-      rules: splitLines(document.getElementById('ns-rules')?.value),
-      locations: collectItems(document, 'locations', asLocationList(current.locations)),
-      factions: splitLines(document.getElementById('ns-factions')?.value),
-      glossary: collectItems(document, 'glossary', asGlossaryList(current.glossary)),
-    });
   } else {
     Object.assign(fields, {
       tone: read('ns-tone'),
@@ -1133,9 +1473,7 @@ async function saveSetting(section) {
       forbidden: splitLines(document.getElementById('ns-forbidden')?.value),
     });
   }
-  // 目标总字数允许为 0（表示清空）；列表字段（地点/词条等）允许为空，
-  // 否则用户删光条目后旧数据会被「空值不提交」逻辑保留下来。
-  const keepEmpty = new Set(['target_words', 'locations', 'glossary', 'rules', 'factions', 'forbidden']);
+  const keepEmpty = new Set(['target_words', 'forbidden']);
   const clean = Object.fromEntries(
     Object.entries(fields).filter(([key, value]) =>
       keepEmpty.has(key) ? true : Array.isArray(value) ? value.length : value
@@ -1202,11 +1540,11 @@ async function run(label, action) {
 
 // ---------------- AI 弹窗 ----------------
 
-/** AI 生成世界：先出预览，勾选后逐条创建 */
+/** AI 生成世界库条目：先出预览，勾选后逐条创建 */
 function openWorldGenerate() {
   const modeKey = 'world.generate';
   openDialog({
-    title: 'AI 生成世界设定',
+    title: 'AI 生成世界',
     body: `
       ${modeSwitchHTML(modeKey, { fallback: 'fill' })}
       <div class="field"><label>题材 / 一句话方向</label>
@@ -1215,7 +1553,7 @@ function openWorldGenerate() {
         <select class="select" id="wg-count">
           <option value="1">1 个</option><option value="2">2 个</option><option value="3">3 个</option>
         </select></div>
-      <div class="hint">生成结果先预览，勾选「采用」后才会写入世界库；「只补缺失」会跳过与现有世界重名的条目。</div>`,
+      <div class="hint">生成结果先预览，勾选「采用」后才会写入世界；每套世界包含世界观总述与地点/势力/术语/其它条目。「只补缺失」会跳过与现有世界重名的条目。</div>`,
     foot: `<div class="right"><button class="btn" data-dlg-close>取消</button>
       <button class="btn primary" data-wg-run>${icon('spark', 12)} 生成预览</button></div>`,
     onMount: (mask) => {
@@ -1237,7 +1575,7 @@ function openWorldGenerate() {
 }
 
 /**
- * 执行世界条目生成（SSE 进度），完成后打开勾选预览。
+ * 执行世界生成（SSE 进度），完成后打开勾选预览。
  * @param {string} brief 方向描述
  * @param {number} count 生成数量
  * @param {'fill'|'regen'} [mode] 只补缺失 / 重新生成
@@ -1285,7 +1623,7 @@ async function runWorldGenerate(brief, count, mode = 'fill') {
           previewPicked = new Set(worlds.map((_, index) => index));
           panel.finish({
             message: `世界生成完成：${worlds.length} 个条目待采用${skipped ? `，跳过重名 ${skipped} 个` : ''}`,
-            detail: '预览里勾选后点「采用选中」才会写入世界库。',
+            detail: '预览里勾选后点「采用选中」才会写入世界。',
             actions: [
               {
                 label: '查看预览',
@@ -1334,10 +1672,16 @@ function renderWorldPreview() {
           <div class="card-body" style="display:grid;gap:6px">
             <div>${esc(world.summary || '')}</div>
             ${asStringList(world.rules).length ? `<div class="hint">规则：${esc(asStringList(world.rules).join('；'))}</div>` : ''}
+            <div class="hint">地点 ${(world.locations || []).length} · 势力 ${(world.factions || []).length} · 术语 ${
+              (world.glossary || []).length
+            } · 其它 ${(world.others || []).length}</div>
             ${
               (world.locations || []).length
                 ? `<div class="hint">地点：${esc(
-                    asLocationList(world.locations).map((item) => locationLine(item).split(' | ')[0]).join('、')
+                    asLocationList(world.locations)
+                      .map((item) => item.name)
+                      .filter(Boolean)
+                      .join('、')
                   )}</div>`
                 : ''
             }
@@ -1358,7 +1702,10 @@ function renderWorldPreview() {
           await postJSON('/api/ui/worlds', { path: cache.path, worlds: picked });
           cache.worlds = (await getJSON('/api/ui/worlds', { path: cache.path }))?.worlds || [];
           const first = cache.worlds.find((item) => picked.some((row) => row.name === item.name));
-          if (first) ui.sel = { kind: 'world', id: first.id };
+          if (first) {
+            ui.worldId = first.id;
+            ui.sel = { kind: 'worldOverview', id: first.id };
+          }
           closeDialog();
           toast(`已采用 ${picked.length} 个世界`, 'ok');
           paint();
@@ -1517,9 +1864,9 @@ async function runOutlineGenerate(body, mode = 'regen') {
   }
 }
 
-/** AI 补设定分区：预览字段后合并写入 */
+/** AI 补设定分区：预览字段后合并写入（世界观归世界模块，不走这里） */
 function openSettingGenerate(section) {
-  const label = { premise: '故事内核', world: '世界观', style: '文风' }[section] || section;
+  const label = { premise: '故事内核', style: '文风' }[section] || section;
   const modeKey = `setting.${section}`;
   openDialog({
     title: `AI 生成${label}`,
@@ -1553,7 +1900,7 @@ function openSettingGenerate(section) {
 
 /**
  * 补全设定分区（无流式接口，用不确定进度浮层），完成后打开字段预览。
- * @param {string} section premise / world / style
+ * @param {string} section premise / style
  * @param {string} label 分区中文名
  * @param {string} brief 补充要求
  * @param {number|null} seed 固定种子；null 表示每次随机
@@ -1610,7 +1957,6 @@ function openSettingPreview(section, label, fields) {
   // 与模型编造的多余键都不进表单，避免裸露英文键名与误改元数据。
   const allowed = {
     premise: ['logline', 'theme', 'core_conflict', 'ending_intent', 'target_audience', 'target_length', 'target_words'],
-    world: ['era', 'rules', 'locations', 'factions', 'glossary'],
     style: ['tone', 'pov', 'tense', 'prose_style', 'forbidden', 'visual_style'],
   }[section] || [];
   const labelOf = {
@@ -1621,11 +1967,6 @@ function openSettingPreview(section, label, fields) {
     target_audience: '目标读者',
     target_length: '目标篇幅',
     target_words: '目标总字数',
-    era: '时代与舞台',
-    locations: '关键地点',
-    rules: '世界规则',
-    factions: '阵营势力',
-    glossary: '名词表',
     tone: '语调',
     pov: '叙事视角',
     tense: '时态',
@@ -1634,15 +1975,12 @@ function openSettingPreview(section, label, fields) {
     visual_style: '视觉风格',
   };
   /** 长文本字段用多行，其余用单行/短行 */
-  const longFields = new Set(['logline', 'theme', 'core_conflict', 'ending_intent', 'target_audience', 'era', 'tone', 'prose_style', 'visual_style']);
+  const longFields = new Set(['logline', 'theme', 'core_conflict', 'ending_intent', 'target_audience', 'tone', 'prose_style', 'visual_style']);
   const keys = allowed.filter((key) => key in fields);
-  const currentWorld = cache.setting?.world || {};
   const rows = keys
     .map((key) => {
       const value = fields[key];
       const textLabel = esc(ENUMS[key]?.label || labelOf[key] || key);
-      if (key === 'locations') return itemsEditorHTML('locations', asLocationList(value));
-      if (key === 'glossary') return itemsEditorHTML('glossary', asGlossaryList(value));
       if (ENUMS[key]) {
         return `
       <div class="field"><label>${textLabel}</label>
@@ -1654,7 +1992,7 @@ function openSettingPreview(section, label, fields) {
         <input class="input" type="number" min="0" step="1000" data-sf-key="${esc(key)}"
           value="${Number(value) > 0 ? Number(value) : ''}" placeholder="可留空" /></div>`;
       }
-      if (Array.isArray(value) || ['rules', 'factions', 'forbidden'].includes(key)) {
+      if (Array.isArray(value) || key === 'forbidden') {
         const list = asStringList(value);
         return `
       <div class="field"><label>${textLabel}（每行一条）</label>
@@ -1677,13 +2015,6 @@ function openSettingPreview(section, label, fields) {
     onMount: (mask) => {
       mask.querySelector('[data-sf-apply]').addEventListener('click', async () => {
         const next = {};
-        // 结构化字段按条目收集，保留未知字段与 id
-        if (keys.includes('locations')) {
-          next.locations = collectItems(mask, 'locations', asLocationList(currentWorld.locations));
-        }
-        if (keys.includes('glossary')) {
-          next.glossary = collectItems(mask, 'glossary', asGlossaryList(currentWorld.glossary));
-        }
         mask.querySelectorAll('[data-sf-key]').forEach((node) => {
           const key = node.dataset.sfKey;
           const original = fields[key];
@@ -1694,9 +2025,7 @@ function openSettingPreview(section, label, fields) {
           }
           // 空值不提交，避免把已有字段清空（显式清空请直接编辑表单后保存）
           if (!rawText) return;
-          next[key] = Array.isArray(original) || ['rules', 'factions', 'forbidden'].includes(key)
-            ? splitLines(rawText)
-            : rawText;
+          next[key] = Array.isArray(original) || key === 'forbidden' ? splitLines(rawText) : rawText;
         });
         if (!Object.keys(next).length) return toast('没有可写入的内容', 'warn');
         try {
@@ -2160,12 +2489,22 @@ function crumbHTML() {
 
 /** 整页重画（保留滚动位置） */
 function paint() {
-  // 选中对象可能在数据到达后失效（例如工程被外部改动），回落到写作设定
+  // 选中对象可能在数据到达后失效（例如工程被外部改动），回落到写作设定 / 世界总述
   if (boot.state.outline === 'ok' && ui.sel.kind === 'chapter' && !findOutlineChapter(ui.sel.id)) {
     ui.sel = { kind: 'setting', id: '' };
   }
-  if (boot.state.worlds === 'ok' && ui.sel.kind === 'world' && !ui.draftWorld && !findWorld(ui.sel.id)) {
-    ui.sel = { kind: 'setting', id: '' };
+  if (boot.state.worlds === 'ok') {
+    if (!findWorld(ui.worldId)) ui.worldId = cache.worlds[0]?.id || '';
+    if (ui.sel.kind === 'worldOverview' && !ui.draftWorld && !findWorld(ui.sel.id)) {
+      // 删掉最后一套世界后保留「世界总述」空态；还有其它世界时落到当前世界
+      if (cache.worlds.length) ui.sel = { kind: 'worldOverview', id: ui.worldId };
+      else ui.sel = { kind: 'worldOverview', id: '' };
+    }
+    if (ui.sel.kind === 'worldEntry' && !ui.draftEntry) {
+      const meta = CATEGORY_META[ui.sel.category];
+      const exists = meta && (activeWorld()?.[meta.field] || []).some((item) => item.id === ui.sel.id);
+      if (!exists) ui.sel = ui.worldId ? { kind: 'worldOverview', id: ui.worldId } : { kind: 'setting', id: '' };
+    }
   }
   const main = document.getElementById('novel-main');
   const ctx = document.querySelector('#novel-root .ctx');
@@ -2207,7 +2546,10 @@ export async function renderNovel(root, target) {
     state.info = null;
     state.chapters = [];
     ui.sel = { kind: 'setting', id: '' };
+    ui.worldId = '';
     ui.draftWorld = false;
+    ui.draftEntry = false;
+    loadCollapse(path);
   }
   root.innerHTML = `
     <div id="novel-root" style="display:flex;flex-direction:column;height:100vh">
@@ -2231,7 +2573,10 @@ export async function renderNovel(root, target) {
       </div>
     </div>`;
 
-  if (!bound) root.addEventListener('click', onClick);
+  if (!bound) {
+    root.addEventListener('click', onClick);
+    root.addEventListener('change', onChange);
+  }
   bound = true;
   // 各数据块并发拉取，谁先返回谁先渲染
   startBoot(path);
@@ -2267,6 +2612,10 @@ function applyBootData(key, data) {
     cache.setting = data || {};
   } else if (key === 'worlds') {
     cache.worlds = data?.worlds || [];
+    // 首次载入或当前世界被外部删除时，落到第一套世界；正在新建世界时不抢占
+    if (!ui.draftWorld && !cache.worlds.some((item) => item.id === ui.worldId)) {
+      ui.worldId = cache.worlds[0]?.id || '';
+    }
   } else if (key === 'outline') {
     cache.outline = data || { acts: [] };
   }
@@ -2326,6 +2675,18 @@ function startBoot(path) {
   }
 }
 
+/** 下拉切换（世界选择器）：切到对应世界的世界观总述 */
+function onChange(event) {
+  if (!document.getElementById('novel-main')) return;
+  const pick = event.target.closest('[data-world-pick]');
+  if (!pick) return;
+  ui.worldId = pick.value;
+  ui.draftWorld = false;
+  ui.draftEntry = false;
+  ui.sel = { kind: 'worldOverview', id: pick.value };
+  paint();
+}
+
 /** 点击统一分发（页面不在时直接返回，避免污染其它视图） */
 async function onClick(event) {
   if (!document.getElementById('novel-main')) return;
@@ -2356,61 +2717,49 @@ async function onClick(event) {
   if (act === 'novel-sel-setting') {
     ui.sel = { kind: 'setting', id: '' };
     ui.draftWorld = false;
+    ui.draftEntry = false;
     return paint();
   }
   if (act === 'novel-start') {
     // 「从写小说开始」：回到写作设定并把光标放进第一个字段
     ui.sel = { kind: 'setting', id: '' };
     ui.draftWorld = false;
+    ui.draftEntry = false;
     paint();
     document.getElementById('ns-logline')?.focus();
     return;
   }
-  if (act === 'novel-sel-world') {
-    ui.sel = { kind: 'world', id: el.dataset.id };
+  if (act === 'novel-sel-world-overview') {
+    ui.worldId = activeWorld()?.id || '';
+    ui.sel = { kind: 'worldOverview', id: ui.worldId };
     ui.draftWorld = false;
+    ui.draftEntry = false;
     return paint();
   }
+  if (act === 'novel-sel-world-entry') {
+    ui.worldId = activeWorld()?.id || ui.worldId;
+    ui.sel = { kind: 'worldEntry', category: el.dataset.category, id: el.dataset.id };
+    ui.draftWorld = false;
+    ui.draftEntry = false;
+    return paint();
+  }
+  if (act === 'novel-toggle-world-group') return toggleWorldGroup(el.dataset.group);
+  if (act === 'novel-toggle-act') return toggleAct(el.dataset.key);
+  if (act === 'novel-entry-new') return newEntry(el.dataset.category);
   if (act === 'novel-sel-chapter') {
     ui.sel = { kind: 'chapter', id: el.dataset.id };
     ui.draftWorld = false;
+    ui.draftEntry = false;
     paint();
     loadBody(el.dataset.id);
     loadPlan(el.dataset.id);
     return;
   }
-  if (act === 'novel-item-add') {
-    const container = el.closest('[data-rows]');
-    const kind = el.dataset.kind || container?.dataset.rows;
-    const body = container?.querySelector('[data-rows-body]');
-    if (!body || !kind) return;
-    body.insertAdjacentHTML('beforeend', itemRowHTML(kind, {}, -1));
-    syncItemsHead(container);
-    body.lastElementChild?.querySelector('input, textarea')?.focus();
-    return;
-  }
-  if (act === 'novel-item-move') {
-    const row = el.closest('[data-row]');
-    if (!row) return;
-    const dir = Number(el.dataset.dir) || 0;
-    const sibling = dir < 0 ? row.previousElementSibling : row.nextElementSibling;
-    if (sibling) {
-      const parent = row.parentElement;
-      if (dir < 0) parent.insertBefore(row, sibling);
-      else parent.insertBefore(sibling, row);
-    }
-    return;
-  }
-  if (act === 'novel-item-del') {
-    const row = el.closest('[data-row]');
-    const container = el.closest('[data-rows]');
-    row?.remove();
-    syncItemsHead(container);
-    return;
-  }
   if (act === 'novel-world-new') return newWorld();
   if (act === 'novel-world-ai') return openWorldGenerate();
-  if (act === 'novel-world-save') return saveWorld();
+  if (act === 'novel-world-overview-save') return saveWorldOverview();
+  if (act === 'novel-world-entry-save') return saveWorldEntry();
+  if (act === 'novel-world-entry-delete') return deleteWorldEntry();
   if (act === 'novel-world-delete') return deleteWorld();
   if (act === 'novel-setting-save') return saveSetting(el.dataset.section);
   if (act === 'novel-setting-ai') return openSettingGenerate(el.dataset.section);

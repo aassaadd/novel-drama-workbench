@@ -152,10 +152,6 @@ def _project_context(work: dict, bible: dict, characters: list[dict]) -> str:
     genres = work.get("genre") or []
     if genres:
         lines.append("题材：" + "、".join(str(item) for item in genres))
-    world = bible.get("world") or {}
-    era = _text(world.get("era"), 40)
-    if era:
-        lines.append(f"世界：{era}")
     if characters:
         lines.append("可用人物（id=姓名）：" + "、".join(f"{item['id']}={item.get('name')}" for item in characters))
     return "\n".join(lines)

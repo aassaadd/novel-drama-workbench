@@ -15,7 +15,6 @@ from __future__ import annotations
 import json
 import time
 import traceback
-from pathlib import Path
 
 from fastapi import HTTPException, Query
 from starlette.responses import Response
@@ -101,11 +100,11 @@ _ACTIONS: dict[str, tuple[str, str]] = {
     "/api/ui/characters/descriptions/fill": ("character.desc_fill", "补全角色描述"),
     "/api/ui/characters/descriptions/fill/stream": ("character.desc_fill", "补全角色描述（流式）"),
     "/api/ui/characters/plan/stream": ("character.plan", "规划角色"),
-    "/api/ui/worlds": ("world.save", "保存世界观"),
-    "/api/ui/worlds/generate": ("world.generate", "生成世界观"),
-    "/api/ui/worlds/generate/stream": ("world.generate", "生成世界观（流式）"),
+    "/api/ui/worlds": ("world.save", "保存世界模块"),
+    "/api/ui/worlds/generate": ("world.generate", "生成世界条目"),
+    "/api/ui/worlds/generate/stream": ("world.generate", "生成世界条目（流式）"),
     "/api/ui/worlds/image": ("world.image", "生成世界封面"),
-    "/api/ui/worlds/delete": ("world.delete", "删除世界观"),
+    "/api/ui/worlds/delete": ("world.delete", "删除世界"),
     "/api/ui/voices": ("voice.save", "保存音色"),
     "/api/ui/voices/bind": ("voice.bind", "绑定音色"),
     "/api/ui/voices/delete": ("voice.delete", "删除音色"),
@@ -228,7 +227,7 @@ def _target_of(body: dict) -> str:
         ("character_id", "角色"),
         ("voice_name", "音色"),
         ("voice_id", "音色"),
-        ("world_id", "世界观"),
+        ("world_id", "世界"),
         ("line_id", "台词行"),
         ("scene_id", "场景"),
         ("chapter_ref", "章节"),

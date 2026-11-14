@@ -151,8 +151,7 @@ function listHTML() {
   let body = '';
   if (characters.length === 0) {
     body = `<div class="empty" style="padding:22px 12px">
-      <b>还没有角色</b><span>从正文切分时会自动识别人物，也可以手动新增。</span>
-      <button class="btn sm" data-act="new-character" style="margin-top:8px">新增角色</button>
+      <b>还没有角色</b><span>从正文切分时会自动识别人物，也可以点上方「+」手动新增。</span>
     </div>`;
   } else if (rows.length) {
     body = rows

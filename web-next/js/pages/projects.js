@@ -311,16 +311,11 @@ function paintCards() {
   const list = filteredProjects();
   const hasAny = state.projects.length > 0;
   grid.innerHTML = list.length
-    ? `${list.map(card).join('')}
-       <button class="new-card" data-act="new">${icon('plus', 20)}<span>新建项目</span></button>`
+    ? list.map(card).join('')
     : `<div class="empty" style="grid-column:1/-1">${icon(hasAny ? 'search' : 'folder', 20)}
          <b>${hasAny ? '没有匹配的工程' : '还没有本机工程'}</b>
-         <span>${hasAny ? '换个筛选条件或关键词' : '新建一个工程开始，或把已有目录导入进来'}</span>
-         ${
-           hasAny
-             ? '<button class="btn" data-act="clear-filter">清除筛选</button>'
-             : '<button class="btn primary" data-act="new">新建项目</button>'
-         }
+         <span>${hasAny ? '换个筛选条件或关键词' : '点右上角「新建项目」开始，或把已有目录导入进来'}</span>
+         ${hasAny ? '<button class="btn" data-act="clear-filter">清除筛选</button>' : ''}
        </div>`;
 }
 

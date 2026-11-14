@@ -77,7 +77,6 @@ from .models.ids import now_iso
 from .orchestration import GpuQueue
 from .orchestration.produce import STAGES as PRODUCE_STAGES
 from .orchestration.pipeline import (
-    build_media_jobs,
     build_tts_jobs,
     split_chapter_scenes,
     split_scene_lines,
@@ -1058,11 +1057,11 @@ def build_parser() -> argparse.ArgumentParser:
     continue_mode.add_argument("--apply", action="store_true", help="追加进正文并记录 continuations")
     q.set_defaults(func=cmd_chapter_continue)
 
-    p = sub.add_parser("setting", help="设定库（世界观/文风/大纲）")
+    p = sub.add_parser("setting", help="设定库（故事内核/文风/大纲；世界观归世界库）")
     p_sub = p.add_subparsers(dest="action", required=True)
     p_sub.add_parser("init", help="生成设定库骨架").set_defaults(func=cmd_setting)
     q = p_sub.add_parser("show", help="查看设定库")
-    q.add_argument("--section", choices=["premise", "world", "outline", "style", "continuity"])
+    q.add_argument("--section", choices=["premise", "outline", "style", "continuity"])
     q.set_defaults(func=cmd_setting)
     q = p_sub.add_parser("validate", help="只校验不写盘")
     q.set_defaults(func=cmd_setting)
@@ -1074,7 +1073,6 @@ def build_parser() -> argparse.ArgumentParser:
         "ending_intent",
         "target_audience",
         "target_length",
-        "era",
         "tone",
         "pov",
         "tense",
@@ -1083,37 +1081,31 @@ def build_parser() -> argparse.ArgumentParser:
     ):
         q.add_argument("--" + flag.replace("_", "-"), dest=flag)
     q.set_defaults(func=cmd_setting)
-    q = p_sub.add_parser("world", help="增补世界设定（规则/阵营/地点/词条）")
-    q.add_argument("--add-rule", dest="add_rule", action="append", help="新增一条世界规则，可重复")
-    q.add_argument("--add-faction", dest="add_faction", action="append", help="新增一个阵营，可重复")
-    q.add_argument("--add-location", dest="add_location", help="`名称|描述|氛围`")
-    q.add_argument("--add-glossary", dest="add_glossary", help="`术语|释义`")
-    q.set_defaults(func=cmd_setting)
     q = p_sub.add_parser("import", help="从 JSON 导入（work_id 必须一致）")
     q.add_argument("--file", required=True)
     q.set_defaults(func=cmd_setting)
     q = p_sub.add_parser("export", help="导出为 JSON")
     q.add_argument("--out")
     q.set_defaults(func=cmd_setting)
-    q = p_sub.add_parser("generate", help="AI 生成世界 / 梗概 / 文风（或按区块生成）")
-    q.add_argument("--step", choices=["world", "premise", "style"], help="兼容旧用法：整体生成某个分区")
-    q.add_argument("--section", choices=["premise", "style", "world", "character"], help="按区块生成（world/character 返回完整条目）")
-    q.add_argument("--brief", help="补充要求，如「外星世界，双恒星」")
-    q.add_argument("--target-id", dest="target_id", help="world / character 区块的改写目标 ID")
+    q = p_sub.add_parser("generate", help="AI 生成梗概 / 文风（或按区块生成）")
+    q.add_argument("--step", choices=["premise", "style"], help="兼容旧用法：整体生成某个分区")
+    q.add_argument("--section", choices=["premise", "style", "character"], help="按区块生成（character 返回完整条目）")
+    q.add_argument("--brief", help="补充要求，如「都市悬疑，双线叙事」")
+    q.add_argument("--target-id", dest="target_id", help="character 区块的改写目标 ID")
     q.add_argument("--overwrite", action="store_true", help="用生成值整体替换已有内容（仅 --step 生效）")
     q.add_argument("--seed", type=int, help="固定随机种子以便复现；缺省不固定，每次采样不同")
     q.add_argument("--keep-existing", action="store_true", help="只补缺失：保留已有非空字段，不覆盖")
     q.add_argument("--dry-run", action="store_true", help="只预览，不落盘")
     q.set_defaults(func=cmd_setting)
     q = p_sub.add_parser("polish", help="AI 润色单个字段")
-    q.add_argument("--field", required=True, help="如 theme / world.rule / character.background")
+    q.add_argument("--field", required=True, help="如 theme / tone / character.background")
     q.add_argument("--text", help="待润色文本；缺省读取当前值")
     q.add_argument("--apply", action="store_true", help="把润色结果写回")
     q.add_argument("--character", help="character.* 字段所属角色 ID")
     q.add_argument("--context", help="附加上下文，帮助模型理解")
     q.set_defaults(func=cmd_setting)
     q = p_sub.add_parser("apply", help="从 JSON 合并写入指定分区")
-    q.add_argument("--section", required=True, choices=["world", "premise", "style"])
+    q.add_argument("--section", required=True, choices=["premise", "style"])
     q.add_argument("--file", required=True, help="JSON 文件路径，- 表示从 stdin 读取")
     q.set_defaults(func=cmd_setting)
 

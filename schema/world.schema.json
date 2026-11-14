@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://novel-drama.local/schema/world.schema.json",
-  "title": "世界条目库（worlds.json）",
-  "description": "一本书可记录 1..n 条世界条目。世界观 / 规则 / 势力 / 地点 / 名词表的结构与设定库 world 字段保持一致。",
+  "title": "世界库（worlds.json）",
+  "description": "一本书可记录 1..n 套世界设定。每套世界 = 顶层世界观总述（名称/时代/总述/规则/画面风格）+ 下层分类条目（地点/势力/术语/其它）。写作设定不再保存世界观，世界文本只在这里存一份。",
   "type": "object",
   "required": ["schema_version", "worlds"],
   "additionalProperties": false,
@@ -12,6 +12,11 @@
   },
   "$defs": {
     "timestamp": { "type": "string", "format": "date-time" },
+    "source_chapters": {
+      "type": "array",
+      "items": { "type": "string", "pattern": "^chp_[0-9A-Za-z]{6,32}$" },
+      "description": "该条目首次出现 / 主要出现的章节 ID（取自分层大纲）"
+    },
     "world": {
       "type": "object",
       "required": [
@@ -23,6 +28,7 @@
         "factions",
         "locations",
         "glossary",
+        "others",
         "visual_style",
         "cover_asset",
         "created_at",
@@ -32,27 +38,48 @@
       "properties": {
         "id": { "type": "string", "pattern": "^wld_[0-9A-Za-z]{6,32}$" },
         "name": { "type": "string", "minLength": 1, "maxLength": 120, "description": "世界名称，如「主世界」「镜中城」" },
-        "era": { "type": "string", "minLength": 1, "maxLength": 200, "description": "时代背景" },
-        "summary": { "type": "string", "maxLength": 2000, "description": "世界概述" },
-        "locations": {
-          "type": "array",
-          "items": { "$ref": "#/$defs/location" }
-        },
+        "era": { "type": "string", "minLength": 1, "maxLength": 200, "description": "时代与舞台（世界观总述的一部分）" },
+        "summary": { "type": "string", "maxLength": 4000, "description": "世界观总述：这个世界的整体运行方式、氛围与核心设定" },
         "rules": {
           "type": "array",
           "items": { "type": "string", "maxLength": 500 },
           "description": "世界硬规则（超自然设定、物理限制等）"
         },
-        "factions": { "type": "array", "items": { "type": "string", "maxLength": 200 } },
+        "factions": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/faction" },
+          "description": "势力条目"
+        },
+        "locations": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/location" },
+          "description": "地点条目"
+        },
         "glossary": {
           "type": "array",
           "items": { "$ref": "#/$defs/glossary_entry" },
-          "description": "专有名词表，供上下文装配与一致性检查"
+          "description": "术语 / 名词条目"
+        },
+        "others": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/other_entry" },
+          "description": "其它条目（物件、习俗、生物等未归类内容）"
         },
         "visual_style": { "type": "string", "maxLength": 500, "description": "该世界统一画面风格，供图像提示词拼装" },
         "cover_asset": { "type": ["string", "null"], "description": "封面图相对路径；为空表示未生成" },
         "created_at": { "$ref": "#/$defs/timestamp" },
         "updated_at": { "$ref": "#/$defs/timestamp" }
+      }
+    },
+    "faction": {
+      "type": "object",
+      "required": ["id", "name"],
+      "additionalProperties": true,
+      "properties": {
+        "id": { "type": "string", "pattern": "^fac_[0-9A-Za-z]{6,32}$" },
+        "name": { "type": "string", "maxLength": 120 },
+        "description": { "type": "string", "maxLength": 1000 },
+        "source_chapters": { "$ref": "#/$defs/source_chapters" }
       }
     },
     "location": {
@@ -63,17 +90,31 @@
         "id": { "type": "string", "pattern": "^loc_[0-9A-Za-z]{6,32}$" },
         "name": { "type": "string", "maxLength": 120 },
         "description": { "type": "string", "maxLength": 1000 },
-        "atmosphere": { "type": "string", "maxLength": 300, "description": "供音效与画面提示词使用" }
+        "atmosphere": { "type": "string", "maxLength": 300, "description": "供音效与画面提示词使用" },
+        "source_chapters": { "$ref": "#/$defs/source_chapters" }
       }
     },
     "glossary_entry": {
       "type": "object",
-      "required": ["term", "meaning"],
+      "required": ["id", "term", "meaning"],
       "additionalProperties": true,
       "properties": {
+        "id": { "type": "string", "pattern": "^glo_[0-9A-Za-z]{6,32}$" },
         "term": { "type": "string", "maxLength": 120 },
         "meaning": { "type": "string", "maxLength": 1000 },
-        "aliases": { "type": "array", "items": { "type": "string", "maxLength": 120 } }
+        "aliases": { "type": "array", "items": { "type": "string", "maxLength": 120 } },
+        "source_chapters": { "$ref": "#/$defs/source_chapters" }
+      }
+    },
+    "other_entry": {
+      "type": "object",
+      "required": ["id", "name"],
+      "additionalProperties": true,
+      "properties": {
+        "id": { "type": "string", "pattern": "^oth_[0-9A-Za-z]{6,32}$" },
+        "name": { "type": "string", "maxLength": 120 },
+        "description": { "type": "string", "maxLength": 1000 },
+        "source_chapters": { "$ref": "#/$defs/source_chapters" }
       }
     }
   }

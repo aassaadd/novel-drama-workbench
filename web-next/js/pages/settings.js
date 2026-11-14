@@ -1230,8 +1230,7 @@ export async function renderSettings(root, target = {}) {
              <div class="brand"><span class="brand-mark"></span><span style="font-size:12.5px">设置<small>全局</small></span></div>`,
       crumbs: `<a href="#/projects">工程列表</a>
                <span class="sep">/</span><span class="cur">全局设置</span>`,
-      right: `<span class="save-state ok">${icon('check', 12)}全局设置即时生效</span>
-              <button class="btn" data-act="back">${icon('folder')} 项目列表</button>`,
+      right: `<span class="save-state ok">${icon('check', 12)}全局设置即时生效</span>`,
     })}
     <div class="studio" id="studio">
       ${railbar('settings')}

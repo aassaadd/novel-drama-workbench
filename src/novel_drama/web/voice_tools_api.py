@@ -22,7 +22,6 @@ from pathlib import Path
 from fastapi import HTTPException, Request
 
 from ..config import load_config
-from ..models.ids import now_iso
 from ..store import ProjectStore
 from ..store.queue_store import QueueStore
 from .actions import fail_body, run

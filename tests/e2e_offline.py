@@ -161,17 +161,6 @@ def main() -> int:
         "--tone",
         "冷峻",
     )
-    run_json(
-        "setting",
-        "world",
-        "--add-rule",
-        "凌晨三点后不能接听陌生来电",
-        "--add-location",
-        "旧电台|城北废弃广播楼|潮湿压抑",
-        "--add-glossary",
-        "回响|能听见过去声音的异常现象",
-    )
-
     log("角色")
     run_json("character", "add", "--name", "沈砚", "--role", "protagonist", "--alias", "沈队")
 

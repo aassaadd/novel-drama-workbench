@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import json
-
 from .cli_common import EXIT_FAILED, EXIT_OK, _emit, _resolve_store
 from .config import AppConfig
-from .orchestration.produce import STAGE_LABELS, STAGES, latest_run, load_run, produce
+from .orchestration.produce import STAGE_LABELS, latest_run, load_run, produce
 
 
 def _fmt_stages(stages: list[dict]) -> str:

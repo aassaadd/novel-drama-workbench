@@ -273,7 +273,7 @@ class UiJob:
             if stage:
                 self.progress(stage, force=True)
         elif kind == "plan":
-            total = Number(data.get("total"))
+            total = _num(data.get("total"))
             if total:
                 self.progress(f"已规划 {int(total)} 个角色", 0, force=True)
 

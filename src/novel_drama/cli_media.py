@@ -9,13 +9,13 @@ from pathlib import Path
 
 from .cli_common import (
     EXIT_FAILED,
-    EXIT_NOT_IMPLEMENTED,
     EXIT_OK,
     PreconditionError,
     _emit,
     _resolve_store,
     _tts_service,
 )
+from .config import AppConfig
 from .media.comfy_media import load_manifest, templates_dir
 from .media import (
     add_cue,
@@ -29,7 +29,6 @@ from .media import (
     plan_concat,
     plan_mix,
     plan_mux,
-    render_mix,
     summarize_timeline,
     sync_cues_from_plans,
     write_export,

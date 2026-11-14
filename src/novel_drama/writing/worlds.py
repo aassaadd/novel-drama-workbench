@@ -295,11 +295,40 @@ def normalize_glossary(rows) -> list[dict]:
     return result
 
 
+def _entries(rows, description_limit: int = 1000) -> list[dict]:
+    """把模型返回的势力 / 其它条目归一化为 {name, description} 数组。
+
+    模型可能返回字符串数组、对象数组或「名称→说明」映射；缺少名称的项直接跳过。
+
+    参数:
+        rows: 原始字段。
+        description_limit: 说明最大长度。
+
+    返回:
+        [{name, description}]。
+    """
+    result: list[dict] = []
+    for item in normalize_locations(rows):
+        name = _text(item.get("name"))[:120]
+        if not name:
+            continue
+        result.append(
+            {
+                "name": name,
+                "description": _text(item.get("description"))[:description_limit],
+            }
+        )
+    return result
+
+
 def clean_world_entry(raw: dict) -> dict:
     """把模型返回的一条世界 JSON 清洗为通过 schema 校验的世界条目。
 
+    世界 = 顶层世界观总述 + 分类条目：模型给的 factions / locations / glossary
+    会分别落到势力 / 地点 / 术语条目，others 落到其它条目。
+
     参数:
-        raw: 模型返回的世界对象，可含 name/era/summary/rules/factions/locations/glossary/visual_style。
+        raw: 模型返回的世界对象，可含 name/era/summary/rules/factions/locations/glossary/others/visual_style。
 
     返回:
         含 id / 时间戳 / cover_asset 的完整世界条目 dict（可直接交给 WorldStore.add）。
@@ -319,11 +348,12 @@ def clean_world_entry(raw: dict) -> dict:
     entry = WorldStore.new_world(
         name=name[:120],
         era=era[:200],
-        summary=_text(raw.get("summary"))[:2000],
+        summary=_text(raw.get("summary"))[:4000],
         rules=_str_list(raw.get("rules"), 500),
-        factions=_str_list(raw.get("factions"), 200),
+        factions=_entries(raw.get("factions"), 200),
         locations=_locations(raw.get("locations")),
         glossary=normalize_glossary(raw.get("glossary")),
+        others=_entries(raw.get("others")),
         visual_style=_text(raw.get("visual_style"))[:500],
     )
     validate({"schema_version": 1, "worlds": [entry]}, "world.schema.json")
@@ -350,13 +380,19 @@ def worlds_digest(worlds: list[dict], ids: list[str]) -> str | None:
             continue
         lines = [f"【{world.get('name') or '未命名世界'}】时代：{world.get('era') or '未注明'}"]
         if world.get("summary"):
-            lines.append(f"概述：{world['summary']}")
+            lines.append(f"总述：{world['summary']}")
         if world.get("visual_style"):
             lines.append(f"画面风格：{world['visual_style']}")
-        for label, key in (("硬规则", "rules"), ("势力", "factions")):
-            values = [str(item) for item in (world.get(key) or []) if str(item).strip()]
-            if values:
-                lines.append(f"{label}：{'；'.join(values)}")
+        rules = [str(item) for item in (world.get("rules") or []) if str(item).strip()]
+        if rules:
+            lines.append(f"硬规则：{'；'.join(rules)}")
+        factions = [item for item in (world.get("factions") or []) if isinstance(item, dict) and item.get("name")]
+        if factions:
+            briefs = []
+            for item in factions:
+                description = str(item.get("description") or "").strip()
+                briefs.append(f"{item['name']}（{description}）" if description else str(item["name"]))
+            lines.append(f"势力：{'；'.join(briefs)}")
         locations = [item for item in (world.get("locations") or []) if item.get("name")]
         if locations:
             briefs = []
@@ -368,6 +404,13 @@ def worlds_digest(worlds: list[dict], ids: list[str]) -> str | None:
         if glossary:
             terms = "；".join("{}：{}".format(item.get("term"), item.get("meaning") or "") for item in glossary)
             lines.append(f"术语：{terms}")
+        others = [item for item in (world.get("others") or []) if item.get("name")]
+        if others:
+            briefs = []
+            for item in others:
+                description = str(item.get("description") or "").strip()
+                briefs.append(f"{item['name']}（{description}）" if description else str(item["name"]))
+            lines.append(f"其它条目：{'；'.join(briefs)}")
         blocks.append("\n".join(lines))
     return "\n\n".join(blocks) or None
 

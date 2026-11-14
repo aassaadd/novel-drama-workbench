@@ -94,7 +94,6 @@ class SettingsStore:
                 "target_audience": "",
                 "target_length": "novella",
             },
-            "world": {"era": "待填写", "locations": [], "rules": [], "factions": [], "glossary": []},
             "outline": {"acts": []},
             "style": {
                 "tone": genre or "克制",
@@ -120,6 +119,9 @@ class SettingsStore:
         返回:
             写入后的 dict（settings_revision 已递增）。
         """
+        # 世界观已归世界模块（worlds.json），旧设定文件里的 world 分区在保存时移除，
+        # 保证「世界文本只存一份」；不把旧内容搬进世界库（按要求不做迁移）。
+        bible.pop("world", None)
         validate(bible, "setting-bible.schema.json")
         bible["settings_revision"] = int(bible.get("settings_revision") or 1) + 1
         bible["updated_at"] = now_iso()

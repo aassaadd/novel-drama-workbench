@@ -7,9 +7,10 @@ import re
 from pathlib import Path
 
 from .cli_common import EXIT_FAILED, EXIT_OK, PreconditionError, _emit, _resolve_store, _tts_service
+from .config import AppConfig
 from .models import entities
 from .models.ids import now_iso
-from .store import find_variant, find_voice, validate, variant_ref, voice_binding_summary
+from .store import ProjectStore, find_variant, find_voice, validate, variant_ref, voice_binding_summary
 
 
 # ---------------- 音色库变体管理 ----------------

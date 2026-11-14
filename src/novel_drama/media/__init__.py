@@ -1,6 +1,6 @@
 """媒体合成层：时间轴构建、拼接、混音、音频规整、播放清单导出、ffmpeg 封装。"""
 
-from .art import render_character_sheet, render_world_cover
+from .art import render_character_sheet
 from .bgm import add_cue, import_asset, load_cues, save_cues, sync_cues_from_plans
 from .bundle import export_bundle
 from .concat import concat_voice, plan_concat

@@ -1,7 +1,7 @@
-"""世界条目 CLI：`ndw world list / generate / apply / remove / image`。
+"""世界模块 CLI：`ndw world list / generate / apply / remove / image`。
 
-世界条目库（worlds.json）是章节绑定的唯一来源；本模块只做查看、生成、
-导入、删除与封面生成，删除前会检查大纲章节是否仍在引用。
+worlds.json 存一套套世界（世界观总述 + 地点/势力/术语/其它条目），也是章节绑定的
+唯一来源；本模块只做查看、生成、导入、删除与封面生成，删除前会检查大纲章节引用。
 """
 
 from __future__ import annotations
@@ -10,7 +10,7 @@ import json
 import sys
 from pathlib import Path
 
-from .cli_common import EXIT_OK, EXIT_REJECTED, PreconditionError, _emit, _resolve_store
+from .cli_common import EXIT_OK, PreconditionError, _emit, _resolve_store
 from .config import AppConfig
 from .media.art import render_world_cover
 from .store.settings_store import SettingsStore
@@ -81,12 +81,14 @@ def _fmt_worlds(worlds: list[dict]) -> str:
         return "（世界条目为空）"
     return "\n".join(
         f"{item.get('id')}  {item.get('name') or '未命名'}（{item.get('era') or '未注明'}）"
+        f"  地点 {len(item.get('locations') or [])} / 势力 {len(item.get('factions') or [])}"
+        f" / 术语 {len(item.get('glossary') or [])} / 其它 {len(item.get('others') or [])}"
         for item in worlds
     )
 
 
 def cmd_world_list(args, config: AppConfig) -> int:
-    """列出全部世界条目（不存在时先触发迁移）。
+    """列出全部世界模块（世界观总述 + 分类条目计数）。
 
     参数:
         args: 已解析参数（json）。
@@ -176,31 +178,70 @@ def cmd_world_apply(args, config: AppConfig) -> int:
     return EXIT_OK
 
 
+def _unbind_world(store, world_id: str) -> dict:
+    """删除世界前清理相关引用：大纲章节 `world_ids` 中的该世界。
+
+    说明：世界 = 世界观总述 + 分类条目；删除是整模块删除，因此章节绑定一并解除。
+    章节文件与场景 schema 不允许世界绑定字段，这里只处理大纲。
+
+    参数:
+        store: 工程。
+        world_id: 被删除的世界 ID。
+
+    返回:
+        `{"outline_chapters": n}` 统计。
+    """
+    stats = {"outline_chapters": 0}
+    settings = SettingsStore(store.root)
+    bible = settings.load_or_none()
+    if not bible:
+        return stats
+    changed = 0
+    for act in (bible.get("outline") or {}).get("acts") or []:
+        for chapter in act.get("chapters") or []:
+            bound = [str(value) for value in (chapter.get("world_ids") or []) if value]
+            if world_id not in bound:
+                continue
+            chapter["world_ids"] = [value for value in bound if value != world_id]
+            changed += 1
+    if changed:
+        settings.save(bible)
+    stats["outline_chapters"] = changed
+    return stats
+
+
 def cmd_world_remove(args, config: AppConfig) -> int:
-    """删除世界条目；仍被大纲章节引用时拒绝删除。
+    """删除整套世界（总述 + 地点/势力/术语/其它条目）并解除相关引用。
 
     参数:
         args: 已解析参数（id / json）。
         config: 本机配置。
 
     返回:
-        进程退出码（被引用时返回 EXIT_REJECTED 且 JSON 里带引用章节列表）。
+        进程退出码。
 
     异常:
-        PreconditionError: 世界条目不存在。
+        PreconditionError: 世界不存在。
     """
     store = _resolve_store(args, config)
     worlds = WorldStore(store.root)
     worlds.ensure()
+    existing = worlds.get(args.id)
+    if existing is None:
+        raise PreconditionError(f"世界不存在: {args.id}")
     refs = _chapter_refs(store, args.id)
-    if refs:
-        titles = "、".join(f"《{item['title']}》（{item['id']}）" for item in refs)
-        message = f"世界条目 {args.id} 仍被 {len(refs)} 个章节引用，无法删除：{titles}；请先在大纲页解绑"
-        _emit(args, message, {"removed": False, "id": args.id, "chapters": refs, "message": message})
-        return EXIT_REJECTED
+    # 先解绑再删除：清理失败时世界仍然存在，不会留下悬空引用
+    unbound = _unbind_world(store, args.id)
     if not worlds.remove(args.id):
-        raise PreconditionError(f"世界条目不存在: {args.id}")
-    _emit(args, f"已删除世界条目 {args.id}", {"removed": True, "id": args.id})
+        raise PreconditionError(f"世界不存在: {args.id}")
+    message = f"已删除世界「{existing.get('name') or args.id}」及其全部条目"
+    if refs:
+        message += f"；已解除 {len(refs)} 个大纲章节的世界绑定"
+    _emit(
+        args,
+        message,
+        {"removed": True, "id": args.id, "name": existing.get("name"), "chapters": refs, "unbound": unbound},
+    )
     return EXIT_OK
 
 

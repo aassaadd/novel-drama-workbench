@@ -1,7 +1,8 @@
 """设定库 CLI：`ndw setting ...`。
 
-设定库是世界观、大纲、文风的唯一事实来源；本模块只做展示与人工编辑，
-自动生成在 `ndw outline generate`、`ndw setting generate` 与 `ndw chapter generate`。
+设定库存放故事层设定（故事内核、文风、大纲、连续性）；世界观与分类条目统一归
+世界库（`ndw world ...`）。本模块只做展示与人工编辑，自动生成在
+`ndw outline generate`、`ndw setting generate` 与 `ndw chapter generate`。
 """
 
 from __future__ import annotations
@@ -13,10 +14,8 @@ from pathlib import Path
 
 from .cli_common import PreconditionError, _emit, _resolve_store
 from .config import AppConfig
-from .models.ids import new_id
 from .store.settings_store import SettingsStore
 from .writing import generate_section, generate_settings, polish_field
-from .writing.worlds import normalize_glossary, normalize_locations
 
 # `setting set` 支持标量字段：解析参数名 → (设定库路径, 字段名)
 SCALAR_FIELDS = {
@@ -26,7 +25,6 @@ SCALAR_FIELDS = {
     "ending_intent": ("premise", "ending_intent"),
     "target_audience": ("premise", "target_audience"),
     "target_length": ("premise", "target_length"),
-    "era": ("world", "era"),
     "tone": ("style", "tone"),
     "pov": ("style", "pov"),
     "tense": ("style", "tense"),
@@ -36,7 +34,6 @@ SCALAR_FIELDS = {
 
 # `setting apply` / `setting generate` 各分区允许写入的字段
 SECTION_FIELDS = {
-    "world": ("era", "rules", "factions", "locations", "glossary"),
     "premise": ("logline", "theme", "core_conflict", "ending_intent", "target_audience", "target_length", "target_words"),
     "style": ("tone", "pov", "tense", "prose_style", "forbidden", "visual_style"),
 }
@@ -92,20 +89,8 @@ def _split_items(text: str) -> list[str]:
     return [part.strip() for part in re.split(r"[、,，;；\n]+", text or "") if part.strip()]
 
 
-def _parse_pipe(raw: str) -> list[str]:
-    """把 `a|b|c` 形式的文本拆成去空列表。
-
-    参数:
-        raw: 竖线分隔的原始文本。
-
-    返回:
-        去空白后的分段列表。
-    """
-    return [part.strip() for part in (raw or "").split("|")]
-
-
 def _merge_section(bible: dict, section: str, fields: dict) -> list[str]:
-    """把字段合并进设定库对应分区（地点/词条自动补 id 与 aliases）。
+    """把字段合并进设定库对应分区（词条自动补 aliases）。
 
     参数:
         bible: 设定库 dict（就地修改）。
@@ -119,67 +104,26 @@ def _merge_section(bible: dict, section: str, fields: dict) -> list[str]:
         ValueError: 分区非法、fields 不是对象或没有可写入字段。
     """
     if section not in SECTION_FIELDS:
-        raise ValueError(f"未知设定分区: {section}（可选 world / premise / style）")
+        raise ValueError(f"未知设定分区: {section}（可选 premise / style）")
     if not isinstance(fields, dict):
         raise ValueError("fields 必须是 JSON 对象")
     target = bible.setdefault(section, {})
     changed: list[str] = []
 
-    if section == "world":
-        if "era" in fields:
-            target["era"] = str(fields.get("era") or "").strip()
-            changed.append("era")
-        for key in ("rules", "factions"):
-            if key in fields:
-                target[key] = _as_str_list(fields.get(key))
-                changed.append(key)
-        if "locations" in fields:
-            raw_rows = fields.get("locations")
-            rows = raw_rows if isinstance(raw_rows, list) else []
-            locations = []
-            for index, item in enumerate(normalize_locations(raw_rows)):
-                old = rows[index] if index < len(rows) and isinstance(rows[index], dict) else {}
-                # 保留编辑器不认识的字段（例如后续 schema 新增的键），只覆盖已知字段
-                extra = {key: value for key, value in old.items() if key not in ("id", "name", "description", "atmosphere")}
-                locations.append(
-                    {
-                        **extra,
-                        "id": str(old.get("id") or new_id("loc")),
-                        "name": item["name"],
-                        "description": item.get("description") or "",
-                        "atmosphere": item.get("atmosphere") or "",
-                    }
-                )
-            target["locations"] = locations
-            changed.append("locations")
-        if "glossary" in fields:
-            raw_rows = fields.get("glossary")
-            rows = raw_rows if isinstance(raw_rows, list) else []
-            glossary = []
-            for index, item in enumerate(normalize_glossary(raw_rows)):
-                old = rows[index] if index < len(rows) and isinstance(rows[index], dict) else {}
-                extra = {key: value for key, value in old.items() if key not in ("term", "meaning", "aliases", "id")}
-                entry = {**extra, **item}
-                if old.get("id"):
-                    entry["id"] = old["id"]
-                glossary.append(entry)
-            target["glossary"] = glossary
-            changed.append("glossary")
-    else:
-        for key in SECTION_FIELDS[section]:
-            if key not in fields:
-                continue
-            value = fields.get(key)
-            if key in INT_FIELDS:
-                # 目标总字数：空值或 0 都表示不约束，统一存 int
-                try:
-                    number = int(value or 0)
-                except (TypeError, ValueError) as error:
-                    raise ValueError(f"{key} 必须是整数") from error
-                target[key] = max(0, number)
-            else:
-                target[key] = _as_str_list(value) if key == "forbidden" else str(value or "").strip()
-            changed.append(key)
+    for key in SECTION_FIELDS[section]:
+        if key not in fields:
+            continue
+        value = fields.get(key)
+        if key in INT_FIELDS:
+            # 目标总字数：空值或 0 都表示不约束，统一存 int
+            try:
+                number = int(value or 0)
+            except (TypeError, ValueError) as error:
+                raise ValueError(f"{key} 必须是整数") from error
+            target[key] = max(0, number)
+        else:
+            target[key] = _as_str_list(value) if key == "forbidden" else str(value or "").strip()
+        changed.append(key)
 
     if not changed:
         raise ValueError(f"fields 里没有可写入 {section} 分区的字段")
@@ -208,8 +152,6 @@ def _read_field_value(store, bible: dict, field: str, character_id: str | None =
     if field == "work.genre":
         work = store.load_project().get("work") or {}
         return "、".join(work.get("genre") or [])
-    if field in ("world.rule", "world.faction", "world.location", "world.glossary"):
-        raise ValueError("该字段是列表，请用 --text 指定要润色的条目")
     if field.startswith("character."):
         if not character_id:
             raise ValueError("润色人物字段需要用 --character 指定角色 ID")
@@ -276,53 +218,6 @@ def _apply_polished(
         bible = settings.save(bible)
         return {"field": field, "applied": True, "settings_revision": bible["settings_revision"]}
 
-    world = bible.setdefault("world", {})
-    if field in ("world.rule", "world.faction"):
-        key = "rules" if field == "world.rule" else "factions"
-        rows = world.setdefault(key, [])
-        if source in rows:
-            rows[rows.index(source)] = polished
-        else:
-            rows.append(polished)
-        bible = settings.save(bible)
-        return {"field": field, "applied": True, "settings_revision": bible["settings_revision"]}
-
-    if field == "world.location":
-        rows = world.setdefault("locations", [])
-        src_parts = _parse_pipe(source)
-        out_parts = _parse_pipe(polished)
-        match = next((item for item in rows if item.get("name") == (src_parts[0] if src_parts else "")), None)
-        if match is None:
-            match = next((item for item in rows if item.get("description") == source), None)
-        if match is None:
-            if len(out_parts) < 2:
-                raise ValueError("找不到要更新的地点，请用 `名称|描述` 指定")
-            rows.append({"id": new_id("loc"), "name": out_parts[0], "description": out_parts[1], "atmosphere": ""})
-        else:
-            match["name"] = out_parts[0] if out_parts else match.get("name")
-            match["description"] = out_parts[1] if len(out_parts) > 1 else polished
-            if len(out_parts) > 2:
-                match["atmosphere"] = "|".join(out_parts[2:])
-        bible = settings.save(bible)
-        return {"field": field, "applied": True, "settings_revision": bible["settings_revision"]}
-
-    if field == "world.glossary":
-        rows = world.setdefault("glossary", [])
-        src_parts = _parse_pipe(source)
-        out_parts = _parse_pipe(polished)
-        match = next((item for item in rows if item.get("term") == (src_parts[0] if src_parts else "")), None)
-        if match is None:
-            match = next((item for item in rows if item.get("meaning") == source), None)
-        if match is None:
-            if len(out_parts) < 2:
-                raise ValueError("找不到要更新的词条，请用 `术语|释义` 指定")
-            rows.append({"term": out_parts[0], "meaning": out_parts[1], "aliases": []})
-        else:
-            match["term"] = out_parts[0] if out_parts else match.get("term")
-            match["meaning"] = out_parts[1] if len(out_parts) > 1 else polished
-        bible = settings.save(bible)
-        return {"field": field, "applied": True, "settings_revision": bible["settings_revision"]}
-
     raise ValueError(f"不支持的润色字段: {field}")
 
 
@@ -336,7 +231,6 @@ def _fmt_bible(bible: dict) -> str:
         多行文本摘要。
     """
     premise = bible.get("premise") or {}
-    world = bible.get("world") or {}
     style = bible.get("style") or {}
     acts = (bible.get("outline") or {}).get("acts") or []
     chapters = sum(len(act.get("chapters") or []) for act in acts)
@@ -345,23 +239,10 @@ def _fmt_bible(bible: dict) -> str:
         f"设定库 r{bible.get('settings_revision')}（{bible.get('updated_at')}）",
         f"  一句话：{premise.get('logline') or '—'}",
         f"  主题：{premise.get('theme') or '—'}　核心冲突：{premise.get('core_conflict') or '—'}",
-        f"  世界：{world.get('era') or '—'}（地点 {len(world.get('locations') or [])} / 规则 {len(world.get('rules') or [])} / 阵营 {len(world.get('factions') or [])}）",
         f"  文风：{style.get('tone') or '—'}　视角：{style.get('pov') or '—'}　时态：{style.get('tense') or '—'}",
         f"  大纲：{len(acts)} 幕 / {chapters} 章 / {beats} 个节拍",
     ]
     return "\n".join(lines)
-
-
-def _parse_triplet(raw: str) -> list[str]:
-    """把 `a|b|c` 形式的参数拆成列表（允许少于三段）。
-
-    参数:
-        raw: 命令行原始字符串。
-
-    返回:
-        去空白后的字段列表。
-    """
-    return [part.strip() for part in raw.split("|")]
 
 
 def cmd_setting(args, config: AppConfig) -> int:
@@ -447,7 +328,7 @@ def cmd_setting(args, config: AppConfig) -> int:
 
         step = getattr(args, "step", None)
         if not step:
-            raise ValueError("需要指定 --section（premise/style/world/character）或 --step（world/premise/style）")
+            raise ValueError("需要指定 --section（premise/style/character）或 --step（premise/style）")
         result = generate_settings(
             store,
             config,
@@ -456,7 +337,7 @@ def cmd_setting(args, config: AppConfig) -> int:
             brief=getattr(args, "brief", None),
             seed=getattr(args, "seed", None),
         )
-        label = {"world": "世界设定", "premise": "故事梗概", "style": "文风"}[step]
+        label = {"premise": "故事梗概", "style": "文风"}[step]
         applied = False
         revision = (settings.load_or_none() or {}).get("settings_revision")
         if not getattr(args, "dry_run", False):
@@ -504,37 +385,6 @@ def cmd_setting(args, config: AppConfig) -> int:
             f"已写入 {args.section}（{len(changed)} 个字段）r{bible['settings_revision']}",
             {"section": args.section, "changed": changed, "settings_revision": bible["settings_revision"]},
         )
-        return 0
-
-    if action == "world":
-        bible = settings.ensure()
-        world = bible.setdefault("world", {})
-        changed = []
-        if getattr(args, "add_rule", None):
-            # argparse 用 append，这里按条展开，schema 要求 rules 元素是字符串
-            world.setdefault("rules", []).extend(args.add_rule)
-            changed.append(f"规则×{len(args.add_rule)}")
-        if getattr(args, "add_faction", None):
-            world.setdefault("factions", []).extend(args.add_faction)
-            changed.append(f"阵营×{len(args.add_faction)}")
-        if getattr(args, "add_location", None):
-            name, desc, atmosphere = (_parse_triplet(args.add_location) + ["", "", ""])[:3]
-            from .models.ids import new_id
-
-            world.setdefault("locations", []).append(
-                {"id": new_id("loc"), "name": name, "description": desc, "atmosphere": atmosphere}
-            )
-            changed.append(f"地点 {name}")
-        if getattr(args, "add_glossary", None):
-            term, meaning = (_parse_triplet(args.add_glossary) + ["", ""])[:2]
-            if not term or not meaning:
-                raise ValueError("--add-glossary 需要 `术语|释义` 两段")
-            world.setdefault("glossary", []).append({"term": term, "meaning": meaning, "aliases": []})
-            changed.append(f"词条 {term}")
-        if not changed:
-            raise ValueError("没有要新增的内容：用 --add-rule / --add-faction / --add-location / --add-glossary")
-        bible = settings.save(bible)
-        _emit(args, f"已更新世界设定 r{bible['settings_revision']}：" + "、".join(changed), {"changed": changed, "settings_revision": bible["settings_revision"]})
         return 0
 
     if action == "import":
