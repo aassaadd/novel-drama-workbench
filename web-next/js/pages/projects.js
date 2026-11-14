@@ -242,9 +242,6 @@ function projectsErrorHTML(message) {
 /** 首页筛选：状态（按配音完成度）/ 编辑时间 / 关键词，均为本地真实数据 */
 const filters = { status: 'all', time: 'all', text: '', sort: 'recent' };
 
-/** 当前列表页是主页还是「项目」入口 */
-let pageScope = 'home';
-
 /** 复位筛选条件（新建工程后确保卡片一定可见） */
 function resetFilters() {
   filters.status = 'all';
@@ -304,19 +301,50 @@ function filteredProjects() {
   return list.sort(sorters[filters.sort] || sorters.recent);
 }
 
-/** 只重画卡片区（筛选后不整页重建，滚动位置保持不变） */
+/** 过滤 / 搜索生效时隐藏顶部「最近项目」，避免同一批卡片出现两次 */
+function hasActiveFilters() {
+  return filters.status !== 'all' || filters.time !== 'all' || Boolean(filters.text.trim());
+}
+
+/** 最近打开的项目（最多 3 个），用于页面顶部置顶区 */
+function recentProjects(limit = 3) {
+  return state.projects
+    .filter((item) => item.last_opened_at)
+    .sort((a, b) => String(b.last_opened_at).localeCompare(String(a.last_opened_at)))
+    .slice(0, limit);
+}
+
+/**
+ * 只重画卡片区：顶部「最近项目」置顶，下面接「全部项目」。
+ * 工程总数不超过 3 个时不再置顶，避免同一批卡片出现两次；筛选或搜索时只显示筛选结果。
+ */
 function paintCards() {
   const grid = document.getElementById('proj-cards');
   if (!grid) return;
+  const pinned = !hasActiveFilters() && state.projects.length > 3 ? recentProjects() : [];
+  const recentSec = document.getElementById('proj-recent-sec');
+  const recentHost = document.getElementById('proj-recent');
+  if (recentSec && recentHost) {
+    recentSec.hidden = pinned.length === 0;
+    recentHost.innerHTML = pinned.map(card).join('');
+  }
   const list = filteredProjects();
   const hasAny = state.projects.length > 0;
   grid.innerHTML = list.length
     ? list.map(card).join('')
-    : `<div class="empty" style="grid-column:1/-1">${icon(hasAny ? 'search' : 'folder', 20)}
-         <b>${hasAny ? '没有匹配的工程' : '还没有本机工程'}</b>
-         <span>${hasAny ? '换个筛选条件或关键词' : '点右上角「新建项目」开始，或把已有目录导入进来'}</span>
-         ${hasAny ? '<button class="btn" data-act="clear-filter">清除筛选</button>' : ''}
-       </div>`;
+    : !hasAny
+      ? `<div class="empty" style="grid-column:1/-1">${icon('folder', 20)}
+           <b>还没有本机工程</b>
+           <span>点右上角「新建项目」开始，或把已有目录导入进来</span>
+           <button class="btn primary" data-act="new">新建项目</button>
+         </div>`
+      : `<div class="empty" style="grid-column:1/-1">${icon('search', 20)}
+           <b>没有匹配的工程</b>
+           <span>换个筛选条件或关键词</span>
+           <button class="btn" data-act="clear-filter">清除筛选</button>
+         </div>`;
+  const count = document.getElementById('proj-count');
+  if (count) count.textContent = `${list.length} 个`;
 }
 
 /** 只重画工程数量与占用统计（增删工程后同步，不整页重建） */
@@ -324,10 +352,7 @@ function paintCounts() {
   const sub = document.getElementById('proj-sub');
   if (!sub) return;
   const totalSize = fmtBytes(state.projects.reduce((sum, item) => sum + Number(item.size_bytes || 0), 0));
-  sub.innerHTML =
-    pageScope === 'all'
-      ? `本机全部 <b>${state.projects.length}</b> 个工程，占用 <b>${totalSize}</b>。`
-      : `本机共 <b>${state.projects.length}</b> 个工程，占用 <b>${totalSize}</b>。打开后进入画本编辑，左侧目录可直接切章。`;
+  sub.innerHTML = `本机共 <b>${state.projects.length}</b> 个工程，占用 <b>${totalSize}</b>。点卡片进入画本编辑，左侧目录可直接切章。`;
 }
 
 /** 重画列表与统计（新增/删除/导入/刷新索引后统一走这里） */
@@ -338,24 +363,21 @@ function paintList() {
 
 /** 渲染工程列表页 */
 /**
- * 首页左侧纵向导航（对齐参考：主页 / 任务 / AI 有声 / 项目 / 素材 / 设置）。
- * 任务、AI 有声、素材、设置都依赖「当前工程」，没有上次打开的工程时置灰并说明原因。
+ * 左侧纵向导航：项目 / AI 有声 / 任务 / 素材，设置与本地版不适用项放在底部。
+ * 主页与项目已合并为一个「项目」入口，导航里不再有第二个工程列表。
+ * 任务、素材依赖「上次打开的工程」，没有可用工程时置灰并说明原因。
  * 团队 / 消息 / 积分 / 头像属于协作、会员与账号能力，本地版不适用，只标注不伪装入口。
- * @param {'home'|'all'} scope 当前页面：主页 / 项目
  * @returns {string} 导航 HTML
  */
-function homeNavHTML(scope) {
+function homeNavHTML() {
   const last = lastProject();
   const enc = last ? encodeURIComponent(last) : '';
   const projectTip = last ? '' : '先打开一个工程';
   const items = [
-    { key: 'home', label: '主页', icon: 'chapter', href: '#/projects', active: scope === 'home' },
+    { key: 'projects', label: '项目', icon: 'folder', href: '#/projects', active: true },
+    { key: 'studio', label: 'AI 有声', icon: 'mic', act: 'nav-studio', tip: '选择工程，把已有正文做成有声' },
     { key: 'tasks', label: '任务', icon: 'task', href: last ? `#/p/${enc}/tasks` : '', tip: projectTip },
-    { key: 'studio', label: 'AI 有声', icon: 'mic', act: 'nav-studio', tip: projectTip },
-    { key: 'projects', label: '项目', icon: 'folder', href: '#/projects/all', active: scope === 'all' },
     { key: 'media', label: '素材', icon: 'image', href: last ? `#/p/${enc}/media` : '', tip: projectTip },
-    // 设置是全局能力，不依赖是否打开过工程
-    { key: 'settings', label: '设置', icon: 'gear', href: '#/settings' },
   ];
   const muted = [
     { label: '团队', icon: 'user', tip: '团队协作属于云端能力，本地版不适用' },
@@ -381,6 +403,9 @@ function homeNavHTML(scope) {
           .join('')}
       </nav>
       <div class="hn-foot">
+        <a class="hn-item" href="#/settings" title="设置：全局与本机环境，不需要先打开工程">
+          <span class="hn-ic">${icon('gear', 16)}</span><span class="hn-label">设置</span>
+        </a>
         ${muted
           .map(
             (item) => `<button type="button" class="hn-item muted" disabled title="${esc(item.tip)}">
@@ -393,21 +418,18 @@ function homeNavHTML(scope) {
     </aside>`;
 }
 
-/** 工程列表页：按 scope 渲染主页 / 项目两个入口 */
-export async function renderProjects(root, target = {}) {
-  const scope = target.scope === 'all' ? 'all' : 'home';
-  pageScope = scope;
-  const heading = scope === 'all' ? '项目' : '最近项目';
+/** 项目页：最近项目置顶 + 全部项目列表（原「主页 / 项目」两个入口已合并） */
+export async function renderProjects(root) {
   // 外壳与骨架立即可见：数据回来前不空屏，也不用整屏 loading
   root.innerHTML = `
     <div class="home-layout">
-      ${homeNavHTML(scope)}
+      ${homeNavHTML()}
       <div class="home-main">
         ${renderShell()}
         <main class="page" id="projects-main">
           <div class="page-head">
             <div class="ph">
-              <h1 class="page-title">${heading}</h1>
+              <h1 class="page-title">项目</h1>
               <div class="page-sub" id="proj-sub">正在读取本机工程…</div>
             </div>
           </div>
@@ -423,23 +445,30 @@ export async function renderProjects(root, target = {}) {
     if (!failed) return;
     failed.innerHTML = `
       <div class="page-head">
-        <div class="ph"><h1 class="page-title">${heading}</h1></div>
+        <div class="ph"><h1 class="page-title">项目</h1></div>
       </div>
       ${projectsErrorHTML(error.message)}`;
     failed.querySelector('[data-act="retry-projects"]')?.addEventListener('click', (event) => {
       event.currentTarget.disabled = true;
-      renderProjects(root, target);
+      renderProjects(root);
     });
     return;
   }
   const main = root.querySelector('#projects-main');
   // 期间又触发了新的列表渲染：这次结果作废，避免旧数据盖掉新页面
   if (!main || !fresh) return;
-  const title = scope === 'all' ? '项目' : '最近项目';
+  // 「上次打开的工程」可能已被删除或移出索引：导航里的任务 / 素材会带着失效路径跳过去，
+  // 这里清掉记录并重画导航，入口回到置灰 +「先打开一个工程」。
+  const last = lastProject();
+  if (last && !state.projects.some((item) => item.path === last)) {
+    forgetProject(last);
+    const nav = root.querySelector('.home-nav');
+    if (nav) nav.outerHTML = homeNavHTML();
+  }
   main.innerHTML = `
     <div class="page-head">
       <div class="ph">
-        <h1 class="page-title">${title}</h1>
+        <h1 class="page-title">项目</h1>
         <div class="page-sub" id="proj-sub"></div>
       </div>
       <div class="ph-actions">
@@ -447,33 +476,40 @@ export async function renderProjects(root, target = {}) {
         <button class="btn primary" data-act="new">${icon('plus')} 新建项目</button>
       </div>
     </div>
-    <div class="ws-filters">
-      <button class="filter-pill" disabled title="来源属于云端账号，本地版不适用">全部来源</button>
-      <button class="filter-pill" disabled title="项目属于团队空间，本地版不适用">全部项目</button>
-      <select class="select ws-filter" id="f-status" title="按制作状态筛选">
-        <option value="all">全部状态</option>
-        <option value="none">未开始</option>
-        <option value="doing">制作中</option>
-        <option value="done">已完成</option>
-      </select>
-      <select class="select ws-filter" id="f-time" title="按编辑时间筛选">
-        <option value="all">全部时间</option>
-        <option value="7">最近 7 天</option>
-        <option value="30">最近 30 天</option>
-        <option value="older">30 天前</option>
-      </select>
-      <select class="select ws-filter" id="f-sort" title="排序方式">
-        <option value="recent">按最近打开</option>
-        <option value="size">按占用从大到小</option>
-        <option value="progress">按完成度</option>
-        <option value="title">按书名</option>
-      </select>
-      <div class="search" style="width:220px;margin-left:auto">
-        ${icon('search', 14)}
-        <input type="search" id="f-text" placeholder="搜索项目" value="${esc(filters.text)}" />
+    <section class="proj-section" id="proj-recent-sec" hidden>
+      <div class="ps-head"><h2>最近项目</h2><span class="ps-note">继续上次制作</span></div>
+      <div class="cards" id="proj-recent"></div>
+    </section>
+    <section class="proj-section">
+      <div class="ps-head"><h2>全部项目</h2><span class="badge mute" id="proj-count"></span></div>
+      <div class="ws-filters">
+        <button class="filter-pill" disabled title="来源属于云端账号，本地版不适用">全部来源</button>
+        <button class="filter-pill" disabled title="项目属于团队空间，本地版不适用">全部项目</button>
+        <select class="select ws-filter" id="f-status" title="按制作状态筛选">
+          <option value="all">全部状态</option>
+          <option value="none">未开始</option>
+          <option value="doing">制作中</option>
+          <option value="done">已完成</option>
+        </select>
+        <select class="select ws-filter" id="f-time" title="按编辑时间筛选">
+          <option value="all">全部时间</option>
+          <option value="7">最近 7 天</option>
+          <option value="30">最近 30 天</option>
+          <option value="older">30 天前</option>
+        </select>
+        <select class="select ws-filter" id="f-sort" title="排序方式">
+          <option value="recent">按最近打开</option>
+          <option value="size">按占用从大到小</option>
+          <option value="progress">按完成度</option>
+          <option value="title">按书名</option>
+        </select>
+        <div class="search" style="width:220px;margin-left:auto">
+          ${icon('search', 14)}
+          <input type="search" id="f-text" placeholder="搜索项目" value="${esc(filters.text)}" />
+        </div>
       </div>
-    </div>
-    <div class="cards" id="proj-cards"></div>`;
+      <div class="cards" id="proj-cards"></div>
+    </section>`;
 
   paintList();
   main.querySelector('#f-status').value = filters.status;
@@ -557,18 +593,102 @@ export async function renderProjects(root, target = {}) {
     }
   });
 
-  // 左侧导航：AI 有声需要先解析上次工程的章节，不能只靠 hash
+  // 左侧导航：「AI 有声」先选工程，再进该工程的画本编辑
   root.querySelector('.home-nav')?.addEventListener('click', (event) => {
-    const button = event.target.closest('[data-act="nav-studio"]');
+    if (event.target.closest('[data-act="nav-studio"]')) openStudioPicker();
+  });
+}
+
+/**
+ * 「AI 有声」入口：先选工程，再进入该工程的画本编辑第一章。
+ * 本机没有工程时给新建入口；选到无章节的工程时给「导入正文 / 去写正文」两条出口。
+ */
+function openStudioPicker() {
+  const list = [...state.projects].sort(
+    (a, b) => new Date(b.last_opened_at || b.updated_at || 0).getTime() - new Date(a.last_opened_at || a.updated_at || 0).getTime()
+  );
+  if (!list.length) {
+    const mask = openDialog({
+      title: 'AI 有声',
+      body: `<div class="empty"><b>本机还没有工程</b>
+        <span>先新建工程并把正文导入进来，之后就能在这里把正文做成有声。</span></div>`,
+      foot: `<div class="right"><button class="btn" data-dlg-close>取消</button>
+        <button class="btn primary" id="st-new">新建项目</button></div>`,
+    });
+    mask.querySelector('#st-new').addEventListener('click', () => {
+      closeDialog();
+      openNewProject();
+    });
+    return;
+  }
+  const mask = openDialog({
+    title: 'AI 有声 · 选择工程',
+    body: `<div class="hint">选择一个工程，进入它的画本编辑第一章开始制作。</div>
+      <div style="display:flex;flex-direction:column;gap:6px;max-height:360px;overflow:auto">
+        ${list
+          .map(
+            (item) => `<button class="btn" style="height:auto;padding:10px 12px;justify-content:flex-start;text-align:left"
+                  data-studio-project="${esc(item.path)}">
+              <span style="display:flex;flex-direction:column;gap:3px;min-width:0">
+                <b style="font-size:13px;color:var(--text)">${esc(item.title || '未命名工程')}</b>
+                <span class="mono" style="font-size:10.5px;color:var(--text-4);overflow:hidden;text-overflow:ellipsis">${esc(item.path)}</span>
+              </span>
+              <span class="badge mute" style="margin-left:auto">${Number(item.chapters || 0)} 章</span>
+            </button>`
+          )
+          .join('')}
+      </div>`,
+    foot: `<div class="right"><button class="btn" data-dlg-close>取消</button></div>`,
+  });
+  mask.addEventListener('click', (event) => {
+    const button = event.target.closest('[data-studio-project]');
     if (!button) return;
-    const last = lastProject();
-    if (!last) return toast('先打开一个工程', 'warn');
-    getJSON('/api/project/chapters', { path: last })
-      .then((chapters) => {
-        if (chapters && chapters.length) goChapter(last, chapters[0].id);
-        else location.hash = `#/p/${encodeURIComponent(last)}/novel`;
-      })
-      .catch((error) => toast(`打开失败：${error.message}`, 'bad'));
+    const item = state.projects.find((project) => project.path === button.dataset.studioProject);
+    if (!item) return;
+    closeDialog();
+    enterStudio(item);
+  });
+}
+
+/**
+ * 进入工程的有声制作：有章节进第一章画本编辑，没有章节给导入 / 写作引导。
+ * @param {object} item 工程条目
+ */
+async function enterStudio(item) {
+  rememberProject(item.path);
+  try {
+    const chapters = await getJSON('/api/project/chapters', { path: item.path });
+    if (chapters && chapters.length) {
+      goChapter(item.path, chapters[0].id);
+      return;
+    }
+    openNeedChapterDialog(item);
+  } catch (error) {
+    toast(`打开失败：${error.message}`, 'bad');
+  }
+}
+
+/**
+ * 工程没有正文时的引导：导入已有正文，或去小说视图写正文。
+ * @param {object} item 工程条目
+ */
+function openNeedChapterDialog(item) {
+  const mask = openDialog({
+    title: `AI 有声 · ${item.title || '未命名工程'}`,
+    body: `<div class="dlg-note">这个工程还没有正文，暂时没有可以做成有声的内容。先导入已有正文，或去小说视图写正文。</div>
+      <div class="summary-line"><span>${esc(item.title || '未命名工程')}</span>
+        <span class="right mono">${esc(item.path)}</span></div>`,
+    foot: `<div class="right"><button class="btn" data-dlg-close>取消</button>
+      <button class="btn" id="nc-novel">去写正文</button>
+      <button class="btn primary" id="nc-import">导入已有正文</button></div>`,
+  });
+  mask.querySelector('#nc-novel').addEventListener('click', () => {
+    closeDialog();
+    location.hash = `#/p/${encodeURIComponent(item.path)}/novel`;
+  });
+  mask.querySelector('#nc-import').addEventListener('click', () => {
+    closeDialog();
+    openImportDialog({ path: item.path, title: item.title || '' });
   });
 }
 

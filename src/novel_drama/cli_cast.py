@@ -78,7 +78,7 @@ def _cmd_backfill(args, store, config: AppConfig) -> int:
                 continue
             if (profile.get("source") or {}).get("override_fields") and not force:
                 continue
-            built = build_profile(adapter, character)
+            built = build_profile(adapter, character, config)
             new_profile = dict(built["profile"])
             source = {
                 "kind": built.get("source") or "rule",

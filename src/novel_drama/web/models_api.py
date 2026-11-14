@@ -811,6 +811,9 @@ def register_models_routes(app, config_path: str | None = None) -> None:
         "omlx.first_token_timeout_s": ("首字超时（秒）", (int, float)),
         "omlx.context_window": ("上下文窗口（tokens）", int),
         "omlx.max_tokens": ("最大输出（tokens）", int),
+        "omlx.temperature": ("写作温度", float),
+        "omlx.temperature_polish": ("润色温度", float),
+        "omlx.temperature_audio": ("音效与 BGM 温度", float),
         "omlx.enable_thinking": ("开启思考", bool),
         "omlx.reasoning_effort": ("思考强度", str),
     }
@@ -842,6 +845,9 @@ def register_models_routes(app, config_path: str | None = None) -> None:
                 # 上下文 / 最大输出由「测试连通」的服务端返回值回填，也可手改后保存
                 "context_window": llm.get("context_window"),
                 "max_output_tokens": llm.get("max_tokens"),
+                "temperature": llm.get("temperature", 0.8),
+                "temperature_polish": llm.get("temperature_polish", 0.6),
+                "temperature_audio": llm.get("temperature_audio", 0.2),
                 "thinking_enabled": bool(llm.get("enable_thinking")),
                 "thinking_effort": str(llm.get("reasoning_effort") or "medium"),
             },
@@ -905,7 +911,7 @@ def register_models_routes(app, config_path: str | None = None) -> None:
                             status_code=400,
                             detail={"code": 2, "message": f"{label}必须是数字"},
                         ) from exc
-                    if value <= 0:
+                    if value < 0 or (value == 0 and not key.startswith("temperature")):
                         raise HTTPException(
                             status_code=400,
                             detail={"code": 2, "message": f"{label}必须大于 0"},

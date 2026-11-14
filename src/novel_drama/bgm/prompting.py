@@ -15,6 +15,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from ..config import resolve_temperature
 from .types import BAD_REQUEST, BgmError
 
 #: 含中日韩统一表意文字即视为中文输入
@@ -227,7 +228,7 @@ def _llm_settings(config, timeout_s: float | None = None) -> dict | None:
     settings["request_timeout_s"] = float(
         timeout_s if timeout_s is not None else (config.get("bgm.prompt.llm_timeout_s") or DEFAULT_LLM_TIMEOUT_S)
     )
-    settings["temperature"] = 0.2
+    settings["temperature"] = resolve_temperature(config, "audio")
     settings["max_tokens"] = 200
     settings["enable_thinking"] = False
     return settings
@@ -255,7 +256,7 @@ def _llm_rewrite(prompt: str, settings: dict) -> str:
         system=LLM_SYSTEM,
         messages=[Message(role="user", content=f"中文配乐描述：{prompt}")],
         max_tokens=200,
-        temperature=0.2,
+        temperature=float(settings.get("temperature") or 0.2),
         stream=False,
     )
     text = (adapter.generate(request).text or "").strip()

@@ -515,6 +515,15 @@ h1.page-title { font-size: 22px; line-height: 1.3; font-weight: 600; }
   font-size: 10.5px; color: var(--text-4); background: rgba(255, 255, 255, 0.012); }
 .pc-foot .right { margin-left: auto; display: flex; gap: 6px; }
 
+/* 项目页分区：最近项目置顶 + 全部项目 */
+.proj-section { margin-bottom: 26px; }
+.proj-section:last-child { margin-bottom: 0; }
+.proj-section[hidden] { display: none; }
+.ps-head { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+.ps-head h2 { font-size: 13.5px; font-weight: 600; }
+.ps-note { font-size: 11px; color: var(--text-4); }
+.proj-section .ws-filters { margin: 0 0 14px; }
+
 /* ---------------- 9. 导出页 ---------------- */
 .export-page { padding: 20px 24px 40px; min-width: 0; overflow-y: auto; }
 .exp-grid { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 16px; align-items: start; }

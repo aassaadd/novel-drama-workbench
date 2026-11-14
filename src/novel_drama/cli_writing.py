@@ -80,8 +80,6 @@ def cmd_outline(args, config: AppConfig) -> int:
             chapter_words=args.words,
             dry_run=args.dry_run,
             binding=getattr(args, "binding", "auto"),
-            multi_turn=bool(getattr(args, "multi_turn", False)),
-            acts_per_round=int(getattr(args, "acts_per_round", 1) or 1),
         )
         head = f"[dry-run] " if args.dry_run else ""
         golden = result.get("golden_three") or {"passed": True, "issues": []}
@@ -90,11 +88,10 @@ def cmd_outline(args, config: AppConfig) -> int:
             hints = "\n黄金三章提示（不阻断）：\n" + "\n".join(
                 f"  第 {issue['chapter']} 章：{issue['problem']}——{issue['hint']}" for issue in golden["issues"]
             )
-        rounds_note = f"，multi-turn，{result.get('rounds') or 1} 轮" if result.get("multi_turn") else ""
         _emit(
             args,
             f"{head}大纲已生成：{result['acts'].__len__()} 幕 / {result['chapters']} 章 / {result['beats']} 个节拍"
-            f"（provider={result['provider']}，settings_revision={result['settings_revision']}，binding={result.get('binding')}{rounds_note}）\n"
+            f"（provider={result['provider']}，settings_revision={result['settings_revision']}，binding={result.get('binding')}）\n"
             + _fmt_outline(result["acts"])
             + hints,
             result,

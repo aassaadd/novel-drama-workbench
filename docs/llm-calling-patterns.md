@@ -8,8 +8,8 @@
 
 | 业务调用点 | 形态 | 轮数 / 批量 | 关键参数 | 失败处理 |
 | --- | --- | --- | --- | --- |
-| 大纲生成（整本） | 单次或按幕多轮 | 1 轮，或「幕数」轮（每轮 1 幕） | 工具调用；temp 默认 0.8；预算按节拍数估算（上限 16384） | 任一轮失败即整体报错 |
-| 大纲续写 | 按幕多轮 | 新增幕数轮，逐幕落盘 | 工具调用 `emit_act`；temp 0.8；预算按本幕节拍数估算 | 失败即停，保留已生成幕 |
+| 大纲生成（整本） | 三级分层 | 1 次幕 + 逐幕章 + 逐章节拍 | 工具调用；temp 取设置页写作分组；预算按条目数估算 | 每层生成后立即校验，越界只重写该层（上限 2 次） |
+| 大纲扩充/续写 | 三级分层（只新增） | 新增幕 + 逐幕章 + 逐章节拍 | 工具调用；temp 取写作分组；预算按条目数估算 | 每层校验，越界只重写该层，失败不写入 |
 | 世界设定（批量） | 单次或按批多轮 | 1 轮，或 `ceil(count/batch_size_worlds)` 轮 | 工具调用 `emit_worlds`；temp 0.7；预算 1800/条 + 固定开销 | 任一批失败即整体报错 |
 | 世界 / 梗概 / 文风（分区） | 单次 | 1 轮 | 工具调用 `emit_world/emit_premise/emit_style`；temp 0.7 | 直接报错 |
 | 单条世界 / 单个人物（区块生成） | 单次 | 1 轮 | 工具调用；temp 0.7 / 0.8；world 约 6.3k、character 约 6.9k | 直接报错 |
@@ -76,7 +76,7 @@ payload = {
 - `polish_field`
 - 音色描述 `build_profile`
 - 音效 / BGM 英文改写
-- `generate_outline(multi_turn=False)`（默认）
+- `generate_outline`（CLI 单轮兼容入口；旧的 `multi_turn=True` 路径已删除）
 - `generate_worlds` / `generate_characters` 在数量不超过单批上限时
 
 ### 3.2 业务级多轮
@@ -127,8 +127,8 @@ payload = {
 
 - 入口 [service.py L104-L237](file:///Users/zhaohaochen/git/novel-drama-workbench/src/novel_drama/writing/service.py#L104-L237)。
 - 单轮：`_generate_json(adapter, req, "outline")`，工具 `emit_outline`，一次产出全部幕/章/节拍。
-- 多轮：`multi_turn=True` 时走 [`_generate_outline_acts`](file:///Users/zhaohaochen/git/novel-drama-workbench/src/novel_drama/writing/service.py#L241-L292)，每轮工具 `emit_act`，已生成幕只回传「标题 + 概要」；CLI 用 `--multi-turn` 打开，页面 `multi_turn` 为真才打开，默认关闭。
-- 参数：`temperature` 未显式设置 → 0.8；输出预算按 `acts × chapters_per_act × beats_per_chapter` 估算（上限 16384）；`stream=False`。
+- 按幕多轮（`_generate_outline_acts` / `--multi-turn` / `.ndw/outline_acts.json`）已删除；页面统一走三级分层。
+- 参数：`temperature` 取下表对应分组（写作/润色/音效与 BGM）；输出预算按 `acts × chapters_per_act × beats_per_chapter` 估算（上限 16384）；`stream=False`。
 
 ### 6.2 大纲续写（`continue_outline`）
 

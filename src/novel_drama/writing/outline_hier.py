@@ -13,6 +13,8 @@
 from __future__ import annotations
 
 import json
+import logging
+from dataclasses import replace
 from pathlib import Path
 
 from ..adapters.base import ErrorCode, AdapterError, Message, TextGenRequest
@@ -22,14 +24,21 @@ from ..store import ProjectStore
 from ..store.settings_store import SettingsStore
 from ..text.titles import strip_index_prefix
 from .service import (
+    _act_validation,
     _characters_payload,
     _generate_json,
     _progress,
+    _tolerance,
     _tool_max_tokens,
+    _validation_report,
     bind_outline_characters,
     build_writing_adapter,
     check_golden_three,
+    sanitize_outline_character_ids,
 )
+
+#: 日志：分层大纲的章数/节拍数纠偏过程
+logger = logging.getLogger(__name__)
 
 #: 分层生成中间文件版本
 WORK_VERSION = "outline_hier/1"
@@ -134,6 +143,51 @@ def _error_text(exc: Exception) -> str:
     return getattr(exc, "message", None) or str(exc) or exc.__class__.__name__
 
 
+def _count_correction(kind: str, got: int, expected: int, existing: list[str]) -> str:
+    """生成「章数/节拍数不符」的重试提示。
+
+    参数:
+        kind: chapters / beats。
+        got: 上一次实际数量（0 表示模型没返回任何条目）。
+        expected: 设定数量。
+        existing: 上一次已给出的标题或概要，用于避免重复。
+
+    返回:
+        中文纠正提示；空数组时明确写「没有返回任何节拍/章节」。
+    """
+    noun = {"acts": "幕", "chapters": "章节", "beats": "节拍"}.get(kind, kind)
+    unit = {"acts": "幕", "chapters": "章", "beats": "个节拍"}.get(kind, kind)
+    subject = {"acts": "整体", "chapters": "本幕", "beats": "本章"}.get(kind, "本次")
+    if got <= 0:
+        return (
+            f"上一版没有返回任何{noun}，{subject}需要 {expected} {unit}。"
+            f"请完整给出 {expected} {unit}，一条都不要省略。"
+        )
+    listed = "、".join(title for title in existing if title)
+    return (
+        f"上一次只给了 {got} {unit}，必须恰好 {expected} {unit}。"
+        f"请补齐到 {expected} {unit}，不要少给、不要多给，也不要重复已有内容：{listed or '（无）'}"
+    )
+
+
+def _count_reason(kind: str, got: int, expected: int) -> str:
+    """生成数量不符时的进度说明（空数组写明「为空」，供页面直接展示）。
+
+    参数:
+        kind: chapters / beats / acts。
+        got: 上一次实际数量。
+        expected: 设定数量。
+
+    返回:
+        中文说明。
+    """
+    if kind == "chapters":
+        return f"本幕章节为空，需要 {expected} 章" if got <= 0 else f"上一版给了 {got} 章，本幕要求 {expected} 章"
+    if kind == "beats":
+        return f"本章节拍为空，需要 {expected} 个节拍" if got <= 0 else f"上一版给了 {got} 个节拍，本章要求 {expected} 个"
+    return f"上一版给了 {got} 幕，本次要求 {expected} 幕"
+
+
 def _project_context(work: dict, bible: dict, characters: list[dict]) -> str:
     """拼三个阶段共用的作品上下文。
 
@@ -158,7 +212,19 @@ def _project_context(work: dict, bible: dict, characters: list[dict]) -> str:
 
 
 def _delta_reporter(on_progress, unit: str, index: int, total: int, name: str, extra: dict | None = None):
-    """生成 on_delta：累计本层接收长度并上报 chars 事件。"""
+    """生成 on_delta：累计本层接收长度并上报 chars 事件。
+
+    参数:
+        on_progress: 进度回调。
+        unit: 事件单位（act / beat），页面据此选择文案模板。
+        index: 当前项序号（从 1 开始；幕阶段为 0，表示尚未拆分）。
+        total: 当前层总项数。
+        name: 当前项名称。
+        extra: 附加字段（phase / act_index / chapter_index / percent 等）。
+
+    返回:
+        `(text) -> None` 回调。
+    """
     state = {"chars": 0}
 
     def on_delta(text: str) -> None:
@@ -171,6 +237,83 @@ def _delta_reporter(on_progress, unit: str, index: int, total: int, name: str, e
         _progress(on_progress, payload)
 
     return on_delta
+
+
+def _beat_delta_reporter(
+    on_progress,
+    done_before: int,
+    beat_total: int,
+    chapter_pos: int,
+    chapter_total: int,
+    act_pos: int,
+    act_total: int,
+    chapter_title: str,
+    percent,
+):
+    """节拍阶段的增量回调：按已出现的节拍概要数上报「第 y/200 节拍」。
+
+    工具参数是流式 JSON，每写一个节拍就会出现一次 `"summary"` 键；累计原文后
+    统计出现次数，得到本章已经产出的节拍数，再叠加前面各章已完成的节拍数。
+
+    参数:
+        on_progress: 进度回调。
+        done_before: 本章之前已完成的节拍总数。
+        beat_total: 全书节拍总数。
+        chapter_pos: 全书章序号。
+        chapter_total: 全书章总数。
+        act_pos: 幕序号。
+        act_total: 幕总数。
+        chapter_title: 本章标题。
+        percent: `(已完成数) -> int` 百分比函数。
+
+    返回:
+        `(text) -> None` 回调。
+    """
+    state = {"chars": 0, "raw": ""}
+
+    def on_delta(text: str) -> None:
+        """接收增量并按节拍概要计数。"""
+        if not text:
+            return
+        state["chars"] += len(str(text))
+        state["raw"] = (state.get("raw") or "") + str(text)
+        local = state["raw"].count('"summary"')
+        index = min(beat_total, done_before + max(1, local))
+        _progress(
+            on_progress,
+            {
+                "type": "chars",
+                "chars": state["chars"],
+                "unit": "beat",
+                "phase": "beats",
+                "index": index,
+                "total": beat_total,
+                "beat_index": index,
+                "beat_total": beat_total,
+                "act_index": act_pos,
+                "act_total": act_total,
+                "chapter_index": chapter_pos,
+                "chapter_total": chapter_total,
+                "chapter": chapter_title,
+                "percent": percent(done_before + max(1, local)),
+            },
+        )
+
+    return on_delta
+
+
+def _pct(done: int, total: int) -> int:
+    """按已完成条目数折算总体百分比（幕 + 章 + 节拍合计）。
+
+    参数:
+        done: 已完成条目数。
+        total: 条目总数。
+
+    返回:
+        0–100 的整数。
+    """
+    total = max(1, int(total))
+    return max(0, min(100, int(round(100 * max(0, int(done)) / total))))
 
 
 def _normalize_acts(payload: dict, acts: int, chapters_per_act: int) -> list[dict]:
@@ -195,15 +338,20 @@ def _normalize_acts(payload: dict, acts: int, chapters_per_act: int) -> list[dic
         if not isinstance(raw, dict):
             continue
         title = strip_index_prefix(_text(raw.get("title"), 80)) or f"第{index}幕"
+        # 章数以用户设定为准：模型给的 chapters_count 只作为参考，不写进中间结果
         try:
-            count = int(raw.get("chapters_count") or chapters_per_act)
+            suggested = int(raw.get("chapters_count") or chapters_per_act)
         except (TypeError, ValueError):
-            count = chapters_per_act
+            suggested = chapters_per_act
+        if suggested != max(1, int(chapters_per_act)):
+            logger.warning(
+                "大纲第 %s 幕模型建议 %s 章，按设定强制为 %s 章", index, suggested, max(1, int(chapters_per_act))
+            )
         rows.append(
             {
                 "title": title,
                 "summary": _text(raw.get("summary") or raw.get("goal"), 400),
-                "chapters_count": max(1, min(12, count)),
+                "chapters_count": max(1, int(chapters_per_act)),
                 "chapters": [],
                 "status": "pending",
                 "error": None,
@@ -222,14 +370,12 @@ def _normalize_chapters(payload: dict, expected: int) -> list[dict]:
         expected: 本幕计划章数（缺失时补足到该数量）。
 
     返回:
-        章节列表，每项 `{title, summary, beats, status, error}`。
-
-    异常:
-        AdapterError: 未返回可用章节。
+        章节列表，每项 `{title, summary, beats, status, error}`；
+        未返回可用章节时返回空列表（交给章数闸门重写，而不是直接记失败）。
     """
     raw = payload.get("chapters") if isinstance(payload, dict) else None
     if not isinstance(raw, list) or not raw:
-        raise AdapterError(ErrorCode.INVALID_INPUT, "分层大纲阶段二失败：emit_chapters 未返回非空 chapters 数组")
+        return []
     rows: list[dict] = []
     for index, item in enumerate(raw, start=1):
         if not isinstance(item, dict):
@@ -243,8 +389,6 @@ def _normalize_chapters(payload: dict, expected: int) -> list[dict]:
                 "error": None,
             }
         )
-    if not rows:
-        raise AdapterError(ErrorCode.INVALID_INPUT, "分层大纲阶段二失败：章节列表里没有可用对象")
     return rows
 
 
@@ -258,14 +402,12 @@ def _normalize_beats(payload: dict, expected: int, chapter_words: int, beats_per
         beats_per_chapter: 未给出目标字数时的默认等分数。
 
     返回:
-        节拍列表。
-
-    异常:
-        AdapterError: 未返回可用节拍。
+        节拍列表；未返回可用节拍时返回空列表
+        （交给节拍数闸门按数量越界重写，而不是直接记失败）。
     """
     raw = payload.get("beats") if isinstance(payload, dict) else None
     if not isinstance(raw, list) or not raw:
-        raise AdapterError(ErrorCode.INVALID_INPUT, "分层大纲阶段三失败：emit_beats 未返回非空 beats 数组")
+        return []
     default_words = max(1, int(chapter_words) // max(1, int(beats_per_chapter)))
     rows: list[dict] = []
     for index, item in enumerate(raw[: max(1, int(expected))], start=1):
@@ -284,8 +426,6 @@ def _normalize_beats(payload: dict, expected: int, chapter_words: int, beats_per
                 "target_words": words,
             }
         )
-    if not rows:
-        raise AdapterError(ErrorCode.INVALID_INPUT, "分层大纲阶段三失败：节拍列表里没有可用对象")
     return rows
 
 
@@ -299,6 +439,7 @@ def generate_hierarchical_outline(
     dry_run: bool = False,
     binding: str = "auto",
     resume: bool = False,
+    only_acts: list[int] | None = None,
     on_progress=None,
 ) -> dict:
     """三级分层生成大纲（幕 → 章 → 节拍），失败项可续跑。
@@ -365,18 +506,112 @@ def generate_hierarchical_outline(
                 "characters": char_rows,
             },
         )
-        payload = _generate_json(adapter, req, "outline_acts")
+        payload = _generate_json(
+            adapter,
+            req,
+            "outline_acts",
+            # 幕是一次请求出全量，这里只报「正在规划 N 幕 + 已接收字数」，
+            # 不把后面的章数错配到「幕」的单位上
+            on_delta=_delta_reporter(
+                on_progress, "act", 0, max(1, int(acts)), "幕结构", {"phase": "acts", "percent": 0}
+            ),
+        )
         work["acts"] = _normalize_acts(payload, acts, chapters_per_act)
+        # 第一轮闸门：幕数必须落在 ±1 内，不合格只重写本层
+        acts_expected = max(1, int(acts))
+        act_gate_attempts = 0
+        while abs(len(work["acts"]) - acts_expected) > 1 and act_gate_attempts < 2:
+            act_gate_attempts += 1
+            _progress(
+                on_progress,
+                {
+                    "type": "rewrite",
+                    "level": "acts",
+                    "attempt": act_gate_attempts,
+                    "reason": f"上一版给了 {len(work['acts'])} 幕，设定 {acts_expected} 幕（允许 ±1 幕）",
+                    "index": 1,
+                    "total": acts_expected,
+                },
+            )
+            retry_req = replace(
+                req,
+                messages=list(req.messages)
+                + [
+                    Message(
+                        "user",
+                        _count_correction("acts", len(work["acts"]), acts_expected, [item["title"] for item in work["acts"]]),
+                    )
+                ],
+            )
+            payload = _generate_json(adapter, retry_req, "outline_acts")
+            work["acts"] = _normalize_acts(payload, acts, chapters_per_act)
+        if abs(len(work["acts"]) - acts_expected) > 1:
+            save_work(store, work)
+            raise AdapterError(
+                ErrorCode.UPSTREAM_ERROR,
+                f"大纲生成停在「幕」层：设定 {acts_expected} 幕（允许 ±1 幕），重写 {act_gate_attempts} 次后实际 "
+                f"{len(work['acts'])} 幕。已完成内容已保留，可从当前层继续。",
+                retryable=True,
+                detail={
+                    "stage": "acts",
+                    "attempts": act_gate_attempts,
+                    "act_index": 1,
+                    "reason": f"上一版给了 {len(work['acts'])} 幕，设定 {acts_expected} 幕",
+                    "resume": True,
+                    "gate": True,
+                    "failures": [{"act_index": 1, "act_name": "幕层", "kind": "幕数越界", "raw": ""}],
+                },
+            )
         save_work(store, work)
 
-    # 阶段二：逐幕补章节（已完成的幕跳过，失败只记录）
+    # 只重写指定幕（页面「重新生成该幕」）：其余幕必须已有章节，否则无法只重写
+    if only_acts:
+        targets = {int(item) - 1 for item in only_acts if str(item).isdigit()}
+        for index, act in enumerate(work["acts"]):
+            if index in targets:
+                act["chapters"] = []
+                act["status"] = "pending"
+                act["error"] = None
+            elif not act.get("chapters"):
+                raise AdapterError(
+                    ErrorCode.INVALID_INPUT,
+                    f"缺少第 {index + 1} 幕的章节，无法只重写指定幕；请重新生成整份大纲。",
+                )
+
+    # 阶段二：逐幕补章节（章数必须落在允许区间；不合格只重写本幕，上限 2 次）
     act_total = len(work["acts"])
+    chapters_expected_total = act_total * max(1, int(chapters_per_act))
+    beats_expected = max(1, int(beats_per_chapter))
+    total_units = max(1, act_total + chapters_expected_total + chapters_expected_total * beats_expected)
+    chapters_done = 0
+    _progress(
+        on_progress,
+        {"type": "stage", "stage": "chapters", "total": act_total, "chapters_total": chapters_expected_total},
+    )
     for act_pos, act in enumerate(work["acts"], start=1):
-        if act.get("chapters"):
+        expected = max(1, int(chapters_per_act))
+        if act.get("chapters") and abs(len(act["chapters"]) - expected) <= _tolerance(expected):
+            chapters_done += len(act["chapters"])
             continue
-        expected = int(act.get("chapters_count") or chapters_per_act)
         name = act.get("title") or f"第{act_pos}幕"
-        _progress(on_progress, {"type": "batch", "unit": "act", "index": act_pos, "total": act_total, "name": name})
+        phase_extra = {
+            "phase": "chapters",
+            "chapters_done": chapters_done,
+            "chapters_expected": expected,
+            "chapters_total": chapters_expected_total,
+            "percent": _pct(act_total + chapters_done, total_units),
+        }
+        _progress(
+            on_progress,
+            {
+                "type": "batch",
+                "unit": "act",
+                "index": act_pos,
+                "total": act_total,
+                "name": name,
+                **phase_extra,
+            },
+        )
         prev = "；".join(f"第 {i} 幕《{item['title']}》：{item.get('summary') or ''}" for i, item in enumerate(work["acts"][: act_pos - 1], start=1))
         nxt = "、".join(f"第 {i} 幕《{item['title']}》" for i, item in enumerate(work["acts"][act_pos:], start=act_pos + 1))
         lines = [
@@ -411,11 +646,76 @@ def generate_hierarchical_outline(
                 adapter,
                 req,
                 "outline_chapters",
-                on_delta=_delta_reporter(on_progress, "act", act_pos, act_total, name),
+                on_delta=_delta_reporter(on_progress, "act", act_pos, act_total, name, phase_extra),
             )
-            act["chapters"] = _normalize_chapters(payload, expected)
+            chapters = _normalize_chapters(payload, expected)
+            # 按层重写：章数越界只重写本幕章节（最多 2 次），不裁剪
+            attempts = 0
+            ch_tol = _tolerance(expected)
+            while abs(len(chapters) - expected) > ch_tol:
+                if attempts >= 2:
+                    break
+                attempts += 1
+                reason = _count_reason("chapters", len(chapters), expected)
+                _progress(on_progress, {"type": "rewrite", "level": "chapters", "index": act_pos,
+                                        "total": act_total, "attempt": attempts, "reason": reason,
+                                        "actual": len(chapters), "expected": expected})
+                retry_req = replace(
+                    req,
+                    messages=list(req.messages)
+                    + [
+                        Message(
+                            "user",
+                            _count_correction("chapters", len(chapters), expected, [c["title"] for c in chapters]),
+                        )
+                    ],
+                )
+                payload = _generate_json(
+                    adapter,
+                    retry_req,
+                    "outline_chapters",
+                    on_delta=_delta_reporter(on_progress, "act", act_pos, act_total, name, phase_extra),
+                )
+                chapters = _normalize_chapters(payload, expected)
+            if abs(len(chapters) - expected) > _tolerance(expected):
+                act["chapters"] = chapters
+                act["status"] = "failed"
+                effect = "章节为空" if not chapters else f"实际 {len(chapters)} 章"
+                act["error"] = f"章层校验未过：设定 {expected} 章，{effect}"
+                save_work(store, work)
+                raise AdapterError(
+                    ErrorCode.UPSTREAM_ERROR,
+                    f"大纲生成停在第 {act_pos} 幕《{name}》的「章」层：{effect}，需要 {expected} 章"
+                    f"（允许 ±{_tolerance(expected)} 章），已尝试 {attempts} 次。已合格的幕与章已保留，可从当前层继续。",
+                    retryable=True,
+                    detail={
+                        "stage": "chapters",
+                        "act_index": act_pos,
+                        "attempts": attempts,
+                        "reason": _count_reason("chapters", len(chapters), expected),
+                        "resume": True,
+                        "gate": True,
+                        "failures": [
+                            {
+                                "act_index": act_pos,
+                                "act_name": name,
+                                "kind": "章层为空" if not chapters else "章层越界",
+                                "raw": f"{len(chapters)}/{expected}",
+                            }
+                        ],
+                    },
+                )
+            act["chapters"] = chapters
             act["status"] = "done"
             act["error"] = None
+            act["_chapters_attempts"] = attempts
+            chapters_done += len(chapters)
+        except AdapterError as exc:
+            if (exc.detail or {}).get("gate"):
+                raise
+            act["status"] = "failed"
+            act["error"] = _error_text(exc)
+            failures.append(_failure("act", act["error"], act_pos, name))
         except Exception as exc:  # 单幕失败不影响其它幕
             act["status"] = "failed"
             act["error"] = _error_text(exc)
@@ -425,23 +725,36 @@ def generate_hierarchical_outline(
     # 阶段三：逐章补齐节拍（按全文章序号显示进度）
     chapter_total = sum(len(act.get("chapters") or []) for act in work["acts"])
     chapter_pos = 0
+    beats_expected = max(1, int(beats_per_chapter))
+    beats_total = chapter_total * beats_expected
+    beats_done = 0
+    total_units = max(1, act_total + chapter_total + beats_total)
+    _progress(on_progress, {"type": "stage", "stage": "beats", "total": chapter_total, "beats_total": beats_total})
     for act_pos, act in enumerate(work["acts"], start=1):
         for chapter in act.get("chapters") or []:
             chapter_pos += 1
-            if chapter.get("beats"):
+            if chapter.get("beats") and len(chapter["beats"]) == beats_expected:
+                beats_done += len(chapter["beats"])
                 continue
             chapter_title = chapter.get("title") or f"第{chapter_pos}章"
             _progress(
                 on_progress,
                 {
                     "type": "batch",
-                    "unit": "chapter",
-                    "index": chapter_pos,
-                    "total": chapter_total,
+                    "unit": "beat",
+                    "phase": "beats",
+                    "index": min(beats_total, beats_done + 1),
+                    "total": beats_total,
+                    "beat_index": min(beats_total, beats_done + 1),
+                    "beat_total": beats_total,
                     "name": chapter_title,
                     "act_index": act_pos,
                     "act_total": act_total,
                     "act_name": act.get("title") or f"第{act_pos}幕",
+                    "chapter_index": chapter_pos,
+                    "chapter_total": chapter_total,
+                    "chapter": chapter_title,
+                    "percent": _pct(act_total + chapter_total + beats_done, total_units),
                 },
             )
             siblings = "；".join(
@@ -478,22 +791,109 @@ def generate_hierarchical_outline(
                 },
             )
             try:
-                payload = _generate_json(
-                    adapter,
-                    req,
-                    "outline_beats",
-                    on_delta=_delta_reporter(
+                beats: list[dict] = []
+                beat_attempts = 0
+                while True:
+                    payload = _generate_json(
+                        adapter,
+                        req if not beat_attempts else retry_req,
+                        "outline_beats",
+                        on_delta=_beat_delta_reporter(
+                            on_progress,
+                            beats_done,
+                            beats_total,
+                            chapter_pos,
+                            chapter_total,
+                            act_pos,
+                            act_total,
+                            chapter_title,
+                            lambda done: _pct(act_total + chapter_total + done, total_units),
+                        ),
+                    )
+                    beats = _normalize_beats(payload, beats_expected, chapter_words, beats_per_chapter)
+                    if abs(len(beats) - beats_expected) <= _tolerance(beats_expected):
+                        break
+                    if beat_attempts >= 2:
+                        break
+                    beat_attempts += 1
+                    logger.warning(
+                        "大纲第 %s 章节拍 %s/%s，第 %s 次按层重写", chapter_pos, len(beats), beats_expected, beat_attempts
+                    )
+                    _progress(
                         on_progress,
-                        "chapter",
-                        chapter_pos,
-                        chapter_total,
-                        chapter_title,
-                        {"act_index": act_pos, "act_total": act_total},
-                    ),
-                )
-                chapter["beats"] = _normalize_beats(payload, beats_per_chapter, chapter_words, beats_per_chapter)
+                        {
+                            "type": "rewrite",
+                            "level": "beats",
+                            "index": act_pos,
+                            "total": act_total,
+                            "chapter_index": chapter_pos,
+                            "chapter": chapter_title,
+                            "attempt": beat_attempts,
+                            "actual": len(beats),
+                            "expected": beats_expected,
+                            "empty": not beats,
+                            "reason": _count_reason("beats", len(beats), beats_expected),
+                        },
+                    )
+                    retry_req = replace(
+                        req,
+                        messages=list(req.messages)
+                        + [
+                            Message(
+                                "user",
+                                _count_correction(
+                                    "beats", len(beats), beats_expected, [item["summary"] for item in beats]
+                                ),
+                            )
+                        ],
+                    )
+                if abs(len(beats) - beats_expected) > _tolerance(beats_expected):
+                    chapter["beats"] = beats
+                    chapter["status"] = "failed"
+                    state = "节拍为空" if not beats else f"实际 {len(beats)} 个节拍"
+                    chapter["error"] = (
+                        f"节拍为空：设定 {beats_expected} 个"
+                        if not beats
+                        else f"节拍数越界：设定 {beats_expected} 个，实际 {len(beats)} 个"
+                    )
+                    save_work(store, work)
+                    raise AdapterError(
+                        ErrorCode.UPSTREAM_ERROR,
+                        f"大纲生成停在第 {act_pos} 幕 · 第 {chapter_pos} 章《{chapter_title}》的「节拍」层：{state}，"
+                        f"需要 {beats_expected} 个（允许 ±{_tolerance(beats_expected)} 个），已尝试 {beat_attempts} 次。"
+                        "已合格的幕与章已保留，可从该章继续。",
+                        retryable=True,
+                        detail={
+                            "stage": "beats",
+                            "act_index": act_pos,
+                            "chapter_index": chapter_pos,
+                            "chapter": chapter_title,
+                            "attempts": beat_attempts,
+                            "reason": _count_reason("beats", len(beats), beats_expected),
+                            "resume": True,
+                            "gate": True,
+                            "failures": [
+                                {
+                                    "act_index": act_pos,
+                                    "act_name": act.get("title") or f"第{act_pos}幕",
+                                    "kind": f"节拍层为空（第 {chapter_pos} 章）" if not beats else f"节拍层越界（第 {chapter_pos} 章）",
+                                    "raw": f"{len(beats)}/{beats_expected}",
+                                }
+                            ],
+                        },
+                    )
+                chapter["beats"] = beats
                 chapter["status"] = "done"
                 chapter["error"] = None
+                beats_done += len(beats)
+            except AdapterError as exc:
+                if (exc.detail or {}).get("gate"):
+                    raise
+                chapter["status"] = "failed"
+                chapter["error"] = _error_text(exc)
+                failures.append(
+                    _failure("chapter", chapter["error"], act_pos, act.get("title") or f"第{act_pos}幕", chapter_pos, chapter_title)
+                )
             except Exception as exc:  # 单章失败不影响其它章
                 chapter["status"] = "failed"
                 chapter["error"] = _error_text(exc)
@@ -529,11 +929,33 @@ def generate_hierarchical_outline(
         built_acts.append(built)
 
     bible.setdefault("outline", {})["acts"] = built_acts
+    # 角色引用：auto 过滤后回落到 POV；none 只清洗（丢弃人名/空串/重复 ID），不回落
+    ignored_character_refs = 0
     if binding == "auto":
         bind_outline_characters(store, bible)
+    else:
+        stats = sanitize_outline_character_ids(bible, characters)
+        ignored_character_refs = int(stats["dropped"])
+        if ignored_character_refs:
+            message = f"已忽略 {ignored_character_refs} 个无法识别的角色引用（binding=none 不自动选角）"
+            logger.info(message)
+            _progress(on_progress, {"type": "notice", "message": message})
     golden = check_golden_three(bible)
     if not dry_run:
         bible = settings_store.save(bible)
+    # 生成完成的逐幕校验摘要（幕/章/节拍三层，含实际值、偏差、允许区间与原因）
+    validation_rows: list[dict] = []
+    for index, act in enumerate(work["acts"], start=1):
+        row = _act_validation(act, index, chapters_per_act, beats_per_chapter, chapter_words, "")
+        row["rewrites"] = {
+            "act_attempts": int(act.get("_chapters_attempts") or 0),
+            "unresolved": [] if act.get("status") == "done" else [str(act.get("error") or "")],
+            "chapter_issues": {},
+        }
+        validation_rows.append(row)
+    report = _validation_report(
+        validation_rows, chapters_per_act, beats_per_chapter, chapter_words, max(1, int(acts))
+    )
     return {
         "acts": built_acts,
         "chapters": chapter_count,
@@ -541,9 +963,19 @@ def generate_hierarchical_outline(
         "provider": getattr(adapter, "model", "") or "offline-writing",
         "settings_revision": bible.get("settings_revision"),
         "binding": binding,
+        "ignored_character_refs": ignored_character_refs,
         "golden_three": golden,
         "dry_run": dry_run,
         "failures": failures,
         "resumed": bool(resume),
         "work_file": str(work_file(store)),
+        "expected": {
+            "acts": max(1, int(acts)),
+            "chapters_per_act": max(1, int(chapters_per_act)),
+            "beats_per_chapter": max(1, int(beats_per_chapter)),
+        },
+        "actual": {"acts": len(built_acts), "chapters": chapter_count, "beats": beat_count},
+        "matches": report["matches"],
+        "validation": report,
+        "summary": report["summary"],
     }

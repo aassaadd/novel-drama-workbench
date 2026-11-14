@@ -22,7 +22,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from ..adapters.base import Message, TextGenRequest
-from ..config import AppConfig
+from ..config import AppConfig, resolve_temperature
 from ..models import entities
 
 WORKER_PATH = Path(__file__).resolve().parent / "providers" / "voxcpm2_design_worker.py"
@@ -190,12 +190,13 @@ def _rule_profile(character: dict) -> dict:
     }
 
 
-def build_profile(adapter, character: dict) -> dict:
+def build_profile(adapter, character: dict, config=None) -> dict:
     """用 LLM 生成音色描述；失败回退规则模板。
 
     参数:
         adapter: 写作适配器（需实现 generate_tool）。
         character: 人物档案 dict。
+        config: 本机配置（读取「润色」分组温度）；None 时用分组默认值 0.6。
 
     返回:
         `{"profile": ..., "source": "llm"|"rule", "note": 可选提示}`。
@@ -205,7 +206,7 @@ def build_profile(adapter, character: dict) -> dict:
         system=_SYSTEM_PROMPT,
         messages=[Message(role="user", content=_character_brief(character))],
         max_tokens=900,
-        temperature=0.6,
+        temperature=resolve_temperature(config, "polish") if config is not None else 0.6,
         stream=False,
         metadata={"purpose": "voice_design_profile"},
     )

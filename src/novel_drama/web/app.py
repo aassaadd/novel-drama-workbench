@@ -2547,20 +2547,15 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         """生成大纲（`outline generate`）。
 
         参数:
-            body: {path 工程目录, acts, chapters_per_act, beats_per_chapter, words,
-                   multi_turn 是否按幕多轮, acts_per_round 每轮幕数, dry_run}。
+            body: {path 工程目录, acts, chapters_per_act, beats_per_chapter, words, dry_run}。
 
         返回:
-            CLI 的 JSON 负载（含 rounds / multi_turn）。
+            CLI 的 JSON 负载（含 validation / summary）。
         """
         argv = ["--project", body["path"], "--json", "outline", "generate"]
         for key, flag in (("acts", "--acts"), ("chapters_per_act", "--chapters-per-act"), ("beats_per_chapter", "--beats-per-chapter"), ("words", "--words")):
             if body.get(key) is not None:
                 argv += [flag, str(body[key])]
-        if body.get("multi_turn"):
-            argv.append("--multi-turn")
-        if body.get("acts_per_round") is not None:
-            argv += ["--acts-per-round", str(body["acts_per_round"])]
         if body.get("dry_run"):
             argv.append("--dry-run")
         return _respond(_cli(*argv))
@@ -4756,7 +4751,7 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
             result = {"profile": None, "source": "manual", "note": None, "prompt": manual}
         else:
             adapters = build_adapters(cfg, store.settings())
-            built = voice_design.build_profile(adapters.writing, character)
+            built = voice_design.build_profile(adapters.writing, character, cfg)
             result = {**built, "prompt": built["profile"]["design_prompt"]}
         return {
             **result,

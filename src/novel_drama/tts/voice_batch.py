@@ -476,7 +476,7 @@ def _run_item(store, cfg: AppConfig, job: dict, item: dict, position: int, total
             adapter = build_adapters(cfg, store.settings()).writing
         except Exception:  # noqa: BLE001 - 适配器不可用时由 build_profile 回退规则模板
             adapter = None
-        built = voice_design.build_profile(adapter, character)
+        built = voice_design.build_profile(adapter, character, cfg)
         meta = voice_design.create_batch(store, cfg, character, built["profile"]["design_prompt"], count, built["profile"])
         item["batch_id"] = meta["batch_id"]
         item["candidates_total"] = count

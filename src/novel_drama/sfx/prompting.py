@@ -16,6 +16,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from ..config import resolve_temperature
 from .types import BAD_REQUEST, SfxError
 
 #: 含中日韩统一表意文字即视为中文输入
@@ -282,7 +283,7 @@ def _llm_settings(config, timeout_s: float | None = None) -> dict | None:
         timeout_s if timeout_s is not None else (config.get("sfx.prompt.llm_timeout_s") or DEFAULT_LLM_TIMEOUT_S)
     )
     # 改写是短任务：低温度 + 关思考，避免几十秒的推理
-    settings["temperature"] = 0.2
+    settings["temperature"] = resolve_temperature(config, "audio")
     settings["max_tokens"] = 220
     settings["enable_thinking"] = False
     return settings
@@ -311,7 +312,7 @@ def _llm_rewrite(prompt: str, duration_s: float, settings: dict) -> str:
         system=LLM_SYSTEM,
         messages=[Message(role="user", content=f"中文描述：{prompt}\n目标时长：{duration_s:g} 秒")],
         max_tokens=220,
-        temperature=0.2,
+        temperature=float(settings.get("temperature") or 0.2),
         stream=False,
     )
     text = (adapter.generate(request).text or "").strip()

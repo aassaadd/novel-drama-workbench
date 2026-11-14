@@ -511,7 +511,7 @@ def cmd_voice_design(args, config: AppConfig) -> int:
     prompt = args.prompt
     if not prompt:
         adapters = build_adapters(config, store.settings())
-        built = voice_design.build_profile(adapters.writing, character)
+        built = voice_design.build_profile(adapters.writing, character, config)
         prompt = built["profile"]["design_prompt"]
         if built.get("note"):
             print(f"[warn] {built['note']}")

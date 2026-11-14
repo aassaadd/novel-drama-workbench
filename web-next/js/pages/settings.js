@@ -683,6 +683,21 @@ function connectionHTML() {
                 <option value="high" ${llm.thinking_effort === 'high' ? 'selected' : ''}>高（更稳、更慢）</option>
               </select></div>
           </div>
+          <div class="conn-grid">
+            <div class="field"><label>写作温度</label>
+              <input class="input" id="conn-llm-temp-writing" type="number" min="0" max="2" step="0.1"
+                value="${esc(llm.temperature ?? 0.8)}"
+                title="大纲 / 正文 / 角色 / 世界生成；保存后立即生效" /></div>
+            <div class="field"><label>润色温度</label>
+              <input class="input" id="conn-llm-temp-polish" type="number" min="0" max="2" step="0.1"
+                value="${esc(llm.temperature_polish ?? 0.6)}"
+                title="润色与音色描述；保存后立即生效" /></div>
+            <div class="field"><label>音效与 BGM 温度</label>
+              <input class="input" id="conn-llm-temp-audio" type="number" min="0" max="2" step="0.1"
+                value="${esc(llm.temperature_audio ?? 0.2)}"
+                title="音效 / BGM 提示词；保存后立即生效" /></div>
+          </div>
+          <div class="hint">温度分组：写作 ${esc(llm.temperature ?? 0.8)} · 润色 ${esc(llm.temperature_polish ?? 0.6)} · 音效与 BGM ${esc(llm.temperature_audio ?? 0.2)}；调用点不再写死温度。</div>
           <div class="conn-actions">
             <button class="btn sm" data-act="conn-test-llm" title="用当前填写的地址、密钥与模型测试连通">测试连通</button>
             <button class="btn sm" data-act="conn-refresh-llm" title="从接口重新读取可用模型列表并刷新下拉">刷新模型</button>
@@ -1007,6 +1022,9 @@ function llmForm() {
     first_token_timeout_s: document.getElementById('conn-llm-first-token')?.value || '',
     context_window: document.getElementById('conn-llm-context')?.value || '',
     max_tokens: document.getElementById('conn-llm-max-output')?.value || '',
+    temperature: document.getElementById('conn-llm-temp-writing')?.value || '',
+    temperature_polish: document.getElementById('conn-llm-temp-polish')?.value || '',
+    temperature_audio: document.getElementById('conn-llm-temp-audio')?.value || '',
     enable_thinking: Boolean(document.getElementById('conn-llm-thinking')?.checked),
     reasoning_effort: document.getElementById('conn-llm-effort')?.value || 'medium',
   };

@@ -47,6 +47,9 @@ _FALLBACK = {
         "total_timeout_s": None,
         "max_retries": 2,
         "temperature": 0.8,
+        # 分组温度：写作（大纲/正文/角色/世界）、润色（润色/音色描述）、音效与 BGM
+        "temperature_polish": 0.6,
+        "temperature_audio": 0.2,
         "max_tokens": None,
         "stop": [],
         "enable_thinking": False,
@@ -374,3 +377,29 @@ def _read_yaml(path: Path, warnings: list[str]) -> dict:
         warnings.append(f"页面覆盖层解析失败，已忽略 {path}: {exc}")
         return {}
     return data if isinstance(data, dict) else {}
+
+
+#: 温度分组 → 配置键与默认值
+TEMPERATURE_GROUPS = {
+    "writing": ("omlx.temperature", 0.8),
+    "polish": ("omlx.temperature_polish", 0.6),
+    "audio": ("omlx.temperature_audio", 0.2),
+}
+
+
+def resolve_temperature(config, group: str = "writing") -> float:
+    """读取某个用途分组的温度（设置页值为准，不再由调用点写死）。
+
+    参数:
+        config: AppConfig 或 dict。
+        group: writing=结构/正文/角色/世界；polish=润色/音色描述；audio=音效与 BGM。
+
+    返回:
+        0.0–2.0 的温度；配置缺失或非法时用该分组默认值。
+    """
+    key, default = TEMPERATURE_GROUPS.get(group, TEMPERATURE_GROUPS["writing"])
+    try:
+        value = float(config.get(key) if config is not None else default)
+    except (AttributeError, TypeError, ValueError):
+        value = default
+    return max(0.0, min(2.0, value))

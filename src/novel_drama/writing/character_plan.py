@@ -16,7 +16,7 @@ import math
 from pathlib import Path
 
 from ..adapters.base import Message, TextGenRequest
-from ..config import AppConfig
+from ..config import AppConfig, resolve_temperature
 from ..models.ids import now_iso
 from ..store import ProjectStore
 from ..store.settings_store import SettingsStore
@@ -203,7 +203,7 @@ def plan_characters(
         system="你是中文小说的人物编辑，人物必须与给定的作品设定一致，只按工具参数输出名单，不要解释。",
         messages=[Message("user", prompt)],
         stream=True,
-        temperature=0.7,
+        temperature=resolve_temperature(config, "writing"),
         max_tokens=_tool_max_tokens(config, "character_plan", wanted),
         metadata={
             "work": {"title": work.get("title"), "author": work.get("author"), "genre": work.get("genre") or []},
@@ -386,7 +386,7 @@ def generate_from_plan(
             system="你是中文小说的人物编辑，人物必须与给定的作品设定一致，只按工具参数输出，不要解释。",
             messages=[Message("user", prompt)],
             stream=True,
-            temperature=0.8,
+            temperature=resolve_temperature(config, "writing"),
             max_tokens=_tool_max_tokens(config, "character", 1),
             metadata={
                 "work": {"title": work.get("title"), "author": work.get("author"), "genre": work.get("genre") or []},
@@ -580,7 +580,7 @@ def fill_character_descriptions(
             system="你是中文小说的人物编辑，只按工具参数输出描述字段，不要解释。",
             messages=[Message("user", prompt)],
             stream=True,
-            temperature=0.7,
+            temperature=resolve_temperature(config, "writing"),
             max_tokens=_tool_max_tokens(config, "character", 1),
             metadata={
                 "mode": "single",

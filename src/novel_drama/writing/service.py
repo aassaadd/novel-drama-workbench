@@ -9,12 +9,14 @@ from __future__ import annotations
 import inspect
 import json
 import logging
+import math
 import re
+import threading
 from dataclasses import replace
 
 from ..adapters.base import AdapterError, ErrorCode, Message, TextGenRequest, TextGenResult
 from ..adapters.offline_writing import OfflineWritingAdapter
-from ..config import AppConfig
+from ..config import AppConfig, resolve_temperature
 from ..director.markup import parse_markup
 from ..models import entities
 from ..models.ids import new_id, now_iso
@@ -32,9 +34,6 @@ DEFAULT_CHAPTER_WORDS = 1200
 
 #: 日志：工具调用解析失败时记录原始片段，便于定位模型返回了什么
 logger = logging.getLogger(__name__)
-
-#: 按幕多轮大纲的中间结果版本（`.ndw/outline_acts.json`）
-_ACT_WORK_VERSION = "outline_acts/1"
 
 # 工具调用输出预算：schema 普遍较大，且 reasoning_tokens 也计入 max_tokens。
 # 适配器只会保证不低于 4096，这里按「固定附加内容 + 条目数」估算，避免参数被截断。
@@ -57,34 +56,71 @@ _TOOL_PER_ITEM_TOKENS = {
 _TOOL_EXTRA_TOKENS = {"characters": 2600, "worlds": 1600}
 #: 单次工具调用的业务估算上限
 _TOOL_MAX_TOKENS_CAP = 16384
-#: 配置兜底允许的输出上限（与常见 OpenAI 兼容服务的最大输出对齐）
-_TOOL_FLOOR_CAP = 32768
+
+#: 最近一次「输出预算被设置值压低」的提示（按线程隔离，供 SSE 透给页面）
+_BUDGET_NOTICE = threading.local()
+
+
+def pop_budget_notice() -> str | None:
+    """取出并清空本线程最近一次输出预算提示。
+
+    返回:
+        中文提示；没有则返回 None。
+    """
+    message = getattr(_BUDGET_NOTICE, "message", None)
+    _BUDGET_NOTICE.message = None
+    return message
+
+
+def _set_budget_notice(message: str) -> None:
+    """记录一条输出预算提示（同一线程只保留最新一条）。
+
+    参数:
+        message: 中文提示。
+
+    返回:
+        无。
+    """
+    _BUDGET_NOTICE.message = message
 
 
 def _tool_max_tokens(config, step: str, items: int = 1) -> int:
-    """估算一次工具调用需要的输出预算。
+    """估算一次工具调用需要的输出预算，并受设置页 `omlx.max_tokens` 约束。
 
-    预算取 `max(配置值 omlx.max_tokens, 业务估算值)`：配置值作为兜底下限，
-    估算值按条目数量增长；配置值高于估算时以配置为准（上限 32768）。
+    规则：
+    - 未设置 `omlx.max_tokens`：用业务估算值（上限 16384）；
+    - 已设置：下发 `min(估算, 设置)`，不再把设置值当下限；
+    - 估算超过设置时记录中文提示「该次调用需要 X，已超出设置 Y」，
+      实际仍按设置下发（页面会以 notice 事件提示，可能被截断）。
 
     参数:
         config: AppConfig 或 dict，用于读取 `omlx.max_tokens`。
-        step: 工具步骤（characters/worlds/outline/act/world/character/premise/style）。
+        step: 工具步骤（characters/worlds/outline/outline_acts/outline_chapters/outline_beats 等）。
         items: 预估条目数（人物数、世界数、节拍数等），至少按 1 计算。
 
     返回:
-        建议的 max_tokens；低于适配器下限时由适配器抬到 4096。
+        实际下发的 max_tokens。
     """
     per_item = _TOOL_PER_ITEM_TOKENS.get(step, 800)
     extra = _TOOL_EXTRA_TOKENS.get(step, 1200)
     estimate = min(_TOOL_MAX_TOKENS_CAP, _TOOL_BASE_MAX_TOKENS + extra + per_item * max(1, int(items)))
-    floor = 0
+    configured = 0
     if config is not None:
         try:
-            floor = int(config.get("omlx.max_tokens") or 0)
+            configured = int(config.get("omlx.max_tokens") or 0)
         except (AttributeError, TypeError, ValueError):
-            floor = 0
-    return max(estimate, min(_TOOL_FLOOR_CAP, floor))
+            configured = 0
+    if configured <= 0:
+        return estimate
+    if estimate > configured:
+        message = (
+            f"该次调用需要 {estimate} tokens，已超出设置 {configured}；"
+            f"本次按 {configured} 下发，输出可能被截断，可在设置页调大「最大输出」"
+        )
+        logger.warning(message)
+        _set_budget_notice(message)
+        return configured
+    return estimate
 
 
 def build_writing_adapter(config: AppConfig, settings: dict | None = None):
@@ -143,12 +179,12 @@ def generate_outline(
     chapter_words: int = DEFAULT_CHAPTER_WORDS,
     dry_run: bool = False,
     binding: str = "auto",
-    multi_turn: bool = False,
-    acts_per_round: int = 1,
-    resume: bool = False,
     on_progress=None,
 ) -> dict:
-    """生成幕/章/节拍大纲并写入设定库。
+    """单次工具调用生成幕/章/节拍大纲并写入设定库（CLI 兼容路径）。
+
+    页面的分层大纲走 `writing.outline_hier.generate_hierarchical_outline`：
+    一次规划全部幕 → 逐幕出章 → 逐章出节拍；旧的「按幕多轮」路径已删除。
 
     参数:
         store: 工程。
@@ -159,14 +195,11 @@ def generate_outline(
         chapter_words: 单章目标字数（用于分配节拍字数）。
         dry_run: 只生成不落盘。
         binding: auto=把节拍绑定到已有人物；none=不改动角色引用。
-        multi_turn: True 时按幕分批调用 `emit_act`，False 走原单轮 `emit_outline`。
-        acts_per_round: 每轮计划生成的幕数（默认 1）；每次工具调用产出一幕。
-        resume: 多轮模式下只补失败/缺失的幕，复用 `.ndw/outline_acts.json` 里已成功的幕。
         on_progress: 进度回调（batch/chars 事件）；仅页面流式接口传入。
 
     返回:
         {"acts": [...], "chapters": N, "beats": M, "provider": name, "settings_revision": r,
-        "golden_three": {"passed", "issues"}, "multi_turn": bool, "rounds": N}。
+        "golden_three": {"passed", "issues"}, "validation": {...}, "summary": "..."}。
 
     异常:
         AdapterError: 模型输出不是合法大纲 JSON。
@@ -207,32 +240,27 @@ def generate_outline(
             "characters": char_rows,
         },
     )
-    outline_rounds = 1
     progress_state = {"chars": 0}
-    if multi_turn:
-        raw_acts = _generate_outline_acts(
-            adapter,
-            req,
-            acts,
-            chapters_per_act,
-            beats_per_chapter,
-            acts_per_round,
-            config=config,
-            store=store,
-            chapter_words=chapter_words,
-            resume=resume,
-            on_progress=on_progress,
-        )
-        outline_rounds = (max(1, int(acts)) + max(1, int(acts_per_round)) - 1) // max(1, int(acts_per_round))
-    else:
-        _progress(on_progress, {"type": "batch", "index": 1, "total": 1, "unit": "outline"})
-        payload = _generate_json(
-            adapter,
-            req,
-            "outline",
-            on_delta=_char_delta(progress_state, on_progress, 1, 1),
-        )
-        raw_acts = payload.get("acts")
+    _progress(on_progress, {"type": "batch", "index": 1, "total": 1, "unit": "outline"})
+    payload = _generate_json(
+        adapter,
+        req,
+        "outline",
+        on_delta=_char_delta(progress_state, on_progress, 1, 1),
+    )
+    raw_acts = payload.get("acts")
+    # 只校验不改内容：数量偏差在生成完成后的校验摘要里标注
+    if isinstance(raw_acts, list):
+        for index, raw_act in enumerate(raw_acts, start=1):
+            if isinstance(raw_act, dict):
+                issues = _act_validation(raw_act, index, chapters_per_act, beats_per_chapter, chapter_words)
+                if not issues["in_range"]:
+                    logger.warning(
+                        "大纲第 %s 幕数量超出允许区间：设定 %s 章，实际 %s 章",
+                        index,
+                        issues["expected"]["chapters"],
+                        issues["actual"]["chapters"],
+                    )
     if not isinstance(raw_acts, list) or not raw_acts:
         raise AdapterError(ErrorCode.INVALID_INPUT, "写作适配器返回的大纲为空：acts 必须是非空数组")
     # 结构化补全：分配稳定 ID、合并到设定库（不覆盖已有正文）
@@ -278,11 +306,51 @@ def generate_outline(
         built_acts.append(act)
 
     bible.setdefault("outline", {})["acts"] = built_acts
+    # 角色引用：auto 过滤后回落到 POV；none 只清洗（丢弃人名/空串/重复 ID），不回落
+    ignored_character_refs = 0
     if binding == "auto":
         bind_outline_characters(store, bible)
+    else:
+        stats = sanitize_outline_character_ids(bible, characters)
+        ignored_character_refs = int(stats["dropped"])
+        if ignored_character_refs:
+            message = f"已忽略 {ignored_character_refs} 个无法识别的角色引用（binding=none 不自动选角）"
+            logger.info(message)
+            _progress(on_progress, {"type": "notice", "message": message})
     golden = check_golden_three(bible)
     if not dry_run:
         bible = settings_store.save(bible)
+    # 逐层校验（只校验不改内容）：幕数、每幕章数、每章节拍数、每幕目标字数
+    validation_rows: list[dict] = []
+    for index, raw_act in enumerate(raw_acts, start=1):
+        if not isinstance(raw_act, dict):
+            continue
+        row = _act_validation(
+            raw_act,
+            index,
+            chapters_per_act,
+            beats_per_chapter,
+            chapter_words,
+            str(raw_act.get("_finish_reason") or ""),
+        )
+        rewrite = raw_act.get("_rewrite") or {}
+        row["rewrites"] = {
+            "act_attempts": int(rewrite.get("act_attempts") or 0),
+            "unresolved": list(rewrite.get("unresolved") or []),
+            "chapter_issues": {
+                key: value for key, value in (rewrite.get("chapter_attempts") or {}).items() if value
+            },
+        }
+        if not row["in_range"]:
+            row["reasons"].append(
+                f"已按层重写 {row['rewrites']['act_attempts']} 次仍越界，保留最后一次结果供你决定"
+                if row["rewrites"]["act_attempts"]
+                else "未触发重写：越界发生在重写之后或尚未重写"
+            )
+        validation_rows.append(row)
+    report = _validation_report(
+        validation_rows, chapters_per_act, beats_per_chapter, chapter_words, max(1, int(acts))
+    )
     return {
         "acts": built_acts,
         "chapters": chapter_count,
@@ -290,73 +358,19 @@ def generate_outline(
         "provider": getattr(adapter, "model", "") or "offline-writing",
         "settings_revision": bible.get("settings_revision"),
         "binding": binding,
+        "ignored_character_refs": ignored_character_refs,
         "golden_three": golden,
         "dry_run": dry_run,
-        "multi_turn": bool(multi_turn),
-        "rounds": outline_rounds,
+        "expected": {
+            "acts": max(1, int(acts)),
+            "chapters_per_act": max(1, int(chapters_per_act)),
+            "beats_per_chapter": max(1, int(beats_per_chapter)),
+        },
+        "actual": {"acts": len(built_acts), "chapters": chapter_count, "beats": beat_count},
+        "matches": report["matches"],
+        "validation": report,
+        "summary": report["summary"],
     }
-
-
-def _act_work_file(store: ProjectStore):
-    """按幕多轮大纲的中间结果文件路径。"""
-    return store.root / ".ndw" / "outline_acts.json"
-
-
-def _act_params(acts, chapters_per_act, beats_per_chapter, chapter_words) -> dict:
-    """生成参数指纹：参数变化时不复用旧中间结果。"""
-    return {
-        "acts": max(1, int(acts)),
-        "chapters_per_act": max(1, int(chapters_per_act)),
-        "beats_per_chapter": max(1, int(beats_per_chapter)),
-        "chapter_words": max(1, int(chapter_words)),
-    }
-
-
-def _load_act_work(store: ProjectStore, params: dict) -> list:
-    """读取上次已成功生成的幕（仅参数一致时复用）。
-
-    参数:
-        store: 工程。
-        params: 参数指纹。
-
-    返回:
-        与幕序号对齐的列表（未完成的项为 None）。
-    """
-    path = _act_work_file(store)
-    if not path.exists():
-        return []
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return []
-    if not isinstance(data, dict) or data.get("params") != params:
-        return []
-    rows = data.get("acts")
-    return rows if isinstance(rows, list) else []
-
-
-def _save_act_work(store: ProjectStore, params: dict, acts: list, failures: list) -> None:
-    """原子保存已完成/失败的幕，供失败后续跑。"""
-    path = _act_work_file(store)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "schema_version": _ACT_WORK_VERSION,
-        "params": params,
-        "acts": acts,
-        "failures": failures,
-        "updated_at": now_iso(),
-    }
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    tmp.replace(path)
-
-
-def _clear_act_work(store: ProjectStore) -> None:
-    """全部成功后删除中间文件（失败时保留供续跑）。"""
-    try:
-        _act_work_file(store).unlink(missing_ok=True)
-    except OSError:
-        return
 
 
 def _raw_preview(payload) -> str:
@@ -392,227 +406,199 @@ def _maybe_json_obj(value) -> dict | None:
     return data if isinstance(data, dict) and data else None
 
 
-def _pick_act(payload) -> tuple[dict | None, str, str]:
-    """从工具参数里取出单幕对象，并给出失败分类。
+def _tolerance(expected: int) -> int:
+    """允许偏差：至少 1，最多为设定的 20%（向上取整）。
 
     参数:
-        payload: 适配器解析后的工具参数。
+        expected: 设定值。
 
     返回:
-        `(act, 失败分类, 原始片段)`；成功时分类为空串。
+        允许的正负偏差。
     """
-    raw = _raw_preview(payload)
-    if not isinstance(payload, dict):
-        # 模型把整个参数序列化成 JSON 字符串时，先剥壳再判断
-        payload = _maybe_json_obj(payload) or payload
-    if not isinstance(payload, dict):
-        return None, "模型没走工具调用：返回值不是 JSON 对象", raw
-    act = payload.get("act")
-    if isinstance(act, str):
-        # 部分模型会把 act 序列化成 JSON 字符串再塞进参数，先剥壳（含 ``` 包裹）
-        act = _maybe_json_obj(act) or act
-    if isinstance(act, dict) and act:
-        return act, "", ""
-    fallback = payload.get("acts")
-    if isinstance(fallback, list) and fallback and isinstance(fallback[0], str):
-        fallback = [_maybe_json_obj(fallback[0]) or fallback[0]] + list(fallback[1:])
-    if isinstance(fallback, list) and fallback and isinstance(fallback[0], dict) and fallback[0]:
-        return fallback[0], "", ""
-    if "act" not in payload:
-        return None, "工具参数不合法：缺少 act 字段", raw
-    if not isinstance(act, dict):
-        return None, f"工具参数不合法：act 应为对象，实际为 {type(act).__name__}", raw
-    return None, "工具参数不合法：act 是空对象", raw
+    return max(1, math.ceil(max(1, int(expected)) * 0.2))
 
 
-def _tool_error_kind(exc: AdapterError) -> tuple[str, str]:
-    """按适配器诊断字段给工具调用失败分类。
+def _looks_split(chapters: list[dict]) -> bool:
+    """判断章节是否像被模型拆成了多章（标题高度重复）。
 
     参数:
-        exc: 适配器抛出的错误。
+        chapters: 章节列表。
 
     返回:
-        `(分类文案, 原始诊断片段)`。
+        True 表示存在重复或互相包含的标题。
     """
-    detail = exc.detail or {}
-    finish = str(detail.get("finish_reason") or "")
-    calls = detail.get("tool_calls")
-    head = str(detail.get("content_head") or "").strip()
-    message = str(exc.message or "").strip()
-    raw = (
-        f"finish_reason={finish or '空'}，tool_calls={calls if calls is not None else '未知'}，"
-        f"content 前 200 字：{head or '（空）'}"
+    titles = [re.sub(r"[\s\d０-９一二三四五六七八九十、：:.\-—]+", "", str(item.get("title") or "")) for item in chapters]
+    titles = [title for title in titles if title]
+    if len(titles) < 3:
+        return False
+    unique = len(set(titles))
+    if unique <= len(titles) * 0.7:
+        return True
+    return any(
+        left != right and (left in right or right in left)
+        for index, left in enumerate(titles)
+        for right in titles[index + 1 :]
     )
-    if finish == "length" or "截断" in message:
-        kind = "输出被截断"
-    elif "未返回 tool_calls" in message or "不支持工具调用" in message:
-        kind = "模型没走工具调用"
-    elif "content" in message or "JSON" in message or "参数" in message:
-        kind = "工具参数不合法"
-    else:
-        kind = "上游调用失败"
-    return f"{kind}：{message or '工具调用失败'}", raw
 
 
-def _generate_outline_acts(
-    adapter,
-    req: TextGenRequest,
-    acts: int,
+def _chapter_beat_issues(chapter: dict, beats_per_chapter: int) -> list[str]:
+    """检查单章节拍数是否落在允许区间（每章单独校验）。
+
+    参数:
+        chapter: 章对象（模型原始输出）。
+        beats_per_chapter: 设定每章节拍数。
+
+    返回:
+        问题描述列表；空列表表示在区间内。
+    """
+    expected = max(1, int(beats_per_chapter))
+    tol = _tolerance(expected)
+    actual = len([beat for beat in (chapter.get("beats") or []) if isinstance(beat, dict)])
+    if expected - tol <= actual <= expected + tol:
+        return []
+    return [f"实际 {actual} 个节拍（设定 {expected} 个，允许 {expected - tol}–{expected + tol} 个）"]
+
+
+def _act_validation(
+    act: dict,
+    index: int,
     chapters_per_act: int,
     beats_per_chapter: int,
-    acts_per_round: int,
-    config: AppConfig | None = None,
-    store: ProjectStore | None = None,
-    chapter_words: int = DEFAULT_CHAPTER_WORDS,
-    resume: bool = False,
-    on_progress=None,
-) -> list[dict]:
-    """按幕分批调用 `emit_act`，合并为完整幕列表。
-
-    每轮的 user 消息追加在固定首条 user 之后：先说明本轮要生成第几幕，
-    再给出已完成幕的「标题 + 概要」只读摘要（不回传整段节拍），保证前缀稳定。
-
-    单幕解析失败会带纠正提示重试一次；仍失败则记录失败项并继续后续幕，
-    已成功的幕写入 `.ndw/outline_acts.json`，resume=True 时只补失败/缺失的幕。
+    chapter_words: int,
+    finish_reason: str = "",
+) -> dict:
+    """校验单幕的章数/节拍数/字数是否落在允许区间，并给出偏差原因（只校验不改内容）。
 
     参数:
-        adapter: 写作适配器（需实现 generate_tool）。
-        req: 单轮大纲请求（system 与首条 user 作为固定前缀）。
-        acts: 计划总幕数。
-        chapters_per_act: 每幕章节数（写进本轮提示）。
-        beats_per_chapter: 每章节拍数（用于估算单幕输出预算）。
-        acts_per_round: 每轮计划生成的幕数（每次工具调用产出一幕）。
-        config: 本机配置，用于读取 `omlx.max_tokens`；可为 None。
-        store: 工程；传入时启用断点续跑。
-        chapter_words: 单章目标字数，参与参数指纹。
-        resume: True 时复用已成功的幕，只补失败/缺失的幕。
-        on_progress: 进度回调。
+        act: 单幕对象（模型原始输出，未裁剪）。
+        index: 幕序号（从 1 开始）。
+        chapters_per_act: 设定每幕章数。
+        beats_per_chapter: 设定每章节拍数。
+        chapter_words: 设定单章字数。
+        finish_reason: 本幕上一次请求的 finish_reason。
 
     返回:
-        合并后的幕对象列表，顺序与生成顺序一致。
-
-    异常:
-        AdapterError: 存在无法补齐的幕；错误里带失败幕、已成功幕数与续跑提示。
+        `{act_index, title, expected, actual, delta, range, in_range, flags, reasons, finish_reason}`。
     """
-    total = max(1, int(acts))
-    per_round = max(1, int(acts_per_round))
-    params = _act_params(total, chapters_per_act, beats_per_chapter, chapter_words)
-    results: list = [None] * total
-    if store is not None:
-        if resume:
-            cached = _load_act_work(store, params)
-            for index, cached_act in enumerate(cached[:total]):
-                if isinstance(cached_act, dict) and cached_act:
-                    results[index] = cached_act
-        else:
-            # 重新生成：丢掉上次的中间结果，避免新旧大纲混在一起
-            _clear_act_work(store)
-    base_messages = list(req.messages)
-    base_metadata = dict(req.metadata or {})
-    progress_state = {"chars": 0}
-    failures: list[dict] = []
-    for act_index in range(total):
-        start = act_index + 1
-        if results[act_index]:
-            continue
-        end = min(total, (act_index // per_round + 1) * per_round)
-        _progress(on_progress, {"type": "batch", "index": start, "total": total, "unit": "act"})
-        lines = []
-        if end > start:
-            lines.append(f"请生成第 {start}–{end} 幕中的第 {start} 幕（共 {total} 幕，每幕 {chapters_per_act} 章）。")
-        else:
-            lines.append(f"请生成第 {start} 幕（共 {total} 幕，每幕 {chapters_per_act} 章）。")
-        done = []
-        for done_index, done_act in enumerate(results, start=1):
-            if not isinstance(done_act, dict):
+    chapters = [item for item in (act.get("chapters") or []) if isinstance(item, dict)]
+    actual_chapters = len(chapters)
+    actual_beats = sum(
+        len([beat for beat in (chapter.get("beats") or []) if isinstance(beat, dict)]) for chapter in chapters
+    )
+    actual_words = 0
+    words_known = False
+    for chapter in chapters:
+        for beat in chapter.get("beats") or []:
+            if not isinstance(beat, dict):
                 continue
-            title = str(done_act.get("title") or "").strip()
-            summary = str(done_act.get("summary") or "").strip()
-            done.append(f"第 {done_index} 幕《{title}》：{summary}")
-        if done:
-            lines.append("已完成幕（不要重复）：\n" + "\n".join(done))
-        request = replace(req, messages=base_messages + [Message("user", "\n".join(lines))])
-        # 单幕输出预算按本幕章数 × 每章节拍数估算，避免多轮时沿用整本预算或默认 2048
-        request.max_tokens = _tool_max_tokens(config, "act", chapters_per_act * beats_per_chapter)
-        # 离线适配器据此从确定性整本大纲里挑出对应幕
-        request.metadata = dict(base_metadata, act_offset=act_index)
-        act = None
-        reason = ""
-        raw = ""
-        for attempt in (1, 2):
             try:
-                payload = _generate_json(
-                    adapter,
-                    request,
-                    "act",
-                    on_delta=_char_delta(progress_state, on_progress, start, total),
-                )
-            except AdapterError as exc:
-                reason, raw = _tool_error_kind(exc)
-                act = None
+                words = int(beat.get("target_words") or 0)
+            except (TypeError, ValueError):
+                words = 0
+            if words > 0:
+                words_known = True
+            actual_words += max(0, words)
+    exp_chapters = max(1, int(chapters_per_act))
+    exp_beats = exp_chapters * max(1, int(beats_per_chapter))
+    exp_words = exp_chapters * max(1, int(chapter_words))
+    ch_tol = _tolerance(exp_chapters)
+    beat_tol = _tolerance(exp_beats)
+    word_tol = max(1, math.ceil(exp_words * 0.2))
+    flags = {
+        "chapters": exp_chapters - ch_tol <= actual_chapters <= exp_chapters + ch_tol,
+        # 节拍层按「每章单独校验」，任一章越界就算本幕节拍层越界
+        "beats": all(not _chapter_beat_issues(chapter, beats_per_chapter) for chapter in chapters),
+        "words": not words_known or exp_words - word_tol <= actual_words <= exp_words + word_tol,
+    }
+    reasons: list[str] = []
+    note = str(act.get("note") or act.get("reason") or "").strip()
+    if note:
+        reasons.append("模型旁注：" + note[:160])
+    if not flags["chapters"]:
+        if actual_chapters > exp_chapters:
+            if _looks_split(chapters):
+                reasons.append("推断：模型把一章拆成多章（多个标题重复或互相包含）")
             else:
-                act, reason, raw = _pick_act(payload)
-            if act:
-                break
-            logger.warning(
-                "大纲第 %s/%s 幕工具调用解析失败（第 %s 次）：%s | %s",
-                start,
-                total,
-                attempt,
-                reason,
-                raw,
-            )
-            if attempt == 1 and not reason.startswith("上游调用失败"):
-                # 带纠正提示重试一次：强调只调用 emit_act、参数必须是 act 对象
-                correction = Message(
-                    "user",
-                    "上一次输出没有返回合法的 act 对象："
-                    + reason
-                    + "。请只调用 emit_act，严格按 schema 返回 "
-                    + '{"act": {"title": "...", "summary": "...", "chapters": [...]}}；'
-                    + "不要输出解释、代码块或额外字段。",
-                )
-                request = replace(request, messages=list(request.messages) + [correction])
-        if not act:
-            failures.append(
-                {
-                    "act_index": start,
-                    "act_name": f"第 {start} 幕",
-                    "kind": reason,
-                    "raw": raw,
-                }
-            )
-            if store is not None:
-                _save_act_work(store, params, results, failures)
-            _progress(
-                on_progress,
-                {
-                    "type": "item",
-                    "index": start,
-                    "total": total,
-                    "name": f"第 {start} 幕",
-                    "status": "failed",
-                    "message": reason,
-                },
-            )
-            continue
-        results[act_index] = act
-        if store is not None:
-            _save_act_work(store, params, results, failures)
-    if failures:
-        ok = total - len(failures)
-        nums = "、".join(str(item["act_index"]) for item in failures)
-        first = failures[0]
-        raise AdapterError(
-            ErrorCode.UPSTREAM_ERROR,
-            f"大纲未完成：第 {nums} 幕失败（已成功 {ok}/{total} 幕）。原因：{first['kind']}。"
-            "已成功的幕已保留，可点「重试」只补失败幕。",
-            retryable=True,
-            detail={"failures": failures, "resume": True, "raw": first.get("raw", "")},
+                reasons.append("推断：模型自行扩写，新增支线或情节点，把本幕展开得比设定更长")
+        elif finish_reason == "length":
+            reasons.append("输出被截断（finish_reason=length），模型只返回了部分章节")
+        else:
+            reasons.append("推断：模型少给章节，可能把多章合并，或输出预算不足")
+    if not flags["beats"]:
+        detail = []
+        for index, chapter in enumerate(chapters, start=1):
+            issues = _chapter_beat_issues(chapter, beats_per_chapter)
+            if issues:
+                detail.append(f"第 {index} 章" + issues[0])
+        reasons.append("；".join(detail[:3]) or "章内节拍号数量与设定不符")
+    if not flags["words"]:
+        reasons.append(f"目标字数与设定不符（设定每章 {max(1, int(chapter_words))} 字，实际合计 {actual_words} 字）")
+    return {
+        "act_index": index,
+        "title": str(act.get("title") or f"第{index}幕"),
+        "expected": {"chapters": exp_chapters, "beats": exp_beats, "words": exp_words},
+        "actual": {"chapters": actual_chapters, "beats": actual_beats, "words": actual_words},
+        "delta": {
+            "chapters": actual_chapters - exp_chapters,
+            "beats": actual_beats - exp_beats,
+            "words": actual_words - exp_words,
+        },
+        "range": {
+            "chapters": [exp_chapters - ch_tol, exp_chapters + ch_tol],
+            "beats": [exp_beats - beat_tol, exp_beats + beat_tol],
+            "words": [exp_words - word_tol, exp_words + word_tol],
+        },
+        "in_range": all(flags.values()),
+        "flags": flags,
+        "reasons": reasons,
+        "finish_reason": finish_reason,
+    }
+
+
+def _validation_report(
+    rows: list[dict], chapters_per_act: int, beats_per_chapter: int, chapter_words: int, acts_expected: int | None = None
+) -> dict:
+    """把逐幕校验结果汇总成页面摘要（含整本合计）。
+
+    参数:
+        rows: `_act_validation` 的结果列表。
+        chapters_per_act: 设定每幕章数。
+        beats_per_chapter: 设定每章节拍数。
+        chapter_words: 设定单章字数。
+        acts_expected: 设定幕数；省略时按实际幕数计算。
+
+    返回:
+        `{rows, out_of_range, matches, summary}`。
+    """
+    out = [row for row in rows if not row["in_range"]]
+    exp_acts = max(1, int(acts_expected or len(rows)))
+    exp_chapters = exp_acts * max(1, int(chapters_per_act))
+    exp_beats = exp_chapters * max(1, int(beats_per_chapter))
+    total_chapters = sum(row["actual"]["chapters"] for row in rows)
+    total_beats = sum(row["actual"]["beats"] for row in rows)
+    lines = []
+    for row in rows:
+        rewrites = row.get("rewrites") or {}
+        attempts = int(rewrites.get("act_attempts") or 0)
+        mark = "✓ 在允许区间" if row["in_range"] else "⚠ 超出允许区间"
+        delta = row["delta"]["chapters"]
+        lines.append(
+            f"第 {row['act_index']} 幕《{row['title']}》：设定 {row['expected']['chapters']} 章 / "
+            f"实际 {row['actual']['chapters']} 章（偏差 {delta:+d}，允许 "
+            f"{row['range']['chapters'][0]}–{row['range']['chapters'][1]} 章）{mark}"
+            + (f"；已重写 {attempts} 次" if attempts else "")
+            + ("；原因：" + "；".join(row["reasons"]) if row["reasons"] else "")
         )
-    if store is not None:
-        _clear_act_work(store)
-    return [act for act in results if isinstance(act, dict)]
+    lines.append(
+        f"合计：设定 {exp_acts} 幕 / {exp_chapters} 章 / {exp_beats} 个节拍，"
+        f"实际 {len(rows)} 幕 / {total_chapters} 章 / {total_beats} 个节拍"
+    )
+    return {
+        "rows": rows,
+        "out_of_range": [row["act_index"] for row in out],
+        "matches": not out,
+        "summary": "\n".join(lines),
+    }
 
 
 def apply_outline(store: ProjectStore, dry_run: bool = False) -> dict:
@@ -919,6 +905,14 @@ def generate_chapter(
     seg_words = max(1, int(segment_words or mt.get("segment_words") or 800))
     rounds_cap = max(1, int(max_rounds or mt.get("max_rounds") or 8))
     round_max_tokens = max(1, int(mt.get("round_max_tokens") or 2048))
+    # 设置页的「最大输出」是硬上限：每段预算不超过它，也不再把设置值当下限
+    configured_tokens = 0
+    try:
+        configured_tokens = int(config.get("omlx.max_tokens") or 0)
+    except (AttributeError, TypeError, ValueError):
+        configured_tokens = 0
+    if configured_tokens > 0:
+        round_max_tokens = min(round_max_tokens, configured_tokens)
     target_words = int(context["metadata"].get("target_words") or chapter_words or 0)
 
     if multi_turn is not None:
@@ -2044,7 +2038,7 @@ def _gen_tool(step: str | None) -> dict | None:
     return None
 
 
-def _generate_json(adapter, req: TextGenRequest, step: str, on_delta=None) -> dict:
+def _generate_json(adapter, req: TextGenRequest, step: str, on_delta=None, tool: dict | None = None) -> dict:
     """用 LLM 工具调用产出结构化参数（不再解析自由文本）。
 
     参数:
@@ -2052,6 +2046,7 @@ def _generate_json(adapter, req: TextGenRequest, step: str, on_delta=None) -> di
         req: 文本生成请求。
         step: 生成步骤（premise/style/world/worlds/character/characters），决定工具 schema。
         on_delta: 接收工具调用增量文本的回调（用于页面进度），可为 None。
+        tool: 覆盖默认工具定义（扩充/续写会按目标数量加 minItems/maxItems），可为 None。
 
     返回:
         工具参数解析后的 dict。
@@ -2060,7 +2055,7 @@ def _generate_json(adapter, req: TextGenRequest, step: str, on_delta=None) -> di
         ValueError: 未知步骤或适配器不支持工具调用。
         AdapterError: 模型未返回工具调用，或工具参数不合法。
     """
-    tool = _gen_tool(step)
+    tool = tool or _gen_tool(step)
     if tool is None:
         raise ValueError(f"未知的生成步骤: {step or '(空)'}")
     generate_tool = getattr(adapter, "generate_tool", None)
@@ -2489,7 +2484,7 @@ def generate_worlds(
         system="你是中文小说的世界观编辑，世界设定必须与给定的作品设定一致，只按工具参数输出，不要解释。",
         messages=[Message("user", prompt)],
         stream=True,
-        temperature=0.7,
+        temperature=resolve_temperature(config, "writing"),
         max_tokens=_tool_max_tokens(config, "worlds", wanted or 6),
         metadata={
             "step": "worlds",
@@ -2521,7 +2516,7 @@ def generate_worlds(
             if take <= 0:
                 break
             progress_index = index + 1
-            _progress(on_progress, {"type": "batch", "index": progress_index, "total": batches, "unit": "world"})
+            _progress(on_progress, {"type": "batch", "index": progress_index, "total": batches, "unit": "batch"})
             lines = [f"本批生成 {take} 条世界（第 {index + 1}/{batches} 批）。"]
             if names:
                 lines.append("已生成世界（不要重复名称）：" + "、".join(names))
@@ -2672,7 +2667,7 @@ def generate_settings(store: ProjectStore, config: AppConfig, step: str, overwri
         system="你是中文小说的设定编辑，设定必须与给定的作品信息一致，只按工具参数输出，不要解释。",
         messages=[Message("user", prompt)],
         stream=True,
-        temperature=0.7,
+        temperature=resolve_temperature(config, "writing"),
         max_tokens=_tool_max_tokens(config, step, 1),
         metadata=metadata,
     )
@@ -2758,7 +2753,7 @@ def generate_characters(
         system="你是中文小说的人物编辑，人物必须与给定的作品设定一致，只按工具参数输出，不要解释。",
         messages=[Message("user", prompt)],
         stream=True,
-        temperature=0.8,
+        temperature=resolve_temperature(config, "writing"),
         # 未指定数量时按一屏 8 个角色的规模预留；人物卡含背景/外貌/关系/音色，单条开销明显高于普通字段
         max_tokens=_tool_max_tokens(config, "characters", min(total, batch) if total else max(batch, 8)),
         metadata={
@@ -2786,7 +2781,7 @@ def generate_characters(
             if take <= 0:
                 break
             progress_index = index + 1
-            _progress(on_progress, {"type": "batch", "index": progress_index, "total": batches, "unit": "character"})
+            _progress(on_progress, {"type": "batch", "index": progress_index, "total": batches, "unit": "batch"})
             lines = [f"本批生成 {take} 条人物（第 {index + 1}/{batches} 批）。"]
             if names:
                 lines.append("已生成人物（不要重复姓名）：" + "、".join(names))
@@ -3245,7 +3240,7 @@ def generate_section(
         system="你是中文小说的人物编辑，人物必须与给定的作品设定一致，只按工具参数输出，不要解释。",
         messages=[Message("user", prompt)],
         stream=True,
-        temperature=0.8,
+        temperature=resolve_temperature(config, "writing"),
         max_tokens=_tool_max_tokens(config, "character", 1),
         metadata={
             "mode": "single",
@@ -3324,7 +3319,7 @@ def polish_field(
         system="你是中文小说编辑，润色要贴合作品设定与文风，保持原意与信息量，只输出 JSON（键为 text）。",
         messages=[Message("user", "\n\n".join(prompt_parts))],
         stream=False,
-        temperature=0.6,
+        temperature=resolve_temperature(config, "polish"),
         metadata={
             "field": key,
             "text": source,
@@ -3394,6 +3389,49 @@ def bind_outline_context(bible: dict, worlds: list[dict], characters: list[dict]
                 beats_bound += 1
             index += 1
     return {"chapters": chapters_bound, "beats": beats_bound, "worlds": len(world_ids)}
+
+
+def sanitize_outline_character_ids(bible: dict, characters: list[dict]) -> dict:
+    """过滤大纲节拍里的非法角色引用（`binding=none` 专用）。
+
+    与 `bind_outline_context()` 的差异（两者都会丢弃非法引用，但后续处理不同）：
+    - `auto`：过滤后若为空，回落到本章 POV，并按幕轮转绑定世界；
+    - `none`：只做清洗，**不回落到 POV、不改世界绑定**，保持空数组。
+
+    判定规则：只保留角色表里真实存在的非旁白 ID；人名、空串、重复项一律丢弃。
+
+    参数:
+        bible: 设定库 dict（就地修改大纲里的节拍）。
+        characters: 角色表（含旁白也可，内部会过滤）。
+
+    返回:
+        `{"chapters": 处理章节数, "kept": 保留引用数, "dropped": 丢弃引用数}`。
+    """
+    cast_ids = {
+        str(item["id"])
+        for item in characters or []
+        if item.get("id") and item.get("role") != "narrator" and item.get("id") != entities.NARRATOR_ID
+    }
+    chapters = 0
+    kept = 0
+    dropped = 0
+    for act in (bible.get("outline") or {}).get("acts") or []:
+        for chapter in act.get("chapters") or []:
+            chapters += 1
+            for beat in chapter.get("beats") or []:
+                clean: list[str] = []
+                seen: set[str] = set()
+                for raw in beat.get("character_ids") or []:
+                    text = str(raw or "").strip()
+                    # 非 ID（人名/空串）与重复项都丢弃，但计数用于提示
+                    if not text or text in seen or text not in cast_ids:
+                        dropped += 1
+                        continue
+                    seen.add(text)
+                    clean.append(text)
+                kept += len(clean)
+                beat["character_ids"] = clean
+    return {"chapters": chapters, "kept": kept, "dropped": dropped}
 
 
 def bind_outline_characters(store: ProjectStore, bible: dict) -> dict:

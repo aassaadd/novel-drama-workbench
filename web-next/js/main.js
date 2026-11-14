@@ -31,8 +31,7 @@ function parseRoute() {
   const raw = location.hash.replace(/^#/, '');
   const [body, rawQuery = ''] = raw.split('?');
   const query = new URLSearchParams(rawQuery);
-  if (!body || body === '/' || body === '/projects') return { view: 'projects', scope: 'home' };
-  if (body === '/projects/all') return { view: 'projects', scope: 'all' };
+  if (!body || body === '/' || body === '/projects') return { view: 'projects' };
   // 全局设置：与任何工程无关，不再接受 ?project= 参数
   if (body === '/settings') return { view: 'settings', section: query.get('section') || '' };
   // 全平台日志：与工程无关，筛选条件在页面内维护

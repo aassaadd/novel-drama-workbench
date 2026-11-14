@@ -30,6 +30,7 @@ from ..store import ProjectStore
 from .job_tracker import UiJob
 from ..writing.character_plan import generate_from_plan, load_plan, plan_characters
 from ..writing.continuation import continue_chapter
+from ..writing.expand import expand_outline
 from ..writing.outline_hier import generate_hierarchical_outline
 from ..writing.service import (
     DEFAULT_CHAPTER_WORDS,
@@ -37,6 +38,7 @@ from ..writing.service import (
     generate_characters,
     generate_outline,
     generate_worlds,
+    pop_budget_notice,
     suggest_script,
 )
 
@@ -109,6 +111,16 @@ def _failure_current(exc: AdapterError) -> str:
         有失败幕时返回「第 2 幕失败 · 可只补失败幕」，否则「生成失败」。
     """
     detail = exc.detail if isinstance(exc.detail, dict) else {}
+    stage = str(detail.get("stage") or "")
+    act_index = detail.get("act_index")
+    if stage and act_index:
+        # 逐层闸门：点明停在哪一层、第几幕/第几章，以及能否从当前层继续
+        names = {"chapters": "章", "beats": "节拍"}
+        label = names.get(stage, stage)
+        chapter = str(detail.get("chapter") or "").strip()
+        where = f"第 {act_index} 幕" + (f" · 第 {detail.get('chapter_index')} 章" if detail.get("chapter_index") else "")
+        tail = " · 可从当前层继续"
+        return f"{where}「{label}」层卡住" + (f"（{chapter}）" if chapter else "") + tail
     failures = detail.get("failures")
     if not isinstance(failures, list) or not failures:
         return "生成失败"
@@ -294,6 +306,12 @@ def _progress_response(task, job=None) -> StreamingResponse:
             job.start("已提交生成请求")
         try:
             result = task(on_progress)
+            notice = pop_budget_notice()
+            if notice:
+                # 输出预算被设置值压低：明确告知用户，而不是静默截断
+                if job:
+                    job.event("notice", {"type": "notice", "message": notice})
+                events.put(("notice", {"message": notice}))
             if job:
                 job.finish("生成完成")
             events.put(("done", {"result": result}))
@@ -500,8 +518,8 @@ def register_stream_routes(app, config_path: str | None = None) -> None:
         """大纲生成（流式进度）：batch/chars/done。
 
         参数:
-            body: `{path, acts?, chapters_per_act?, beats_per_chapter?, words?, binding?,
-                multi_turn?, acts_per_round?, resume?, dry_run?}`；resume=True 时只补失败/缺失的幕。
+            body: `{path, acts?, chapters_per_act?, beats_per_chapter?, words?, binding?, dry_run?}`。
+                页面的分层大纲改用 `/api/ui/outline/hierarchical/stream`，这里仅保留单轮兼容入口。
 
         返回:
             SSE：start → batch/chars* → done(result) / error(message)。
@@ -520,9 +538,6 @@ def register_stream_routes(app, config_path: str | None = None) -> None:
                 chapter_words=int(body.get("words") or DEFAULT_CHAPTER_WORDS),
                 dry_run=bool(body.get("dry_run")),
                 binding=str(body.get("binding") or "auto"),
-                multi_turn=bool(body.get("multi_turn")),
-                acts_per_round=int(body.get("acts_per_round") or 1),
-                resume=bool(body.get("resume")),
                 on_progress=on_progress,
             )
 
@@ -558,6 +573,7 @@ def register_stream_routes(app, config_path: str | None = None) -> None:
                 dry_run=bool(body.get("dry_run")),
                 binding=str(body.get("binding") or "auto"),
                 resume=bool(body.get("resume")),
+                only_acts=body.get("only_acts"),
                 on_progress=on_progress,
             )
 
@@ -565,6 +581,45 @@ def register_stream_routes(app, config_path: str | None = None) -> None:
             task,
             UiJob(store, "outline", {"label": "三级分层大纲"}, "三级分层大纲"),
         )
+
+    @app.post("/api/ui/outline/expand/stream")
+    def ui_outline_expand_stream(body: dict) -> StreamingResponse:
+        """大纲扩充 / 续写（流式进度）：只新增，不重写已有幕与章。
+
+        参数:
+            body: `{path, mode?, anchor_act?, anchor_chapter?, new_acts?, new_chapters?,
+                chapters_per_act?, beats_per_chapter?, words?, brief?, dry_run?}`；
+                mode 取 after_act（某幕后插入）/ after_chapter（某章后插入）/ append（结局后续写）。
+
+        返回:
+            SSE：start → batch/chars/rewrite* → done(result) / error(message)；
+            result.inserted_acts / inserted_chapters 标出新增位置，已有内容保持不变。
+        """
+        store = _store(body.get("path"))
+        config = load_config(config_path)
+        mode = str(body.get("mode") or "append")
+
+        def task(on_progress):
+            """调用 expand_outline 并透出层级进度。"""
+            return expand_outline(
+                store,
+                config,
+                mode=mode,
+                anchor_act=body.get("anchor_act"),
+                anchor_chapter=body.get("anchor_chapter"),
+                new_acts=int(body.get("new_acts") or 1),
+                new_chapters=body.get("new_chapters"),
+                chapters_per_act=body.get("chapters_per_act"),
+                beats_per_chapter=body.get("beats_per_chapter"),
+                chapter_words=body.get("words"),
+                brief=str(body.get("brief") or ""),
+                dry_run=bool(body.get("dry_run")),
+                binding=str(body.get("binding") or "auto"),
+                on_progress=on_progress,
+            )
+
+        label = {"after_act": "某幕后扩充", "after_chapter": "某章后扩充", "append": "结局后续写"}.get(mode, "大纲扩充")
+        return _progress_response(task, UiJob(store, "outline", {"label": label}, label))
 
     @app.post("/api/ui/voices/design/batch/{job_id}/stream")
     def ui_voices_batch_stream(job_id: str, body: dict) -> StreamingResponse:

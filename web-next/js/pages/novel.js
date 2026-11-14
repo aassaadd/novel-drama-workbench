@@ -157,6 +157,56 @@ function outlineChapters() {
   return rows;
 }
 
+/**
+ * 大纲生成进度文案：严格按阶段区分分母与单位，避免把章数/节拍数配到「幕」上。
+ * - 幕阶段：规划 10 幕（一次请求出全量，不虚构「第 k/10 幕」）
+ * - 章阶段：第 x/10 幕 · 已完成 k/50 章
+ * - 节拍阶段：第 x/10 幕 · 第 k/50 章 · 第 y/200 节拍
+ * @param {object} data 后端进度事件
+ * @param {object} totals 兜底总量 `{acts, chapters, beats}`
+ * @returns {{stage: string, current: string}} 浮层主文案与副标题
+ */
+function outlineProgressText(data, totals = {}) {
+  const phase = String(data.phase || '');
+  const actsTotal = Number(data.act_total || (phase === 'acts' || phase === 'chapters' ? data.total : 0) || totals.acts || 0);
+  const actIndex = Number(data.act_index || data.index || 0);
+  const chaptersTotal = Number(data.chapter_total || data.chapters_total || totals.chapters || 0);
+  const chapterIndex = Number(data.chapter_index || 0);
+  const beatsTotal = Number(data.beat_total || totals.beats || 0);
+  const beatIndex = Number(data.beat_index || data.index || 0);
+  if (phase === 'acts') {
+    return {
+      stage: `正在规划 ${actsTotal || '?'} 幕（一次请求出全量）`,
+      current: data.name ? String(data.name) : '',
+    };
+  }
+  if (phase === 'chapters') {
+    const done = Number(data.chapters_done || 0);
+    const expected = Number(data.chapters_expected || 0);
+    const span = expected ? `第 ${done + 1}–${done + expected} 章` : `已完成 ${done} 章`;
+    return {
+      stage: `第 ${actIndex}/${actsTotal} 幕 · 生成章节 · ${span}`,
+      current: chaptersTotal ? `全书共 ${chaptersTotal} 章` : '',
+    };
+  }
+  if (phase === 'beats') {
+    return {
+      stage: `第 ${actIndex}/${actsTotal} 幕 · 第 ${chapterIndex}/${chaptersTotal} 章 · 第 ${Math.max(
+        1,
+        beatIndex
+      )}/${beatsTotal} 节拍`,
+      current: data.chapter || data.name ? `《${data.chapter || data.name}》` : '',
+    };
+  }
+  // 兼容旧事件（没有 phase）：按 unit 区分单位，绝不把章数写成「幕」
+  const unitLabel = { act: '幕', chapter: '章', beat: '个节拍' }[data.unit] || '批';
+  const total = Number(data.total || 0);
+  return {
+    stage: `正在生成第 ${Number(data.index || 1)}/${total || '?'} ${unitLabel}`,
+    current: data.name ? String(data.name) : '',
+  };
+}
+
 /** 按章节 ID 找大纲章 + 所属幕 */
 function findOutlineChapter(id) {
   return outlineChapters().find((row) => row.chapter.id === id) || null;
@@ -185,6 +235,59 @@ function outlineCounts() {
       (sum, act) => sum + (act.chapters || []).reduce((n, ch) => n + (ch.beats?.length || 0), 0),
       0
     ),
+  };
+}
+
+/**
+ * 扩充 / 续写的可读来源说明：按当前大纲即时定位锚点，插入后编号变化也能对上。
+ * @param {object} origin 大纲对象上的 origin 字段
+ * @returns {string} 说明文本；非扩充对象返回空串
+ */
+function originLabel(origin) {
+  if (!origin || !origin.kind) return '';
+  const kindLabel = origin.kind === 'continuation' ? '结局后续写' : '扩充';
+  const acts = cache.outline?.acts || [];
+  if (origin.mode === 'after_chapter' && origin.anchor_chapter_id) {
+    const hit = outlineChapters().find((row) => row.chapter.id === origin.anchor_chapter_id);
+    const number = hit ? Number(hit.chapter.index || 0) : null;
+    return `${kindLabel} · 插在第 ${number ?? '?'} 章《${origin.anchor_chapter_title || ''}》之后`;
+  }
+  if (origin.mode === 'after_act' && origin.anchor_act_id) {
+    const pos = acts.findIndex((act) => act.id === origin.anchor_act_id);
+    return `${kindLabel} · 插在第 ${pos >= 0 ? pos + 1 : '?'} 幕《${origin.anchor_act_title || ''}》之后`;
+  }
+  return `${kindLabel} · 接在全书结尾之后`;
+}
+
+/**
+ * 扩充 / 续写来源徽标（只标注，不改变已有内容）。
+ * @param {object} origin 大纲对象上的 origin 字段
+ * @returns {string} HTML
+ */
+function originBadge(origin) {
+  if (!origin || !origin.kind) return '';
+  const label = origin.kind === 'continuation' ? '续写' : '扩充';
+  return `<span class="badge warn" title="${esc(originLabel(origin))}">${label}</span>`;
+}
+
+/** 从已有大纲推断常用规模（每幕章数 / 每章节拍 / 单章字数） */
+function outlineScaleDefaults() {
+  const acts = cache.outline?.acts || [];
+  const chapters = acts.flatMap((act) => act.chapters || []);
+  const pick = (values, fallback) => {
+    const rows = values.filter((value) => Number(value) > 0);
+    if (!rows.length) return fallback;
+    const counts = new Map();
+    for (const value of rows) counts.set(value, (counts.get(value) || 0) + 1);
+    return [...counts.entries()].sort((left, right) => right[1] - left[1])[0][0];
+  };
+  const words = chapters.map((chapter) =>
+    (chapter.beats || []).reduce((sum, beat) => sum + Number(beat.target_words || 0), 0)
+  );
+  return {
+    chaptersPerAct: pick(acts.map((act) => (act.chapters || []).length), 5),
+    beatsPerChapter: pick(chapters.map((chapter) => (chapter.beats || []).length), 4),
+    chapterWords: pick(words, 3000),
   };
 }
 
@@ -570,6 +673,7 @@ function ctxHTML() {
           <span class="novel-caret" aria-hidden="true">▸</span>
           <span class="mono novel-act-index">第 ${Number(act.index || actIndex + 1)} 幕</span>
           <span class="novel-act-title" title="${esc(act.title || '')}">${esc(act.title || '未命名幕')}</span>
+          ${originBadge(act.origin)}
           <span class="n">${chapters.length} 章</span>
         </div>
         ${
@@ -584,6 +688,7 @@ function ctxHTML() {
             <span class="novel-chapter-title" title="${esc(chapter.title || '未命名章节')}">${esc(
               chapter.title || '未命名章节'
             )}</span>
+            ${originBadge(chapter.origin)}
             ${landedChapter(chapter.id) ? '<span class="badge ok">已落章</span>' : ''}
           </button>`
                 )
@@ -623,6 +728,9 @@ function ctxHTML() {
         ${boot.state.worlds !== 'ok' ? ctxBlockHTML('worlds') : worldModuleHTML()}
         <div class="ctx-group">
           分层大纲
+          <button class="btn icon sm" data-act="novel-outline-expand" title="扩充 / 续写大纲（只新增，不改已有幕与章）">
+            ${icon('plus', 12)}
+          </button>
           <button class="btn icon sm" data-act="novel-outline-generate" title="AI 生成分层大纲" style="margin-left:auto">
             ${icon('spark', 12)}
           </button>
@@ -928,7 +1036,9 @@ function chapterHTML() {
       <div style="min-width:0">
         <div class="et">${esc(chapter.title || '未命名章节')}</div>
         <div class="em">第 ${Number(act.index || 0)} 幕 · ${esc(act.title || '')} ·
-          ${landed ? `已落章（${Number(landed.word_count || 0)} 字）` : '尚未落成正文'}</div>
+          ${landed ? `已落章（${Number(landed.word_count || 0)} 字）` : '尚未落成正文'}${
+            chapter.origin ? ` · ${esc(originLabel(chapter.origin))}` : ''
+          }</div>
       </div>
       <div class="right">
         <button class="btn sm primary" data-act="novel-outline-save">保存</button>
@@ -1747,9 +1857,7 @@ function openOutlineGenerate() {
       </div>
       <div class="field"><label>补充要求（可选）</label>
         <textarea class="textarea" id="og-brief" rows="2" placeholder="例：前三章必须完成身份揭示与第一次反转"></textarea></div>
-      <label class="hint" style="display:flex;gap:6px;align-items:center;margin-top:4px">
-        <input type="checkbox" id="og-multi" checked /> 按幕多轮生成（长大纲更稳）
-      </label>`,
+      <div class="hint" style="margin-top:4px">生成顺序：一次规划全部幕 → 逐幕生成章 → 逐章生成节拍，每层校验通过才继续。</div>`,
     foot: `<div class="right"><button class="btn" data-dlg-close>取消</button>
       <button class="btn primary" data-og-run>${icon('spark', 12)} 开始生成</button></div>`,
     onMount: (mask) => {
@@ -1765,7 +1873,6 @@ function openOutlineGenerate() {
           chapters_per_act: Number(mask.querySelector('#og-chapters').value) || 3,
           beats_per_chapter: Number(mask.querySelector('#og-beats').value) || 4,
           words: Number(mask.querySelector('#og-words').value) || 3000,
-          multi_turn: mask.querySelector('#og-multi').checked,
         };
         const brief = mask.querySelector('#og-brief').value.trim();
         if (brief) body.brief = brief;
@@ -1826,35 +1933,85 @@ async function runOutlineGenerate(body, mode = 'regen') {
     paint();
     const firstAct = (cache.outline?.acts || [])[0];
     panel.note(firstAct ? `第 1 幕：${firstAct.title || '未命名幕'}` : `共 ${counts.acts} 幕`);
+    const validation = result?.validation || null;
+    const out = Array.isArray(validation?.out_of_range) ? validation.out_of_range : [];
+    const summary =
+      validation?.summary || `实际 ${counts.acts} 幕 / ${counts.chapters} 章 / ${counts.beats} 个节拍`;
+    if (out.length) {
+      // 越界只提示不改内容：标黄 + 原因，并提供按层重写/接受/稍后再调
+      toast('大纲有幕超出允许区间，已按层重写仍未达标', 'warn', 5200);
+      const actions = out.slice(0, 2).map((index) => ({
+        label: `重新生成第 ${index} 幕`,
+        onClick: (close) => {
+          close();
+          runOutlineGenerate({ ...body, resume: true, only_acts: [index] }, 'regen');
+        },
+      }));
+      actions.push({
+        label: '接受实际值',
+        onClick: (close) => {
+          close();
+          toast(`已保留实际章数；下次生成可在对话框把每幕章数改为 ${out.length ? '实际值' : '设定值'}`, 'ok');
+        },
+      });
+      actions.push({ label: '稍后手动调整', onClick: (close) => close() });
+      panel.finish({
+        message: `大纲已生成：${counts.acts} 幕 / ${counts.chapters} 章 / ${counts.beats} 个节拍（有越界）`,
+        detail: summary,
+        actions,
+      });
+      return;
+    }
     panel.finish({
       message: `大纲已生成：${counts.acts} 幕 / ${counts.chapters} 章 / ${counts.beats} 个节拍`,
       detail: result?.failures?.length
         ? `有 ${result.failures.length} 个批次失败，可在目录里补生成。`
-        : '已写入工程大纲，可点「查看大纲」继续编辑。',
+        : summary,
       actions: [{ label: '查看大纲', primary: true, onClick: () => paint() }],
     });
     toast('大纲已生成', 'ok');
   };
   try {
-    await streamJSON('/api/ui/outline/generate/stream', body, (event, data) => {
+    const totals = {
+      acts: totalActs,
+      chapters: totalActs * Number(body.chapters_per_act || 3),
+      beats: totalActs * Number(body.chapters_per_act || 3) * Number(body.beats_per_chapter || 4),
+    };
+    await streamJSON('/api/ui/outline/hierarchical/stream', body, (event, data) => {
       if (!data) return;
       if (event === 'batch') {
-        const index = Number(data.index || 1);
-        const total = Number(data.total || totalActs) || 1;
+        const info = outlineProgressText(data, totals);
         panel.update({
-          stage: `正在生成第 ${index}/${total} 幕…`,
-          // 第一批从 0% 起步会显得卡住；未完成前展示「进行中」，批次推进后再给百分比
-          percent: index > 1 ? Math.round(((index - 1) / total) * 100) : null,
-          current: `第 ${index} / ${total} 幕`,
+          stage: info.stage,
+          current: info.current,
+          // 后端给了整体百分比就按它走；否则在首项显示「进行中」
+          percent: typeof data.percent === 'number' ? data.percent : null,
         });
       } else if (event === 'chars') {
-        const index = Number(data.batch || data.index || 1);
-        const total = Number(data.total || totalActs) || 1;
+        const info = outlineProgressText(data, totals);
+        const chars = Number(data.chars || 0);
         panel.update({
           percent: null,
-          stage: `正在生成第 ${index}/${total} 幕…`,
-          current: `第 ${index}/${total} 幕 · 已接收 ${Number(data.chars || 0)} 字`,
+          stage: info.stage,
+          current: `${info.current ? `${info.current} · ` : ''}已接收 ${chars} 字`,
         });
+      } else if (event === 'stage') {
+        // 阶段切换：幕 → 章 → 节拍，先把主文案切到新阶段，避免沿用上一阶段的单位
+        const stage = String(data.stage || '');
+        const names = { acts: '规划幕结构', chapters: '逐幕生成章节', beats: '逐章生成节拍' };
+        if (names[stage]) panel.update({ stage: names[stage], percent: null, current: '' });
+      } else if (event === 'rewrite') {
+        const level = data.level === 'chapters' ? '章' : data.level === 'beats' ? '节拍' : '幕';
+        // 章/节拍层重写带的是幕内章序号：补上幕序号，避免与全局章号混淆
+        const who = data.chapter
+          ? `第 ${data.index || '?'} 幕 · 第 ${data.chapter_index || ''} 章《${data.chapter}》`
+          : `第 ${data.index || '?'} 幕`;
+        panel.update({
+          percent: null,
+          stage: `第 ${data.attempt} 次重写 ${who}（${level}层）：按设定纠正中…`,
+          current: data.reason || '',
+        });
+        panel.note(`第 ${data.attempt} 次重写 · ${level}层 · ${who} · ${data.reason || ''}`);
       } else if (event === 'done') {
         settled = true;
         panel.update({ percent: 100 });
@@ -1871,10 +2028,15 @@ async function runOutlineGenerate(body, mode = 'regen') {
         settled = true;
         // 可续跑时只补失败幕：复用后端保留的已完成幕
         const canResume = Boolean(data.resume || data.retryable);
+        const gateStuck = /「(章|节拍)」层|「章」|「节拍」/.test(String(data.message || ''));
         panel.fail({
           message: data.message || '大纲生成失败',
           detail: data.detail || '',
-          current: canResume ? '已成功的幕已保留；点「重试」只补失败幕' : '',
+          current: canResume
+            ? gateStuck
+              ? '已合格的幕与章已保留；点「重试」从当前层继续'
+              : '已成功的幕已保留；点「重试」只补失败幕'
+            : '',
           retry: () => runOutlineGenerate(canResume ? { ...body, resume: true } : body, mode),
         });
       }
@@ -1887,6 +2049,221 @@ async function runOutlineGenerate(body, mode = 'regen') {
       panel.fail({ message: `大纲生成失败：${error.message}`, retry: () => runOutlineGenerate(body, mode) });
     }
   }
+}
+
+/**
+ * AI 扩充 / 续写大纲：在末尾续写、某幕后或某章后插入新内容。
+ * 只新增，不重写已有幕与章；新增部分走同样的逐层校验。
+ */
+function openOutlineExpand() {
+  const counts = outlineCounts();
+  if (!counts.acts) {
+    toast('还没有大纲，先整本生成一版再扩充', 'warn');
+    return;
+  }
+  const scale = outlineScaleDefaults();
+  const acts = cache.outline?.acts || [];
+  const chapters = outlineChapters();
+  const actOptions = acts
+    .map((act, index) => `<option value="${index + 1}">第 ${index + 1} 幕《${esc(act.title || '')}》</option>`)
+    .join('');
+  const chapterOptions = chapters
+    .map(({ chapter }) => `<option value="${Number(chapter.index || 0)}">第 ${Number(chapter.index || 0)} 章《${esc(chapter.title || '')}》</option>`)
+    .join('');
+  openDialog({
+    title: 'AI 扩充 / 续写大纲',
+    body: `
+      <div class="hint" style="margin-bottom:8px">
+        当前大纲：${counts.acts} 幕 / ${counts.chapters} 章 / ${counts.beats} 个节拍。
+        扩充只新增内容：已有幕、章、节拍与已写正文、标注、配音都不改动；插入位置之后的编号自动顺延。
+      </div>
+      <div class="field"><label>插入位置</label>
+        <select class="select" id="oe-mode">
+          <option value="append">结局后续写（接在全书末尾）</option>
+          <option value="after_act">在某幕之后扩充</option>
+          <option value="after_chapter">在某章之后扩充</option>
+        </select>
+      </div>
+      <div class="field" id="oe-act-wrap" hidden><label>插在第几幕之后</label>
+        <select class="select" id="oe-anchor-act">${actOptions}</select></div>
+      <div class="field" id="oe-chapter-wrap" hidden><label>插在第几章之后</label>
+        <select class="select" id="oe-anchor-chapter">${chapterOptions}</select></div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+        <div class="field" id="oe-count-wrap"><label id="oe-count-label">新增幕数</label>
+          <input class="input" id="oe-count" type="number" min="1" max="20" value="1" /></div>
+        <div class="field"><label>每幕章数</label>
+          <input class="input" id="oe-cpa" type="number" min="1" max="20" value="${scale.chaptersPerAct}" /></div>
+        <div class="field"><label>每章节拍</label>
+          <input class="input" id="oe-bpc" type="number" min="1" max="12" value="${scale.beatsPerChapter}" /></div>
+        <div class="field"><label>每章目标字数</label>
+          <input class="input" id="oe-words" type="number" min="500" step="500" value="${scale.chapterWords}" /></div>
+      </div>
+      <div class="field"><label>补充要求（可选）</label>
+        <textarea class="textarea" id="oe-brief" rows="2" placeholder="例：插入一段反派视角的支线，交代他为何倒戈"></textarea></div>`,
+    foot: `<div class="right"><button class="btn" data-dlg-close>取消</button>
+      <button class="btn primary" data-oe-run>${icon('spark', 12)} 开始生成</button></div>`,
+    onMount: (mask) => {
+      const modeEl = mask.querySelector('#oe-mode');
+      const actWrap = mask.querySelector('#oe-act-wrap');
+      const chapterWrap = mask.querySelector('#oe-chapter-wrap');
+      const countWrap = mask.querySelector('#oe-count-wrap');
+      const countLabel = mask.querySelector('#oe-count-label');
+      const countInput = mask.querySelector('#oe-count');
+      const cpaInput = mask.querySelector('#oe-cpa');
+      /** 按插入方式切换可见字段与默认数量 */
+      const sync = () => {
+        const mode = modeEl.value;
+        actWrap.hidden = mode !== 'after_act';
+        chapterWrap.hidden = mode !== 'after_chapter';
+        // 「每幕章数」只在新增幕时生效；某章后扩充用「新增章数」
+        cpaInput.closest('.field').hidden = mode === 'after_chapter';
+        countLabel.textContent = mode === 'after_chapter' ? '新增章数' : '新增幕数';
+        if (mode === 'after_chapter') countInput.value = String(scale.chaptersPerAct);
+        else if (!countInput.value || Number(countInput.value) > 12) countInput.value = '1';
+        countWrap.hidden = false;
+      };
+      modeEl.addEventListener('change', sync);
+      sync();
+      mask.querySelector('[data-oe-run]').addEventListener('click', () => {
+        const mode = modeEl.value;
+        const body = {
+          path: cache.path,
+          mode,
+          new_acts: mode === 'after_chapter' ? 1 : Number(countInput.value) || 1,
+          chapters_per_act: Number(cpaInput.value) || scale.chaptersPerAct,
+          beats_per_chapter: Number(mask.querySelector('#oe-bpc').value) || scale.beatsPerChapter,
+          words: Number(mask.querySelector('#oe-words').value) || scale.chapterWords,
+        };
+        if (mode === 'after_act') body.anchor_act = Number(mask.querySelector('#oe-anchor-act').value) || counts.acts;
+        if (mode === 'after_chapter') {
+          body.anchor_chapter = Number(mask.querySelector('#oe-anchor-chapter').value) || counts.chapters;
+          body.new_chapters = Number(countInput.value) || scale.chaptersPerAct;
+        }
+        const brief = mask.querySelector('#oe-brief').value.trim();
+        if (brief) body.brief = brief;
+        closeDialog();
+        runOutlineExpand(body);
+      });
+    },
+  });
+}
+
+/**
+ * 执行大纲扩充 / 续写（SSE 进度）：逐层校验，完成后刷新目录并定位到新增内容。
+ * @param {object} body 扩充参数
+ */
+async function runOutlineExpand(body) {
+  const label = { after_act: '某幕后扩充', after_chapter: '某章后扩充', append: '结局后续写' }[body.mode] || '大纲扩充';
+  const panel = openProgress({
+    title: `正在${label}…`,
+    hint: '只新增，不改动已有幕、章、节拍与已写正文',
+    stage: '已提交请求，正在生成新增内容…',
+  });
+  panel.update({ percent: null });
+  let settled = false;
+  const chapterCount = Number(body.new_chapters || body.chapters_per_act || 0);
+  const totals = {
+    acts: Number(body.new_acts || 1),
+    chapters: body.mode === 'after_chapter' ? chapterCount : Number(body.new_acts || 1) * Number(body.chapters_per_act || 0),
+    beats:
+      (body.mode === 'after_chapter' ? chapterCount : Number(body.new_acts || 1) * Number(body.chapters_per_act || 0)) *
+      Number(body.beats_per_chapter || 0),
+  };
+  try {
+    await streamJSON('/api/ui/outline/expand/stream', body, (event, data) => {
+      if (!data) return;
+      if (event === 'batch') {
+        // unit=expand 是插入位置说明；其余是逐幕/逐章生成
+        if (data.unit === 'expand') {
+          panel.note(String(data.name || ''));
+          return;
+        }
+        const info = outlineProgressText(data, totals);
+        panel.update({
+          stage: info.stage,
+          current: info.current,
+          percent: typeof data.percent === 'number' ? data.percent : null,
+        });
+      } else if (event === 'chars') {
+        const info = outlineProgressText(data, totals);
+        panel.update({
+          percent: null,
+          stage: info.stage,
+          current: `${info.current ? `${info.current} · ` : ''}已接收 ${Number(data.chars || 0)} 字`,
+        });
+      } else if (event === 'rewrite') {
+        const level = data.level === 'chapters' ? '章' : data.level === 'beats' ? '节拍' : '幕';
+        // 章/节拍层重写带的是幕内章序号：补上幕序号，避免与全局章号混淆
+        const who = data.chapter
+          ? `第 ${data.index || '?'} 幕 · 第 ${data.chapter_index || ''} 章《${data.chapter}》`
+          : `第 ${data.index || '?'} 幕`;
+        panel.update({
+          percent: null,
+          stage: `第 ${data.attempt} 次重写 ${who}（${level}层）：按设定纠正中…`,
+          current: data.reason || '',
+        });
+        panel.note(`第 ${data.attempt} 次重写 · ${level}层 · ${who} · ${data.reason || ''}`);
+      } else if (event === 'done') {
+        settled = true;
+        panel.update({ percent: 100 });
+        void finishWithExpand(data.result || {}, panel).catch((error) =>
+          panel.fail({ message: `扩充已生成，但刷新目录失败：${error.message}`, retry: () => runOutlineExpand(body) })
+        );
+      } else if (event === 'canceled') {
+        settled = true;
+        panel.fail({ message: '已停止生成', detail: '任务已取消，未写入任何新增内容。' });
+      } else if (event === 'error') {
+        settled = true;
+        panel.fail({
+          message: data.message || '扩充失败',
+          detail: data.detail || '',
+          current: data.resume ? '新增内容未写入；点「重试」重新生成这一批' : '',
+          retry: () => runOutlineExpand(body),
+        });
+      }
+    });
+    if (!settled) {
+      panel.fail({ message: '连接已中断，没有收到扩充结果', retry: () => runOutlineExpand(body) });
+    }
+  } catch (error) {
+    if (!settled) panel.fail({ message: `扩充失败：${error.message}`, retry: () => runOutlineExpand(body) });
+  }
+}
+
+/**
+ * 扩充完成后：刷新大纲、定位到第一个新增章节，并展示逐层校验摘要。
+ * @param {object} result 后端返回
+ * @param {object} panel 进度面板
+ */
+async function finishWithExpand(result, panel) {
+  cache.outline = await getJSON('/api/ui/outline', { path: cache.path });
+  const inserted = Array.isArray(result.inserted_chapters) ? result.inserted_chapters : [];
+  const first = inserted[0];
+  if (first?.chapter_id) ui.sel = { kind: 'chapter', id: first.chapter_id };
+  paint();
+  if (first?.chapter_id) {
+    loadBody(first.chapter_id);
+    loadPlan(first.chapter_id);
+  }
+  const counts = outlineCounts();
+  const total = result.total || {};
+  const validation = result.validation || null;
+  const out = Array.isArray(validation?.out_of_range) ? validation.out_of_range : [];
+  const summary = result.summary || `已新增 ${inserted.length} 章；全书 ${counts.acts} 幕 / ${counts.chapters} 章 / ${counts.beats} 个节拍`;
+  if (out.length) {
+    toast('新增部分有幕超出允许区间，已标注在摘要里', 'warn', 5200);
+  }
+  panel.finish({
+    message: `${result.label || '扩充'}完成：新增 ${inserted.length} 章，全书 ${counts.acts} 幕 / ${counts.chapters} 章 / ${counts.beats} 个节拍`,
+    detail: summary + (total.acts ? `（全书现为 ${total.acts} 幕 / ${total.chapters} 章 / ${total.beats} 个节拍）` : ''),
+    actions: [
+      { label: '查看大纲', primary: true, onClick: () => paint() },
+      ...(first?.chapter_id
+        ? [{ label: '打开新增章节', onClick: () => { ui.sel = { kind: 'chapter', id: first.chapter_id }; paint(); loadBody(first.chapter_id); } }]
+        : []),
+    ],
+  });
+  toast(`${result.label || '扩充'}完成`, 'ok');
 }
 
 /** AI 补设定分区：预览字段后合并写入（世界观归世界模块，不走这里） */
@@ -1934,7 +2311,7 @@ function openSettingGenerate(section) {
 async function runSettingGenerate(section, label, brief, seed = null, mode = 'regen') {
   const panel = openProgress({
     title: `正在${mode === 'fill' ? '补缺失' : '重新生成'}${label}…`,
-    hint: `${mode === 'fill' ? '保留已有字段，只生成空缺' : '已有字段会被新结果覆盖'} · 温度 0.7${
+    hint: `${mode === 'fill' ? '保留已有字段，只生成空缺' : '已有字段会被新结果覆盖'} · 温度取设置页「写作」分组${
       seed === null ? ' · 未固定种子' : ` · 种子 ${seed}`
     }`,
     stage: '已提交生成请求，等待模型返回…',
@@ -2793,6 +3170,7 @@ async function onClick(event) {
   if (act === 'novel-setting-ai') return openSettingGenerate(el.dataset.section);
   if (act === 'novel-outline-save') return saveOutlineChapter();
   if (act === 'novel-outline-generate') return openOutlineGenerate();
+  if (act === 'novel-outline-expand') return openOutlineExpand();
   if (act === 'novel-outline-apply') return applyOutline();
   if (act === 'novel-outline-check') return checkOutline();
   if (act === 'novel-beat-delete') return deleteBeat(Number(el.dataset.index));

@@ -307,8 +307,10 @@ class UiJob:
             unit = str(data.get("unit") or "").strip()
             self._batch = {"index": index, "total": total, "unit": unit, "name": name}
             self._batch_touched = False
-            text = _batch_text(index, total, unit, name)
-            if total > 1:
+            text = _event_text(data, name)
+            if data.get("percent") is not None:
+                self.progress(text or None, _num(data.get("percent")))
+            elif total > 1:
                 self.progress(text, ((index - 1) / total) * 100)
             else:
                 # 单批任务没有「批次推进」可展示：直接显示进行中，字数由 chars 事件累加
@@ -316,11 +318,10 @@ class UiJob:
         elif kind == "chars":
             chars = _num(data.get("chars"))
             batch = self._batch or {}
-            index = _num(data.get("index") or data.get("batch") or batch.get("index"))
-            total = _num(data.get("total") or batch.get("total")) or 1
-            unit = str(data.get("unit") or batch.get("unit") or "").strip()
+            merged = dict(batch)
+            merged.update(data)
             if chars:
-                head = _batch_text(index, total, unit)
+                head = _event_text(merged, str(data.get("name") or batch.get("name") or ""))
                 text = f"{head} · 已接收 {int(chars)} 字" if head else f"已接收 {int(chars)} 字"
                 # 当前批还没结束：百分比停在批首（常见 0%），改为「进行中」并持续累加字数
                 force = not self._batch_touched
@@ -334,6 +335,28 @@ class UiJob:
                 self.progress(f"{name} · 失败{('（' + reason + '）') if reason else ''}", force=True)
             elif name:
                 self.progress(f"{name}{' · 已完成' if status == 'done' else ''}", force=status == "done")
+        elif kind == "rewrite":
+            # 逐层闸门的按项重写：把「哪一层次、第几次、为什么」写进任务进度
+            level = {"acts": "幕", "chapters": "章", "beats": "节拍"}.get(str(data.get("level") or ""), "幕")
+            attempt = int(_num(data.get("attempt")) or 1)
+            act_index = int(_num(data.get("index")) or 0)
+            chapter_index = int(_num(data.get("chapter_index")) or 0)
+            chapter = str(data.get("chapter") or "").strip()
+            who = (
+                f"第 {act_index} 幕 · 第 {chapter_index} 章《{chapter}》"
+                if chapter and act_index and chapter_index
+                else (f"第 {act_index} 幕" if act_index else "整体")
+            )
+            reason = str(data.get("reason") or "").strip()
+            text = f"第 {attempt} 次重写 {who}（{level}层）"
+            if reason:
+                text = f"{text}：{reason}"
+            self.progress(text, force=True, clear_percent=True)
+        elif kind == "notice":
+            message = str(data.get("message") or "").strip()
+            if message:
+                # 输出预算被设置值压低等提醒：留在任务进度里，避免只在服务端日志里
+                self.progress(f"⚠ {message}", force=True, clear_percent=True)
         elif kind == "stage":
             stage = str(data.get("stage") or data.get("message") or "").strip()
             stage = {"acts": "规划幕结构", "chapters": "补全章节", "beats": "补齐节拍"}.get(stage, stage)
@@ -420,7 +443,47 @@ def _num(value) -> float:
 
 
 #: 批次单位中文名（空单位按「批」展示）
-_BATCH_UNIT = {"act": "幕", "chapter": "章", "outline": "", "world": "个世界", "character": "个角色"}
+_BATCH_UNIT = {"act": "幕", "chapter": "章", "beat": "个节拍", "outline": "", "batch": "批", "world": "个世界", "character": "个角色"}
+
+
+def _event_text(data: dict, name: str = "") -> str:
+    """按阶段拼进度文案，避免把章数/节拍数错配到「幕」的单位上。
+
+    - 幕阶段：`第 k/10 幕`（一次请求出全量时显示 `规划 10 幕`）；
+    - 章阶段：`第 x/10 幕 · 已完成 k/50 章`；
+    - 节拍阶段：`第 x/10 幕 · 第 k/50 章 · 第 y/200 节拍`；
+    - 其他（世界 / 角色）：`第 2/3 批`。
+
+    参数:
+        data: 事件负载（可含 phase/act_index/act_total/chapter_index/chapter_total/beat_index/beat_total）。
+        name: 当前项名称。
+
+    返回:
+        中文进度前缀。
+    """
+    phase = str(data.get("phase") or "").strip()
+    act_total = int(_num(data.get("act_total") or (data.get("total") if phase in ("acts", "chapters") else 0)))
+    act_index = int(_num(data.get("act_index") or data.get("index")))
+    chapter_total = int(_num(data.get("chapter_total") or data.get("chapters_total")))
+    chapter_index = int(_num(data.get("chapter_index")))
+    beat_total = int(_num(data.get("beat_total")))
+    beat_index = int(_num(data.get("beat_index") or data.get("index")))
+    if phase == "acts":
+        return f"规划 {act_total} 幕" if act_total else ""
+    if phase == "chapters":
+        done = int(_num(data.get("chapters_done")))
+        head = f"第 {act_index}/{act_total} 幕 · 已完成 {done}/{chapter_total} 章"
+        return f"{head} · {name}" if name else head
+    if phase == "beats":
+        head = (
+            f"第 {act_index}/{act_total} 幕 · 第 {chapter_index}/{chapter_total} 章"
+            f" · 第 {max(1, beat_index)}/{beat_total} 节拍"
+        )
+        return f"{head} · {name}" if name else head
+    index = _num(data.get("index") or data.get("batch"))
+    total = _num(data.get("total")) or 1
+    unit = str(data.get("unit") or "").strip()
+    return _batch_text(index, total, unit, name)
 
 
 def _batch_text(index: float, total: float, unit: str, name: str = "") -> str:

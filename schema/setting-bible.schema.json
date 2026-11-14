@@ -56,7 +56,8 @@
         "id": { "type": "string", "pattern": "^act_[0-9A-Za-z]{6,32}$" },
         "title": { "type": "string", "maxLength": 200 },
         "summary": { "type": "string", "maxLength": 2000 },
-        "chapters": { "type": "array", "items": { "$ref": "#/$defs/outline_chapter" } }
+        "chapters": { "type": "array", "items": { "$ref": "#/$defs/outline_chapter" } },
+        "origin": { "$ref": "#/$defs/origin" }
       }
     },
     "outline_chapter": {
@@ -75,7 +76,23 @@
           "items": { "type": "string", "pattern": "^wld_[0-9A-Za-z]{6,32}$" },
           "default": [],
           "description": "本章涉及的世界条目 ID（worlds.json）；空数组表示沿用主世界"
-        }
+        },
+        "origin": { "$ref": "#/$defs/origin" }
+      }
+    },
+    "origin": {
+      "type": "object",
+      "description": "扩充/续写来源：只做标注，不改变已有内容的引用关系",
+      "required": ["kind", "mode", "created_at"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "type": "string", "enum": ["expansion", "continuation"], "description": "expansion=中间扩充，continuation=结局后接续" },
+        "mode": { "type": "string", "enum": ["after_act", "after_chapter", "append"] },
+        "anchor_act_id": { "type": ["string", "null"], "pattern": "^act_[0-9A-Za-z]{6,32}$" },
+        "anchor_act_title": { "type": "string", "maxLength": 200 },
+        "anchor_chapter_id": { "type": ["string", "null"], "pattern": "^chp_[0-9A-Za-z]{6,32}$" },
+        "anchor_chapter_title": { "type": "string", "maxLength": 200 },
+        "created_at": { "type": "string", "format": "date-time" }
       }
     },
     "beat": {

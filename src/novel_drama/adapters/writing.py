@@ -924,6 +924,21 @@ class OmlxWritingAdapter:
         values = [int(value) for value in (cached, configured) if isinstance(value, (int, float)) and int(value) > 0]
         return min(values) if values else None
 
+    def _output_limit(self) -> int | None:
+        """返回服务端探测到的模型最大输出（用于避免下发超过模型能力的预算）。
+
+        返回:
+            tokens；没有探测值时为 None。
+        """
+        for key in ("max_output_tokens", "max_completion_tokens"):
+            try:
+                value = int(self.settings.get(key) or 0)
+            except (TypeError, ValueError, AttributeError):
+                value = 0
+            if value > 0:
+                return value
+        return None
+
     @staticmethod
     def _estimate_prompt_tokens(messages: list[dict]) -> int:
         """粗略估算 prompt 的 token 数（中文按 1 字≈1 token 保守计）。
@@ -1165,7 +1180,15 @@ class OmlxWritingAdapter:
         payload.setdefault("chat_template_kwargs", {})["enable_thinking"] = enabled
         if enabled and self.reasoning_effort in _THINKING_EFFORTS:
             payload["reasoning_effort"] = self.reasoning_effort
-        payload["max_tokens"] = max(int(payload.get("max_tokens") or 0), TOOL_MIN_MAX_TOKENS)
+        budget = int(payload.get("max_tokens") or 0)
+        # 只有调用方没显式给预算时才用工具下限兜底；设置页的显式上限要原样下发
+        if req.max_tokens is None:
+            budget = max(budget, TOOL_MIN_MAX_TOKENS)
+        limit = self._output_limit()
+        if limit and budget > limit:
+            logger.warning("工具调用预算 %s 超过模型最大输出 %s，已按模型上限下发", budget, limit)
+            budget = limit
+        payload["max_tokens"] = budget
 
         started = time.monotonic()
         url = f"{str(self.endpoint).rstrip('/')}/v1/chat/completions"

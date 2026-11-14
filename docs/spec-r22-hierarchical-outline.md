@@ -39,6 +39,14 @@
 - `resume=true` 时复用中间结果：跳过已完成的幕/章，只补缺失部分，不重新规划幕；
 - 页面在结束后列出失败项并询问是否「只重试失败项」，确认后带 `resume=true` 再跑一次。
 
+## 角色引用（binding，仅取值 auto / none）
+
+请求体里的 `binding` 只影响**生成完成后的落盘处理**，不进入提示词，也不影响幕/章/节拍生成：
+
+- `auto`（默认）：`bind_outline_characters()` → `bind_outline_context()`，按幕轮转绑定世界与 POV；节拍 `character_ids` 只保留真实角色 ID，过滤后为空则回落到本章 POV。
+- `none`：`sanitize_outline_character_ids()`，只过滤非法引用（人名、空串、重复 ID），**不回落到 POV、不改世界绑定**；丢弃数量以 `notice` 事件提示「已忽略 N 个无法识别的角色引用」，并写入返回体的 `ignored_character_refs`。
+- 页面（`/api/ui/outline/hierarchical/stream`、`/api/ui/outline/expand/stream`）不下发 `binding`，服务端按默认 `auto` 处理；只有 CLI `outline generate --binding` 能显式指定。
+
 ## 预算
 
 按层级分别估算，复用 `_tool_max_tokens`：
@@ -51,8 +59,8 @@
 
 ## 兼容性
 
-- 原 `/api/ui/outline/generate` 与 `/api/ui/outline/generate/stream`、`service.generate_outline`
-  （单轮 / 按幕多轮）保持不变；
+- `/api/ui/outline/generate` 与 `/api/ui/outline/generate/stream`、`service.generate_outline` 仅保留单轮；
+  按幕多轮（`multi_turn` / `acts_per_round` / `.ndw/outline_acts.json`）已删除；
 - 未改 `setting-bible.schema.json`，组装结果仍走 `SettingsStore.new_act / new_outline_chapter / new_beat`；
 - 章序号全局连续，复用同序号已有的章节 ID，已落地章节文件不受影响；
 - 离线适配器新增 `emit_acts / emit_chapters / emit_beats` 分支，便于无模型时跑通。

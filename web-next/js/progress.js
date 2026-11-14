@@ -241,6 +241,15 @@ export function openProgress({ title, hint = '', stage = '准备中…', stream 
         }
         return;
       }
+      // 输出预算被设置值压低：黄色提示，不再静默按更小的 max_tokens 截断
+      if (event === 'notice') {
+        const message = String(data?.message || '');
+        if (message) {
+          this.note(`⚠ ${message}`);
+          toast(message, 'warn', 6000);
+        }
+        return;
+      }
       // 模型原文刚更新过时，不让紧随其后的批次 / 条目名把实时内容顶掉
       if (['batch', 'item'].includes(event) && Date.now() - lastCharsAt < 4000) return;
       const text =

@@ -1117,7 +1117,7 @@ def _run_batch_voice(
             meta = voice_design.read_batch(store, batch_id)
         if not meta:
             adapter = _writing_adapter(cfg, store)
-            built = voice_design.build_profile(adapter, character)
+            built = voice_design.build_profile(adapter, character, cfg)
             meta = voice_design.create_batch(
                 store, cfg, character, built["profile"]["design_prompt"], count, built["profile"]
             )
