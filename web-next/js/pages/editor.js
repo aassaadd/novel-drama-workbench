@@ -2666,16 +2666,15 @@ function openScriptAnnotate() {
       <div id="sa-body"><div class="empty" style="padding:18px"><span>正在读取标注…</span></div></div>`,
     foot: `<div class="right">
       <button class="btn" data-sa="close">关闭</button>
-      <button class="btn" data-sa="refresh" title="重新读取落盘标注与告警">重新读取</button>
-      <button class="btn" data-sa="preview" title="调用写作模型生成标注建议，只预览不写盘">生成建议（预览）</button>
-      <button class="btn primary" data-sa="apply" title="生成标注并同步到本章场景与台词">生成并写入本章</button>
+      <button class="btn" data-sa="refresh" title="重新读取已保存到本集的标注与告警">重新读取</button>
+      <button class="btn primary" data-sa="preview" title="调用写作模型生成标注预览，不写入本集">生成预览（不写入）</button>
     </div>`,
   });
   // 生成方式：只补缺失批次（resume）或重新生成全部批次
   const readMode = bindModeSwitch(mask, 'script.annotate', {
     fallback: 'fill',
     action: mask.querySelector('[data-sa="preview"]'),
-    labels: { fill: '只补缺失批次', regen: '重新生成全部' },
+    labels: { fill: '生成预览（只补缺失）', regen: '生成预览（全部重做）' },
   });
   mask.addEventListener('click', (event) => {
     const button = event.target.closest('[data-sa]');
@@ -2683,8 +2682,12 @@ function openScriptAnnotate() {
     const act = button.dataset.sa;
     if (act === 'close') return closeDialog();
     if (act === 'refresh') return void loadScriptAnnotate(mask);
-    if (act === 'preview') return runScriptSuggest(mask, false, readMode());
-    if (act === 'apply') return runScriptSuggest(mask, true, readMode());
+    if (act === 'preview') return void runScriptSuggest(mask, readMode());
+    if (act === 'discard') {
+      mask._saPreview = null;
+      return void loadScriptAnnotate(mask);
+    }
+    if (act === 'adopt') return void adoptScriptPreview(mask, button);
     if (act === 'jump') {
       const lineId = button.dataset.line;
       const scene = Number(button.dataset.scene || 0);
@@ -2719,112 +2722,211 @@ function warningWhere(item) {
   return parts.join(' · ') || '全章';
 }
 
-/** 读取并渲染标注与告警 */
+/** 读取并渲染已保存的标注、告警，以及尚未写入的预览内容 */
 async function loadScriptAnnotate(mask) {
   const body = mask.querySelector('#sa-body');
   if (!body) return;
   try {
     const data = await getJSON('/api/ui/script', { path: state.path, chapter: state.chapterId });
-    const items = data.warning_items || [];
-    const plain = (data.warnings || []).filter(
-      (text) => !items.some((item) => String(item.message || '') === String(text))
-    );
-    const rows = items
-      .map(
-        (item) => `
-        <div class="summary-line" style="align-items:flex-start;gap:10px">
-          <span style="min-width:0">
-            <b style="color:var(--warn)">${esc(warningWhere(item))}</b>
-            <span class="badge mute" style="margin-left:6px">${esc(item.kind || '告警')}</span>
-            <div style="font-size:12px;color:var(--text);margin-top:2px">${esc(item.message || '')}</div>
-            ${
-              item.text || item.snippet
-                ? `<div style="font-size:11px;color:var(--text-4);margin-top:2px">${esc(
-                    item.text || item.snippet || ''
-                  )}</div>`
-                : ''
-            }
-          </span>
-          <span class="right">
-            <button class="btn sm" data-sa="jump" data-line="${esc(item.line_id || '')}"
-              data-scene="${item.scene_index != null ? Number(item.scene_index) + 1 : ''}">定位</button>
-          </span>
-        </div>`
-      )
-      .join('');
+    const preview = mask._saPreview || null;
     body.innerHTML = `
-      <div class="summary-line">
-        <span>标注文件</span>
-        <span class="right badge ${data.has_script ? 'ok' : 'warn'}">${
-          data.has_script ? '已生成导演脚本' : '仅有标注文本'
-        }</span>
-      </div>
-      <div class="summary-line">
-        <span>标注文本</span>
-        <span class="right mono" style="max-width:70%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
-          title="${esc(data.markup_path || '')}">${esc(data.markup_path || '未生成')}</span>
-      </div>
-      <div class="summary-line">
-        <span>硬告警</span>
-        <span class="right"><span class="badge ${items.length ? 'warn' : 'ok'}">${items.length} 条</span></span>
-      </div>
-      ${
-        rows
-          ? `<div style="margin-top:10px">${rows}</div>`
-          : `<div class="dlg-note" style="margin-top:10px">没有需要人工处理的硬告警。${
-              data.markup ? '' : '还没有标注文本，可点「生成建议（预览）」先看规则解析结果。'
-            }</div>`
-      }
-      ${
-        plain.length
-          ? `<details style="margin-top:10px"><summary style="cursor:pointer;font-size:11px;color:var(--text-3)">
-              自动修正 / 信息提示 ${plain.length} 条</summary>
-             <div style="padding:6px 0 0 8px;font-size:11.5px;color:var(--text-3)">
-               ${plain.map((text) => `<div>· ${esc(text)}</div>`).join('')}
-             </div></details>`
-          : ''
-      }
-      <div id="sa-progress" style="margin-top:10px"></div>
-      <details style="margin-top:12px">
-        <summary style="cursor:pointer;font-size:11.5px;color:var(--text-3)">查看标注文本（${(
-          data.markup || ''
-        ).length} 字）</summary>
-        <pre style="max-height:240px;overflow:auto;margin-top:8px;padding:10px;border-radius:6px;
-          background:var(--bg-2);font-size:11.5px;line-height:1.6;white-space:pre-wrap">${esc(
-            data.markup || '（还没有标注文本）'
-          )}</pre>
-      </details>`;
+      ${preview ? scriptPreviewHTML(preview, data.markup_path) : ''}
+      <div ${preview ? 'style="margin-top:14px;border-top:1px solid var(--line);padding-top:10px"' : ''}>
+        ${scriptSavedHTML(data)}
+      </div>`;
   } catch (error) {
     body.innerHTML = `<div class="dlg-note bad">${esc(error.message)}</div>`;
   }
 }
 
 /**
- * 生成标注建议（流式）。
+ * 已保存到本集的标注与告警。
+ * @param {object} data `/api/ui/script` 返回体
+ * @returns {string} HTML
+ */
+function scriptSavedHTML(data) {
+  const items = data.warning_items || [];
+  const plain = (data.warnings || []).filter(
+    (text) => !items.some((item) => String(item.message || '') === String(text))
+  );
+  const rows = items
+    .map(
+      (item) => `
+      <div class="summary-line" style="align-items:flex-start;gap:10px">
+        <span style="min-width:0">
+          <b style="color:var(--warn)">${esc(warningWhere(item))}</b>
+          <span class="badge mute" style="margin-left:6px">${esc(item.kind || '告警')}</span>
+          <div style="font-size:12px;color:var(--text);margin-top:2px">${esc(item.message || '')}</div>
+          ${
+            item.text || item.snippet
+              ? `<div style="font-size:11px;color:var(--text-4);margin-top:2px">${esc(
+                  item.text || item.snippet || ''
+                )}</div>`
+              : ''
+          }
+        </span>
+        <span class="right">
+          <button class="btn sm" data-sa="jump" data-line="${esc(item.line_id || '')}"
+            data-scene="${item.scene_index != null ? Number(item.scene_index) + 1 : ''}">定位</button>
+        </span>
+      </div>`
+    )
+    .join('');
+  return `
+    <div class="summary-line">
+      <span>本集导演脚本</span>
+      <span class="right badge ${data.has_script ? 'ok' : 'warn'}">${
+        data.has_script ? '已生成' : '还没有'
+      }</span>
+    </div>
+    <div class="summary-line">
+      <span>已保存的标注文件</span>
+      <span class="right mono" style="max-width:70%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
+        title="${esc(data.markup_path || '')}">${esc(data.markup ? data.markup_path : '还没有保存')}</span>
+    </div>
+    <div class="summary-line">
+      <span>硬告警</span>
+      <span class="right"><span class="badge ${items.length ? 'warn' : 'ok'}">${items.length} 条</span></span>
+    </div>
+    ${
+      rows
+        ? `<div style="margin-top:10px">${rows}</div>`
+        : `<div class="dlg-note" style="margin-top:10px">没有需要人工处理的硬告警。${
+            data.markup ? '' : '本集还没有保存标注，可点下方「生成预览（不写入）」先看生成结果。'
+          }</div>`
+    }
+    ${
+      plain.length
+        ? `<details style="margin-top:10px"><summary style="cursor:pointer;font-size:11px;color:var(--text-3)">
+            自动修正 / 信息提示 ${plain.length} 条</summary>
+           <div style="padding:6px 0 0 8px;font-size:11.5px;color:var(--text-3)">
+             ${plain.map((text) => `<div>· ${esc(text)}</div>`).join('')}
+           </div></details>`
+        : ''
+    }
+    <div id="sa-progress" style="margin-top:10px"></div>
+    <details style="margin-top:12px">
+      <summary style="cursor:pointer;font-size:11.5px;color:var(--text-3)">查看已保存的标注（${(
+        data.markup || ''
+      ).length} 字）</summary>
+      <pre style="max-height:240px;overflow:auto;margin-top:8px;padding:10px;border-radius:6px;
+        background:var(--bg-2);font-size:11.5px;line-height:1.6;white-space:pre-wrap">${esc(
+          data.markup || '（本集还没有保存标注）'
+        )}</pre>
+    </details>`;
+}
+
+/**
+ * 把标注原文按 `@shot` 切成镜头块，供预览逐条浏览。
+ * @param {string} markup 标注原文
+ * @returns {Array<{head: string, body: string}>} 镜头块（没有 @shot 时整段返回）
+ */
+function splitShotBlocks(markup) {
+  const blocks = [];
+  let current = null;
+  for (const line of String(markup || '').split('\n')) {
+    if (/^@shot\b/.test(line.trim())) {
+      current = { head: line.trim(), body: [] };
+      blocks.push(current);
+    } else if (current) {
+      current.body.push(line);
+    }
+  }
+  if (!blocks.length) {
+    const text = String(markup || '').trim();
+    return text ? [{ head: '标注原文', body: text }] : [];
+  }
+  return blocks.map((block) => ({ head: block.head, body: block.body.join('\n').trim() }));
+}
+
+/**
+ * 尚未写入的标注预览：按镜头逐条展示，并明确「写入 / 不写入」的差别。
+ * @param {{markup?: string, failures?: Array<object>}} preview 预览数据
+ * @param {string} markupPath 写入目标（本集标注文件路径）
+ * @returns {string} HTML
+ */
+function scriptPreviewHTML(preview, markupPath) {
+  const markup = String(preview.markup || '').trim();
+  const failures = preview.failures || [];
+  const shots = splitShotBlocks(markup);
+  const canAdopt = Boolean(markup) && !failures.length;
+  const failureRows = failures
+    .map(
+      (item) =>
+        `<div>· 镜头 ${esc(String(item.start_scene || '?'))}–${esc(
+          String(item.end_scene || '?')
+        )}：${esc(item.message || '生成失败')}</div>`
+    )
+    .join('');
+  return `
+    <div class="dlg-note" style="border:1px solid var(--accent);padding:10px 12px;border-radius:6px">
+      <b>标注预览（还没有写入本集）</b>
+      <div style="margin-top:4px;font-size:11.5px;color:var(--text-3)">
+        不写入：点「丢弃预览」或关闭弹窗，本集已有标注保持原样；
+        写入：点「写入本集标注文件（采纳）」会把下面的内容保存到本集，并同步到本集场景与台词。
+      </div>
+    </div>
+    <div class="summary-line" style="margin-top:8px">
+      <span>预览内容</span>
+      <span class="right badge ${failures.length ? 'warn' : 'ok'}">${shots.length} 个镜头 · ${
+        markup.length
+      } 字${failures.length ? ` · ${failures.length} 个批次失败` : ''}</span>
+    </div>
+    ${
+      failures.length
+        ? `<div class="dlg-note bad" style="margin-top:6px">以下批次没有生成成功，补齐后才能写入：${failureRows}</div>`
+        : ''
+    }
+    <div style="max-height:320px;overflow:auto;margin-top:8px;padding-right:4px">
+      ${
+        shots.length
+          ? shots
+              .map(
+                (shot) => `
+        <details open style="margin-bottom:6px;background:var(--bg-2);border-radius:6px;padding:6px 10px">
+          <summary style="cursor:pointer;font-size:12px;color:var(--text)">${esc(shot.head)}</summary>
+          <pre style="margin:6px 0 0;font-size:11.5px;line-height:1.6;white-space:pre-wrap">${esc(
+            shot.body || '（这个镜头没有内容）'
+          )}</pre>
+        </details>`
+              )
+              .join('')
+          : '<div class="dlg-note bad">没有拿到可展示的标注内容</div>'
+      }
+    </div>
+    <div class="summary-line" style="margin-top:8px">
+      <span>写入位置</span>
+      <span class="right mono" style="max-width:70%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
+        title="${esc(markupPath || '')}">${esc(markupPath || '')}</span>
+    </div>
+    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px">
+      <button class="btn" data-sa="discard">丢弃预览</button>
+      <button class="btn primary" data-sa="adopt" ${canAdopt ? '' : 'disabled'}
+        title="${canAdopt ? '把预览写入本集标注文件，并同步到本集场景与台词' : '还有失败批次，补齐后才能写入'}">
+        写入本集标注文件（采纳）
+      </button>
+    </div>`;
+}
+
+/**
+ * 生成标注预览（流式，不写入本集）。
  * @param {HTMLElement} mask 弹窗根节点
- * @param {boolean} apply true 时同步到本章（有失败批次则只落标注文本）
  * @param {'fill'|'regen'} [mode] fill 只补缺失 / 失败批次（resume=true），regen 从头生成
  */
-async function runScriptSuggest(mask, apply, mode = 'fill') {
+async function runScriptSuggest(mask, mode = 'fill') {
   const resume = mode === 'fill';
   const progress = mask.querySelector('#sa-progress');
-  const buttons = mask.querySelectorAll('[data-sa="preview"], [data-sa="apply"], [data-sa="refresh"]');
+  const buttons = mask.querySelectorAll('[data-sa="preview"], [data-sa="refresh"], [data-sa="adopt"], [data-sa="discard"]');
   buttons.forEach((button) => (button.disabled = true));
   if (progress) {
-    progress.innerHTML = `<div class="dlg-note">正在生成标注建议…<span id="sa-progress-text"></span></div>`;
+    progress.innerHTML = `<div class="dlg-note">正在生成标注预览…<span id="sa-progress-text"></span></div>`;
   }
   const label = mask.querySelector('#sa-progress-text');
   const panel = openProgress({
-    title: apply
-      ? resume
-        ? '正在补齐标注批次并写入本章…'
-        : '正在重新生成标注并写入本章…'
-      : resume
-        ? '正在补齐缺失批次的标注建议…'
-        : '正在重新生成全部标注建议…',
+    title: resume ? '正在补齐缺失批次的标注预览…' : '正在重新生成全部标注预览…',
     hint: resume
-      ? '只补做缺失 / 失败的镜头批次，已完成批次会跳过'
-      : '忽略已有批次，按镜头重新生成全部标注',
+      ? '只补做缺失 / 失败的镜头批次，已完成批次会跳过；本次不写入本集'
+      : '忽略已有批次，按镜头重新生成全部标注；本次不写入本集',
     stage: '已提交生成请求，等待模型返回…',
   });
   panel.update({ percent: null });
@@ -2832,17 +2934,18 @@ async function runScriptSuggest(mask, apply, mode = 'fill') {
   try {
     await streamJSON(
       '/api/ui/script/suggest/stream',
-      { path: state.path, chapter: state.chapterId, apply, dry_run: !apply, resume },
+      { path: state.path, chapter: state.chapterId, apply: false, dry_run: true, resume },
       (event, data) => {
         if (!data) return;
         if (event === 'batch') {
-          const index = Number(data.index || 0);
-          const total = Number(data.total || 1) || 1;
-          const text = ` 第 ${index + 1}/${total} 批（镜头 ${Number(data.start) + 1}–${Number(data.end)}）`;
+          // 后端 index 是 1 基批次序号；进度只表示已完成批次，done 时才到 100%
+          const total = Math.max(1, Number(data.total) || 1);
+          const index = Math.min(Math.max(1, Number(data.index) || 1), total);
+          const text = ` 第 ${index}/${total} 批（镜头 ${Number(data.start) + 1}–${Number(data.end)}）`;
           if (label) label.textContent = text;
           panel.update({
-            stage: `正在标注第 ${index + 1}/${total} 批镜头…`,
-            percent: Math.round((index / total) * 100),
+            stage: `正在标注第 ${index}/${total} 批镜头…`,
+            percent: total > 1 ? Math.round(((index - 1) / total) * 100) : 0,
             current: `镜头 ${Number(data.start) + 1}–${Number(data.end)}`,
           });
         } else if (event === 'chars') {
@@ -2863,88 +2966,116 @@ async function runScriptSuggest(mask, apply, mode = 'fill') {
             markupLine || (failures.length ? `仍有 ${failures.length} 个批次失败` : '全部批次已完成')
           );
           panel.finish({
-            message: apply
-              ? `标注已生成并同步到本章${failures.length ? `，${failures.length} 个批次失败` : ''}`
-              : `标注建议已生成（未写盘）${failures.length ? `，${failures.length} 个批次失败` : ''}`,
+            message: failures.length
+              ? `预览已生成，${failures.length} 个批次失败`
+              : '预览已生成，还没有写入本集标注文件',
             detail: failures.length
-              ? '失败批次可用「重试失败批次」只补做失败部分。'
-              : '标注文件已更新，可在弹窗里查看告警明细。',
-            actions: [
-              {
-                label: '刷新标注',
-                primary: true,
-                onClick: () => void loadScriptAnnotate(mask),
-              },
-              ...(failures.length
-                ? [
-                    {
-                      label: '重试失败批次',
-                      onClick: () => void runScriptSuggestResume(mask, apply),
-                    },
-                  ]
-                : []),
-            ],
+              ? '失败批次补齐后才能写入本集；可点「重试失败批次」只补做失败部分。'
+              : '在弹窗里按镜头查看；点「写入本集标注文件（采纳）」才会保存到本集，不写入则本集标注保持原样。',
+            actions: failures.length
+              ? [
+                  {
+                    label: '重试失败批次',
+                    primary: true,
+                    onClick: () => void runScriptSuggestResume(mask),
+                  },
+                ]
+              : [],
           });
+          mask._saPreview = {
+            markup: String(result.markup || ''),
+            failures,
+            warnings: result.warnings || [],
+          };
         } else if (event === 'error') {
           settled = true;
           panel.fail({
             message: data.message || '标注生成失败',
-            retry: () => void runScriptSuggest(mask, apply, mode),
+            retry: () => void runScriptSuggest(mask, mode),
           });
         }
       }
     );
     if (!settled) {
-      panel.fail({ message: '连接已中断，没有收到标注结果', retry: () => void runScriptSuggest(mask, apply, mode) });
+      panel.fail({ message: '连接已中断，没有收到标注结果', retry: () => void runScriptSuggest(mask, mode) });
     }
-    if (apply) {
-      toast('标注已生成并同步到本章，正在刷新台词', 'ok', 3600);
-      await loadChapterState();
-      repaintPage();
-    } else {
-      toast('已生成标注建议（未写盘）', 'ok');
+    if (settled && mask._saPreview) {
+      toast('已生成标注预览（还没有写入本集）', 'ok');
     }
     await loadScriptAnnotate(mask);
   } catch (error) {
     toast(error.message, 'bad', 4600);
     if (progress) progress.innerHTML = `<div class="dlg-note bad">${esc(error.message)}</div>`;
-    if (!settled) panel.fail({ message: `标注生成失败：${error.message}`, retry: () => void runScriptSuggest(mask, apply, mode) });
+    if (!settled) panel.fail({ message: `标注生成失败：${error.message}`, retry: () => void runScriptSuggest(mask, mode) });
   } finally {
     buttons.forEach((button) => (button.disabled = false));
   }
 }
 
 /**
- * 只重试失败批次的标注（resume=true）。
+ * 只重试失败批次的标注预览（resume=true，不写入本集）。
  * @param {HTMLElement} mask 弹窗根节点
- * @param {boolean} apply 是否同步到本章
  */
-async function runScriptSuggestResume(mask, apply) {
+async function runScriptSuggestResume(mask) {
   const panel = openProgress({
     title: '正在重试失败批次…',
-    hint: '只补做上次失败的镜头批次，已完成批次会跳过',
+    hint: '只补做上次失败的镜头批次，已完成批次会跳过；本次不写入本集',
     stage: '已提交重试请求…',
   });
   panel.update({ percent: null });
   try {
     await streamJSON(
       '/api/ui/script/suggest/stream',
-      { path: state.path, chapter: state.chapterId, apply, dry_run: !apply, resume: true },
+      { path: state.path, chapter: state.chapterId, apply: false, dry_run: true, resume: true },
       (event, data) => {
         if (event === 'done') {
-          const failures = data?.result?.failures || [];
+          const result = data?.result || {};
+          const failures = result.failures || [];
           panel.finish({
             message: failures.length ? `仍有 ${failures.length} 个批次失败` : '失败批次已补齐',
-            actions: [{ label: '刷新标注', primary: true, onClick: () => void loadScriptAnnotate(mask) }],
+            detail: '预览已更新，可在弹窗里按镜头查看；确认后再写入本集。',
           });
+          mask._saPreview = {
+            markup: String(result.markup || ''),
+            failures,
+            warnings: result.warnings || [],
+          };
         } else if (event === 'error') {
-          panel.fail({ message: data?.message || '重试失败', retry: () => void runScriptSuggestResume(mask, apply) });
+          panel.fail({ message: data?.message || '重试失败', retry: () => void runScriptSuggestResume(mask) });
         }
       }
     );
     await loadScriptAnnotate(mask);
   } catch (error) {
-    panel.fail({ message: `重试失败：${error.message}`, retry: () => void runScriptSuggestResume(mask, apply) });
+    panel.fail({ message: `重试失败：${error.message}`, retry: () => void runScriptSuggestResume(mask) });
+  }
+}
+
+/**
+ * 采纳预览：把弹窗里的标注写入本集标注文件，并同步到本集场景与台词。
+ * @param {HTMLElement} mask 弹窗根节点
+ * @param {HTMLButtonElement} button 触发的按钮
+ */
+async function adoptScriptPreview(mask, button) {
+  const preview = mask._saPreview;
+  if (!preview || !preview.markup) return;
+  button.disabled = true;
+  button.textContent = '正在写入…';
+  try {
+    const result = await postJSON('/api/ui/script/apply', {
+      path: state.path,
+      chapter: state.chapterId,
+      markup: preview.markup,
+    });
+    mask._saPreview = null;
+    toast(`已写入本集标注文件：${Number(result.shots || 0)} 个镜头、${Number(result.lines || 0)} 条台词`, 'ok', 3600);
+    await loadChapterState();
+    repaintPage();
+    await loadScriptAnnotate(mask);
+  } catch (error) {
+    toast(`写入失败：${error.message}`, 'bad', 4600);
+    button.disabled = false;
+    button.textContent = '写入本集标注文件（采纳）';
   }
 }
 
@@ -2965,7 +3096,7 @@ function bind(root) {
 }
 
 /** 进入编辑页入口 */
-export async function renderEditor(root, { path, chapterId, lineId = '' }) {
+export async function renderEditor(root, { path, chapterId, lineId = '', act = '' }) {
   stopPolling();
   pageRoot = root;
   if (state.path !== path) resetProject(path);

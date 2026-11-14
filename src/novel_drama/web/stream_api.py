@@ -848,3 +848,54 @@ def register_stream_routes(app, config_path: str | None = None) -> None:
             task,
             UiJob(store, "script", _chapter_target(store, chapter_id), "导演标注"),
         )
+
+    @app.post("/api/ui/script/apply")
+    def ui_script_apply(body: dict) -> dict:
+        """采纳预览：把页面上的标注文本写入本集标注文件并同步到本集场景与台词。
+
+        参数:
+            body: `{path, chapter, markup}`；`markup` 为预览里展示的标注原文。
+
+        返回:
+            `{markup_path, script_path, warnings, warning_items, shots, lines, apply}`。
+
+        异常:
+            HTTPException 400: 缺少标注文本，或标注无法解析 / 不符合 schema。
+        """
+        store = _store(body.get("path"))
+        chapter_id = str(body.get("chapter") or "")
+        if not chapter_id:
+            raise HTTPException(status_code=400, detail="缺少 chapter 参数（章节 ID）")
+        markup = str(body.get("markup") or "").strip()
+        if not markup:
+            raise HTTPException(status_code=400, detail="没有可写入的标注内容：请先生成预览")
+
+        from ..cli_voice import _apply_script_to_chapter
+        from ..director.markup import parse_markup
+        from ..store.schema_validator import validate
+
+        chapter = store.load_chapter(chapter_id)
+        characters = store.load_characters()["characters"]
+        warning_items: list[dict] = []
+        try:
+            script = parse_markup(
+                markup, chapter, characters, store.settings(), diagnostics=warning_items
+            )
+            validate(script, "director-script.schema.json")
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=f"标注无法写入：{exc}") from exc
+
+        out_path = store.root / "scripts" / f"{chapter_id}.markup.txt"
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(markup + "\n", encoding="utf-8")
+        store.save_script(script)
+        applied = _apply_script_to_chapter(store, chapter, script)
+        return {
+            "markup_path": str(out_path),
+            "script_path": str(store.script_path(chapter_id)),
+            "warnings": script.get("warnings") or [],
+            "warning_items": warning_items,
+            "shots": len(script.get("shots") or []),
+            "lines": sum(len(shot.get("lines") or []) for shot in script.get("shots") or []),
+            "apply": applied,
+        }

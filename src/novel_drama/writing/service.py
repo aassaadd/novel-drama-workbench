@@ -1572,6 +1572,8 @@ def suggest_script(
             ],
         }
 
+    # 批次总数以真实批次列表为准：续跑复用的批次可能少于按当前参数重算的轮数
+    rounds = len(work["batches"])
     failures: list[dict] = []
     last_result = None
     for batch in work["batches"]:
