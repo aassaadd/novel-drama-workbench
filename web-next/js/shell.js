@@ -48,8 +48,8 @@ export function railbar(active, counts = {}) {
   const toVoices = path ? `#/p/${path}/voices` : '#/projects';
   const toMedia = path ? `#/p/${path}/media` : '#/projects';
   const toTasks = path ? `#/p/${path}/tasks` : '#/projects';
-  // 设置是全局视图：没有打开工程时也能进入，有工程时额外带上工程上下文
-  const toSettings = path ? `#/settings?project=${path}` : '#/settings';
+  // 设置是全局视图：不带任何工程参数；工程侧设置走 #/p/<路径>/settings
+  const toSettings = '#/settings';
   const items = [
     { key: 'projects', label: '项目', href: '#/projects', icon: 'folder', n: '' },
     { key: 'novel', label: '小说', href: toNovel, icon: 'book', n: '' },
@@ -75,7 +75,7 @@ export function railbar(active, counts = {}) {
           <span class="rail-ic">${icon('search', 18)}</span>搜索
         </button>
         <a class="rail-item ${active === 'settings' ? 'active' : ''}" href="${toSettings}"
-          title="${path ? '设置：全局与本机环境、当前工程参数' : '设置：全局与本机环境（不需要先打开工程）'}">
+          title="设置：全局与本机环境（不需要先打开工程）">
           <span class="rail-ic">${icon('gear', 18)}</span>设置
         </a>
       </div>

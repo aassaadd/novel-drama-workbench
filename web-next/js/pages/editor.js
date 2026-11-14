@@ -641,7 +641,7 @@ function pageHTML() {
                  data-act="set-view" data-view="${view.key}" title="${view.title}">${icon(view.icon)}</button>`
              ).join('')}
              <button class="btn icon view-tab ${state.view === 'align' || (state.view === 'script' && state.panelTab === 'audit') ? 'on' : ''}"
-               data-act="more-views" title="更多视图">${icon('more')}</button>`,
+               data-act="more-views" title="审听与对轨视图">${icon('more')}</button>`,
       crumbs: `<button class="btn icon sm" data-act="prev-chapter" ${prev ? '' : 'disabled'} title="上一章">${icon('prev')}</button>
                <button class="chapter-picker" data-act="chapter-picker" title="切换章节">
                  <span class="cp-title">${esc(state.info?.work?.title || '工程')}</span>
@@ -652,7 +652,7 @@ function pageHTML() {
                <button class="btn icon sm" data-act="next-chapter" ${next ? '' : 'disabled'} title="下一章">${icon('next')}</button>`,
       right: `<button class="btn icon" id="tb-undo" data-act="undo" ${history.undo.length ? '' : 'disabled'} title="撤销（⌘Z）">${icon('undo')}</button>
         <button class="btn icon" id="tb-redo" data-act="redo" ${history.redo.length ? '' : 'disabled'} title="重做（⇧⌘Z）">${icon('redo')}</button>
-        <button class="btn icon" data-act="open-settings" title="设置：全局与本机环境、当前工程参数">${icon('gear')}</button>`,
+        <button class="btn icon" data-act="open-settings" title="工程设置：作品信息与制作要求">${icon('gear')}</button>`,
     })}
     <div class="studio" id="studio" data-font="${state.fontSize}">
       ${railbar('chapter', { chapters: state.chapters.length, ready: c.ready, total: c.total })}
@@ -1558,32 +1558,74 @@ function confirmMergeSelected() {
 
 /**
  * 行尾「⋯」菜单：与参考一致，所有行级操作都从这一个入口进入。
- * 顺序：试听 → 重新生成 → 复制文本 → 查看版本记录 → 删除本条音频。
+ * 顺序对齐参考：试听 → 向上合并 → 向下合并 → 说话情绪 → 段末停顿 → 在线配音 → 配音记录；
+ * 本地另有两项：复制文本、删除本条音频。
  * @param {string} lineId 台词行 ID
  * @param {HTMLElement} anchor 触发按钮
  */
 function openLineMenu(lineId, anchor) {
   const row = state.lines.find((item) => item.line_id === lineId);
   if (!row) return;
+  const index = state.lines.findIndex((item) => item.line_id === lineId);
   const playable = Boolean(audioOf(row));
   openMenu(
     anchor,
     [
       { key: 'play', label: '试听这一行', disabled: !playable },
-      { key: 'rerun', label: '重新生成' },
+      { key: 'merge-up', label: '向上合并', disabled: index <= 0 },
+      { key: 'merge-down', label: '向下合并', disabled: index < 0 || index >= state.lines.length - 1 },
+      { key: 'emotion', label: '说话情绪' },
+      { key: 'pause', label: '段末停顿' },
+      { key: 'rerun', label: '生成配音' },
+      { key: 'versions', label: '配音记录' },
       { key: 'copy', label: '复制文本' },
-      { key: 'versions', label: '查看版本记录' },
       { sep: true },
       { key: 'delete', label: '删除本条音频', danger: true, disabled: !row.audio },
     ],
     (key) => {
       if (key === 'play') playRow(row);
+      else if (key === 'merge-up') mergeWithNeighbor(lineId, 'up');
+      else if (key === 'merge-down') mergeWithNeighbor(lineId, 'down');
+      else if (key === 'emotion') focusLineField(lineId, '#le-emotion');
+      else if (key === 'pause') focusLineField(lineId, '#le-pause-after');
       else if (key === 'rerun') runOne(lineId);
-      else if (key === 'copy') copyLineText(row);
       else if (key === 'versions') openVersions(row);
+      else if (key === 'copy') copyLineText(row);
       else if (key === 'delete') confirmDeleteAudio(row);
     }
   );
+}
+
+/**
+ * 菜单里的「向上合并 / 向下合并」：把当前行与相邻行组成选择集，
+ * 复用同一套「只合并同场景相邻行」的校验与二次确认，不另写一套合并逻辑。
+ * @param {string} lineId 当前行
+ * @param {'up'|'down'} direction 合并方向
+ */
+function mergeWithNeighbor(lineId, direction) {
+  const index = state.lines.findIndex((item) => item.line_id === lineId);
+  if (index < 0) return;
+  const other = state.lines[direction === 'up' ? index - 1 : index + 1];
+  if (!other) return toast(direction === 'up' ? '上面没有可合并的行' : '下面没有可合并的行', 'warn');
+  state.selected = new Set([lineId, other.line_id]);
+  confirmMergeSelected();
+}
+
+/**
+ * 打开行内编辑面板并把焦点放到指定字段（说话情绪 / 段末停顿共用）。
+ * @param {string} lineId 台词行 ID
+ * @param {string} fieldSelector 面板内字段选择器
+ */
+function focusLineField(lineId, fieldSelector) {
+  state.expandedLine = lineId;
+  repaintRows();
+  const box = document.querySelector(`[data-edit-for="${CSS.escape(lineId)}"]`);
+  if (!box) return;
+  box.scrollIntoView({ block: 'nearest' });
+  const field = box.querySelector(fieldSelector);
+  if (!field) return;
+  field.focus();
+  if (typeof field.select === 'function') field.select();
 }
 
 /** 复制该行台词文本；剪贴板不可用时退回 execCommand */
@@ -2345,8 +2387,8 @@ async function onRootClick(event) {
   if (act === 'undo') return undo();
   if (act === 'redo') return redo();
   if (act === 'open-settings') {
-    // 全局设置路由；带上当前工程，页面里才会出现「当前工程」区块
-    window.location.hash = `#/settings?project=${encodeURIComponent(state.path)}`;
+    // 工程侧设置：作品信息与制作要求只作用于当前工程
+    window.location.hash = `#/p/${encodeURIComponent(state.path)}/settings`;
     return;
   }
   if (act === 'toggle-task') {

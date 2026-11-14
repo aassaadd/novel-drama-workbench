@@ -50,6 +50,8 @@ _FALLBACK = {
         "max_tokens": None,
         "stop": [],
         "enable_thinking": False,
+        # 思考强度：low / medium / high；仅在 enable_thinking 打开时随请求下发
+        "reasoning_effort": "medium",
         "unload": {"enabled": True, "path": "/v1/models/{model_id}/unload", "policy": "after_text_task"},
     },
     "comfyui": {
@@ -321,6 +323,35 @@ def load_config(path: str | Path | None = None, ui_path: str | Path | None = Non
         ui_values=ui_values,
         ui_path=(Path(ui_path).expanduser() if ui_path else DEFAULT_UI_CONFIG_PATH),
     )
+
+
+def save_ui_config(updates: dict, path: str | Path | None = None) -> Path:
+    """把设置页的连接配置写入覆盖层 `config/config.ui.yaml`。
+
+    只写覆盖层、不改手写的 `config.yaml`，因此不会抹掉主配置里的注释；
+    `load_config` 每次请求都会重新读取覆盖层，保存后立即生效、无需重启。
+
+    参数:
+        updates: 需要覆盖的配置片段（调用方负责白名单校验）。
+        path: 覆盖层路径；默认 `config/config.ui.yaml`。
+
+    返回:
+        实际写入的覆盖层路径。
+    """
+    import yaml
+
+    target = Path(path).expanduser() if path else DEFAULT_UI_CONFIG_PATH
+    current = _read_yaml(target, [])
+    merged = _deep_merge(current, updates)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_name(target.name + ".tmp")
+    header = (
+        "# 由 Web「设置」页写入，只覆盖 config.yaml 里的同名键。\n"
+        "# 删掉本文件（或删掉某个键）即回落到 config.yaml 的取值。\n"
+    )
+    tmp.write_text(header + yaml.safe_dump(merged, allow_unicode=True, sort_keys=False), encoding="utf-8")
+    os.replace(tmp, target)
+    return target
 
 
 def _read_yaml(path: Path, warnings: list[str]) -> dict:

@@ -1,29 +1,19 @@
 /**
- * 设置视图：全局设置（本机 / 与工程无关）+ 当前工程设置（作品信息与制作要求）。
- * 全局设置不依赖工程路径，没有打开工程时也能进入；工程区块只在带 path 时渲染。
+ * 设置视图：只放全局设置（本机环境 / 模型 / 连接配置 / 快捷键 / 界面偏好）。
+ * 工程相关字段（作品信息、制作要求、制作概况）已迁到工程设置页 `#/p/<路径>/settings`。
  */
 import { esc, icon, toast, openDialog, closeDialog, fmtBytes } from '../dom.js';
 import { getJSON, postJSON } from '../api.js';
-import { state, resetProject, saveUIPrefs } from '../store.js';
-import { railbar, topbar, goChapter, goProjects, openShortcuts } from '../shell.js';
+import { state, saveUIPrefs } from '../store.js';
+import { railbar, topbar, goProjects, openShortcuts } from '../shell.js';
 
-/** 当前展示工程区块的工程路径；空串表示只展示全局设置 */
-let projectPath = '';
-let work = null;
-let info = null;
-let globalError = '';
-let timer = null;
-/** 项目级制作要求（静音间隔 + 音频导出参数） */
-let production = null;
-/** 制作要求的自动保存定时器 */
-let prodTimer = null;
 let bound = false;
-/** 是否有尚未落盘的改动（控制顶栏「保存」按钮的可用状态） */
-let dirty = false;
 /** 本机环境数据：readiness / models / 最近一次 ComfyUI 与 LLM 检查 */
 let env = { readiness: null, models: null, comfy: null, llm: null, error: '' };
 /** 环境卡片里下载任务的轮询定时器 */
 let envTimer = null;
+/** 连接配置（ComfyUI / 写作模型）与配置文件位置 */
+let connection = null;
 /** 模型分组（顺序即展示顺序） */
 const MODEL_GROUPS = [
   ['audio', '配音 / 音乐权重'],
@@ -32,143 +22,6 @@ const MODEL_GROUPS = [
   ['music', '配乐模型'],
 ];
 
-/** 静音间隔字段：键、参考字段名、单位（秒） */
-const SILENCE_FIELDS = [
-  ['start', '起始留白'],
-  ['title_to_body', '标题⇀正文'],
-  ['narration_to_dialogue', '旁白⇀对话'],
-  ['narration_to_sfx', '旁白⇀音效'],
-  ['narration_to_narration', '旁白⇀旁白'],
-  ['dialogue_to_narration', '对话⇀旁白'],
-  ['dialogue_to_sfx', '对话⇀音效'],
-  ['dialogue_to_dialogue', '对话⇀对话'],
-  ['sfx_to_dialogue', '音效⇀对白'],
-  ['sfx_to_narration', '音效⇀旁白'],
-  ['sfx_to_sfx', '音效⇀音效'],
-  ['end', '结束留白'],
-];
-
-/** 更新顶栏保存态，并同步「保存」按钮的禁用条件 */
-function setSaveState(kind, text) {
-  const node = document.getElementById('settings-save');
-  if (node) {
-    node.className = `save-state ${kind}`;
-    node.innerHTML = `${icon(kind === 'saving' ? 'refresh' : 'check', 12)}${esc(text)}`;
-  }
-  const button = document.getElementById('settings-save-now');
-  if (button) {
-    button.disabled = !dirty;
-    button.title = dirty ? '立即保存作品信息（⌘S）' : '没有未保存的改动';
-  }
-}
-
-/** 目标时长格式化 */
-function durationText(ms) {
-  if (!ms) return '未设置';
-  const minutes = Math.round(Number(ms) / 60000);
-  return `${minutes} 分钟`;
-}
-
-/** 制作要求区块：静音间隔（秒）+ 音频格式参数 */
-function productionHTML() {
-  const silences = production?.silences_ms || {};
-  const audio = production?.audio || {};
-  const fields = SILENCE_FIELDS.map(
-    ([key, label]) => `
-      <div class="field prod-field">
-        <label>${esc(label)}</label>
-        <div class="prod-input">
-          <input class="input" type="number" min="0" step="0.1" data-prod-silence="${key}"
-            value="${(Number(silences[key] ?? 0) / 1000).toFixed(1)}"
-            title="${esc(label)} 静音时长，单位秒" />
-          <span class="unit">s</span>
-        </div>
-      </div>`
-  ).join('');
-  const formatOptions = ['mp3', 'wav', 'm4a']
-    .map((item) => `<option value="${item}" ${audio.format === item ? 'selected' : ''}>${item}</option>`)
-    .join('');
-  const rateOptions = [44100, 48000]
-    .map(
-      (item) =>
-        `<option value="${item}" ${Number(audio.sample_rate) === item ? 'selected' : ''}>${item}hz</option>`
-    )
-    .join('');
-  const bitrateOptions = [192, 256]
-    .map(
-      (item) =>
-        `<option value="${item}" ${Number(audio.bitrate_kbps) === item ? 'selected' : ''}>${item}kbps</option>`
-    )
-    .join('');
-  return `
-    <div class="card" style="margin-top:14px">
-      <div class="card-head"><span class="ct">制作要求（当前工程）</span>
-        <span class="hint">自动保存到当前工程；静音间隔影响时间轴拼接，音频参数影响交付导出</span></div>
-      <div class="card-body">
-        <div class="prod-group">
-          <h4>静音间隔设置</h4>
-          <div class="prod-grid">${fields}</div>
-        </div>
-        <div class="prod-group" style="margin-top:16px">
-          <h4>音频格式参数</h4>
-          <div class="prod-grid">
-            <div class="field prod-field"><label>音频格式</label>
-              <select class="select" data-prod-audio="format" title="交付包音频格式">${formatOptions}</select></div>
-            <div class="field prod-field"><label>采样率</label>
-              <select class="select" data-prod-audio="sample_rate" title="导出与混音采样率">${rateOptions}</select></div>
-            <div class="field prod-field"><label>目标码率</label>
-              <select class="select" data-prod-audio="bitrate_kbps" title="有损格式的目标码率；wav 忽略">${bitrateOptions}</select></div>
-          </div>
-        </div>
-        <div class="hint" style="margin-top:12px">改动静音间隔后，已有时间轴需要重建一次才会生效；新导出的交付包立即使用新的音频参数。</div>
-      </div>
-    </div>`;
-}
-
-/** 读取制作要求表单 */
-function collectProduction() {
-  const silences = {};
-  document.querySelectorAll('[data-prod-silence]').forEach((node) => {
-    const seconds = Number(node.value || 0);
-    silences[node.dataset.prodSilence] = Math.max(0, Math.min(10000, Math.round(seconds * 1000)));
-  });
-  return {
-    path: projectPath,
-    production: {
-      silences_ms: silences,
-      audio: {
-        format: document.querySelector('[data-prod-audio="format"]')?.value || 'mp3',
-        sample_rate: Number(document.querySelector('[data-prod-audio="sample_rate"]')?.value || 48000),
-        bitrate_kbps: Number(document.querySelector('[data-prod-audio="bitrate_kbps"]')?.value || 192),
-      },
-    },
-  };
-}
-
-/** 保存制作要求（自动保存入口） */
-async function saveProduction() {
-  if (!production) return;
-  const payload = collectProduction();
-  setSaveState('saving', '保存中…');
-  try {
-    const result = await postJSON('/api/ui/project/production', payload);
-    production = result.production || payload.production;
-    setSaveState('ok', '已自动保存');
-  } catch (error) {
-    setSaveState('bad', '保存失败');
-    toast(error.message, 'bad');
-  }
-}
-
-/** 制作要求延迟保存 */
-function scheduleProductionSave() {
-  if (prodTimer) window.clearTimeout(prodTimer);
-  setSaveState('saving', '待保存…');
-  prodTimer = window.setTimeout(() => {
-    prodTimer = null;
-    saveProduction();
-  }, 500);
-}
 
 /** 本机环境卡片（内容异步填充） */
 function environmentHTML() {
@@ -484,37 +337,51 @@ function openManualModel(group, key) {
   });
 }
 
-/** 左侧目录（复用章节列表，仅用于导航） */
-function ctxHTML() {
+/** 全局设置的分区：键、名称、说明（左侧导航与地址参数共用） */
+const SECTIONS = [
+  ['env', '本机环境与模型', '本机环境、模型列表与下载'],
+  ['conn', '连接配置', 'ComfyUI 与写作模型连接'],
+  ['prefs', '快捷键与界面偏好', '快捷键、字号与显示偏好'],
+];
+
+/** 默认分区：地址里的 section 不认识时回落到它，避免空屏 */
+const DEFAULT_SECTION = 'env';
+
+/** 左侧目录：全局设置分区导航，点击切换分区（地址同步 section 参数） */
+function ctxHTML(active = DEFAULT_SECTION) {
+  const items = SECTIONS.map(
+    ([key, label, desc]) => `
+      <button class="rail-link ${active === key ? 'active' : ''}" data-section="${key}"
+        title="${esc(desc)}" aria-current="${active === key ? 'true' : 'false'}">${esc(label)}</button>`
+  ).join('');
   return `
-    <section class="ctx" aria-label="章节目录">
-      <div class="ctx-head"><span class="ct">章节目录</span>
-        <span class="badge mute">${state.chapters.length} 章</span>
+    <section class="ctx" aria-label="设置导航">
+      <div class="ctx-head"><span class="ct">全局设置</span>
+        <span class="badge mute">与工程无关</span>
       </div>
-      <div class="chap-list" id="ctx-list">${ctxRowsHTML()}</div>
+      <div class="set-nav">
+        ${items}
+        <div class="hint" style="margin-top:6px">这里的设置写入本机配置文件，对所有工程生效；项目级设置请在工程内打开「工程设置」。</div>
+      </div>
     </section>`;
 }
 
-/** 章节行（仅在有工程上下文时展示，点击回到该章画本） */
-function ctxRowsHTML() {
-  if (!projectPath || projectPath !== state.path || !state.chapters.length) {
-    return `<div class="empty" style="padding:18px 12px">
-      <span>${projectPath ? '正在读取章节…' : '设置不需要选择工程'}</span></div>`;
-  }
-  return state.chapters
-    .map(
-      (chapter) => `
-      <div class="chap-row" data-chapter="${esc(chapter.id)}"
-           title="${esc(chapter.title || `第 ${chapter.index} 章`)} · 回到画本">
-        <span class="cn">${esc(chapter.title || `第 ${chapter.index} 章`)}</span>
-        <span class="dot ${chapter.status === 'split' ? 'warn' : ''}"></span>
-        <span class="cw">${chapter.word_count ? `${chapter.word_count}字` : '未写'}</span>
-      </div>`
-    )
-    .join('');
+/**
+ * 滚动到指定分区并同步选中态。
+ * @param {string} key 分区键
+ * @param {ScrollBehavior} behavior 滚动方式
+ */
+function gotoSection(key, behavior = 'smooth') {
+  const node = document.getElementById(key);
+  if (node) node.scrollIntoView({ behavior, block: 'start' });
+  document.querySelectorAll('.rail-link[data-section]').forEach((item) => {
+    const on = item.dataset.section === key;
+    item.classList.toggle('active', on);
+    item.setAttribute('aria-current', on ? 'true' : 'false');
+  });
 }
 
-/** 分区标题：明确这是全局还是当前工程 */
+/** 分区标题：全局设置与工程设置分属两个页面 */
 function sectionHead(title, desc) {
   return `<div class="set-section-head">
     <span class="ct">${esc(title)}</span>
@@ -582,178 +449,584 @@ function prefsHTML() {
     </div>`;
 }
 
-/** 工程信息卡片（当前工程专属） */
-function projectInfoHTML(item) {
+/**
+ * ComfyUI 与写作模型的连接配置卡片。
+ * 只渲染全局连接项，不包含任何工程字段；底部给出配置文件实际路径。
+ */
+function connectionHTML() {
+  const conn = connection || {};
+  const comfy = conn.comfyui || {};
+  const llm = conn.llm || {};
+  const templates = comfy.templates || {};
   return `
-    <div class="card">
-      <div class="card-head"><span class="ct">作品信息</span>
-        <span class="hint">只写入当前工程</span></div>
+    <div class="card" style="margin-top:14px">
+      <div class="card-head"><span class="ct">连接配置（全局）</span>
+        <span class="hint">保存后立即生效，不需要重启</span></div>
       <div class="card-body">
-        <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px">
-          <div class="field"><label>书名</label>
-            <input class="input" id="set-title" value="${esc(item.title || '')}" title="作品名，显示在顶栏与工程列表" /></div>
-          <div class="field"><label>作者</label>
-            <input class="input" id="set-author" value="${esc(item.author || '')}" placeholder="未填写"
-              title="作者署名，可留空" /></div>
-          <div class="field" style="grid-column:1/-1"><label>题材（逗号分隔）</label>
-            <input class="input" id="set-genres" value="${esc((item.genres || []).join('，'))}" placeholder="例如：悬疑，都市"
-              title="题材关键词，多个用逗号分隔" /></div>
-          <div class="field"><label>语言</label>
-            <div class="input" style="display:flex;align-items:center;color:var(--text-3)"
-              title="语言在导入阶段确定，本地版暂不支持在这里修改">${esc(item.language || 'zh-CN')}</div></div>
-          <div class="field"><label>目标时长</label>
-            <div class="input" style="display:flex;align-items:center;color:var(--text-3)"
-              title="目标时长在导入阶段确定，本地版暂不支持在这里修改">${durationText(
-              item.target_duration_ms
-            )}</div></div>
+        <div class="conn-block">
+          <h4>ComfyUI</h4>
+          <div class="field"><label>服务地址</label>
+            <input class="input" id="conn-comfy-url" value="${esc(comfy.base_url || '')}"
+              placeholder="http://127.0.0.1:8188" title="ComfyUI 服务根地址，例如 http://127.0.0.1:8188" /></div>
+          <div class="conn-grid">
+            <div class="field"><label>工作流目录</label>
+              <select class="select" id="conn-comfy-templates" data-combo
+                title="从实际目录读取；需要手填时选末尾「自定义…」"></select>
+              <input class="input conn-custom" id="conn-comfy-templates-custom" hidden
+                placeholder="输入目录路径，例如 config/comfy" /></div>
+            <div class="field"><label>模型目录</label>
+              <select class="select" id="conn-comfy-models" data-combo
+                title="从实际目录读取；需要手填时选末尾「自定义…」"></select>
+              <input class="input conn-custom" id="conn-comfy-models-custom" hidden
+                placeholder="输入模型目录路径" /></div>
+          </div>
+          <div class="conn-grid">
+            <div class="field"><label>图像工作流</label>
+              <select class="select" id="conn-comfy-tpl-image" data-combo
+                title="从工作流目录读取；需要手填时选末尾「自定义…」"></select>
+              <input class="input conn-custom" id="conn-comfy-tpl-image-custom" hidden
+                placeholder="输入工作流标识" /></div>
+            <div class="field"><label>文生视频工作流</label>
+              <select class="select" id="conn-comfy-tpl-t2v" data-combo
+                title="从工作流目录读取；需要手填时选末尾「自定义…」"></select>
+              <input class="input conn-custom" id="conn-comfy-tpl-t2v-custom" hidden
+                placeholder="输入工作流标识" /></div>
+            <div class="field"><label>图生视频工作流</label>
+              <select class="select" id="conn-comfy-tpl-i2v" data-combo
+                title="从工作流目录读取；需要手填时选末尾「自定义…」"></select>
+              <input class="input conn-custom" id="conn-comfy-tpl-i2v-custom" hidden
+                placeholder="输入工作流标识" /></div>
+          </div>
+          <div class="conn-actions">
+            <button class="btn sm" data-act="conn-test-comfy" title="用当前填写的地址测试 ComfyUI 是否可达">测试连通</button>
+            <button class="btn sm" data-act="conn-refresh-workflows" title="重新读取工作流目录并刷新三个工作流下拉">刷新工作流</button>
+            <button class="btn sm" data-act="conn-refresh-dirs" title="重新读取工作流目录与模型目录的子目录">刷新目录</button>
+            <button class="btn sm primary" data-act="conn-save-comfy" title="写入本机配置文件，立即生效">保存</button>
+          </div>
+          <div class="conn-result" id="conn-comfy-result"></div>
+          <div class="hint conn-list-msg" id="conn-comfy-list-msg"></div>
         </div>
-        <div class="hint">作品信息写回 project.json；语言与目标时长本阶段只读展示。</div>
+
+        <div class="conn-block" style="margin-top:16px">
+          <h4>写作模型（LLM）</h4>
+          <div class="conn-grid">
+            <div class="field"><label>接口地址（base_url）</label>
+              <input class="input" id="conn-llm-endpoint" value="${esc(llm.endpoint || '')}"
+                placeholder="http://127.0.0.1:8080/v1" title="OpenAI 兼容接口的 base_url，需包含 /v1" /></div>
+            <div class="field"><label>模型名称</label>
+              <select class="select" id="conn-llm-model" data-combo
+                title="从接口读取可用模型；需要手填时选末尾「自定义…」"></select>
+              <input class="input conn-custom" id="conn-llm-model-custom" hidden
+                placeholder="输入模型名称" /></div>
+          </div>
+          <div class="conn-grid">
+            <div class="field"><label>API Key</label>
+              <input class="input" id="conn-llm-key" type="password" value=""
+                placeholder="${llm.api_key_set ? '已保存，留空表示不修改' : '本地服务可留空'}"
+                title="留空表示沿用已保存的密钥；本地服务可不填" /></div>
+            <div class="field"><label>请求超时（秒）</label>
+              <input class="input" id="conn-llm-timeout" type="number" min="1" step="1"
+                value="${esc(llm.request_timeout_s ?? '')}" placeholder="120" title="单次请求最长等待时间" /></div>
+            <div class="field"><label>连接超时（秒）</label>
+              <input class="input" id="conn-llm-connect-timeout" type="number" min="1" step="1"
+                value="${esc(llm.connect_timeout_s ?? '')}" placeholder="10" title="建立连接的最长等待时间" /></div>
+            <div class="field"><label>最大并发</label>
+              <input class="input" id="conn-llm-concurrency" type="number" min="1" step="1"
+                value="${esc(llm.max_concurrency ?? '')}" placeholder="2" title="同时进行的写作请求数上限" /></div>
+            <div class="field"><label>首字超时（秒）</label>
+              <input class="input" id="conn-llm-first-token" type="number" min="1" step="1"
+                value="${esc(llm.first_token_timeout_s ?? '')}" placeholder="60" title="流式输出首个字符的最长等待时间" /></div>
+          </div>
+          <div class="conn-grid">
+            <div class="field"><label>上下文窗口（tokens）</label>
+              <input class="input" id="conn-llm-context" type="number" min="1" step="1"
+                value="${esc(llm.context_window ?? '')}" placeholder="例如 262144"
+                title="模型可用的上下文上限；测试连通后按服务端返回值回填，保存后用于请求预算校验" /></div>
+            <div class="field"><label>最大输出（tokens）</label>
+              <input class="input" id="conn-llm-max-output" type="number" min="1" step="1"
+                value="${esc(llm.max_output_tokens ?? '')}" placeholder="例如 32768"
+                title="单次生成的最大输出预算；保存后作为写作 / 标注请求的 max_tokens" /></div>
+          </div>
+          <div class="conn-grid">
+            <div class="field"><label>思考</label>
+              <label class="set-pref" style="padding-top:4px">
+                <input type="checkbox" id="conn-llm-thinking" ${llm.thinking_enabled ? 'checked' : ''}
+                  title="开启后写作 / 标注请求会带上思考参数" />
+                <span><b>开启思考</b><em>开启后请求带思考参数，速度变慢、结果更稳；关闭时强度不可选</em></span>
+              </label>
+            </div>
+            <div class="field"><label>思考强度</label>
+              <select class="select" id="conn-llm-effort" ${llm.thinking_enabled ? '' : 'disabled'}
+                title="关闭思考时不可用；开启后随请求的 reasoning_effort 下发">
+                <option value="low" ${llm.thinking_effort === 'low' ? 'selected' : ''}>低（更快、更省）</option>
+                <option value="medium" ${llm.thinking_effort !== 'low' && llm.thinking_effort !== 'high' ? 'selected' : ''}>中（默认）</option>
+                <option value="high" ${llm.thinking_effort === 'high' ? 'selected' : ''}>高（更稳、更慢）</option>
+              </select></div>
+          </div>
+          <div class="conn-actions">
+            <button class="btn sm" data-act="conn-test-llm" title="用当前填写的地址、密钥与模型测试连通">测试连通</button>
+            <button class="btn sm" data-act="conn-refresh-llm" title="从接口重新读取可用模型列表并刷新下拉">刷新模型</button>
+            <button class="btn sm primary" data-act="conn-save-llm" title="写入本机配置文件，立即生效">保存</button>
+          </div>
+          <div class="conn-result" id="conn-llm-result"></div>
+          <div class="hint conn-list-msg" id="conn-llm-limits-msg"></div>
+          <div class="conn-models" id="conn-llm-models"></div>
+          <div class="hint conn-list-msg" id="conn-llm-list-msg"></div>
+        </div>
+
+        <div class="hint" style="margin-top:12px">配置文件：
+          <span class="mono">${esc(conn.ui_config_path || 'config/config.ui.yaml')}</span>
+          （页面写入的覆盖层，保存即生效；主配置
+          <span class="mono">${esc(conn.config_path || 'config/config.yaml')}</span> 不会被改写）</div>
       </div>
     </div>`;
 }
 
-/** 当前工程区块：作品信息 + 制作要求 + 制作概况 */
-function projectBlockHTML() {
-  if (globalError) {
-    return `
-      <section class="set-section" style="margin-top:22px" data-section="project">
-        ${sectionHead('当前工程', '工程级设置读取失败')}
-        <div class="card"><div class="card-body">
-          <div class="empty" style="padding:18px">${icon('warn', 20)}
-            <b>当前工程设置加载失败</b><span>${esc(globalError)}</span></div>
-        </div></div>
-      </section>`;
-  }
-  const item = work || {};
-  const totalWords = (info?.chapters || []).reduce((sum, chapter) => sum + Number(chapter.word_count || 0), 0);
-  return `
-    <section class="set-section" style="margin-top:22px" data-section="project">
-      ${sectionHead(
-        `当前工程：${item.title || '未命名作品'}`,
-        '只对当前打开的工程生效：作品信息、制作要求、制作概况；与全局设置互不影响'
-      )}
-      ${projectInfoHTML(item)}
-      ${productionHTML()}
-      <div class="card" style="margin-top:14px">
-        <div class="card-head"><span class="ct">制作概况</span></div>
-        <div class="card-body">
-          <div class="summary-line"><span>章节数</span><span class="right">${(info?.chapters || []).length} 章</span></div>
-          <div class="summary-line"><span>正文字数</span><span class="right">${totalWords} 字</span></div>
-          <div class="summary-line"><span>创建时间</span><span class="right mono">${esc(item.created_at || '—')}</span></div>
-          <div class="summary-line"><span>最近更新</span><span class="right mono">${esc(item.updated_at || '—')}</span></div>
-        </div>
-      </div>
-    </section>`;
-}
-
-/** 没有工程上下文时的工程区块提示 */
-function noProjectHTML() {
-  return `
-    <section class="set-section" style="margin-top:22px" data-section="project">
-      ${sectionHead('当前工程', '没有打开工程时这里为空；全局设置不受影响')}
-      <div class="card"><div class="card-body">
-        <div class="empty" style="padding:18px">${icon('folder', 20)}
-          <b>还没有打开工程</b>
-          <span>打开一个工程后，这里会出现该工程的作品信息与制作要求</span>
-          <a class="btn" href="#/projects" style="margin-top:10px">去打开工程</a>
-        </div>
-      </div></div>
-    </section>`;
-}
-
-/** 主区：全局设置恒在，工程区块按是否有工程上下文追加 */
+/** 主区：只有全局设置，按分区各给一个锚点，左侧导航按 id 滚动 */
 function mainHTML() {
   return `
     <div class="page-head" style="padding:18px 18px 0">
       <div class="ph">
         <div class="eyebrow"><span class="ln"></span>设置</div>
-        <h1 class="page-title">设置</h1>
-        <div class="page-sub">全局设置作用于本机所有工程；当前工程设置只影响这一个工程。</div>
+        <h1 class="page-title">全局设置</h1>
+        <div class="page-sub">这里的设置作用于本机所有工程，与具体工程无关；项目级设置请在工程内打开「工程设置」。</div>
       </div>
     </div>
-    <div style="padding:0 18px 18px;overflow:auto;flex:1">
+    <div class="set-body" style="padding:0 18px 18px;overflow:auto;flex:1">
       <section class="set-section" data-section="global">
         ${sectionHead(
           '全局设置（本机）',
-          '与具体工程无关：模型与算力、配音 provider、环境自检与模型下载、写作模型连通、快捷键、界面偏好'
+          '模型与算力、连接配置、环境自检与模型下载、快捷键、界面偏好'
         )}
-        ${environmentHTML()}
-        ${shortcutsHTML()}
-        ${prefsHTML()}
+        <div id="env" class="set-block">${environmentHTML()}</div>
+        <div id="conn" class="set-block">${connectionHTML()}</div>
+        <div id="prefs" class="set-block">${shortcutsHTML()}${prefsHTML()}</div>
       </section>
-      <div id="project-set">${projectPath ? `<div class="card" style="margin-top:22px"><div class="card-body">
-        <div class="empty" style="padding:12px"><span>正在读取当前工程设置…</span></div></div></div>` : noProjectHTML()}</div>
     </div>`;
 }
 
-/** 收集表单 */
-function collect() {
-  return {
-    title: document.getElementById('set-title')?.value.trim() || '',
-    author: document.getElementById('set-author')?.value.trim() || '',
-    genres: (document.getElementById('set-genres')?.value || '')
-      .split(/[,，、;；]/)
-      .map((text) => text.trim())
-      .filter(Boolean),
-  };
-}
 
-/** 保存作品信息 */
-async function saveWork({ silent = false } = {}) {
-  if (!work) return;
-  const body = collect();
-  setSaveState('saving', '保存中…');
+/**
+ * 读取全局连接配置（ComfyUI / 写作模型）。
+ * 失败时保留空表单，但仍展示配置文件说明，避免整页不可用。
+ */
+async function loadConnection() {
   try {
-    await postJSON('/api/ui/project/work', { path: projectPath, ...body });
-    work = { ...work, ...body, updated_at: new Date().toISOString() };
-    dirty = false;
-    setSaveState('ok', '已自动保存');
-    if (!silent) toast('项目设定已保存', 'ok');
+    connection = await getJSON('/api/ui/config/connection');
   } catch (error) {
-    setSaveState('', '保存失败');
-    toast(error.message, 'bad');
+    connection = null;
+    toast(`连接配置读取失败：${error.message}`, 'bad', 4000);
   }
 }
 
-/** 延迟保存 */
-function scheduleSave() {
-  dirty = true;
-  setSaveState('saving', '待保存…');
-  if (timer) window.clearTimeout(timer);
-  timer = window.setTimeout(() => {
-    timer = null;
-    saveWork({ silent: true });
-  }, 800);
+/**
+ * 从模型接口返回里取出模型名（兼容字符串与 {id} 两种形态）。
+ * @param {any} item 单个模型项
+ * @returns {string} 模型名
+ */
+function modelName(item) {
+  return typeof item === 'string' ? item : item?.id || item?.name || '';
 }
 
-/** 失焦立即保存 */
-function flushSave() {
-  if (!timer) return;
-  window.clearTimeout(timer);
-  timer = null;
-  saveWork({ silent: true });
+/**
+ * 生成一组 <option>。
+ * @param {Array<{value:string,label:string}>} items 选项
+ * @param {string} current 当前值
+ * @returns {string} option HTML
+ */
+function optionsHTML(items, current) {
+  return items
+    .map(
+      (item) =>
+        `<option value="${esc(item.value)}" ${item.value === current ? 'selected' : ''}>${esc(item.label)}</option>`
+    )
+    .join('');
+}
+
+/**
+ * 填充「真实下拉 + 自定义…」控件。
+ * 已保存但不在列表里的值保留为「已保存」项；列表为空时在下拉里直接显示中文原因；
+ * 末尾固定「自定义…」，选中后才展开手填输入框（次要入口）。
+ * @param {string} id select 的 ID（对应 <id>-custom 手填框）
+ * @param {Array<{value:string,label:string}>} items 真实读到的选项
+ * @param {string} saved 已保存的值
+ * @param {string} emptyText 列表为空时的中文原因
+ */
+function fillCombo(id, items, saved, emptyText) {
+  const select = document.getElementById(id);
+  if (!select) return;
+  const list = Array.isArray(items) ? items.slice() : [];
+  const values = list.map((item) => String(item.value));
+  const current = saved || '';
+  const opts = [];
+  if (!current) opts.push('<option value="">（未选择）</option>');
+  if (current && !values.includes(current)) {
+    opts.push(`<option value="${esc(current)}" selected>${esc(current)}（已保存）</option>`);
+  }
+  opts.push(optionsHTML(list, current));
+  if (!list.length) {
+    opts.push(`<option value="" disabled ${current ? '' : 'selected'}>${esc(emptyText || '没有读到可选值')}</option>`);
+  }
+  opts.push('<option value="__custom__">自定义…</option>');
+  select.innerHTML = opts.join('');
+  if (current) select.value = current;
+  syncCustom(id);
+}
+
+/**
+ * 选中「自定义…」时展开手填输入框并聚焦；选回列表项时收起。
+ * @param {string} id select 的 ID
+ */
+function syncCustom(id) {
+  const select = document.getElementById(id);
+  const input = document.getElementById(`${id}-custom`);
+  if (!select || !input) return;
+  const custom = select.value === '__custom__';
+  input.hidden = !custom;
+  if (custom) input.focus();
+}
+
+/**
+ * 读取下拉当前值（选中「自定义…」时取手填框的值）。
+ * @param {string} id select 的 ID
+ * @returns {string} 实际值
+ */
+function comboValue(id) {
+  const select = document.getElementById(id);
+  if (!select) return '';
+  if (select.value === '__custom__') {
+    return (document.getElementById(`${id}-custom`)?.value || '').trim();
+  }
+  return select.value || '';
+}
+
+/**
+ * 用工作流清单填充三个工作流下拉（真实 select）。
+ * @param {Array} workflows 工作流清单
+ * @param {object} saved 已保存的三个工作流值
+ * @param {string} emptyText 列表为空时的中文原因
+ */
+function fillWorkflowSelects(workflows, saved, emptyText) {
+  const list = Array.isArray(workflows) ? workflows : [];
+  const toItems = (rows) => rows.map((item) => ({ value: item.id, label: item.display_name || item.id }));
+  fillCombo(
+    'conn-comfy-tpl-image',
+    toItems(list.filter((item) => String(item.kind || '').startsWith('image'))),
+    saved.image,
+    emptyText
+  );
+  fillCombo(
+    'conn-comfy-tpl-t2v',
+    toItems(list.filter((item) => item.kind === 'video' && String(item.id).includes('t2v'))),
+    saved.video_t2v,
+    emptyText
+  );
+  fillCombo(
+    'conn-comfy-tpl-i2v',
+    toItems(list.filter((item) => item.kind === 'video' && !String(item.id).includes('t2v'))),
+    saved.video_i2v,
+    emptyText
+  );
+}
+
+/**
+ * 读取目录子项并填充路径下拉。
+ * @param {string} id select 的 ID
+ * @param {string} value 目录路径
+ * @returns {Promise<object|null>} 后端返回；异常返回 null
+ */
+async function fillDirCombo(id, value) {
+  try {
+    const result = await getJSON('/api/ui/fs/dirs', { path: value || '' });
+    const base = String(result.resolved_dir || '').replace(/\/$/, '');
+    const items = (result.dirs || []).map((name) => ({
+      value: base ? `${base}/${name}` : name,
+      label: name,
+    }));
+    fillCombo(id, items, value || '', result.ok ? '没有读到子目录' : result.message);
+    return result;
+  } catch (error) {
+    fillCombo(id, [], value || '', `读取目录失败：${error.message}`);
+    return null;
+  }
+}
+
+/**
+ * 刷新 ComfyUI 的工作流下拉与两个目录下拉。
+ * @param {boolean} withToast 是否弹提示（手动刷新时为 true）
+ */
+async function refreshComfyOptions(withToast = false) {
+  const saved = connection?.comfyui || {};
+  const dir = comboValue('conn-comfy-templates') || saved.templates_dir || '';
+  const msg = document.getElementById('conn-comfy-list-msg');
+  try {
+    const result = await getJSON('/api/ui/comfy/workflows', { templates_dir: dir });
+    fillWorkflowSelects(
+      result.workflows || [],
+      {
+        image: comboValue('conn-comfy-tpl-image') || saved.templates?.image || '',
+        video_t2v: comboValue('conn-comfy-tpl-t2v') || saved.templates?.video_t2v || '',
+        video_i2v: comboValue('conn-comfy-tpl-i2v') || saved.templates?.video_i2v || '',
+      },
+      result.message || '没有读到工作流'
+    );
+    await Promise.all([
+      fillDirCombo('conn-comfy-templates', comboValue('conn-comfy-templates') || saved.templates_dir || ''),
+      fillDirCombo('conn-comfy-models', comboValue('conn-comfy-models') || saved.models_dir || ''),
+    ]);
+    if (msg) {
+      msg.className = `hint conn-list-msg ${result.ok ? '' : 'bad'}`;
+      msg.textContent = result.ok
+        ? `${result.message}；目录：${result.resolved_dir}`
+        : `${result.message}（可在下拉里选「自定义…」手填）`;
+    }
+    if (withToast) toast(result.message, result.ok ? 'ok' : 'warn', 3400);
+    return result;
+  } catch (error) {
+    fillWorkflowSelects([], {}, `读取工作流失败：${error.message}`);
+    if (msg) {
+      msg.className = 'hint conn-list-msg bad';
+      msg.textContent = `读取工作流失败：${error.message}（可在下拉里选「自定义…」手填）`;
+    }
+    if (withToast) toast(`读取工作流失败：${error.message}`, 'bad', 3800);
+    return null;
+  }
+}
+
+/** 只刷新两个目录下拉；读不到时在下拉里与提示里给中文原因 */
+async function refreshDirOptions(withToast = false) {
+  const saved = connection?.comfyui || {};
+  const msg = document.getElementById('conn-comfy-list-msg');
+  const [tpl, models] = await Promise.all([
+    fillDirCombo('conn-comfy-templates', comboValue('conn-comfy-templates') || saved.templates_dir || ''),
+    fillDirCombo('conn-comfy-models', comboValue('conn-comfy-models') || saved.models_dir || ''),
+  ]);
+  const bad = [tpl, models].filter((item) => item && !item.ok);
+  if (msg) {
+    msg.className = `hint conn-list-msg ${bad.length ? 'bad' : ''}`;
+    msg.textContent = bad.length
+      ? bad.map((item) => item.message).join('；')
+      : `已读取目录：${tpl?.resolved_dir || ''}`;
+  }
+  if (withToast) toast(bad.length ? bad[0].message : '目录已刷新', bad.length ? 'warn' : 'ok', 3200);
+}
+
+/**
+ * 组装连通性探测请求：空值不发送，避免把已保存的密钥 / 模型覆盖成空。
+ * @param {object} form 表单值
+ * @returns {object} 探测请求体
+ */
+function llmProbeBody(form) {
+  const body = { endpoint: form.endpoint };
+  if (form.api_key) body.api_key = form.api_key;
+  if (form.model) body.model = form.model;
+  return body;
+}
+
+/**
+ * 从接口读取可用写作模型并填充下拉；读不到时在下拉里给中文原因。
+ * @param {boolean} withToast 是否弹提示
+ * @returns {Promise<string[]>} 模型名列表
+ */
+async function refreshLlmOptions(withToast = false) {
+  const form = llmForm();
+  const msg = document.getElementById('conn-llm-list-msg');
+  try {
+    const result = await postJSON('/api/ui/llm/status', llmProbeBody(form));
+    const names = (Array.isArray(result.models) ? result.models : []).map(modelName).filter(Boolean);
+    fillCombo(
+      'conn-llm-model',
+      names.map((name) => ({ value: name, label: name })),
+      form.model || connection?.llm?.model || '',
+      result.message || '接口没有返回可用模型'
+    );
+    if (msg) {
+      msg.className = `hint conn-list-msg ${names.length ? '' : 'bad'}`;
+      msg.textContent = names.length
+        ? `已读取 ${names.length} 个可用模型`
+        : `${result.message || '没有读到可用模型'}（可在下拉里选「自定义…」手填）`;
+    }
+    if (withToast) {
+      toast(names.length ? `已读取 ${names.length} 个模型` : '没有读到可用模型，可选「自定义…」手填', names.length ? 'ok' : 'warn', 3200);
+    }
+    return names;
+  } catch (error) {
+    fillCombo('conn-llm-model', [], form.model || '', `读取模型列表失败：${error.message}`);
+    if (msg) {
+      msg.className = 'hint conn-list-msg bad';
+      msg.textContent = `读取模型列表失败：${error.message}（可在下拉里选「自定义…」手填）`;
+    }
+    if (withToast) toast(`读取模型列表失败：${error.message}`, 'bad', 3800);
+    return [];
+  }
+}
+
+/** 收集 ComfyUI 表单值 */
+function comfyForm() {
+  return {
+    base_url: document.getElementById('conn-comfy-url')?.value.trim() || '',
+    templates_dir: comboValue('conn-comfy-templates'),
+    models_dir: comboValue('conn-comfy-models'),
+    templates: {
+      image: comboValue('conn-comfy-tpl-image'),
+      video_t2v: comboValue('conn-comfy-tpl-t2v'),
+      video_i2v: comboValue('conn-comfy-tpl-i2v'),
+    },
+  };
+}
+
+/** 收集写作模型表单值（key 留空表示不修改已保存密钥） */
+function llmForm() {
+  return {
+    endpoint: document.getElementById('conn-llm-endpoint')?.value.trim() || '',
+    model: comboValue('conn-llm-model'),
+    api_key: document.getElementById('conn-llm-key')?.value.trim() || '',
+    request_timeout_s: document.getElementById('conn-llm-timeout')?.value || '',
+    connect_timeout_s: document.getElementById('conn-llm-connect-timeout')?.value || '',
+    max_concurrency: document.getElementById('conn-llm-concurrency')?.value || '',
+    first_token_timeout_s: document.getElementById('conn-llm-first-token')?.value || '',
+    context_window: document.getElementById('conn-llm-context')?.value || '',
+    max_tokens: document.getElementById('conn-llm-max-output')?.value || '',
+    enable_thinking: Boolean(document.getElementById('conn-llm-thinking')?.checked),
+    reasoning_effort: document.getElementById('conn-llm-effort')?.value || 'medium',
+  };
+}
+
+/**
+ * 在连接卡片里显示测试/保存结果。
+ * @param {string} id 结果容器 ID
+ * @param {boolean} ok 是否成功
+ * @param {string} text 中文提示
+ */
+function setConnResult(id, ok, text) {
+  const node = document.getElementById(id);
+  if (!node) return;
+  node.className = `conn-result ${ok ? 'ok' : 'bad'}`;
+  node.innerHTML = `${icon(ok ? 'check' : 'warn', 13)}<span>${esc(text)}</span>`;
+}
+
+/** 测试 ComfyUI 连通（用表单里的地址，不要求先保存） */
+async function testComfy(button) {
+  const baseUrl = document.getElementById('conn-comfy-url')?.value.trim() || '';
+  button.disabled = true;
+  setConnResult('conn-comfy-result', true, '正在测试…');
+  try {
+    const result = await postJSON('/api/ui/comfy/health', { base_url: baseUrl });
+    setConnResult('conn-comfy-result', Boolean(result.ok), result.message || (result.ok ? 'ComfyUI 连接正常' : 'ComfyUI 连接失败'));
+    if (result.ok) {
+      toast('ComfyUI 连接正常', 'ok', 2200);
+      // 连上之后顺手把工作流下拉刷成目录里的真实文件
+      void refreshComfyOptions();
+    }
+  } catch (error) {
+    setConnResult('conn-comfy-result', false, error.message || 'ComfyUI 连接失败');
+  } finally {
+    button.disabled = false;
+  }
+}
+
+/** 测试写作模型连通，并把返回的模型清单展示出来 */
+async function testLlm(button) {
+  const form = llmForm();
+  button.disabled = true;
+  setConnResult('conn-llm-result', true, '正在测试…');
+  const modelsBox = document.getElementById('conn-llm-models');
+  try {
+    const result = await postJSON('/api/ui/llm/status', llmProbeBody(form));
+    const ok = Boolean(result.connected);
+    const text = result.message || (ok ? '写作模型连接正常' : '写作模型连接失败');
+    setConnResult('conn-llm-result', ok && result.model_found !== false, text);
+    const names = (Array.isArray(result.models) ? result.models : []).map(modelName).filter(Boolean);
+    if (modelsBox) {
+      modelsBox.innerHTML = names.length
+        ? `<div class="hint">可用模型（${names.length}）：${names.slice(0, 30).map((name) => esc(name)).join('、')}</div>`
+        : '';
+    }
+    // 连通后把模型下拉补成真实列表，方便直接选
+    fillCombo(
+      'conn-llm-model',
+      names.map((name) => ({ value: name, label: name })),
+      form.model || '',
+      result.message || '接口没有返回可用模型'
+    );
+    const listMsg = document.getElementById('conn-llm-list-msg');
+    if (listMsg && names.length) {
+      listMsg.className = 'hint conn-list-msg';
+      listMsg.textContent = `已读取 ${names.length} 个可用模型`;
+    }
+    // 把服务端返回的上下文 / 最大输出反显成可编辑字段，用户可直接改完保存
+    const contextValue = Number(result.context_window);
+    const outputValue = Number(result.max_output_tokens);
+    const contextInput = document.getElementById('conn-llm-context');
+    const outputInput = document.getElementById('conn-llm-max-output');
+    if (contextInput && Number.isFinite(contextValue) && contextValue > 0) {
+      contextInput.value = String(contextValue);
+    }
+    if (outputInput && Number.isFinite(outputValue) && outputValue > 0) {
+      outputInput.value = String(outputValue);
+    }
+    const limitsMsg = document.getElementById('conn-llm-limits-msg');
+    if (limitsMsg) {
+      const hasLimits = (Number.isFinite(contextValue) && contextValue > 0) || (Number.isFinite(outputValue) && outputValue > 0);
+      limitsMsg.className = 'hint conn-list-msg';
+      limitsMsg.textContent = hasLimits
+        ? `服务端字段：上下文 ${contextValue > 0 ? contextValue : '未知'} / 最大输出 ${
+            outputValue > 0 ? outputValue : '未知'
+          } tokens，已回填到上方字段，可直接修改后保存。`
+        : '服务端未返回上下文 / 最大输出字段，可在上方直接手填后保存。';
+    }
+  } catch (error) {
+    setConnResult('conn-llm-result', false, error.message || '写作模型连接失败');
+  } finally {
+    button.disabled = false;
+  }
+}
+
+/** 保存连接配置（section: comfyui / llm），保存后刷新本机环境卡片 */
+async function saveConnection(section, button) {
+  const payload = section === 'comfyui' ? { comfyui: comfyForm() } : { llm: llmForm() };
+  const resultId = section === 'comfyui' ? 'conn-comfy-result' : 'conn-llm-result';
+  button.disabled = true;
+  setConnResult(resultId, true, '正在保存…');
+  try {
+    connection = await postJSON('/api/ui/config/connection', payload);
+    setConnResult(resultId, true, `已保存到 ${connection.saved_to || connection.ui_config_path}，立即生效`);
+    toast('连接配置已保存，立即生效', 'ok', 2400);
+    // 让「写作模型检查」「ComfyUI 状态」按新配置重新取一次
+    env.llm = null;
+    env.comfy = null;
+    await loadEnvironment();
+  } catch (error) {
+    setConnResult(resultId, false, error.message || '保存失败');
+  } finally {
+    button.disabled = false;
+  }
 }
 
 /** 点击 */
 function onRootClick(event) {
-  const chapterRow = event.target.closest('[data-chapter]');
-  if (chapterRow) return goChapter(projectPath, chapterRow.dataset.chapter);
+  // 左侧分区导航：切区块 + 同步地址，刷新后仍停在当前分区
+  const nav = event.target.closest('.rail-link[data-section]');
+  if (nav) {
+    const key = nav.dataset.section;
+    gotoSection(key);
+    history.replaceState(null, '', `#/settings?section=${encodeURIComponent(key)}`);
+    return;
+  }
   const button = event.target.closest('[data-act]');
   if (!button) return;
   if (button.dataset.act === 'back') return goProjects();
-  if (button.dataset.act === 'to-editor') return goChapter(projectPath, state.chapterId);
   if (button.dataset.act === 'shortcuts-help') return openShortcuts();
-  if (button.dataset.act === 'save-now') {
-    if (timer) {
-      window.clearTimeout(timer);
-      timer = null;
-    }
-    saveWork();
-    return;
-  }
   if (button.dataset.act === 'env-refresh') return void loadEnvironment();
   if (button.dataset.act === 'comfy-check') return void checkComfy(button);
   if (button.dataset.act === 'llm-check') return void checkLlm(button);
+  if (button.dataset.act === 'conn-test-comfy') return void testComfy(button);
+  if (button.dataset.act === 'conn-refresh-workflows') return void refreshComfyOptions(true);
+  if (button.dataset.act === 'conn-refresh-dirs') return void refreshDirOptions(true);
+  if (button.dataset.act === 'conn-save-comfy') return void saveConnection('comfyui', button);
+  if (button.dataset.act === 'conn-test-llm') return void testLlm(button);
+  if (button.dataset.act === 'conn-refresh-llm') return void refreshLlmOptions(true);
+  if (button.dataset.act === 'conn-save-llm') return void saveConnection('llm', button);
   if (button.dataset.act === 'model-install') {
     return void startInstall(button.dataset.group, button.dataset.key, button.dataset.gate);
   }
@@ -774,38 +1047,6 @@ function onRootClick(event) {
   }
 }
 
-/** ⌘S 立即保存（只在设置页且有当前工程时生效，避免抢走浏览器默认行为） */
-function onKeydown(event) {
-  if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== 's') return;
-  if (!location.hash.startsWith('#/settings')) return;
-  if (!projectPath) return;
-  event.preventDefault();
-  if (!dirty) return toast('没有未保存的改动', 'info', 1500);
-  if (timer) {
-    window.clearTimeout(timer);
-    timer = null;
-  }
-  saveWork();
-}
-
-/** 输入 */
-function onRootInput(event) {
-  if (event.target.closest('#set-title, #set-author, #set-genres')) scheduleSave();
-  if (event.target.closest('[data-prod-silence]')) scheduleProductionSave();
-}
-
-/** 失焦 */
-function onRootFocusOut(event) {
-  if (event.target.closest('#set-title, #set-author, #set-genres')) flushSave();
-  if (event.target.closest('[data-prod-silence]')) {
-    if (prodTimer) {
-      window.clearTimeout(prodTimer);
-      prodTimer = null;
-    }
-    saveProduction();
-  }
-}
-
 /** 改动界面偏好：写回 state 并落到 localStorage（全局，与工程无关） */
 function applyPref(name, value) {
   if (name === 'fontSize') {
@@ -818,107 +1059,62 @@ function applyPref(name, value) {
   toast('界面偏好已保存，回到画本后生效', 'ok', 1600);
 }
 
-/** 下拉选择 / 勾选：工程制作参数立即保存，界面偏好写本地 */
+/** 下拉选择 / 勾选：界面偏好写本地 */
 function onRootChange(event) {
-  const pref = event.target.closest('[data-pref]');
-  if (pref) {
-    const name = pref.dataset.pref;
-    applyPref(name, name === 'fontSize' ? pref.value : pref.checked);
+  // 思考开关与强度联动：关掉思考时强度置灰不可选
+  if (event.target.id === 'conn-llm-thinking') {
+    const effort = document.getElementById('conn-llm-effort');
+    if (effort) effort.disabled = !event.target.checked;
     return;
   }
-  if (event.target.closest('[data-prod-audio]')) saveProduction();
+  // 下拉切到「自定义…」时展开手填框
+  if (event.target.matches('[data-combo]')) {
+    syncCustom(event.target.id);
+    return;
+  }
+  const pref = event.target.closest('[data-pref]');
+  if (!pref) return;
+  const name = pref.dataset.pref;
+  applyPref(name, name === 'fontSize' ? pref.value : pref.checked);
 }
 
-/** 读取当前工程的三份数据，并只重画工程区块与章节行 */
-async function loadProject() {
-  const host = document.getElementById('project-set');
-  if (!host || !projectPath) return;
-  try {
-    const [infoPayload, workPayload, productionPayload] = await Promise.all([
-      getJSON('/api/project/info', { path: projectPath }),
-      getJSON('/api/ui/project/work', { path: projectPath }),
-      getJSON('/api/ui/project/production', { path: projectPath }),
-    ]);
-    info = infoPayload;
-    work = workPayload || {};
-    production = productionPayload?.production || null;
-    state.info = info;
-    state.chapters = info?.chapters || [];
-    if (!state.chapters.some((item) => item.id === state.chapterId)) {
-      state.chapterId = state.chapters[0]?.id || '';
-    }
-    globalError = '';
-  } catch (error) {
-    globalError = error.message;
-    // 加载失败时清掉旧工程数据，避免表单显示上一个工程的信息
-    work = null;
-    production = null;
-  }
-  host.innerHTML = projectBlockHTML();
-  const list = document.getElementById('ctx-list');
-  if (list) list.innerHTML = ctxRowsHTML();
-  const crumb = document.getElementById('set-crumb-project');
-  if (crumb) crumb.textContent = work?.title || '当前工程';
-}
-
-/** 进入设置：全局区块立即渲染，工程区块异步补上 */
-export async function renderSettings(root, { path = '' } = {}) {
-  if (timer) {
-    window.clearTimeout(timer);
-    timer = null;
-  }
-  dirty = false;
-  if (prodTimer) {
-    window.clearTimeout(prodTimer);
-    prodTimer = null;
-  }
+/** 进入全局设置：不接收任何工程参数；section 决定默认停靠的分区 */
+export async function renderSettings(root, target = {}) {
+  const wanted = String(target.section || '');
+  // 地址里的 section 不认识时回落到默认分区，绝不留空屏
+  const section = SECTIONS.some(([key]) => key === wanted) ? wanted : DEFAULT_SECTION;
   if (envTimer) {
     window.clearInterval(envTimer);
     envTimer = null;
   }
-  projectPath = path || '';
-  if (projectPath && state.path !== projectPath) {
-    resetProject(projectPath);
-    production = null;
-  }
-  if (!projectPath) {
-    // 全局设置没有工程上下文：不要把上一个工程的表单残留当成当前工程
-    work = null;
-    info = null;
-    production = null;
-    globalError = '';
-  }
   if (!bound) {
     root.addEventListener('click', onRootClick);
-    root.addEventListener('input', onRootInput);
     root.addEventListener('change', onRootChange);
-    root.addEventListener('focusout', onRootFocusOut);
-    document.addEventListener('keydown', onKeydown);
     bound = true;
   }
+  await loadConnection();
   root.innerHTML = `
     ${topbar({
       left: `<button class="btn icon" data-act="back" title="回工程列表">${icon('back')}</button>
              <div class="brand"><span class="brand-mark"></span><span style="font-size:12.5px">设置<small>全局</small></span></div>`,
       crumbs: `<a href="#/projects">工程列表</a>
-               <span class="sep">/</span><span class="cur">全局设置</span>
-               ${projectPath ? '<span class="sep">/</span><span class="cur" id="set-crumb-project">当前工程</span>' : ''}`,
-      right: projectPath
-        ? `<span class="save-state ok" id="settings-save">${icon('check', 12)}已自动保存</span>
-           <button class="btn sm" id="settings-save-now" data-act="save-now" disabled
-             title="没有未保存的改动">保存</button>
-           <button class="btn" data-act="to-editor">${icon('chapter')} 回画本</button>`
-        : `<span class="save-state ok">${icon('check', 12)}全局设置即时生效</span>
-           <button class="btn" data-act="back">${icon('folder')} 项目列表</button>`,
+               <span class="sep">/</span><span class="cur">全局设置</span>`,
+      right: `<span class="save-state ok">${icon('check', 12)}全局设置即时生效</span>
+              <button class="btn" data-act="back">${icon('folder')} 项目列表</button>`,
     })}
     <div class="studio" id="studio">
       ${railbar('settings')}
-      ${ctxHTML()}
+      ${ctxHTML(section)}
       <section class="editor">
         <div id="settings-main" style="display:flex;flex-direction:column;min-height:0;flex:1">${mainHTML()}</div>
       </section>
       <aside class="studio-right"></aside>
     </div>`;
+  // 渲染完再滚动，保证目标分区已存在；刷新时也停在同一分区
+  requestAnimationFrame(() => gotoSection(section, 'auto'));
   void loadEnvironment();
-  if (projectPath) void loadProject();
+  // 进页面就按当前配置拉一次工作流与模型列表，读不到时保留手填
+  void refreshComfyOptions();
+  void refreshLlmOptions();
 }
+

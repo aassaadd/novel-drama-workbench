@@ -35,6 +35,7 @@ function card(item) {
         <span class="glyph">${esc(glyphOf(item.title))}</span>
         <span class="pc-tag">${recent}</span>
         <div class="pc-act">
+          <button class="btn icon sm" data-card-act="settings" title="工程设置：作品信息与制作要求">${icon('gear')}</button>
           <button class="btn icon sm" data-card-act="import" title="导入正文">${icon('arrow')}</button>
           <button class="btn icon sm" data-card-act="duplicate" title="复制工程">${icon('plus')}</button>
           <button class="btn icon sm" data-card-act="reveal" title="在访达中显示">${icon('folder')}</button>
@@ -449,6 +450,11 @@ export async function renderProjects(root, target = {}) {
             else toast('这个工程还没有章节，先导入正文', 'warn');
           })
           .catch((error) => toast(error.message, 'bad'));
+        return;
+      }
+      if (action === 'settings') {
+        rememberProject(item.path);
+        window.location.hash = `#/p/${encodeURIComponent(item.path)}/settings`;
         return;
       }
       if (action === 'import') {

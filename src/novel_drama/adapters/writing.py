@@ -43,6 +43,8 @@ _LIMIT_CACHE: dict[tuple[str, str], int] = {}
 #: 各 OpenAI 兼容实现可能使用的候选字段名（上下文 / 最大输出）
 _CONTEXT_FIELDS = ("max_model_len", "context_length", "context_window", "model_context_length", "max_context_window", "n_ctx")
 _OUTPUT_FIELDS = ("max_output_tokens", "max_completion_tokens", "max_tokens", "max_new_tokens")
+#: 思考强度合法档位（与设置页下拉一致）
+_THINKING_EFFORTS = ("low", "medium", "high")
 #: 探测上限时额外尝试的非标准端点（没有的会记录 404 / 非 JSON，不抛错）
 _LIMIT_PROBE_PATHS = ("/props", "/v1/internal/model/info", "/v1/model/info", "/health")
 #: 模型列表缓存：`(endpoint, api_key) -> (抓取时间, id 列表)`；只用于调用前轻量校验，短 TTL
@@ -132,6 +134,8 @@ class OmlxWritingAdapter:
             self.total_timeout_s = None
         self.max_retries = max(0, int(self.settings.get("max_retries") or 0))
         self.enable_thinking = self.settings.get("enable_thinking")
+        # 思考强度：low / medium / high；仅在开启思考时随请求下发
+        self.reasoning_effort = str(self.settings.get("reasoning_effort") or "").strip().lower()
         self.unload_settings = dict(self.settings.get("unload") or {})
 
     @property
@@ -950,6 +954,9 @@ class OmlxWritingAdapter:
         # omlx 支持通过 chat_template_kwargs 关闭思考，降低延迟与 token 消耗
         if self.enable_thinking is not None:
             payload["chat_template_kwargs"] = {"enable_thinking": bool(self.enable_thinking)}
+        # 开启思考时把强度一并传给服务端（OpenAI 兼容的 reasoning_effort）
+        if bool(self.enable_thinking) and self.reasoning_effort in _THINKING_EFFORTS:
+            payload["reasoning_effort"] = self.reasoning_effort
         # 多轮续写前缀稳定时显式请求前缀缓存；服务不支持该字段会忽略
         if req.prompt_cache_key and bool(self.settings.get("cache_prompt", True)):
             payload["cache_prompt"] = True
@@ -1110,9 +1117,12 @@ class OmlxWritingAdapter:
         payload["tools"] = [tool]
         payload["tool_choice"] = {"type": "function", "function": {"name": name}}
         # thinking 模型的 reasoning_tokens 同样占用 max_tokens，预算太小会把参数截断；
-        # 结构化输出默认关闭思考，调用方可用 metadata.enable_thinking 显式覆盖
+        # 结构化输出是否思考沿用全局开关，调用方可用 metadata.enable_thinking 显式覆盖
         thinking = (req.metadata or {}).get("enable_thinking")
-        payload.setdefault("chat_template_kwargs", {})["enable_thinking"] = bool(thinking) if thinking is not None else False
+        enabled = bool(self.enable_thinking) if thinking is None else bool(thinking)
+        payload.setdefault("chat_template_kwargs", {})["enable_thinking"] = enabled
+        if enabled and self.reasoning_effort in _THINKING_EFFORTS:
+            payload["reasoning_effort"] = self.reasoning_effort
         payload["max_tokens"] = max(int(payload.get("max_tokens") or 0), TOOL_MIN_MAX_TOKENS)
 
         if req.stream:

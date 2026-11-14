@@ -90,6 +90,8 @@ const ui = {
 let timelineCache = { chapter: '', data: null };
 /** 时间轴加载中的章节，防止并发重复构建 */
 let timelineLoading = '';
+/** 最近一次时间轴加载失败的原因（空串表示没有错误）；用于错误态展示，避免一直停在「正在读取」 */
+let timelineError = '';
 
 /** 当前章节标题 */
 function chapterLabel() {
@@ -117,6 +119,7 @@ async function loadTimeline(force = false) {
         path: state.path,
       });
       timelineCache = { chapter: state.chapterId, data };
+      timelineError = '';
       return data;
     } catch (error) {
       if (error.status !== 404) throw error;
@@ -127,6 +130,7 @@ async function loadTimeline(force = false) {
     chapter: state.chapterId,
   });
   timelineCache = { chapter: state.chapterId, data };
+  timelineError = '';
   return data;
 }
 
@@ -1293,6 +1297,17 @@ function onDocPointerUp() {
 function postInnerHTML() {
   const data = timeline();
   if (!data) {
+    if (timelineError) {
+      return `<div class="ed-head">
+          <div><div class="et">后期制作</div><div class="em">时间轴读取失败</div></div>
+          <div class="right"><button class="btn sm" data-vact="post-build">${icon('refresh', 13)} 重试</button></div>
+        </div>
+        <div class="vw-body"><div class="empty">${icon('warn', 20)}
+          <b>时间轴构建失败</b><span>${esc(timelineError)}</span>
+          <span class="hint">常见原因：章节还没有配音、工程目录不可写、模型或音频文件缺失。</span>
+          <button class="btn" data-vact="post-build" style="margin-top:10px">${icon('refresh', 13)} 重试构建</button>
+        </div></div>`;
+    }
     return `<div class="ed-head">
         <div><div class="et">后期制作</div><div class="em">正在读取本章时间轴…</div></div>
       </div>
@@ -1612,6 +1627,7 @@ function zoomPost(direction) {
 async function rebuildTimeline() {
   if (timelineLoading === state.chapterId) return;
   timelineLoading = state.chapterId;
+  timelineError = '';
   paintView();
   try {
     const data = await loadTimeline(true);
@@ -2511,8 +2527,9 @@ async function ensureTimelineForView() {
   timelineLoading = state.chapterId;
   try {
     await loadTimeline(false);
-  } catch {
-    // 后期会显示空状态，不在这里打断
+  } catch (error) {
+    // 后期视图必须给出可读的错误态，不能一直停在「正在读取本章时间轴…」
+    timelineError = error.message || '时间轴构建失败';
   } finally {
     timelineLoading = '';
     if (state.view === 'post') {

@@ -88,6 +88,7 @@ CONFIG_FIELD_GROUPS = (
             ("omlx.max_retries", "最大重试次数", "int", None, 0, None),
             ("omlx.stop", "停止词", "strlist", None, None, None),
             ("omlx.enable_thinking", "启用 thinking", "bool", None, None, None),
+            ("omlx.reasoning_effort", "思考强度", "select", ("low", "medium", "high"), None, None),
             ("omlx.unload.enabled", "文本任务后卸载", "bool", None, None, None),
             ("omlx.unload.path", "卸载接口路径", "str", None, None, None),
             ("omlx.unload.policy", "卸载策略", "select", ("after_text_task", "never"), None, None),

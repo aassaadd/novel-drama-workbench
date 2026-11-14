@@ -14,6 +14,7 @@ import { renderVoices, leaveVoices } from './pages/voices.js';
 import { renderMedia } from './pages/media.js';
 import { renderTasks, leaveTasks } from './pages/tasks.js';
 import { renderSettings } from './pages/settings.js';
+import { renderProjectSettings } from './pages/project-settings.js';
 import { renderExport, leaveExport } from './pages/export.js';
 import { decodePath } from './shell.js';
 import { loadUIPrefs } from './store.js';
@@ -28,8 +29,8 @@ function parseRoute() {
   const query = new URLSearchParams(rawQuery);
   if (!body || body === '/' || body === '/projects') return { view: 'projects', scope: 'home' };
   if (body === '/projects/all') return { view: 'projects', scope: 'all' };
-  // 全局设置：不依赖工程路径；?project= 只用于额外展示「当前工程」区块
-  if (body === '/settings') return { view: 'settings', path: query.get('project') || '' };
+  // 全局设置：与任何工程无关，不再接受 ?project= 参数
+  if (body === '/settings') return { view: 'settings', section: query.get('section') || '' };
   const parts = body.split('/').filter(Boolean);
   if (parts[0] === 'p' && parts[1]) {
     const path = decodePath(parts[1]);
@@ -41,8 +42,7 @@ function parseRoute() {
     if (parts[2] === 'voices') return { view: 'voices', path };
     if (parts[2] === 'media') return { view: 'media', path };
     if (parts[2] === 'tasks') return { view: 'tasks', path };
-    // 工程内旧地址仍落到同一个全局设置页，只是额外带上该工程的上下文
-    if (parts[2] === 'settings') return { view: 'settings', path };
+    if (parts[2] === 'settings') return { view: 'project-settings', path };
     if (parts[2] === 'export' && parts[3]) return { view: 'export', path, chapterId: decodePath(parts[3]) };
   }
   return { view: 'unknown' };
@@ -87,6 +87,10 @@ async function route() {
   }
   if (target.view === 'settings') {
     await renderSettings(root, target);
+    return;
+  }
+  if (target.view === 'project-settings') {
+    await renderProjectSettings(root, target);
     return;
   }
   if (target.view === 'export') {

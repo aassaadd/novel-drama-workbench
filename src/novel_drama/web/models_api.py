@@ -23,7 +23,7 @@ from fastapi import HTTPException
 
 from ..adapters.comfyui import LocalComfyGateway
 from ..adapters.writing import OmlxWritingAdapter
-from ..config import load_config
+from ..config import DEFAULT_UI_CONFIG_PATH, load_config, save_ui_config
 from ..media import comfy_media, comfy_models
 from ..tts import model_store
 from ..writing.service import _tool_max_tokens
@@ -650,6 +650,266 @@ def register_models_routes(app, config_path: str | None = None) -> None:
         except ValueError as exc:
             raise HTTPException(status_code=400, detail={"code": 2, "message": str(exc)}) from exc
         return {"group": group, **result}
+
+    #: 仓库根目录：配置里的相对路径统一按它解析
+    REPO_ROOT = Path(__file__).resolve().parents[3]
+
+    def _resolve_config_path(value: str) -> Path:
+        """把配置里的路径解析成绝对路径（相对路径按仓库根目录）。
+
+        参数:
+            value: 配置中的路径文本，可为空。
+
+        返回:
+            解析后的绝对路径。
+        """
+        raw = Path(value or ".").expanduser()
+        return raw if raw.is_absolute() else (REPO_ROOT / raw)
+
+    @app.get("/api/ui/comfy/workflows")
+    def ui_comfy_workflows(templates_dir: str = "") -> dict:
+        """列出工作流目录里实际存在的工作流，供设置页做下拉选择。
+
+        参数:
+            templates_dir: 工作流目录；留空表示使用当前生效配置。
+
+        返回:
+            `{ok, dir, resolved_dir, workflows, message}`，读取失败时 ok=false 并给中文原因。
+        """
+        target = (templates_dir or "").strip()
+        if not target:
+            configured = (load_config(config_path).get("comfyui", {}) or {}).get("templates_dir") or ""
+            target = str(configured)
+        resolved = _resolve_config_path(target)
+        if not resolved.is_dir():
+            return {
+                "ok": False,
+                "dir": target,
+                "resolved_dir": str(resolved),
+                "workflows": [],
+                "message": f"工作流目录不存在：{resolved}",
+            }
+        workflows: list[dict] = []
+        manifest = resolved / "manifest.json"
+        if manifest.is_file():
+            try:
+                payload = json.loads(manifest.read_text(encoding="utf-8"))
+                for item in payload.get("templates", []):
+                    if not isinstance(item, dict):
+                        continue
+                    workflows.append(
+                        {
+                            "id": item.get("id") or Path(str(item.get("file", ""))).stem,
+                            "file": item.get("file") or "",
+                            "kind": item.get("kind") or "",
+                            "display_name": item.get("display_name") or item.get("id") or "",
+                        }
+                    )
+            except (OSError, ValueError):
+                workflows = []
+        if not workflows:
+            skip = {"manifest.json", "models.json", "models.local.json", "styles.json"}
+            for file in sorted(resolved.glob("*.json")):
+                if file.name in skip:
+                    continue
+                workflows.append({"id": file.stem, "file": file.name, "kind": "", "display_name": file.stem})
+        if not workflows:
+            return {
+                "ok": False,
+                "dir": target,
+                "resolved_dir": str(resolved),
+                "workflows": [],
+                "message": f"目录里没有找到工作流文件：{resolved}",
+            }
+        return {
+            "ok": True,
+            "dir": target,
+            "resolved_dir": str(resolved),
+            "workflows": workflows,
+            "message": f"已读取 {len(workflows)} 个工作流",
+        }
+
+    @app.get("/api/ui/fs/dirs")
+    def ui_fs_dirs(path: str = "") -> dict:
+        """列出目录下的子目录，供「模型目录 / 工作流目录」等路径项做下拉建议。
+
+        参数:
+            path: 目录路径；空串表示仓库根目录，相对路径按仓库根目录解析。
+
+        返回:
+            `{ok, path, resolved_dir, exists, dirs, message}`；不存在时 ok=false 并给中文原因。
+        """
+        resolved = _resolve_config_path((path or "").strip())
+        if not resolved.exists():
+            return {
+                "ok": False,
+                "path": path,
+                "resolved_dir": str(resolved),
+                "exists": False,
+                "dirs": [],
+                "message": f"目录不存在：{resolved}",
+            }
+        if not resolved.is_dir():
+            resolved = resolved.parent
+        try:
+            dirs = sorted(
+                item.name
+                for item in resolved.iterdir()
+                if item.is_dir() and not item.name.startswith(".")
+            )
+        except OSError as exc:
+            return {
+                "ok": False,
+                "path": path,
+                "resolved_dir": str(resolved),
+                "exists": True,
+                "dirs": [],
+                "message": f"目录不可读：{exc.strerror or exc}",
+            }
+        return {
+            "ok": True,
+            "path": path,
+            "resolved_dir": str(resolved),
+            "exists": True,
+            "dirs": dirs,
+            "message": f"已读取 {len(dirs)} 个子目录",
+        }
+
+    #: 设置页可写的连接配置白名单：点分键 -> (中文名, 值类型)
+    CONNECTION_FIELDS = {
+        "comfyui.base_url": ("ComfyUI 服务地址", str),
+        "comfyui.templates_dir": ("ComfyUI 工作流目录", str),
+        "comfyui.models_dir": ("ComfyUI 模型目录", str),
+        "comfyui.templates.image": ("图像工作流", str),
+        "comfyui.templates.video_t2v": ("文生视频工作流", str),
+        "comfyui.templates.video_i2v": ("图生视频工作流", str),
+        "omlx.endpoint": ("写作模型接口地址", str),
+        "omlx.api_key": ("写作模型 API Key", str),
+        "omlx.model": ("写作模型名称", str),
+        "omlx.request_timeout_s": ("请求超时（秒）", (int, float)),
+        "omlx.connect_timeout_s": ("连接超时（秒）", (int, float)),
+        "omlx.max_concurrency": ("最大并发", (int, float)),
+        "omlx.first_token_timeout_s": ("首字超时（秒）", (int, float)),
+        "omlx.context_window": ("上下文窗口（tokens）", int),
+        "omlx.max_tokens": ("最大输出（tokens）", int),
+        "omlx.enable_thinking": ("开启思考", bool),
+        "omlx.reasoning_effort": ("思考强度", str),
+    }
+
+    #: 思考强度合法档位（与设置页下拉一致）
+    THINKING_EFFORTS = ("low", "medium", "high")
+
+    def _connection_state(config) -> dict:
+        """把当前生效的连接配置整理成页面可编辑的结构（不回显密钥原文）。"""
+        comfy = dict(config.get("comfyui", {}) or {})
+        llm = dict(config.get("omlx", {}) or {})
+        return {
+            "config_path": str(config.path or config_path or ""),
+            "ui_config_path": str(config.ui_path or DEFAULT_UI_CONFIG_PATH),
+            "comfyui": {
+                "base_url": comfy.get("base_url") or "",
+                "templates_dir": comfy.get("templates_dir") or "",
+                "models_dir": comfy.get("models_dir") or "",
+                "templates": dict(comfy.get("templates") or {}),
+            },
+            "llm": {
+                "endpoint": llm.get("endpoint") or "",
+                "model": llm.get("model") or "",
+                "api_key_set": bool(llm.get("api_key")),
+                "request_timeout_s": llm.get("request_timeout_s"),
+                "connect_timeout_s": llm.get("connect_timeout_s"),
+                "max_concurrency": llm.get("max_concurrency"),
+                "first_token_timeout_s": llm.get("first_token_timeout_s"),
+                # 上下文 / 最大输出由「测试连通」的服务端返回值回填，也可手改后保存
+                "context_window": llm.get("context_window"),
+                "max_output_tokens": llm.get("max_tokens"),
+                "thinking_enabled": bool(llm.get("enable_thinking")),
+                "thinking_effort": str(llm.get("reasoning_effort") or "medium"),
+            },
+        }
+
+    @app.get("/api/ui/config/connection")
+    def ui_config_connection() -> dict:
+        """读取全局连接配置（ComfyUI / 写作模型）与配置存放位置。"""
+        return _connection_state(load_config(config_path))
+
+    @app.post("/api/ui/config/connection")
+    def ui_save_connection(body: dict | None = None) -> dict:
+        """保存全局连接配置到页面覆盖层，返回保存后的生效值。
+
+        参数:
+            body: `{comfyui: {...}, llm: {...}}`；只接受白名单字段。
+                `llm.api_key` 留空表示沿用已保存密钥，不会被清空。
+
+        异常:
+            400：字段类型不合法或值超出范围（中文说明）。
+        """
+        body = body or {}
+        updates: dict = {}
+        for section, payload in (("comfyui", body.get("comfyui") or {}), ("omlx", body.get("llm") or {})):
+            for key, value in dict(payload).items():
+                dotted = f"{section}.{key}"
+                if dotted not in CONNECTION_FIELDS:
+                    continue
+                label, types = CONNECTION_FIELDS[dotted]
+                if dotted == "omlx.api_key" and not str(value or "").strip():
+                    continue
+                if isinstance(value, str):
+                    value = value.strip()
+                # 数字项留空表示「沿用已保存值」，不因空串报错
+                if types is not str and types is not bool and value in ("", None):
+                    continue
+                if types is bool:
+                    # 开关允许布尔值或 "true"/"false" 字符串（表单序列化差异都能接受）
+                    if isinstance(value, str):
+                        value = value.lower() in ("1", "true", "on", "yes")
+                    else:
+                        value = bool(value)
+                elif types is int:
+                    try:
+                        value = int(float(value))
+                    except (TypeError, ValueError) as exc:
+                        raise HTTPException(
+                            status_code=400,
+                            detail={"code": 2, "message": f"{label}必须是整数"},
+                        ) from exc
+                    if value <= 0:
+                        raise HTTPException(
+                            status_code=400,
+                            detail={"code": 2, "message": f"{label}必须大于 0"},
+                        )
+                elif types is not str:
+                    try:
+                        value = float(value)
+                    except (TypeError, ValueError) as exc:
+                        raise HTTPException(
+                            status_code=400,
+                            detail={"code": 2, "message": f"{label}必须是数字"},
+                        ) from exc
+                    if value <= 0:
+                        raise HTTPException(
+                            status_code=400,
+                            detail={"code": 2, "message": f"{label}必须大于 0"},
+                        )
+                    if isinstance(types, tuple) and int in types and key == "max_concurrency":
+                        value = int(value)
+                if dotted == "omlx.reasoning_effort" and value not in THINKING_EFFORTS:
+                    raise HTTPException(
+                        status_code=400,
+                        detail={"code": 2, "message": f"{label}只能是 low / medium / high"},
+                    )
+                updates.setdefault(section, {})[key] = value
+        # 覆盖层固定写 config/config.ui.yaml：所有 load_config 调用都会合并它，保存即生效
+        try:
+            target = save_ui_config(updates)
+        except OSError as exc:
+            raise HTTPException(
+                status_code=500,
+                detail={"code": 3, "message": f"配置写入失败：{exc.strerror or exc}"},
+            ) from exc
+        state = _connection_state(load_config(config_path))
+        state["saved_to"] = str(target)
+        return state
 
     @app.post("/api/ui/comfy/health")
     def ui_comfy_health(body: dict | None = None) -> dict:
