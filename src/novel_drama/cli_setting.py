@@ -16,6 +16,7 @@ from .config import AppConfig
 from .models.ids import new_id
 from .store.settings_store import SettingsStore
 from .writing import generate_section, generate_settings, polish_field
+from .writing.worlds import normalize_glossary, normalize_locations
 
 # `setting set` 支持标量字段：解析参数名 → (设定库路径, 字段名)
 SCALAR_FIELDS = {
@@ -56,9 +57,27 @@ def _as_str_list(rows) -> list[str]:
         return []
     if isinstance(rows, str):
         rows = [rows]
+    if isinstance(rows, dict):
+        # 模型有时把规则/势力返回成单个对象或「名称→说明」映射
+        if any(key in rows for key in ("name", "title", "description", "desc", "summary")):
+            rows = [rows]
+        else:
+            rows = [
+                f"{key}：{value}" if not isinstance(value, (dict, list)) and str(value).strip() else str(key)
+                for key, value in rows.items()
+            ]
     if not isinstance(rows, list):
-        raise ValueError("该字段必须是字符串数组")
-    return [str(item).strip() for item in rows if str(item).strip()]
+        raise ValueError(f"该字段必须是字符串数组（实际收到 {type(rows).__name__}）")
+    result = []
+    for item in rows:
+        if isinstance(item, dict):
+            name = str(item.get("name") or item.get("title") or "").strip()
+            note = str(item.get("description") or item.get("desc") or item.get("summary") or "").strip()
+            item = f"{name}：{note}" if name and note else (name or note or "")
+        text = str(item).strip()
+        if text:
+            result.append(text)
+    return result
 
 
 def _split_items(text: str) -> list[str]:
@@ -115,39 +134,23 @@ def _merge_section(bible: dict, section: str, fields: dict) -> list[str]:
                 target[key] = _as_str_list(fields.get(key))
                 changed.append(key)
         if "locations" in fields:
-            rows = fields.get("locations") or []
-            if not isinstance(rows, list):
-                raise ValueError("locations 必须是数组")
+            raw_rows = fields.get("locations")
+            rows = raw_rows if isinstance(raw_rows, list) else []
             locations = []
-            for index, item in enumerate(rows):
-                if not isinstance(item, dict):
-                    raise ValueError(f"locations 第 {index + 1} 项必须是对象")
+            for index, item in enumerate(normalize_locations(raw_rows)):
+                old = rows[index] if index < len(rows) and isinstance(rows[index], dict) else {}
                 locations.append(
                     {
-                        "id": str(item.get("id") or new_id("loc")),
-                        "name": str(item.get("name") or "").strip(),
-                        "description": str(item.get("description") or "").strip(),
-                        "atmosphere": str(item.get("atmosphere") or "").strip(),
+                        "id": str(old.get("id") or new_id("loc")),
+                        "name": item["name"],
+                        "description": item.get("description") or "",
+                        "atmosphere": item.get("atmosphere") or "",
                     }
                 )
             target["locations"] = locations
             changed.append("locations")
         if "glossary" in fields:
-            rows = fields.get("glossary") or []
-            if not isinstance(rows, list):
-                raise ValueError("glossary 必须是数组")
-            glossary = []
-            for index, item in enumerate(rows):
-                if not isinstance(item, dict):
-                    raise ValueError(f"glossary 第 {index + 1} 项必须是对象")
-                glossary.append(
-                    {
-                        "term": str(item.get("term") or "").strip(),
-                        "meaning": str(item.get("meaning") or "").strip(),
-                        "aliases": _as_str_list(item.get("aliases")),
-                    }
-                )
-            target["glossary"] = glossary
+            target["glossary"] = normalize_glossary(fields.get("glossary"))
             changed.append("glossary")
     else:
         for key in SECTION_FIELDS[section]:

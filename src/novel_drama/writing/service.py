@@ -24,7 +24,7 @@ from ..text.context import POV_LABELS, ContextAssembler
 from ..text.dialogue import normalize_dialogue
 from ..text.titles import strip_index_prefix
 from .worlds import build_art_prompt as _build_art_prompt
-from .worlds import clean_world_entry, worlds_digest
+from .worlds import clean_world_entry, normalize_locations, worlds_digest
 
 # 默认每章目标字数
 DEFAULT_CHAPTER_WORDS = 1200
@@ -1936,10 +1936,26 @@ def _clean_str_list(rows, item_limit: int, label: str) -> list[str]:
         return []
     if isinstance(rows, str):
         rows = [rows]
+    if isinstance(rows, dict):
+        # 模型可能把规则/势力返回成单个对象或「名称→说明」映射，统一转成字符串数组
+        if any(key in rows for key in ("name", "title", "description", "desc", "summary")):
+            rows = [rows]
+        else:
+            rows = [
+                f"{key}：{value}" if not isinstance(value, (dict, list)) and str(value).strip() else str(key)
+                for key, value in rows.items()
+            ]
     if not isinstance(rows, list):
-        raise ValueError(f"{label}必须是字符串数组")
+        raise ValueError(f"{label}必须是字符串数组（实际收到 {type(rows).__name__}）")
     result = []
     for index, item in enumerate(rows):
+        if isinstance(item, dict):
+            # 对象项拼成「名称：说明」，不直接报错
+            name = str(item.get("name") or item.get("title") or "").strip()
+            note = str(item.get("description") or item.get("desc") or item.get("summary") or "").strip()
+            item = f"{name}：{note}" if name and note else (name or note or "、".join(
+                str(value).strip() for value in item.values() if not isinstance(value, (dict, list)) and str(value).strip()
+            ))
         text = _check_text(item, item_limit, f"{label}第 {index + 1} 项")
         if text:
             result.append(text)
@@ -1949,23 +1965,22 @@ def _clean_str_list(rows, item_limit: int, label: str) -> list[str]:
 def _clean_locations(rows) -> list[dict]:
     """清洗世界地点数组。
 
+    先复用 `normalize_locations` 把数组 / 单对象 / 名称映射 / 字符串归一化成
+    对象数组，再校验字段长度，避免模型返回对象形态时整次生成失败。
+
     参数:
-        rows: 原始地点数组。
+        rows: 原始地点字段。
 
     返回:
         [{name, description, atmosphere}]。
 
     异常:
-        ValueError: 结构或长度不合法。
+        ValueError: 归一化后仍无法识别结构（错误信息带实际类型）。
     """
     if rows is None:
         return []
-    if not isinstance(rows, list):
-        raise ValueError("locations 必须是数组")
     result = []
-    for index, item in enumerate(rows):
-        if not isinstance(item, dict):
-            raise ValueError(f"locations 第 {index + 1} 项必须是对象")
+    for index, item in enumerate(normalize_locations(rows)):
         result.append(
             {
                 "name": _check_text(item.get("name"), 120, f"locations 第 {index + 1} 项名称", required=True),
@@ -1994,12 +2009,26 @@ def _clean_glossary(rows) -> list[dict]:
         # 模型有时把词条写成整段文本，按换行/分号拆成多项
         rows = [part.strip() for part in rows.replace("；", "\n").replace(";", "\n").splitlines() if part.strip()]
     if isinstance(rows, dict):
-        # 单个词条对象，或「术语→释义」映射，统一成数组
-        rows = [rows] if any(key in rows for key in ("term", "name", "word")) else [
-            {"term": key, "meaning": value} for key, value in rows.items()
-        ]
+        # 单个词条对象，或「术语→释义」映射，统一成数组；释义可能是对象 / 数组
+        if any(key in rows for key in ("term", "name", "word")):
+            rows = [rows]
+        else:
+            mapped = []
+            for key, value in rows.items():
+                if isinstance(value, dict):
+                    # 值本身是词条对象：保留 meaning/aliases 等字段，只补 term
+                    item = {sub_key: sub_value for sub_key, sub_value in value.items() if sub_key != "term"}
+                    item["term"] = key
+                    mapped.append(item)
+                    continue
+                if isinstance(value, list):
+                    meaning = "、".join(str(entry).strip() for entry in value if str(entry).strip())
+                else:
+                    meaning = value
+                mapped.append({"term": key, "meaning": meaning})
+            rows = mapped
     if not isinstance(rows, list):
-        raise ValueError("glossary 必须是数组")
+        raise ValueError(f"glossary 必须是数组或对象（实际收到 {type(rows).__name__}）")
     result = []
     for index, item in enumerate(rows):
         if isinstance(item, str):
@@ -2027,7 +2056,11 @@ def _clean_glossary(rows) -> list[dict]:
         }
         aliases = _clean_str_list(item.get("aliases"), 120, f"glossary 第 {index + 1} 项别名")
         if aliases:
-            entry["aliases"] = aliases
+            # 模型有时把多个别名写成一个字符串（顿号/逗号分隔），拆开保留
+            expanded = []
+            for alias in aliases:
+                expanded.extend(part.strip() for part in re.split(r"[、,，]", alias) if part.strip())
+            entry["aliases"] = [alias[:120] for alias in expanded]
         result.append(entry)
     return result
 
