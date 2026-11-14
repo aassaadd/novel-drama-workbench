@@ -28,6 +28,9 @@ _TEXT_LIMITS = {
     "beat": {"summary": 1000},
 }
 
+#: 节拍上可通过大纲文本接口修改的布尔开关（不在 _TEXT_LIMITS 里，按布尔处理）
+_BEAT_FLAGS = ("turning_point",)
+
 #: 字段的中文名，用于错误提示里指明是哪个字段
 _TEXT_LABELS = {
     "act": {"title": "幕标题", "summary": "幕概要"},
@@ -470,7 +473,7 @@ def update_outline_text(
     beat: int | str | None = None,
     fields: dict | None = None,
 ) -> dict:
-    """就地修改大纲文本（幕/章标题与概要、单个节拍文本）。
+    """就地修改大纲文本（幕/章标题与概要、单个节拍文本与转折标记）。
 
     只改设定库大纲里的文本：不动章节序号、节拍顺序，不写章节文件，也不碰正文与标注。
     保存沿用 `SettingsStore.save` 的 schema 校验 + 原子写，失败时不会留下半写状态。
@@ -480,10 +483,12 @@ def update_outline_text(
         act: 幕 ID（编辑幕时传）。
         chapter: 大纲章节 ID（编辑章或节拍时传）。
         beat: 节拍序号（从 1 开始，编辑节拍时传）。
-        fields: 要更新的字段，例如 `{"title": "...", "summary": "..."}`。
+        fields: 要更新的字段，例如 `{"title": "...", "summary": "..."}`；
+            节拍还可传 `{"turning_point": true}`（转折/小高潮标记）。
 
     返回:
-        `{scope, act_id?, chapter_id?, index?, beat?, title?, updated, settings_revision}`。
+        `{scope, act_id?, chapter_id?, index?, beat?, title?, turning_point?, updated,
+        settings_revision}`。
 
     异常:
         ValueError: 设定库不存在、对象找不到、字段不支持、标题为空或文本超长。
@@ -516,7 +521,10 @@ def update_outline_text(
         raise ValueError("缺少要编辑的对象：act / chapter / beat 至少给一个")
 
     allowed = _TEXT_LIMITS[scope]
-    unknown = [key for key in values if key not in allowed]
+    # 节拍上的布尔开关单独处理：不进 _TEXT_LIMITS，也不做文本清洗
+    flags = {key: bool(value) for key, value in values.items() if scope == "beat" and key in _BEAT_FLAGS}
+    text_values = {key: value for key, value in values.items() if key not in flags}
+    unknown = [key for key in text_values if key not in allowed]
     if unknown:
         raise ValueError(
             f"不支持的字段：{'、'.join(unknown)}（{scope} 只支持 {'、'.join(allowed)}）"
@@ -531,19 +539,22 @@ def update_outline_text(
         if entry is None:
             raise ValueError(f"大纲里没有这一章：{chapter_id}")
 
-    cleaned = {key: _clean_text(scope, key, value) for key, value in values.items()}
+    cleaned = {key: _clean_text(scope, key, value) for key, value in text_values.items()}
     if scope == "beat":
         beats = entry.get("beats") or []
         if not 1 <= beat_index <= len(beats):
             raise ValueError(f"节拍序号越界：{beat_index}（本章共 {len(beats)} 个节拍）")
-        beats[beat_index - 1]["summary"] = cleaned["summary"]
+        beat_entry = beats[beat_index - 1]
+        if "summary" in cleaned:
+            beat_entry["summary"] = cleaned["summary"]
+        beat_entry.update(flags)
     else:
         entry.update(cleaned)
 
     saved = settings_store.save(bible)
     result = {
         "scope": scope,
-        "updated": sorted(cleaned),
+        "updated": sorted([*cleaned, *flags]),
         "settings_revision": saved.get("settings_revision"),
     }
     if scope == "act":
@@ -557,7 +568,8 @@ def update_outline_text(
         result["title"] = entry.get("title") or ""
     if scope == "beat":
         result["beat"] = beat_index
-        result["summary"] = cleaned["summary"]
+        result["summary"] = beat_entry.get("summary") or ""
+        result["turning_point"] = bool(beat_entry.get("turning_point"))
     return result
 
 

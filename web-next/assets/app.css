@@ -1103,6 +1103,16 @@ table.files .mono { font-size: 11px; color: var(--text-4); }
 .novel-beat { border: 1px solid var(--line); border-radius: 8px; padding: 8px; display: grid; gap: 6px; }
 .novel-beat-head { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-4); }
 .novel-beat .textarea { min-height: 44px; }
+/* 节拍转折开关：勾选即代表本章小高潮候选，卡片描边同步高亮 */
+.beat-turn { display: inline-flex; align-items: center; gap: 4px; cursor: pointer; color: var(--text-3); font-size: 11px; }
+.beat-turn input { cursor: pointer; margin: 0; }
+.novel-beat.turning { border-color: rgba(240, 138, 75, 0.5); }
+/* 从黄金三章明细跳转后，短暂高亮还没标转折的节拍 */
+.novel-beat.need-turn { border-color: rgba(240, 138, 75, 0.65); animation: beat-need 3.2s ease-out; }
+@keyframes beat-need {
+  0%, 55% { background: rgba(240, 138, 75, 0.12); }
+  100% { background: transparent; }
+}
 /* 地点 / 名词表条目编辑器：每条一行卡片，右侧操作按钮，不走整块重绘 */
 .novel-items { display: grid; gap: 6px; }
 .novel-items-head { display: flex; align-items: center; gap: 8px; }

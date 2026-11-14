@@ -1021,14 +1021,16 @@ function chapterHTML() {
   const beats = (chapter.beats || [])
     .map(
       (beat, index) => `
-      <div class="novel-beat">
+      <div class="novel-beat${beat.turning_point ? ' turning' : ''}" data-beat="${index}">
         <div class="novel-beat-head">
           <span class="mono">节拍 ${index + 1}</span>
-          ${beat.turning_point ? `<span class="badge warn">转折</span>` : ''}
           ${beat.target_words ? `<span class="badge mute">${Number(beat.target_words)} 字</span>` : ''}
           ${(beat.character_ids || []).length ? `<span class="badge mute">${beat.character_ids.length} 人</span>` : ''}
-          <button class="btn icon sm" data-act="novel-beat-delete" data-index="${index}" title="删除该节拍"
-                  style="margin-left:auto">${icon('trash', 12)}</button>
+          <label class="beat-turn" style="margin-left:auto" title="标记为本章转折（小高潮），黄金三章检查据此判断">
+            <input type="checkbox" id="nb-beat-turn-${index}" data-beat-turn="${index}"
+                   ${beat.turning_point ? 'checked' : ''} /> 转折（小高潮）
+          </label>
+          <button class="btn icon sm" data-act="novel-beat-delete" data-index="${index}" title="删除该节拍">${icon('trash', 12)}</button>
         </div>
         <textarea class="textarea" id="nb-beat-${index}" rows="2">${esc(beat.summary || '')}</textarea>
       </div>`
@@ -1060,9 +1062,9 @@ function chapterHTML() {
         <div class="field"><label>幕概要（只读，改大纲时统一调整）</label>
           <div class="hint" style="line-height:1.6">${esc(act.summary || '—')}</div></div>
       </div></div>
-      <div class="card">
+      <div class="card" id="novel-beat-list">
         <div class="card-head"><span class="ct">节拍（${(chapter.beats || []).length}）</span>
-          <div class="right hint">节拍是正文生成的最小单位</div>
+          <div class="right hint">节拍是正文生成的最小单位 · 勾选「转折（小高潮）」标记本章反转</div>
         </div>
         <div class="card-body" style="display:grid;gap:10px">
           ${beats || '<div class="hint">这一章还没有节拍</div>'}
@@ -1614,7 +1616,7 @@ async function saveSetting(section) {
   // 保存成功后不重绘页面：保住输入焦点与滚动位置（失败时也不会走到这里）
 }
 
-/** 保存大纲章：标题 / 概要 / 各节拍摘要 */
+/** 保存大纲章：标题 / 概要 / 各节拍摘要与转折标记（节拍序号从 1 开始，与后端一致） */
 async function saveOutlineChapter() {
   const hit = findOutlineChapter(ui.sel.id);
   if (!hit) return;
@@ -1626,13 +1628,23 @@ async function saveOutlineChapter() {
       await postJSON('/api/ui/outline/text', { path: cache.path, chapter: chapter.id, title, summary });
     }
     for (let index = 0; index < (chapter.beats || []).length; index += 1) {
+      const beat = chapter.beats[index];
       const value = document.getElementById(`nb-beat-${index}`)?.value.trim() || '';
-      if (value !== (chapter.beats[index].summary || '')) {
+      if (value !== (beat.summary || '')) {
         await postJSON('/api/ui/outline/text', {
           path: cache.path,
           chapter: chapter.id,
-          beat: index,
+          beat: index + 1,
           summary: value,
+        });
+      }
+      const turning = Boolean(document.getElementById(`nb-beat-turn-${index}`)?.checked);
+      if (turning !== Boolean(beat.turning_point)) {
+        await postJSON('/api/ui/outline/text', {
+          path: cache.path,
+          chapter: chapter.id,
+          beat: index + 1,
+          turning_point: turning,
         });
       }
     }
@@ -1647,6 +1659,22 @@ async function saveOutlineChapter() {
     row.textContent = title || '未命名章节';
     row.setAttribute('title', title || '未命名章节');
   }
+  // 转折标记会影响黄金三章结论：结果条已展示时立刻重查并刷新
+  await refreshCheckBanner();
+}
+
+/** 重跑黄金三章检查并就地替换主区顶部的结果条（不重绘主区，保住输入焦点） */
+async function refreshCheckBanner() {
+  if (!cache.check) return;
+  const slot = document.getElementById('novel-check-slot');
+  if (!slot) return;
+  try {
+    cache.check = await getJSON('/api/ui/outline/check', { path: cache.path });
+  } catch {
+    // 重查失败保留上一次结果，不影响刚保存的大纲
+    return;
+  }
+  slot.innerHTML = checkBannerHTML();
 }
 
 /**
@@ -2505,12 +2533,12 @@ function openSettingPreview(section, label, fields) {
   });
 }
 
-/** 删除节拍（无确认，节拍可重新生成） */
+/** 删除节拍（无确认，节拍可重新生成）；index 为页面上的 0 基序号，后端按 1 基接收 */
 async function deleteBeat(index) {
   const hit = findOutlineChapter(ui.sel.id);
   if (!hit) return;
   await run('删除节拍', () =>
-    postJSON('/api/ui/outline/beat/delete', { path: cache.path, chapter: hit.chapter.id, beat: index })
+    postJSON('/api/ui/outline/beat/delete', { path: cache.path, chapter: hit.chapter.id, beat: index + 1 })
   );
   cache.outline = await getJSON('/api/ui/outline', { path: cache.path });
   toast('节拍已删除', 'ok');
@@ -3205,7 +3233,7 @@ async function reloadAfterBodyChange(chapterId) {
 /**
  * 归一化黄金三章检查明细：只保留有可展示文案的条目。
  * 数量与明细同源，避免出现「有数无内容」。
- * @returns {Array<{index: number, id: string, title: string, problem: string, hint: string}>}
+ * @returns {Array<{index: number, id: string, title: string, problem: string, hint: string, focus: string}>}
  */
 function checkIssues() {
   return (cache.check?.issues || [])
@@ -3215,6 +3243,7 @@ function checkIssues() {
       title: String(item?.chapter_title || ''),
       problem: String(item?.problem || ''),
       hint: String(item?.hint || ''),
+      focus: String(item?.focus || ''),
     }))
     .filter((row) => row.problem || row.hint);
 }
@@ -3222,8 +3251,9 @@ function checkIssues() {
 /**
  * 从检查明细定位到大纲章节：展开所属幕并选中该章。
  * @param {string} id 章节 ID
+ * @param {string} [focus] 落点标记；beat_turning_point 表示需要给该章某个节拍标转折
  */
-function gotoCheckChapter(id) {
+function gotoCheckChapter(id, focus = '') {
   const hit = findOutlineChapter(id);
   if (!hit) return;
   const index = (cache.outline?.acts || []).indexOf(hit.act);
@@ -3236,6 +3266,20 @@ function gotoCheckChapter(id) {
   paint();
   loadBody(id);
   loadPlan(id);
+  if (focus === 'beat_turning_point') highlightTurningBeats();
+}
+
+/** 跳到该章后滚动到节拍区，并高亮尚未标转折的节拍，指明该改哪一处 */
+function highlightTurningBeats() {
+  const card = document.getElementById('novel-beat-list');
+  if (!card) return;
+  const pending = [...card.querySelectorAll('.novel-beat')].filter(
+    (node) => !node.querySelector('[data-beat-turn]')?.checked
+  );
+  pending.forEach((node) => node.classList.add('need-turn'));
+  card.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  pending[0]?.querySelector('[data-beat-turn]')?.focus({ preventScroll: true });
+  setTimeout(() => pending.forEach((node) => node.classList.remove('need-turn')), 3200);
 }
 
 /** 检查结果条：有大纲检查结果时出现在主区顶部 */
@@ -3255,8 +3299,9 @@ function checkBannerHTML() {
         <span class="bi-head"><b>${esc(label)}</b>${row.problem ? `<span class="bi-problem">· ${esc(row.problem)}</span>` : ''}</span>
         ${row.hint ? `<span class="bi-why">${esc(row.hint)}</span>` : ''}`;
       if (!row.id || !findOutlineChapter(row.id)) return `<div class="banner-issue">${body}</div>`;
+      const jump = row.focus === 'beat_turning_point' ? '定位并标记转折 ›' : '定位章节 ›';
       return `<button class="banner-issue" data-act="novel-goto-check-chapter" data-id="${esc(row.id)}"
-        title="定位到第 ${row.index} 章">${body}<span class="bi-jump">定位章节 ›</span></button>`;
+        data-focus="${esc(row.focus)}" title="定位到第 ${row.index} 章">${body}<span class="bi-jump">${jump}</span></button>`;
     })
     .join('');
   return `
@@ -3314,7 +3359,7 @@ function paint() {
   const listScroll = document.querySelector('#novel-root .chap-list')?.scrollTop || 0;
   if (ctx) ctx.outerHTML = ctxHTML();
   if (main) {
-    main.innerHTML = `${emptyGuideHTML()}${checkBannerHTML()}${mainHTML()}`;
+    main.innerHTML = `${emptyGuideHTML()}<div id="novel-check-slot">${checkBannerHTML()}</div>${mainHTML()}`;
     main.scrollTop = scroll;
   }
   const list = document.querySelector('#novel-root .chap-list');
@@ -3368,7 +3413,7 @@ export async function renderNovel(root, target) {
         ${ctxHTML()}
         <section class="editor">
           <div id="novel-main" style="display:flex;flex-direction:column;min-height:0;flex:1;overflow:hidden">
-            ${emptyGuideHTML()}${checkBannerHTML()}${mainHTML()}
+            ${emptyGuideHTML()}<div id="novel-check-slot">${checkBannerHTML()}</div>${mainHTML()}
           </div>
         </section>
         <aside class="studio-right"></aside>
@@ -3477,9 +3522,15 @@ function startBoot(path) {
   }
 }
 
-/** 下拉切换（世界选择器）：切到对应世界的世界观总述 */
+/** 变更事件：世界选择器切换 / 节拍转折开关 */
 function onChange(event) {
   if (!document.getElementById('novel-main')) return;
+  // 节拍转折开关：只切卡片高亮态，落盘交给「保存」
+  const turn = event.target.closest('[data-beat-turn]');
+  if (turn) {
+    turn.closest('.novel-beat')?.classList.toggle('turning', turn.checked);
+    return;
+  }
   const pick = event.target.closest('[data-world-pick]');
   if (!pick) return;
   ui.worldId = pick.value;
@@ -3580,7 +3631,7 @@ async function onClick(event) {
   if (act === 'novel-outline-expand') return openOutlineExpand();
   if (act === 'novel-outline-apply') return applyOutline();
   if (act === 'novel-outline-check') return checkOutline();
-  if (act === 'novel-goto-check-chapter') return gotoCheckChapter(el.dataset.id);
+  if (act === 'novel-goto-check-chapter') return gotoCheckChapter(el.dataset.id, el.dataset.focus || '');
   if (act === 'novel-beat-delete') return deleteBeat(Number(el.dataset.index));
   if (act === 'novel-chapter-delete') return deleteChapter();
   if (act === 'novel-body-save') return saveBody();

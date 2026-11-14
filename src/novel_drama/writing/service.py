@@ -3796,7 +3796,9 @@ def _outline_chapters(bible: dict) -> list[dict]:
     return sorted(rows, key=lambda item: int(item.get("index") or 0))
 
 
-def _golden_issue(chapter_index: int, chapter: dict | None, problem: str, hint: str) -> dict:
+def _golden_issue(
+    chapter_index: int, chapter: dict | None, problem: str, hint: str, focus: str | None = None
+) -> dict:
     """构造一条黄金三章问题（带可定位的章节信息）。
 
     参数:
@@ -3804,9 +3806,10 @@ def _golden_issue(chapter_index: int, chapter: dict | None, problem: str, hint: 
         chapter: 对应的大纲章节 dict；章节不存在时为 None。
         problem: 未通过的具体项（一句话，不含章节号）。
         hint: 为什么没过 + 怎么改。
+        focus: 界面定位用的落点标记；目前仅 `beat_turning_point`（需标记转折的节拍）。
 
     返回:
-        {"chapter_index", "chapter_id", "chapter_title", "problem", "hint"}。
+        {"chapter_index", "chapter_id", "chapter_title", "problem", "hint", "focus"}。
     """
     chapter = chapter or {}
     return {
@@ -3815,6 +3818,7 @@ def _golden_issue(chapter_index: int, chapter: dict | None, problem: str, hint: 
         "chapter_title": str(chapter.get("title") or ""),
         "problem": problem,
         "hint": hint,
+        "focus": focus,
     }
 
 
@@ -3830,7 +3834,8 @@ def check_golden_three(bible: dict) -> dict:
         bible: 设定库 dict。
 
     返回:
-        {"passed": bool, "issues": [{"chapter_index", "chapter_id", "chapter_title", "problem", "hint"}]}。
+        {"passed": bool, "issues": [{"chapter_index", "chapter_id", "chapter_title", "problem",
+        "hint", "focus"}]}；focus 供界面定位（如 beat_turning_point 表示该章需要标转折）。
     """
     chapters = _outline_chapters(bible)[:3]
     issues: list[dict] = []
@@ -3901,6 +3906,7 @@ def check_golden_three(bible: dict) -> dict:
                     third,
                     "缺少第一次小高潮",
                     f"第 {third_index} 章没有任何节拍标记 turning_point=true；把其中一个节拍标记为转折，形成阶段性反转",
+                    focus="beat_turning_point",
                 )
             )
 

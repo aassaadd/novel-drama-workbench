@@ -51,21 +51,23 @@ def register_outline_edit_routes(app) -> None:
 
     @app.post("/api/ui/outline/text")
     def ui_outline_text(body: dict) -> dict:
-        """就地修改大纲文本（幕/章标题与概要、单个节拍文本）。
+        """就地修改大纲文本（幕/章标题与概要、单个节拍文本与转折标记）。
 
         参数:
-            body: `{path, act?, chapter?, beat?, title?, summary?}`；
-                beat 为节拍序号（从 1 开始），带 beat 时按节拍处理。
+            body: `{path, act?, chapter?, beat?, title?, summary?, turning_point?}`；
+                beat 为节拍序号（从 1 开始），带 beat 时按节拍处理；
+                turning_point 只对节拍生效，布尔值。
 
         返回:
-            `{scope, act_id?, chapter_id?, index?, beat?, title?, updated, settings_revision}`。
+            `{scope, act_id?, chapter_id?, index?, beat?, title?, turning_point?, updated,
+            settings_revision}`。
 
         异常:
             HTTPException 400: 缺少 path 或没有要保存的字段。
             HTTPException 409: 大纲不存在、对象找不到、标题为空或文本超长。
         """
         store = _store(body.get("path"))
-        fields = {key: body[key] for key in ("title", "summary") if key in body}
+        fields = {key: body[key] for key in ("title", "summary", "turning_point") if key in body}
         try:
             return update_outline_text(
                 store,
