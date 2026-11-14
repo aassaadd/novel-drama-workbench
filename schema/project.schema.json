@@ -46,6 +46,7 @@
         "sfx": { "$ref": "#/$defs/sfx" },
         "comfy": { "$ref": "#/$defs/comfy" },
         "output": { "$ref": "#/$defs/output" },
+        "production": { "$ref": "#/$defs/production", "description": "项目级制作要求：静音间隔与音频导出参数" },
         "gpu": { "$ref": "#/$defs/gpu" },
         "bible": { "$ref": "#/$defs/bible_ref" },
         "tools": {
@@ -285,6 +286,47 @@
         },
         "image_width": { "type": "integer", "minimum": 256, "maximum": 4096 },
         "image_height": { "type": "integer", "minimum": 256, "maximum": 4096 }
+      }
+    },
+    "production": {
+      "type": "object",
+      "description": "项目级制作要求：静音间隔（毫秒）与音频导出参数。时间轴与导出直接读取这里",
+      "required": ["silences_ms", "audio"],
+      "additionalProperties": false,
+      "properties": {
+        "silences_ms": {
+          "type": "object",
+          "required": [
+            "start", "title_to_body", "narration_to_dialogue", "narration_to_sfx",
+            "narration_to_narration", "dialogue_to_narration", "dialogue_to_sfx",
+            "dialogue_to_dialogue", "sfx_to_dialogue", "sfx_to_narration", "sfx_to_sfx", "end"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "start": { "type": "integer", "minimum": 0, "maximum": 10000, "description": "起始留白" },
+            "title_to_body": { "type": "integer", "minimum": 0, "maximum": 10000, "description": "标题→正文" },
+            "narration_to_dialogue": { "type": "integer", "minimum": 0, "maximum": 10000, "description": "旁白→对话" },
+            "narration_to_sfx": { "type": "integer", "minimum": 0, "maximum": 10000, "description": "旁白→音效" },
+            "narration_to_narration": { "type": "integer", "minimum": 0, "maximum": 10000, "description": "旁白→旁白" },
+            "dialogue_to_narration": { "type": "integer", "minimum": 0, "maximum": 10000, "description": "对话→旁白" },
+            "dialogue_to_sfx": { "type": "integer", "minimum": 0, "maximum": 10000, "description": "对话→音效" },
+            "dialogue_to_dialogue": { "type": "integer", "minimum": 0, "maximum": 10000, "description": "对话→对话" },
+            "sfx_to_dialogue": { "type": "integer", "minimum": 0, "maximum": 10000, "description": "音效→对白" },
+            "sfx_to_narration": { "type": "integer", "minimum": 0, "maximum": 10000, "description": "音效→旁白" },
+            "sfx_to_sfx": { "type": "integer", "minimum": 0, "maximum": 10000, "description": "音效→音效" },
+            "end": { "type": "integer", "minimum": 0, "maximum": 10000, "description": "结束留白" }
+          }
+        },
+        "audio": {
+          "type": "object",
+          "required": ["format", "sample_rate", "bitrate_kbps"],
+          "additionalProperties": false,
+          "properties": {
+            "format": { "type": "string", "enum": ["mp3", "wav", "m4a"], "description": "导出音频格式" },
+            "sample_rate": { "type": "integer", "enum": [44100, 48000], "description": "采样率" },
+            "bitrate_kbps": { "type": "integer", "enum": [192, 256], "description": "目标码率（kbps，wav 忽略）" }
+          }
+        }
       }
     },
     "gpu": {

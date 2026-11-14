@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>导出 · 长夜将明</title>
+<link rel="stylesheet" href="assets/app.css" />
+</head>
+<body>
+<header class="topbar">
+  <div class="tb-left"><a class="btn icon" href="01-projects.html" title="返回工程列表"><span class="ic ic-back"></span></a>
+    <div class="tb-views"><button class="btn icon" title="画本编辑视图"><span class="ic ic-doc"></span></button><button class="btn icon" title="配音视图"><span class="ic ic-mic"></span></button><button class="btn icon" title="后期制作视图"><span class="ic ic-media"></span></button><button class="btn icon" title="更多视图"><span class="ic ic-more"></span></button></div></div>
+  <div class="tb-mid"><button class="btn icon sm" title="上一章"><span class="ic ic-prev"></span></button>
+    <div class="crumbs"><a href="01-projects.html">长夜将明</a><span class="sep">/</span><span class="cur">导出 · 第一章</span><span class="ic ic-chev" style="color:var(--text-4)"></span></div>
+    <span class="state ok"><span class="ic ic-check"></span>已自动保存</span>
+    <button class="btn icon sm" title="下一章"><span class="ic ic-next"></span></button></div>
+  <div class="tb-right"><button class="btn icon" title="撤销"><span class="tb-glyph">↶</span></button><button class="btn icon" title="重做"><span class="tb-glyph">↷</span></button>
+    <div class="zoom"><button class="btn icon sm" title="缩小"><span class="ic ic-minus"></span></button><span class="z-val">100%</span><button class="btn icon sm" title="放大"><span class="ic ic-plus"></span></button></div>
+    <button class="btn icon" title="查找"><span class="ic ic-search"></span></button><button class="btn icon" title="更多"><span class="ic ic-more"></span></button><a class="btn icon" href="11-settings.html" title="设置"><span class="ic ic-sliders"></span></a></div>
+</header>
+
+<div class="studio no-right">
+  <!-- 56px 图标栏 -->
+  <nav class="railbar">
+    <a class="rail-item" href="01-projects.html" title="项目"><span class="ic ic-project"></span>项目<span class="rail-n">5</span></a>
+    <a class="rail-item" href="02-world.html" title="世界"><span class="ic ic-world"></span>世界<span class="rail-n">4</span></a>
+    <a class="rail-item" href="03-characters.html" title="人物"><span class="ic ic-user"></span>人物<span class="rail-n">9</span></a>
+    <a class="rail-item" href="05-outline.html" title="大纲"><span class="ic ic-outline"></span>大纲<span class="rail-n">3</span></a>
+    <a class="rail-item" href="06-chapter.html" title="章节"><span class="ic ic-doc"></span>章节<span class="rail-n">12</span></a>
+    <a class="rail-item" href="07-script.html" title="标注"><span class="ic ic-clap"></span>标注<span class="rail-n">8</span></a>
+    <a class="rail-item" href="08-voice.html" title="配音"><span class="ic ic-mic"></span>配音<span class="rail-n">86%</span></a>
+    <a class="rail-item" href="09-media.html" title="媒体"><span class="ic ic-media"></span>媒体<span class="rail-n">24</span></a>
+    <a class="rail-item active" href="10-export.html" title="导出"><span class="ic ic-export"></span>导出</a>
+    <div class="rail-sep"></div>
+    <a class="rail-item" href="04-voices.html" title="音色库"><span class="ic ic-mic"></span>音色</a>
+    <div class="rail-foot">
+      <a class="rail-item" href="10-export.html" title="运行记录"><span class="ic ic-clock"></span>记录</a>
+      <a class="rail-item" href="11-settings.html" title="设置"><span class="ic ic-sliders"></span>设置</a>
+    </div>
+  </nav>
+
+  <!-- 360px 上下文面板：导出任务 -->
+  <section class="ctx">
+    <div class="ctx-head">
+      <span class="ct">导出任务</span>
+      <span class="badge" style="font-weight:400">3 条</span>
+      <div class="right">
+        <button class="btn icon sm" title="刷新"><span class="ic ic-refresh"></span></button>
+        <button class="btn icon sm" title="折叠面板"><span class="ic ic-back"></span></button>
+      </div>
+    </div>
+    <div class="ctx-tools">
+      <div class="toolrow">
+        <div class="search" style="min-width:0"><span class="ic ic-search"></span><input placeholder="搜索导出任务" /></div>
+        <button class="btn sm primary" style="height:30px"><span class="ic ic-plus"></span>新建导出</button>
+      </div>
+      <div style="display:flex;gap:6px">
+        <button class="chip on" style="height:24px;font-size:11px;padding:0 8px">全部 <span class="cnt">3</span></button>
+        <button class="chip" style="height:24px;font-size:11px;padding:0 8px">已完成 <span class="cnt">2</span></button>
+        <button class="chip" style="height:24px;font-size:11px;padding:0 8px;color:var(--bad);border-color:rgba(238,107,107,.3)">失败 <span class="cnt">1</span></button>
+      </div>
+    </div>
+    <div class="chap-list">
+      <div class="row-list">
+        <div class="row sel">
+          <span class="avatar sq" style="width:30px;height:30px;flex-basis:30px"><span class="ic ic-media"></span></span>
+          <div class="grow">
+            <div class="r-title">第一章_长夜将明.mp4</div>
+            <div class="r-sub">1080p · 486MB · 今天 14:26</div>
+          </div>
+          <span class="badge ok">已完成</span>
+        </div>
+        <div class="row">
+          <span class="avatar sq" style="width:30px;height:30px;flex-basis:30px"><span class="ic ic-mic"></span></span>
+          <div class="grow">
+            <div class="r-title">第一章_长夜将明.mp3</div>
+            <div class="r-sub">48kHz 24bit · 62MB · 今天 14:24</div>
+          </div>
+          <span class="badge ok">已完成</span>
+        </div>
+        <div class="row">
+          <span class="avatar sq" style="width:30px;height:30px;flex-basis:30px"><span class="ic ic-doc"></span></span>
+          <div class="grow">
+            <div class="r-title">第一章_长夜将明.srt</div>
+            <div class="r-sub">32 行 · 时间轴不匹配 · 今天 14:26</div>
+          </div>
+          <span class="badge bad">失败</span>
+        </div>
+      </div>
+    </div>
+    <div class="col-foot" style="padding:9px 14px;border-top:1px solid var(--line);font-size:10.5px;color:var(--text-3)">
+      产物目录 <span class="mono" style="color:var(--text-2)">~/Movies/长夜将明/</span>
+    </div>
+  </section>
+
+  <!-- 主区：导出配置与历史 -->
+  <section class="editor">
+    <div class="ed-head">
+      <span class="et">导出</span>
+      <span class="em">第一章 雨夜归人 · 32 段 · 03:48</span>
+      <div class="right">
+        <button class="btn sm"><span class="ic ic-outline"></span>导出预设</button>
+        <button class="btn primary"><span class="ic ic-export"></span>开始导出</button>
+      </div>
+    </div>
+
+    <div class="ed-body" style="padding:14px;display:flex;flex-direction:column;gap:12px">
+
+      <!-- 导出配置 -->
+      <div class="card">
+        <div class="card-head">
+          <h3>导出配置</h3>
+          <span class="sub">仅作用于本次导出，不影响工程默认值</span>
+          <div class="right"><span class="badge accent">草案</span></div>
+        </div>
+        <div style="display:flex;align-items:center;gap:18px;flex-wrap:wrap;padding-bottom:12px;border-bottom:1px solid var(--line)">
+          <label class="check"><input type="checkbox" checked />MP4 视频</label>
+          <label class="check"><input type="checkbox" checked />MP3 音频</label>
+          <label class="check"><input type="checkbox" />WAV 母版</label>
+          <label class="check"><input type="checkbox" checked />SRT 字幕</label>
+          <label class="check"><input type="checkbox" checked />manifest</label>
+        </div>
+        <div class="form-grid" style="grid-template-columns:repeat(3,minmax(0,1fr));margin-top:12px">
+          <label class="field"><span class="label">分辨率 / 帧率</span><select class="select"><option>1080p · 30fps</option><option>720p · 30fps</option><option>1080p · 25fps</option></select></label>
+          <label class="field"><span class="label">音频采样</span><select class="select"><option>48kHz · 24bit</option><option>44.1kHz · 16bit</option></select></label>
+          <label class="field"><span class="label">响度标准</span><select class="select"><option>-16 LUFS（播客）</option><option>-14 LUFS（流媒体）</option><option>-18 LUFS（广播）</option></select></label>
+        </div>
+      </div>
+
+      <!-- 完整性检查 -->
+      <div class="card">
+        <div class="card-head">
+          <h3>完整性检查</h3>
+          <span class="badge warn">4 项待处理</span>
+          <div class="right"><button class="btn sm"><span class="ic ic-refresh"></span>重新检查</button></div>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+          <div style="display:flex;gap:8px;padding:9px 10px;border:1px solid var(--line);border-radius:8px;background:var(--bg-1)">
+            <span class="ic ic-warn" style="color:var(--warn);margin-top:2px"></span>
+            <div style="flex:1;min-width:0">
+              <div style="font-size:12px;color:var(--text)">缺 TTS 3 行</div>
+              <div class="muted" style="margin-top:2px">第 006 / 009 / 014 段尚未生成</div>
+              <a class="hint" href="08-voice.html" style="color:var(--accent-hi)">去处理 →</a>
+            </div>
+          </div>
+          <div style="display:flex;gap:8px;padding:9px 10px;border:1px solid var(--line);border-radius:8px;background:var(--bg-1)">
+            <span class="ic ic-warn" style="color:var(--warn);margin-top:2px"></span>
+            <div style="flex:1;min-width:0">
+              <div style="font-size:12px;color:var(--text)">缺音色 1 人</div>
+              <div class="muted" style="margin-top:2px">记者乙未绑定任何音色</div>
+              <a class="hint" href="04-voices.html" style="color:var(--accent-hi)">去处理 →</a>
+            </div>
+          </div>
+          <div style="display:flex;gap:8px;padding:9px 10px;border:1px solid var(--line);border-radius:8px;background:var(--bg-1)">
+            <span class="ic ic-warn" style="color:var(--warn);margin-top:2px"></span>
+            <div style="flex:1;min-width:0">
+              <div style="font-size:12px;color:var(--text)">视频超 5 秒 1 段</div>
+              <div class="muted" style="margin-top:2px">第 07 段 6.2s，超过上限 5s</div>
+              <a class="hint" href="07-script.html" style="color:var(--accent-hi)">去处理 →</a>
+            </div>
+          </div>
+          <div style="display:flex;gap:8px;padding:9px 10px;border:1px solid var(--line);border-radius:8px;background:var(--bg-1)">
+            <span class="ic ic-warn" style="color:var(--warn);margin-top:2px"></span>
+            <div style="flex:1;min-width:0">
+              <div style="font-size:12px;color:var(--text)">音效缺失 2 处</div>
+              <div class="muted" style="margin-top:2px">第 02 / 11 场景未绑定音效</div>
+              <a class="hint" href="09-media.html" style="color:var(--accent-hi)">去处理 →</a>
+            </div>
+          </div>
+        </div>
+        <div class="settings-foot">
+          <span class="muted">存在 4 项问题，直接导出会跳过对应片段并在 manifest 中标记。</span>
+          <div class="right"><button class="btn danger">忽略问题并导出</button></div>
+        </div>
+      </div>
+
+      <!-- 预计产物 -->
+      <div class="card">
+        <div class="card-head"><h3>预计产物</h3><span class="sub">按当前配置估算</span></div>
+        <div class="kpi-row" style="grid-template-columns:repeat(3,minmax(0,1fr))">
+          <div class="kpi">
+            <div class="k-label">总时长</div>
+            <div class="k-value mono">03:48</div>
+            <div class="k-foot">32 段 · 台词 18 / 旁白 14</div>
+          </div>
+          <div class="kpi">
+            <div class="k-label">体积</div>
+            <div class="k-value mono">486<small>MB</small></div>
+            <div class="k-foot">MP4 418MB · 音频 66MB</div>
+          </div>
+          <div class="kpi">
+            <div class="k-label">产物数量</div>
+            <div class="k-value">3<small>个</small></div>
+            <div class="k-foot">MP4 · MP3 · SRT</div>
+          </div>
+        </div>
+        <div class="artifact" style="margin-top:12px">
+          <span class="a-ic"><span class="ic ic-export"></span></span>
+          <div class="a-body">
+            <div class="a-name">~/Movies/长夜将明/第一章/</div>
+            <div class="a-meta">覆盖同名文件前会保留一份 .bak</div>
+          </div>
+          <button class="btn sm">打开目录</button>
+        </div>
+      </div>
+
+      <!-- 历史任务 -->
+      <div class="card" style="padding:0">
+        <div class="card-head" style="padding:14px 16px 0;margin-bottom:10px">
+          <h3>历史任务</h3>
+          <span class="sub">最近 3 次</span>
+          <div class="right"><button class="btn sm">打开产物目录</button></div>
+        </div>
+        <table class="tbl">
+          <thead>
+            <tr><th>产物</th><th>规格</th><th>时长 / 体积</th><th>状态</th><th style="text-align:right">操作</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td class="strong">
+                <div style="display:flex;align-items:center;gap:8px">
+                  <span class="ic ic-media" style="color:var(--text-3)"></span>
+                  <div style="min-width:0">
+                    <div style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">第一章_长夜将明.mp4</div>
+                    <div class="muted" style="font-size:10px">今天 14:26</div>
+                  </div>
+                </div>
+              </td>
+              <td>1080p · 30fps</td>
+              <td class="mono" style="font-size:11.5px">04:12 · 486MB</td>
+              <td><span class="badge ok">已完成</span></td>
+              <td style="text-align:right;white-space:nowrap">
+                <button class="btn sm">打开所在目录</button>
+                <button class="btn sm danger">删除产物</button>
+              </td>
+            </tr>
+            <tr>
+              <td class="strong">
+                <div style="display:flex;align-items:center;gap:8px">
+                  <span class="ic ic-mic" style="color:var(--text-3)"></span>
+                  <div style="min-width:0">
+                    <div style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">第一章_长夜将明.mp3</div>
+                    <div class="muted" style="font-size:10px">今天 14:24</div>
+                  </div>
+                </div>
+              </td>
+              <td>48kHz · 24bit</td>
+              <td class="mono" style="font-size:11.5px">04:12 · 62MB</td>
+              <td><span class="badge ok">已完成</span></td>
+              <td style="text-align:right;white-space:nowrap">
+                <button class="btn sm">打开所在目录</button>
+                <button class="btn sm danger">删除产物</button>
+              </td>
+            </tr>
+            <tr>
+              <td class="strong">
+                <div style="display:flex;align-items:center;gap:8px">
+                  <span class="ic ic-doc" style="color:var(--text-3)"></span>
+                  <div style="min-width:0">
+                    <div style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">第一章_长夜将明.srt</div>
+                    <div class="muted" style="font-size:10px">今天 14:26 · 32 行</div>
+                  </div>
+                </div>
+              </td>
+              <td>UTF-8 · 32 行</td>
+              <td class="mono" style="font-size:11.5px">—</td>
+              <td><span class="badge bad">失败</span></td>
+              <td style="text-align:right;white-space:nowrap">
+                <button class="btn sm">重试</button>
+                <button class="btn sm danger">删除产物</button>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+        <div style="display:flex;align-items:center;gap:8px;padding:10px 16px;border-top:1px solid var(--line);font-size:10.5px;color:var(--text-3)">
+          <span class="ic ic-warn" style="color:var(--bad);width:13px;height:13px;flex-basis:13px"></span>
+          SRT 失败：第 12 段时间轴与音频不匹配（相差 320ms）
+          <a class="hint" href="#" style="margin-left:auto;color:var(--accent-hi)">查看日志 →</a>
+        </div>
+      </div>
+
+    </div>
+  </section>
+</div>
+</body>
+</html>

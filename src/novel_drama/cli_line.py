@@ -1,13 +1,16 @@
-"""场景与台词行 CLI：场景切分、台词切分、状态列表、diff / revert / set。
+"""场景与台词行 CLI：场景切分、台词切分、状态列表、diff / revert / set / 合并。
 
 从 `cli.py` 拆出，纯搬迁：命令名、参数、输出格式、退出码一律未改动。
 """
 
 from __future__ import annotations
 
+import copy
+
 from .cli_common import EXIT_OK, EXIT_REJECTED, _emit, _resolve_store, cast_hint
 from .config import AppConfig
 from .models import entities
+from .models.ids import new_id
 from .orchestration.pipeline import split_chapter_scenes, split_scene_lines
 from .orchestration.resplit import analyze_line_split, analyze_scene_split
 from .tts import line_state
@@ -202,6 +205,8 @@ def cmd_line_list(args, config: AppConfig) -> int:
                 "tts_status": row["persisted"],
                 "changes": row["changes"],
                 "duration_ms": (line.get("tts") or {}).get("duration_ms"),
+                # 上次失败的结构化原因（code/message/at），供行内直接展示与重试
+                "error": (line.get("tts") or {}).get("error"),
                 # 已生成音频的相对路径，供页面直接试听
                 "audio": (line.get("tts") or {}).get("asset_id"),
             }
@@ -242,6 +247,77 @@ def _find_line(store, chapter: dict, line_id: str):
             if line.get("id") == line_id:
                 return scene, line
     raise ValueError(f"台词行不存在: {line_id}（用 line list --chapter {chapter['id']} 查看可用行 ID）")
+
+
+def cmd_line_split_at(args, config: AppConfig) -> int:
+    """在指定字符位置把一条台词拆成两行（对应参考的「光标处拆分」）。
+
+    只改切分结构：两段文本拼起来等于原文本，正文不动，因此正文/切分仍然对位。
+    原行保留前半段与已有音频（revision 递增后自动变「已过期」），新行没有配音。
+
+    参数:
+        args: 含 chapter、line、offset（0 基字符位置）。
+        config: 本机配置。
+
+    返回:
+        退出码。
+
+    异常:
+        ValueError: 行不存在、位置不在台词中间、正文对不上。
+    """
+    store = _resolve_store(args, config)
+    chapter = store.load_chapter(args.chapter)
+    scene, line = _find_line(store, chapter, args.line)
+    text = str(line.get("text") or "")
+    offset = int(args.offset)
+    if offset <= 0 or offset >= len(text):
+        raise ValueError("拆分位置必须落在台词中间（不能是开头或结尾）")
+    first_text = text[:offset].strip()
+    second_text = text[offset:].strip()
+    if not first_text or not second_text:
+        raise ValueError("拆分后有一段为空，请换个位置")
+    anchors, _ = _locate_lines(chapter.get("content") or "", _ordered_lines(chapter))
+    if line["id"] not in anchors:
+        raise ValueError(_CONTENT_MISMATCH)
+
+    second = copy.deepcopy(line)
+    second["id"] = new_id("lin")
+    second["text"] = second_text
+    second["revision"] = 1
+    second["pause_before_ms"] = 0
+    # 新行还没有任何音频，旧行保留自己的 tts（revision 变化后由状态机判为过期）
+    second.pop("tts", None)
+    second.pop("anchor", None)
+    second.pop("target_duration_ms", None)
+    second.pop("paralinguistic", None)
+
+    line["text"] = first_text
+    line["pause_after_ms"] = 0
+    line["revision"] = int(line.get("revision") or 1) + 1
+    line.pop("target_duration_ms", None)
+
+    lines = list(scene.get("lines") or [])
+    position = next(index for index, item in enumerate(lines) if item.get("id") == line["id"])
+    lines.insert(position + 1, second)
+    for index, item in enumerate(lines):
+        item["index"] = index
+        item["scene_id"] = scene.get("id")
+    scene["lines"] = lines
+    chapter["revision"] = int(chapter.get("revision") or 1) + 1
+    store.save_chapter(chapter)
+    _emit(
+        args,
+        f"已在第 {offset} 字处拆分 {line['id']} → {line['id']} + {second['id']}",
+        {
+            "changed": True,
+            "line_id": line["id"],
+            "new_line_id": second["id"],
+            "first_text": first_text,
+            "second_text": second_text,
+            "chapter_revision": chapter["revision"],
+        },
+    )
+    return EXIT_OK
 
 
 def cmd_line_diff(args, config: AppConfig) -> int:
@@ -456,6 +532,36 @@ def _locate_lines(content: str, lines: list[dict], cursor: int = 0) -> tuple[dic
     return anchors, missing
 
 
+def chapter_consistency(chapter: dict) -> dict:
+    """检查章节正文与已切分台词是否仍能按顺序原样对位。
+
+    与 `line edit` 的定位算法完全一致：任何一行在正文里找不到，就说明正文被改过而
+    台词没有重新切分，此时「改台词同步正文」会失败。只读，不写盘。
+
+    参数:
+        chapter: 章节 dict。
+
+    返回:
+        {"ok": 是否一致, "chapter": 章节 ID, "chapter_title": 标题,
+         "total": 有文本的台词行数, "missing_total": 对不上的行数, "missing": 前 20 个行 ID}。
+    """
+    lines = _ordered_lines(chapter)
+    anchors, _ = _locate_lines(chapter.get("content") or "", lines)
+    missing = [
+        line.get("id")
+        for line in lines
+        if (line.get("text") or "").strip() and line.get("id") not in anchors
+    ]
+    return {
+        "ok": not missing,
+        "chapter": chapter.get("id"),
+        "chapter_title": chapter.get("title") or "",
+        "total": len(lines),
+        "missing_total": len(missing),
+        "missing": missing[:20],
+    }
+
+
 def cmd_line_edit(args, config: AppConfig) -> int:
     """就地编辑一条台词文本，并把同一处文本同步回章节正文。
 
@@ -528,6 +634,265 @@ def cmd_line_edit(args, config: AppConfig) -> int:
             "chapter_revision": chapter["revision"],
             "start": start,
             "end": start + len(new_text),
+        },
+    )
+    return EXIT_OK
+
+
+# ---------------- 合并相邻行 / 批量合并旁白 ----------------
+# 合并只做结构收敛：新行文本取正文里「首行开头 → 末行结尾」的原文片段，
+# 因此正文与切分仍然对位，不写正文、不删除任何音频文件。
+
+
+def _ordered_group(store, chapter: dict, line_ids: list[str]) -> tuple[dict, list[dict]]:
+    """把行 ID 解析成同一场景内按顺序排列的相邻台词行。
+
+    参数:
+        store: 工程。
+        chapter: 章节 dict。
+        line_ids: 待合并的行 ID 列表。
+
+    返回:
+        `(场景, 按 index 排序后的行列表)`。
+
+    异常:
+        ValueError: 行不存在、跨场景、有重复或不相邻。
+    """
+    scene_of: dict | None = None
+    picked: list[dict] = []
+    for line_id in line_ids:
+        try:
+            scene, line, _ = store.find_line(chapter, line_id)
+        except KeyError as error:
+            raise ValueError(error.args[0] if error.args else f"台词行不存在: {line_id}") from error
+        if scene_of is None:
+            scene_of = scene
+        elif scene is not scene_of:
+            raise ValueError("只能合并同一场景内的台词行")
+        picked.append(line)
+    picked.sort(key=lambda item: int(item.get("index") or 0))
+    indexes = [int(item.get("index") or 0) for item in picked]
+    if len(set(indexes)) != len(indexes):
+        raise ValueError("合并目标里有重复行")
+    if len(indexes) > 1 and indexes != list(range(indexes[0], indexes[0] + len(indexes))):
+        raise ValueError("只能合并相邻的台词行")
+    return scene_of, picked
+
+
+def _merge_group(scene: dict, group: list[dict], content: str, anchors: dict) -> dict:
+    """把一组相邻台词行合并成一行（就地改写 `scene["lines"]`）。
+
+    参数:
+        scene: 目标场景 dict。
+        group: 按顺序排列、index 连续的台词行。
+        content: 章节正文。
+        anchors: `_locate_lines` 得到的行 ID → 正文字符区间。
+
+    返回:
+        合并后的台词行。
+
+    异常:
+        ValueError: 正文对不上、合并后为空或超长。
+    """
+    if any(line["id"] not in anchors for line in group):
+        raise ValueError(_CONTENT_MISMATCH)
+    start = anchors[group[0]["id"]][0]
+    end = anchors[group[-1]["id"]][1]
+    text = (content[start:end] or "").strip()
+    if not text:
+        raise ValueError("合并后的台词为空")
+    if len(text) > 5000:
+        raise ValueError("合并后的台词超过 5000 字，请减少合并行数")
+
+    merged = dict(group[0])
+    merged["text"] = text
+    merged["pause_after_ms"] = group[-1].get("pause_after_ms", merged.get("pause_after_ms"))
+    merged["revision"] = int(group[0].get("revision") or 1) + 1
+    # 合并后覆盖多段正文，旧段落锚点与目标时长都不再准确，先清掉避免误导
+    merged.pop("anchor", None)
+    merged.pop("target_duration_ms", None)
+
+    removed = {line["id"] for line in group[1:]}
+    lines: list[dict] = []
+    for line in scene.get("lines") or []:
+        if line.get("id") == merged["id"]:
+            lines.append(merged)
+        elif line.get("id") in removed:
+            continue
+        else:
+            lines.append(line)
+    for index, line in enumerate(lines):
+        line["index"] = index
+        line["scene_id"] = scene.get("id")
+    scene["lines"] = lines
+    return merged
+
+
+def _lost_audio(group: list[dict]) -> int:
+    """统计被合并掉的台词行里已有配音的条数（文件保留，仅失去引用）。"""
+    return sum(1 for line in group[1:] if (line.get("tts") or {}).get("asset_id"))
+
+
+def cmd_line_merge(args, config: AppConfig) -> int:
+    """合并同一场景内相邻的台词行（选中行 → 合并）。
+
+    参数:
+        args: 含 chapter、lines（逗号分隔的行 ID）。
+        config: 本机配置。
+
+    返回:
+        退出码。
+
+    异常:
+        ValueError: 行不足两行、跨场景、不相邻或正文对不上。
+    """
+    store = _resolve_store(args, config)
+    chapter = store.load_chapter(args.chapter)
+    line_ids = [item.strip() for item in str(args.lines or "").split(",") if item.strip()]
+    if len(line_ids) < 2:
+        raise ValueError("至少选择两行才能合并")
+    scene, group = _ordered_group(store, chapter, line_ids)
+    anchors, _ = _locate_lines(chapter.get("content") or "", _ordered_lines(chapter))
+    lost = _lost_audio(group)
+    merged = _merge_group(scene, group, chapter.get("content") or "", anchors)
+    chapter["revision"] = int(chapter.get("revision") or 1) + 1
+    store.save_chapter(chapter)
+    payload = {
+        "changed": True,
+        "merged": {
+            "line_id": merged["id"],
+            "text": merged["text"],
+            "chars": len(merged["text"]),
+            "removed": [line["id"] for line in group[1:]],
+            "lost_audio": lost,
+        },
+        "revision": merged["revision"],
+        "chapter_revision": chapter["revision"],
+    }
+    text = f"已合并 {len(group)} 行为 {merged['id']}（{len(merged['text'])} 字）"
+    if lost:
+        text += f"；{lost} 条已有配音失去引用（文件仍在磁盘）"
+    _emit(args, text, payload)
+    return EXIT_OK
+
+
+def plan_narration_groups(chapter: dict, scene_ids: list[str] | None = None, max_chars: int = 120) -> list[tuple[dict, list[dict]]]:
+    """按期望字数规划相邻旁白的合并分组（只读，不写盘）。
+
+    只有「连续旁白」才会被合并；角色台词、内心独白、音效标记都会切断分组。
+    单组至少两行才进入结果，避免出现「合并后没有变化」的无效操作。
+
+    参数:
+        chapter: 章节 dict。
+        scene_ids: 只处理这些场景；为空表示全部。
+        max_chars: 单组目标字数上限（达到上限就另起一组）。
+
+    返回:
+        `[(场景, 行列表)]`，组内行按 index 升序。
+    """
+    groups: list[tuple[dict, list[dict]]] = []
+    limit = max(1, int(max_chars or 120))
+    for scene in chapter.get("scenes") or []:
+        if scene_ids and scene.get("id") not in scene_ids:
+            continue
+        current: list[dict] = []
+        size = 0
+
+        def flush() -> None:
+            """收尾当前分组：至少两行才算一次合并。"""
+            nonlocal current, size
+            if len(current) >= 2:
+                groups.append((scene, list(current)))
+            current = []
+            size = 0
+
+        for line in sorted(scene.get("lines") or [], key=lambda item: int(item.get("index") or 0)):
+            if line.get("kind") != "narration":
+                flush()
+                continue
+            chars = len((line.get("text") or "").strip())
+            if current and size + chars > limit:
+                flush()
+            current.append(line)
+            size += chars
+        flush()
+    return groups
+
+
+def _narration_preview(groups: list[tuple[dict, list[dict]]], chapter: dict) -> list[dict]:
+    """构造批量合并旁白的预览（含合并后文本与预计时长）。"""
+    anchors, _ = _locate_lines(chapter.get("content") or "", _ordered_lines(chapter))
+    content = chapter.get("content") or ""
+    rows = []
+    for scene, group in groups:
+        if group[0]["id"] in anchors and group[-1]["id"] in anchors:
+            text = content[anchors[group[0]["id"]][0] : anchors[group[-1]["id"]][1]].strip()
+        else:
+            text = "".join((line.get("text") or "").strip() for line in group)
+        duration = sum(int((line.get("tts") or {}).get("duration_ms") or 0) for line in group)
+        rows.append(
+            {
+                "scene_id": scene.get("id"),
+                "scene_title": scene.get("title") or "",
+                "line_ids": [line["id"] for line in group],
+                "text": text,
+                "chars": len(text),
+                "duration_ms": duration,
+                "lost_audio": _lost_audio(group),
+            }
+        )
+    return rows
+
+
+def cmd_line_merge_narration(args, config: AppConfig) -> int:
+    """按期望字数批量合并相邻旁白；`--dry-run` 只输出预览。
+
+    参数:
+        args: 含 chapter、scene（可重复）、max_chars、dry_run。
+        config: 本机配置。
+
+    返回:
+        退出码。
+    """
+    store = _resolve_store(args, config)
+    chapter = store.load_chapter(args.chapter)
+    groups = plan_narration_groups(chapter, scene_ids=args.scene, max_chars=args.max_chars)
+    preview = _narration_preview(groups, chapter)
+    before = sum(len(group) for _, group in groups)
+    counts = {"groups": len(groups), "lines_before": before, "lines_after": len(groups)}
+    if args.dry_run:
+        _emit(
+            args,
+            f"预览：{before} 段相邻旁白可合并为 {len(groups)} 段"
+            if groups
+            else "没有可合并的相邻旁白（需要同场景内连续两段以上旁白）",
+            {"mode": "narration", "dry_run": True, "groups": preview, "counts": counts},
+        )
+        return EXIT_OK
+    if not groups:
+        _emit(args, "没有可合并的相邻旁白", {"changed": False, "groups": [], "counts": counts})
+        return EXIT_OK
+
+    anchors, _ = _locate_lines(chapter.get("content") or "", _ordered_lines(chapter))
+    content = chapter.get("content") or ""
+    lost = 0
+    for scene, group in groups:
+        lost += _lost_audio(group)
+        _merge_group(scene, group, content, anchors)
+    chapter["revision"] = int(chapter.get("revision") or 1) + 1
+    store.save_chapter(chapter)
+    _emit(
+        args,
+        f"已合并 {before} 段相邻旁白为 {len(groups)} 段"
+        + (f"；{lost} 条已有配音失去引用（文件仍在磁盘）" if lost else ""),
+        {
+            "changed": True,
+            "mode": "narration",
+            "dry_run": False,
+            "groups": preview,
+            "counts": counts,
+            "lost_audio": lost,
+            "chapter_revision": chapter["revision"],
         },
     )
     return EXIT_OK

@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>媒体素材 · 长夜将明</title>
+<link rel="stylesheet" href="assets/app.css" />
+</head>
+<body>
+<header class="topbar">
+  <div class="tb-left"><a class="btn icon" href="01-projects.html" title="返回工程列表"><span class="ic ic-back"></span></a>
+    <div class="tb-views"><button class="btn icon" title="画本编辑视图"><span class="ic ic-doc"></span></button><button class="btn icon" title="配音视图"><span class="ic ic-mic"></span></button><button class="btn icon" title="后期制作视图"><span class="ic ic-media"></span></button><button class="btn icon" title="更多视图"><span class="ic ic-more"></span></button></div></div>
+  <div class="tb-mid"><button class="btn icon sm" title="上一章"><span class="ic ic-prev"></span></button>
+    <div class="crumbs"><a href="01-projects.html">长夜将明</a><span class="sep">/</span><span class="cur">媒体 · 第一章</span><span class="ic ic-chev" style="color:var(--text-4)"></span></div>
+    <span class="state ok"><span class="ic ic-check"></span>已自动保存</span>
+    <button class="btn icon sm" title="下一章"><span class="ic ic-next"></span></button></div>
+  <div class="tb-right"><button class="btn icon" title="撤销"><span class="tb-glyph">↶</span></button><button class="btn icon" title="重做"><span class="tb-glyph">↷</span></button>
+    <div class="zoom"><button class="btn icon sm" title="缩小"><span class="ic ic-minus"></span></button><span class="z-val">100%</span><button class="btn icon sm" title="放大"><span class="ic ic-plus"></span></button></div>
+    <button class="btn icon" title="查找"><span class="ic ic-search"></span></button><button class="btn icon" title="更多"><span class="ic ic-more"></span></button><a class="btn icon" href="11-settings.html" title="设置"><span class="ic ic-sliders"></span></a></div>
+</header>
+
+<div class="studio no-right">
+  <!-- 56px 图标栏 -->
+  <nav class="railbar">
+    <a class="rail-item" href="01-projects.html" title="项目"><span class="ic ic-project"></span>项目<span class="rail-n">5</span></a>
+    <a class="rail-item" href="02-world.html" title="世界"><span class="ic ic-world"></span>世界<span class="rail-n">4</span></a>
+    <a class="rail-item" href="03-characters.html" title="人物"><span class="ic ic-user"></span>人物<span class="rail-n">9</span></a>
+    <a class="rail-item" href="05-outline.html" title="大纲"><span class="ic ic-outline"></span>大纲<span class="rail-n">3</span></a>
+    <a class="rail-item" href="06-chapter.html" title="章节"><span class="ic ic-doc"></span>章节<span class="rail-n">12</span></a>
+    <a class="rail-item" href="07-script.html" title="标注"><span class="ic ic-clap"></span>标注<span class="rail-n">8</span></a>
+    <a class="rail-item" href="08-voice.html" title="配音"><span class="ic ic-mic"></span>配音<span class="rail-n">86%</span></a>
+    <a class="rail-item active" href="09-media.html" title="媒体"><span class="ic ic-media"></span>媒体<span class="rail-n">24</span></a>
+    <a class="rail-item" href="10-export.html" title="导出"><span class="ic ic-export"></span>导出</a>
+    <div class="rail-sep"></div>
+    <a class="rail-item" href="04-voices.html" title="音色库"><span class="ic ic-mic"></span>音色</a>
+    <div class="rail-foot">
+      <a class="rail-item" href="10-export.html" title="运行记录"><span class="ic ic-clock"></span>记录</a>
+      <a class="rail-item" href="11-settings.html" title="设置"><span class="ic ic-sliders"></span>设置</a>
+    </div>
+  </nav>
+
+  <!-- 360px 上下文面板：素材分类 + 场景列表 -->
+  <section class="ctx">
+    <div class="ctx-head">
+      <span class="ct">素材库</span>
+      <span class="badge" style="font-weight:400">本章 24 项</span>
+      <div class="right">
+        <button class="btn icon sm" title="刷新素材"><span class="ic ic-refresh"></span></button>
+        <button class="btn icon sm" title="折叠面板"><span class="ic ic-back"></span></button>
+      </div>
+    </div>
+    <div class="ctx-tools">
+      <div class="two">
+        <button class="chip on" style="justify-content:space-between">音效<span class="cnt">18</span></button>
+        <button class="chip" style="justify-content:space-between">配图<span class="cnt">12</span></button>
+        <button class="chip" style="justify-content:space-between">视频<span class="cnt">4</span></button>
+        <button class="chip" style="justify-content:space-between">参考图<span class="cnt">6</span></button>
+      </div>
+      <div class="search"><span class="ic ic-search"></span><input placeholder="搜索素材名称 / 场景" /><span class="ic ic-close" style="opacity:.5"></span></div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap">
+        <button class="chip on" style="height:24px;font-size:11px;padding:0 8px">全部 <span class="cnt">18</span></button>
+        <button class="chip" style="height:24px;font-size:11px;padding:0 8px">已完成 <span class="cnt">10</span></button>
+        <button class="chip" style="height:24px;font-size:11px;padding:0 8px">生成中 <span class="cnt">2</span></button>
+        <button class="chip" style="height:24px;font-size:11px;padding:0 8px;color:var(--bad);border-color:rgba(238,107,107,.3)">失败 <span class="cnt">1</span></button>
+        <button class="chip" style="height:24px;font-size:11px;padding:0 8px">待生成 <span class="cnt">5</span></button>
+      </div>
+      <button class="btn primary" style="width:100%"><span class="ic ic-spark"></span>生成素材</button>
+    </div>
+    <div class="chap-list">
+      <div class="chap-row on"><span class="cn">场景 01 雨夜街口</span><span class="dot ok"></span><span class="cw">12 项</span></div>
+      <div class="chap-row"><span class="cn">场景 02 楼道与楼梯</span><span class="dot warn"></span><span class="cw">5 项</span></div>
+      <div class="chap-row"><span class="cn">场景 03 卷宗室</span><span class="dot ok"></span><span class="cw">4 项</span></div>
+      <div class="chap-row"><span class="cn">场景 04 天台</span><span class="dot" style="background:var(--text-4)"></span><span class="cw">2 项</span></div>
+      <div class="chap-row"><span class="cn">场景 05 旧城区路口</span><span class="dot" style="background:var(--text-4)"></span><span class="cw">1 项</span></div>
+    </div>
+    <div class="col-foot" style="padding:9px 14px;border-top:1px solid var(--line);font-size:10.5px;color:var(--text-3)">
+      本章 24 项 · 已完成 16 · 排队 2
+    </div>
+  </section>
+
+  <!-- 主区：媒体素材网格 -->
+  <section class="editor">
+    <div class="ed-head">
+      <span class="et">媒体 · 第一章</span>
+      <span class="em">音效 18 项 · 已用 186MB</span>
+      <div class="right">
+        <button class="btn sm"><span class="ic ic-mic"></span>生成音效</button>
+        <button class="btn sm"><span class="ic ic-doc"></span>生成配图</button>
+        <button class="btn sm"><span class="ic ic-play"></span>生成 5 秒视频</button>
+      </div>
+    </div>
+
+    <div class="ed-filters">
+      <span class="state run"><span class="dot run"></span>生成中 2</span>
+      <span class="state bad"><span class="dot bad"></span>失败 1</span>
+      <span class="state warn"><span class="dot warn"></span>待生成 5</span>
+      <span class="hint" style="margin-left:4px">共 24 项 · 已完成 16</span>
+      <div style="margin-left:auto;display:flex;align-items:center;gap:6px">
+        <span class="badge muted">自动生成已开启</span>
+        <div class="seg">
+          <button class="on">网格</button>
+          <button>列表</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="ed-body" style="padding:14px">
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px">
+
+        <!-- 已完成 -->
+        <div class="proj-card">
+          <div class="pc-cover" style="position:relative;aspect-ratio:16/9;background:radial-gradient(75% 85% at 20% 10%,rgba(88,196,224,.34),transparent 62%),radial-gradient(70% 70% at 88% 92%,rgba(232,180,76,.14),transparent 60%),linear-gradient(160deg,#15212b,#090c10)">
+            <span class="badge" style="position:absolute;left:8px;top:8px;background:rgba(8,9,11,.6)">音效</span>
+            <span class="wave mini" style="position:absolute;left:10px;right:56px;bottom:9px;height:20px;opacity:.7"><i style="--h:36%"></i><i style="--h:58%"></i><i style="--h:44%"></i><i style="--h:72%"></i><i style="--h:52%"></i><i style="--h:86%"></i><i style="--h:40%"></i><i style="--h:64%"></i><i style="--h:48%"></i><i style="--h:76%"></i><i style="--h:34%"></i><i style="--h:56%"></i></span>
+            <span class="mono" style="position:absolute;right:8px;bottom:7px;font-size:9.5px;color:#dfe4ea;background:rgba(4,5,7,.55);padding:0 4px;border-radius:3px">00:12.4</span>
+          </div>
+          <div class="pc-actions">
+            <button class="btn icon sm" title="替换素材"><span class="ic ic-doc"></span></button>
+            <button class="btn icon sm" title="重新生成"><span class="ic ic-spark"></span></button>
+            <button class="btn icon sm" title="下载"><span class="ic ic-download"></span></button>
+            <button class="btn icon sm danger" title="删除"><span class="ic ic-trash"></span></button>
+          </div>
+          <div class="pc-body" style="gap:7px">
+            <div class="pc-title"><h3 style="flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">雨声加密</h3><span class="badge ok">已完成</span></div>
+            <div class="pc-meta"><span class="mono">00:12.4</span><span>·</span><span>WAV 48kHz · 24bit</span></div>
+            <div class="pc-progress"><div class="prog ok"><span style="width:100%"></span></div><span>100%</span></div>
+          </div>
+        </div>
+
+        <!-- 生成中 -->
+        <div class="proj-card">
+          <div class="pc-cover" style="position:relative;aspect-ratio:16/9;background:radial-gradient(75% 85% at 22% 12%,rgba(232,180,76,.3),transparent 62%),radial-gradient(70% 70% at 86% 90%,rgba(120,90,200,.22),transparent 60%),linear-gradient(160deg,#1d1922,#0a0b10)">
+            <span class="badge" style="position:absolute;left:8px;top:8px;background:rgba(8,9,11,.6)">音效</span>
+            <button class="btn sm danger" style="position:absolute;left:8px;bottom:8px;z-index:3"><span class="ic ic-stop"></span>停止</button>
+            <span class="mono" style="position:absolute;right:8px;bottom:7px;font-size:9.5px;color:#dfe4ea;background:rgba(4,5,7,.55);padding:0 4px;border-radius:3px">预计 00:06.8</span>
+          </div>
+          <div class="pc-actions">
+            <button class="btn icon sm" title="替换素材"><span class="ic ic-doc"></span></button>
+            <button class="btn icon sm" title="重新生成"><span class="ic ic-spark"></span></button>
+            <button class="btn icon sm" title="下载"><span class="ic ic-download"></span></button>
+            <button class="btn icon sm danger" title="删除"><span class="ic ic-trash"></span></button>
+          </div>
+          <div class="pc-body" style="gap:7px">
+            <div class="pc-title"><h3 style="flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">楼道脚步</h3><span class="badge run">生成中 62%</span></div>
+            <div class="pc-meta"><span class="mono">00:06.8</span><span>·</span><span>WAV 48kHz · 24bit</span></div>
+            <div class="pc-progress"><div class="prog run"><span style="width:62%"></span></div><span>62%</span></div>
+          </div>
+        </div>
+
+        <!-- 已完成 -->
+        <div class="proj-card">
+          <div class="pc-cover" style="position:relative;aspect-ratio:16/9;background:radial-gradient(75% 85% at 18% 14%,rgba(232,180,76,.34),transparent 62%),radial-gradient(70% 70% at 86% 92%,rgba(150,96,70,.3),transparent 60%),linear-gradient(160deg,#211b13,#0a0b0d)">
+            <span class="badge" style="position:absolute;left:8px;top:8px;background:rgba(8,9,11,.6)">音效</span>
+            <span class="wave mini" style="position:absolute;left:10px;right:56px;bottom:9px;height:20px;opacity:.7"><i style="--h:52%"></i><i style="--h:34%"></i><i style="--h:66%"></i><i style="--h:42%"></i><i style="--h:78%"></i><i style="--h:38%"></i><i style="--h:56%"></i><i style="--h:70%"></i><i style="--h:30%"></i><i style="--h:62%"></i><i style="--h:46%"></i><i style="--h:58%"></i></span>
+            <span class="mono" style="position:absolute;right:8px;bottom:7px;font-size:9.5px;color:#dfe4ea;background:rgba(4,5,7,.55);padding:0 4px;border-radius:3px">00:04.2</span>
+          </div>
+          <div class="pc-actions">
+            <button class="btn icon sm" title="替换素材"><span class="ic ic-doc"></span></button>
+            <button class="btn icon sm" title="重新生成"><span class="ic ic-spark"></span></button>
+            <button class="btn icon sm" title="下载"><span class="ic ic-download"></span></button>
+            <button class="btn icon sm danger" title="删除"><span class="ic ic-trash"></span></button>
+          </div>
+          <div class="pc-body" style="gap:7px">
+            <div class="pc-title"><h3 style="flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">卷宗翻页</h3><span class="badge ok">已完成</span></div>
+            <div class="pc-meta"><span class="mono">00:04.2</span><span>·</span><span>WAV 48kHz · 24bit</span></div>
+            <div class="pc-progress"><div class="prog ok"><span style="width:100%"></span></div><span>100%</span></div>
+          </div>
+        </div>
+
+        <!-- 失败：悬浮操作默认展示 -->
+        <div class="proj-card">
+          <div class="pc-cover" style="position:relative;aspect-ratio:16/9;background:radial-gradient(75% 85% at 24% 12%,rgba(238,107,107,.28),transparent 62%),radial-gradient(70% 70% at 86% 90%,rgba(120,60,60,.3),transparent 60%),linear-gradient(160deg,#231518,#0a0a0c)">
+            <span class="badge" style="position:absolute;left:8px;top:8px;background:rgba(8,9,11,.6)">音效</span>
+            <button class="btn sm" style="position:absolute;left:8px;bottom:8px;z-index:3"><span class="ic ic-refresh"></span>重试</button>
+            <span class="mono" style="position:absolute;right:8px;bottom:7px;font-size:9.5px;color:#f3a1a1;background:rgba(4,5,7,.55);padding:0 4px;border-radius:3px">超时 600s</span>
+          </div>
+          <div class="pc-actions" style="opacity:1;transform:none">
+            <button class="btn icon sm" title="替换素材"><span class="ic ic-doc"></span></button>
+            <button class="btn icon sm" title="重新生成"><span class="ic ic-spark"></span></button>
+            <button class="btn icon sm" title="下载"><span class="ic ic-download"></span></button>
+            <button class="btn icon sm danger" title="删除"><span class="ic ic-trash"></span></button>
+          </div>
+          <div class="pc-body" style="gap:7px">
+            <div class="pc-title"><h3 style="flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">铁门开合</h3><span class="badge bad">失败</span></div>
+            <div class="pc-meta"><span class="mono">00:05.0</span><span>·</span><span style="color:#f3a1a1">模型超时 · 已重试 1 次</span></div>
+            <div class="pc-progress"><div class="prog warn"><span style="width:0"></span></div><span>0%</span></div>
+          </div>
+        </div>
+
+        <!-- 已完成 -->
+        <div class="proj-card">
+          <div class="pc-cover" style="position:relative;aspect-ratio:16/9;background:radial-gradient(75% 85% at 20% 10%,rgba(127,156,245,.32),transparent 62%),radial-gradient(70% 70% at 88% 92%,rgba(88,196,224,.18),transparent 60%),linear-gradient(160deg,#151b2a,#090b10)">
+            <span class="badge" style="position:absolute;left:8px;top:8px;background:rgba(8,9,11,.6)">音效</span>
+            <span class="wave mini" style="position:absolute;left:10px;right:56px;bottom:9px;height:20px;opacity:.7"><i style="--h:28%"></i><i style="--h:52%"></i><i style="--h:80%"></i><i style="--h:44%"></i><i style="--h:60%"></i><i style="--h:34%"></i><i style="--h:72%"></i><i style="--h:50%"></i><i style="--h:88%"></i><i style="--h:40%"></i><i style="--h:64%"></i><i style="--h:32%"></i></span>
+            <span class="mono" style="position:absolute;right:8px;bottom:7px;font-size:9.5px;color:#dfe4ea;background:rgba(4,5,7,.55);padding:0 4px;border-radius:3px">00:18.0</span>
+          </div>
+          <div class="pc-actions">
+            <button class="btn icon sm" title="替换素材"><span class="ic ic-doc"></span></button>
+            <button class="btn icon sm" title="重新生成"><span class="ic ic-spark"></span></button>
+            <button class="btn icon sm" title="下载"><span class="ic ic-download"></span></button>
+            <button class="btn icon sm danger" title="删除"><span class="ic ic-trash"></span></button>
+          </div>
+          <div class="pc-body" style="gap:7px">
+            <div class="pc-title"><h3 style="flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">远处警笛</h3><span class="badge ok">已完成</span></div>
+            <div class="pc-meta"><span class="mono">00:18.0</span><span>·</span><span>WAV 48kHz · 24bit</span></div>
+            <div class="pc-progress"><div class="prog ok"><span style="width:100%"></span></div><span>100%</span></div>
+          </div>
+        </div>
+
+        <!-- 待生成 -->
+        <div class="proj-card">
+          <div class="pc-cover" style="position:relative;aspect-ratio:16/9;background:radial-gradient(75% 85% at 22% 14%,rgba(140,150,170,.16),transparent 62%),linear-gradient(160deg,#171a1f,#090a0c)">
+            <span class="badge" style="position:absolute;left:8px;top:8px;background:rgba(8,9,11,.6)">音效</span>
+            <span class="ic ic-mic" style="position:absolute;left:50%;top:46%;transform:translate(-50%,-50%);width:30px;height:30px;color:var(--text-4);opacity:.7"></span>
+            <span class="mono" style="position:absolute;right:8px;bottom:7px;font-size:9.5px;color:var(--text-3);background:rgba(4,5,7,.55);padding:0 4px;border-radius:3px">预计 00:08.0</span>
+          </div>
+          <div class="pc-actions">
+            <button class="btn icon sm" title="替换素材"><span class="ic ic-doc"></span></button>
+            <button class="btn icon sm" title="立即生成"><span class="ic ic-spark"></span></button>
+            <button class="btn icon sm is-disabled" title="下载"><span class="ic ic-download"></span></button>
+            <button class="btn icon sm danger" title="删除"><span class="ic ic-trash"></span></button>
+          </div>
+          <div class="pc-body" style="gap:7px">
+            <div class="pc-title"><h3 style="flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">电话忙音</h3><span class="badge muted">待生成</span></div>
+            <div class="pc-meta"><span class="mono">—</span><span>·</span><span>WAV 48kHz · 未合成</span></div>
+            <div class="pc-progress"><div class="prog"><span style="width:0"></span></div><span>0%</span></div>
+          </div>
+        </div>
+
+        <!-- 已完成 -->
+        <div class="proj-card">
+          <div class="pc-cover" style="position:relative;aspect-ratio:16/9;background:radial-gradient(75% 85% at 20% 12%,rgba(160,132,240,.3),transparent 62%),radial-gradient(70% 70% at 86% 90%,rgba(88,196,224,.14),transparent 60%),linear-gradient(160deg,#1a1626,#090a0e)">
+            <span class="badge" style="position:absolute;left:8px;top:8px;background:rgba(8,9,11,.6)">音效</span>
+            <span class="wave mini" style="position:absolute;left:10px;right:56px;bottom:9px;height:20px;opacity:.7"><i style="--h:44%"></i><i style="--h:68%"></i><i style="--h:36%"></i><i style="--h:52%"></i><i style="--h:74%"></i><i style="--h:30%"></i><i style="--h:58%"></i><i style="--h:46%"></i><i style="--h:66%"></i><i style="--h:38%"></i><i style="--h:54%"></i><i style="--h:70%"></i></span>
+            <span class="mono" style="position:absolute;right:8px;bottom:7px;font-size:9.5px;color:#dfe4ea;background:rgba(4,5,7,.55);padding:0 4px;border-radius:3px">00:09.6</span>
+          </div>
+          <div class="pc-actions">
+            <button class="btn icon sm" title="替换素材"><span class="ic ic-doc"></span></button>
+            <button class="btn icon sm" title="重新生成"><span class="ic ic-spark"></span></button>
+            <button class="btn icon sm" title="下载"><span class="ic ic-download"></span></button>
+            <button class="btn icon sm danger" title="删除"><span class="ic ic-trash"></span></button>
+          </div>
+          <div class="pc-body" style="gap:7px">
+            <div class="pc-title"><h3 style="flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">楼梯回声</h3><span class="badge ok">已完成</span></div>
+            <div class="pc-meta"><span class="mono">00:09.6</span><span>·</span><span>WAV 48kHz · 24bit</span></div>
+            <div class="pc-progress"><div class="prog ok"><span style="width:100%"></span></div><span>100%</span></div>
+          </div>
+        </div>
+
+        <!-- 已完成 -->
+        <div class="proj-card">
+          <div class="pc-cover" style="position:relative;aspect-ratio:16/9;background:radial-gradient(75% 85% at 20% 10%,rgba(79,191,139,.3),transparent 62%),radial-gradient(70% 70% at 88% 92%,rgba(150,120,70,.2),transparent 60%),linear-gradient(160deg,#121d18,#090b0b)">
+            <span class="badge" style="position:absolute;left:8px;top:8px;background:rgba(8,9,11,.6)">音效</span>
+            <span class="wave mini" style="position:absolute;left:10px;right:56px;bottom:9px;height:20px;opacity:.7"><i style="--h:60%"></i><i style="--h:42%"></i><i style="--h:76%"></i><i style="--h:50%"></i><i style="--h:34%"></i><i style="--h:68%"></i><i style="--h:46%"></i><i style="--h:58%"></i><i style="--h:72%"></i><i style="--h:38%"></i><i style="--h:54%"></i><i style="--h:44%"></i></span>
+            <span class="mono" style="position:absolute;right:8px;bottom:7px;font-size:9.5px;color:#dfe4ea;background:rgba(4,5,7,.55);padding:0 4px;border-radius:3px">00:03.4</span>
+          </div>
+          <div class="pc-actions">
+            <button class="btn icon sm" title="替换素材"><span class="ic ic-doc"></span></button>
+            <button class="btn icon sm" title="重新生成"><span class="ic ic-spark"></span></button>
+            <button class="btn icon sm" title="下载"><span class="ic ic-download"></span></button>
+            <button class="btn icon sm danger" title="删除"><span class="ic ic-trash"></span></button>
+          </div>
+          <div class="pc-body" style="gap:7px">
+            <div class="pc-title"><h3 style="flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">雨伞收起</h3><span class="badge ok">已完成</span></div>
+            <div class="pc-meta"><span class="mono">00:03.4</span><span>·</span><span>WAV 48kHz · 24bit</span></div>
+            <div class="pc-progress"><div class="prog ok"><span style="width:100%"></span></div><span>100%</span></div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- 底部：整章素材包 -->
+    <div style="flex:0 0 56px;display:flex;align-items:center;gap:12px;padding:0 14px;border-top:1px solid var(--line);background:var(--bg-1)">
+      <div style="min-width:0">
+        <div style="font-size:12.5px;color:var(--text)">本章素材包</div>
+        <div class="muted" style="margin-top:1px">24 项 · 约 186MB · 音效 WAV／配图 PNG／视频 MP4</div>
+      </div>
+      <div style="margin-left:auto;display:flex;align-items:center;gap:8px">
+        <button class="btn sm"><span class="ic ic-clock"></span>版本记录</button>
+        <button class="btn primary"><span class="ic ic-export"></span>导出本章素材包</button>
+      </div>
+    </div>
+  </section>
+</div>
+</body>
+</html>

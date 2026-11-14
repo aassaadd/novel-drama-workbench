@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -13,6 +14,15 @@ DEFAULT_UI_CONFIG_PATH = REPO_ROOT / "config" / "config.ui.yaml"
 
 # 模型下载镜像链：国内优先，国外降级（音频与 ComfyUI 模型下载共用）
 _DEFAULT_DOWNLOAD_MIRRORS = ["https://hf-mirror.com", "https://huggingface.co"]
+
+#: 启动时必须可写的配置路径：(配置键, 中文名称)
+#: 这些位置会在运行期写入锁文件 / 缓存 / 下载音色；不可写时直接报错，
+#: 不静默改用 /tmp 等其它目录，避免出现「看起来能跑、实际状态分裂」。
+REQUIRED_WRITABLE_PATHS = (
+    ("gpu.lock_path", "GPU 锁文件"),
+    ("tts.hf_home", "HF 缓存目录"),
+    ("tts.builtin_voices.root", "内置音色目录"),
+)
 
 # 无配置文件时的最小默认值，保证 doctor / init 可用
 _FALLBACK = {
@@ -213,6 +223,63 @@ class AppConfig:
         return list(_DEFAULT_DOWNLOAD_MIRRORS)
 
 
+def _get_dotted(raw: dict, dotted: str):
+    """按 `a.b.c` 从字典里取值；任一层缺失返回 None。
+
+    参数:
+        raw: 已合并的配置字典。
+        dotted: 点号分隔的键路径。
+
+    返回:
+        配置值或 None。
+    """
+    node = raw
+    for part in dotted.split("."):
+        if not isinstance(node, dict) or part not in node:
+            return None
+        node = node[part]
+    return node
+
+
+def _ensure_writable(value, dotted: str, label: str) -> None:
+    """校验配置里的写入路径是否可写；不可写直接抛中文错误。
+
+    参数:
+        value: 配置值（路径字符串，可为空）。
+        dotted: 配置键，用于错误提示。
+        label: 中文名称，用于错误提示。
+
+    返回:
+        无。
+
+    异常:
+        ValueError: 路径（或其最近存在的父目录）不可写时抛出，提示里带具体路径。
+    """
+    if value is None or not str(value).strip():
+        return
+    target = Path(str(value).strip()).expanduser()
+    # 文件名（如 gpu.lock）看父目录；目录（如 hf-cache）看自身
+    probe = target.parent if target.suffix else target
+    while not probe.exists() and probe != probe.parent:
+        probe = probe.parent
+    reason = ""
+    if not probe.exists():
+        reason = "目录不存在"
+    else:
+        # 只读挂载下 os.access 仍可能返回可写，必须真正写一个临时文件才能确认
+        try:
+            with tempfile.NamedTemporaryFile(dir=probe, prefix=".ndw-write-check-", delete=True):
+                pass
+        except OSError as exc:
+            reason = f"写入测试失败：{exc.strerror or exc}"
+    if reason:
+        raise ValueError(
+            f"配置项 {dotted}（{label}）指向的路径不可写：{target}。"
+            f"最近存在的目录是 {probe}（{reason}）。"
+            f"请把 {label} 改到可写位置（例如外置盘的可写目录）后重新启动；程序不会改用其它目录。"
+        )
+
+
 def load_config(path: str | Path | None = None, ui_path: str | Path | None = None) -> AppConfig:
     """加载本机配置。
 
@@ -242,6 +309,9 @@ def load_config(path: str | Path | None = None, ui_path: str | Path | None = Non
 
     # 三层：内置默认 < 手写 config.yaml < 页面覆盖层
     merged = _deep_merge(_deep_merge(_FALLBACK, raw if isinstance(raw, dict) else {}), ui_values)
+    # 启动即校验写入路径：不可写就明确报中文错误并指出路径，不回退到其它目录
+    for dotted, label in REQUIRED_WRITABLE_PATHS:
+        _ensure_writable(_get_dotted(merged, dotted), dotted, label)
     project_root = os.environ.get("NDW_PROJECT") or merged.get("project_root")
     return AppConfig(
         raw=merged,

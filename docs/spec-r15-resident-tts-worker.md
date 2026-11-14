@@ -381,7 +381,7 @@ worker 复用键（任一变化即优雅重启，仅付一次约 16s）：
 | `web/app.py` | `ui_generate` 增加存活 pid 复用判断；新增 shutdown 钩子复用 `ui_stop` 清理 | 中：停止与队列写入的竞态（现有等待循环已缓解） |
 | `config/config.yaml`、`config.py` | 新增 `tts.providers[].runtime`: `worker_mode`（resident/per_call，默认 resident）、`idle_timeout_s`（默认 300）、`request_timeout_s`（默认 300）、`max_restarts`（默认 2） | 低 |
 | `schema/*` | **不改** | — |
-| 数据/旧工程 | **无需迁移**：产物路径、侧车、缓存键、指纹均不变；关开关即回旧链路 | 低 |
+| 数据/旧工程 | **无需迁移**：产物路径、侧车、缓存键、指纹均不变；关开关即回旧链路（**未上线阶段暂不要求**：无需为旧工程保留回旧链路与兼容分支） | 低 |
 
 ### 12.1 风险清单
 

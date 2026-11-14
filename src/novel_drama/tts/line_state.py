@@ -492,6 +492,10 @@ def resolve_line_state(
         # 旧侧车（无指纹）走 revision 兜底，与改造前行为一致
         return {"state": "stale", "persisted": asked, "reason": "revision_changed", "changes": []}
 
+    # 真人录音不依赖 TTS 音色/侧车参数：正文 revision 已在上方校验，直接算就绪。
+    if tts.get("adapter") == "human":
+        return {"state": "ready", "persisted": asked, "reason": "human_take", "changes": []}
+
     # 说话人是否变过：换了人就把音频标为过期，避免留着旧音色的音频还显示「就绪」。
     # 新侧车直接记 speaker_id；旧侧车没有该字段时，按音频音色反推归属者兜底。
     current_speaker = line.get("speaker_id")

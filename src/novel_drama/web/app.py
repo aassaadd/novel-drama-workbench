@@ -15,6 +15,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -23,17 +24,20 @@ from fastapi import HTTPException
 from .. import __version__
 from ..adapters.base import AdapterError
 from ..adapters.writing import OmlxWritingAdapter
+from ..cli_line import chapter_consistency
 from ..config import DEFAULT_UI_CONFIG_PATH, load_config
 from ..media import comfy_media
 from ..media.references import collect_references
 from ..models.ids import now_iso
 from ..store import ProjectStore, list_workspaces
+from ..store.project_store import WORKSPACE_INDEX
 from ..store.queue_store import QueueStore
 from ..writing.editing import edit_chapter, save_chapter_content
 from ..writing.summarize import apply_summary, summarize_chapter
 from .actions import fail_body, run
 from .models_api import register_models_routes, resolve_llm_settings
 from .voice_tools_api import register_voice_tools_routes
+from .align_api import register_align_routes
 from .character_desc_api import register_character_desc_routes
 from .continue_api import register_continue_routes
 from .outline_edit_api import register_outline_edit_routes
@@ -41,7 +45,8 @@ from .stream_api import register_stream_routes
 from .bgm_api import register_bgm_routes
 from .sfx_api import register_sfx_routes
 
-STATIC_DIR = Path(__file__).with_name("static")
+#: 唯一前端目录（仓库根 web-next/）；直接挂到根路径，旧 static 界面已废弃
+WEB_NEXT_DIR = Path(__file__).resolve().parents[3] / "web-next"
 
 #: 「设置」页允许改写的配置键（点号路径）；其余键一律拒绝，避免页面改坏配置
 #: 设置页「全部配置」分组：分组名 → (键, 中文标签, 类型, 选项, 最小值, 最大值)
@@ -738,6 +743,67 @@ def _resolve_voice_binding(binding: dict | None, index: dict) -> str | None:
     return None
 
 
+def _export_preflight(store: ProjectStore, chapter_id: str) -> dict:
+    """导出前检查（只读）：缺配音、音色编排提示、时间轴状态。
+
+    参数:
+        store: 工程读写入口。
+        chapter_id: 章节 ID。
+
+    返回:
+        `{ok, issues, lines_total, ready, missing, missing_total, timeline_exists}`；
+        issues 为 `{code, level, message, line_id?}`，level=error 表示建议先修。
+    """
+    from ..store.voice_cast import check_cast
+
+    chapter = store.load_chapter(chapter_id)
+    characters = {item["id"]: item for item in store.load_characters().get("characters") or []}
+    lines = [line for scene in chapter.get("scenes") or [] for line in scene.get("lines") or []]
+    missing = [
+        {
+            "line_id": line.get("id"),
+            "speaker": (characters.get(line.get("speaker_id")) or {}).get("name") or line.get("speaker_id"),
+            "text": line.get("text"),
+        }
+        for line in lines
+        if not (line.get("tts") or {}).get("asset_id")
+    ]
+    timeline_exists = store.timeline_path(chapter_id).exists()
+    issues: list[dict] = []
+    if not timeline_exists:
+        issues.append({"code": "timeline-missing", "level": "warn", "message": "时间轴尚未构建（导出时会自动重建）"})
+    if missing:
+        issues.append(
+            {
+                "code": "missing-audio",
+                "level": "warn",
+                "message": f"{len(missing)} 行还没有配音，导出包里对应行没有音频",
+            }
+        )
+    try:
+        findings = check_cast(store, chapter_id).get("findings") or []
+    except Exception:  # 音色检查失败不应阻断导出前的其他信息
+        findings = []
+    for item in findings[:20]:
+        issues.append(
+            {
+                "code": item.get("code"),
+                "level": item.get("level") or "warn",
+                "message": item.get("message"),
+                "line_id": item.get("line_id"),
+            }
+        )
+    return {
+        "ok": not any(item["level"] == "error" for item in issues),
+        "issues": issues,
+        "lines_total": len(lines),
+        "ready": len(lines) - len(missing),
+        "missing": missing[:100],
+        "missing_total": len(missing),
+        "timeline_exists": timeline_exists,
+    }
+
+
 def create_app(project_root: str | None = None, config_path: str | None = None):
     """创建 FastAPI 应用。
 
@@ -952,12 +1018,439 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
             raise HTTPException(status_code=500, detail={"code": 3, "message": f"移入废纸篓失败：{result.stderr.strip() or result.returncode}"})
         return {"ok": True, "path": str(root)}
 
+    @app.get("/api/ui/projects/overview")
+    def projects_overview() -> list[dict]:
+        """工程列表扩展信息：章节数、总字数、磁盘占用。
+
+        返回:
+            `[{path, title, last_opened_at, chapters, words, size_bytes}]`；
+            单个工程读取失败时该项带 `error`，不影响其它工程。
+        """
+        rows: list[dict] = []
+        for item in list_workspaces():
+            row = dict(item)
+            try:
+                store = ProjectStore(item["path"])
+                chapters = store.list_chapters()
+                row["chapters"] = len(chapters)
+                row["words"] = sum(int(chapter.get("word_count") or 0) for chapter in chapters)
+                total = 0
+                newest = 0.0
+                for file in Path(item["path"]).rglob("*"):
+                    if file.is_file():
+                        try:
+                            stat = file.stat()
+                        except OSError:
+                            continue
+                        total += stat.st_size
+                        newest = max(newest, stat.st_mtime)
+                # 配音完成度：逐章统计行数，供首页「状态」筛选使用
+                ready_lines = 0
+                total_lines = 0
+                for chapter in chapters:
+                    try:
+                        data = store.load_chapter(chapter["id"])
+                    except Exception:  # noqa: BLE001 - 单章损坏不影响其它统计
+                        continue
+                    for scene in data.get("scenes") or []:
+                        for line in scene.get("lines") or []:
+                            total_lines += 1
+                            if (line.get("tts") or {}).get("status") == "ready":
+                                ready_lines += 1
+                row["ready_lines"] = ready_lines
+                row["total_lines"] = total_lines
+                row["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(newest)) if newest else None
+                row["size_bytes"] = total
+            except Exception as exc:  # noqa: BLE001 - 单个工程损坏不影响列表
+                row["error"] = str(exc)
+            rows.append(row)
+        return rows
+
+    @app.post("/api/ui/projects/reindex")
+    def projects_reindex(body: dict | None = None) -> dict:
+        """重建本机工程索引：扫描默认工程目录并写回 ~/.ndw/workspaces.json。
+
+        参考产品在「项目」页提供刷新索引；本地没有服务端索引缓存，但仍会维护
+        `~/.ndw/workspaces.json` 作为工程列表数据源。本接口负责重新扫描磁盘，
+        把手动移动过目录、或从其它位置拷入的工程重新登记进来。
+
+        参数:
+            body: 可选 `{root?: 额外扫描目录}`；不传时使用配置里的 `project_root`。
+
+        返回:
+            `{ok: true, count: 扫描到的工程数, index: 索引文件路径}`。
+        """
+        candidates: list[Path] = []
+        raw = str((body or {}).get("root") or load_config(config_path).get("project_root") or "").strip()
+        if raw:
+            candidates.append(Path(raw).expanduser())
+        # 现有索引里工程的父目录也补扫，避免工程被整体移动后从列表消失
+        for item in list_workspaces():
+            parent = Path(item["path"]).parent
+            if parent == Path.home() or len(parent.parts) < 4:
+                continue
+            if parent not in candidates:
+                candidates.append(parent)
+
+        found: dict[str, Path] = {}
+
+        def scan(base: Path, depth: int) -> None:
+            """递归扫描 base 下 depth 层内的工程目录。"""
+            try:
+                if (base / "project.json").is_file():
+                    found[str(base.resolve())] = base.resolve()
+                if depth <= 0:
+                    return
+                for child in sorted(base.iterdir()):
+                    if child.name.startswith(".") or not child.is_dir():
+                        continue
+                    scan(child, depth - 1)
+            except OSError:
+                return
+
+        for base in candidates:
+            scan(base, 2)
+
+        # 保留已有工程的最近打开时间，新发现的工程按 project.json 修改时间排序
+        previous = {item["path"]: item.get("last_opened_at") for item in list_workspaces()}
+        projects = []
+        for path, root in found.items():
+            stamp = previous.get(path)
+            if not stamp:
+                try:
+                    stamp = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime((root / "project.json").stat().st_mtime))
+                except OSError:
+                    stamp = now_iso()
+            projects.append({"path": path, "last_opened_at": stamp})
+        projects.sort(key=lambda item: item.get("last_opened_at") or "", reverse=True)
+        try:
+            WORKSPACE_INDEX.parent.mkdir(parents=True, exist_ok=True)
+            WORKSPACE_INDEX.write_text(
+                json.dumps({"projects": projects}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+            )
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail=f"索引文件不可写：{exc}") from exc
+        return {"ok": True, "count": len(projects), "index": str(WORKSPACE_INDEX)}
+
+    @app.post("/api/ui/project/duplicate")
+    def duplicate_project(body: dict) -> dict:
+        """复制整个工程目录，并把副本登记到工程列表。
+
+        参数:
+            body: `{"path": 源工程, "name"?: 副本目录名}`。
+
+        返回:
+            `{"ok": true, "path": 副本路径}`。
+
+        异常:
+            HTTPException 400: 副本目录已存在。
+            HTTPException 404: 源目录不是工程。
+            HTTPException 500: 复制失败（磁盘或权限）。
+        """
+        source = _project_dir(body.get("path"))
+        name = str(body.get("name") or "").strip() or f"{source.name}-copy"
+        # 只允许目录名，禁止把副本写到其它目录
+        if "/" in name or name in {".", ".."}:
+            raise HTTPException(status_code=400, detail={"code": 2, "message": "副本名称只能是目录名，不能带路径"})
+        target = source.parent / name
+        if target.exists():
+            raise HTTPException(status_code=400, detail={"code": 2, "message": f"目标目录已存在：{target}"})
+        try:
+            shutil.copytree(source, target)
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail={"code": 3, "message": f"复制失败：{exc}"}) from exc
+        ProjectStore(str(target)).register_workspace()
+        return {"ok": True, "path": str(target)}
+
+    @app.post("/api/ui/chapter/import")
+    def import_chapters(body: dict) -> dict:
+        """把前端上传的纯文本按标题切章导入。
+
+        参数:
+            body: `{path, text, pattern?, on_duplicate?}`；`on_duplicate` 取值 skip/replace/new。
+
+        返回:
+            CLI `chapter import` 的 JSON 结果。
+
+        异常:
+            HTTPException 400: 正文为空。
+        """
+        path = body.get("path")
+        text = str(body.get("text") or "")
+        if not text.strip():
+            raise HTTPException(status_code=400, detail={"code": 2, "message": "导入内容为空"})
+        store = _store(path)
+        pattern = str(body.get("pattern") or "").strip()
+        on_duplicate = str(body.get("on_duplicate") or "skip")
+        if on_duplicate not in {"skip", "replace", "new"}:
+            raise HTTPException(status_code=400, detail={"code": 2, "message": "on_duplicate 只能是 skip/replace/new"})
+        with tempfile.NamedTemporaryFile("w", suffix=".md", encoding="utf-8", delete=False) as handle:
+            handle.write(text)
+            temp_path = handle.name
+        try:
+            argv = ["--project", str(store.root), "--json", "chapter", "import", temp_path, "--on-duplicate", on_duplicate]
+            if pattern:
+                argv += ["--pattern", pattern]
+            return _respond(_cli(*argv))
+        finally:
+            Path(temp_path).unlink(missing_ok=True)
+
+    @app.post("/api/ui/lines/replace")
+    def replace_line_text(body: dict) -> dict:
+        """在本章台词里做查找替换（逐行走 `line edit`，保证正文同步）。
+
+        参数:
+            body: `{path, chapter, find, replace, whole?, case_sensitive?}`。
+
+        返回:
+            `{replaced, failed, total_matched}`。
+
+        异常:
+            HTTPException 400: find 为空。
+        """
+        path = body.get("path")
+        chapter_id = body.get("chapter")
+        find = str(body.get("find") or "")
+        if not find:
+            raise HTTPException(status_code=400, detail={"code": 2, "message": "查找内容不能为空"})
+        replacement = str(body.get("replace") or "")
+        store = _store(path)
+        payload = store.load_chapter(chapter_id)
+        replaced = 0
+        failed = 0
+        matched = 0
+        for scene in payload.get("scenes") or []:
+            for line in scene.get("lines") or []:
+                text = str(line.get("text") or "")
+                if find not in text:
+                    continue
+                matched += 1
+                new_text = text.replace(find, replacement)
+                result = _cli(
+                    "--project", str(store.root), "--json",
+                    "line", "edit", "--chapter", chapter_id, "--line", line.get("id"), "--text", new_text,
+                )
+                if result.code == 0:
+                    replaced += 1
+                else:
+                    failed += 1
+        return {"replaced": replaced, "failed": failed, "total_matched": matched}
+
+    @app.post("/api/ui/timeline/save")
+    def ui_timeline_save(body: dict) -> dict:
+        """保存页面上调整过的时间轴（片段平移 / 淡入淡出）。
+
+        写回 `timelines/<chapter>.timeline.json`；后续混音与导出直接消费该文件。
+
+        参数:
+            body: `{path, chapter, timeline}`，timeline 需含 duration_ms 与 tracks。
+
+        返回:
+            `{saved, duration_ms, tracks}`。
+
+        异常:
+            HTTPException 400: 时间轴结构不合法。
+        """
+        store = _store(body["path"])
+        chapter_id = body["chapter"]
+        data = body.get("timeline") or {}
+        tracks = data.get("tracks")
+        if not isinstance(tracks, list):
+            raise HTTPException(status_code=400, detail={"code": 4, "message": "时间轴缺少 tracks"})
+        max_end = 0
+        for track in tracks:
+            for item in track.get("items") or []:
+                try:
+                    start = int(item.get("start_ms"))
+                    end = int(item.get("end_ms"))
+                    fade_in = max(0, int(item.get("fade_in_ms") or 0))
+                    fade_out = max(0, int(item.get("fade_out_ms") or 0))
+                except (TypeError, ValueError):
+                    raise HTTPException(
+                        status_code=400,
+                        detail={"code": 4, "message": "片段起止或淡入淡出必须是整数毫秒"},
+                    )
+                if start < 0 or end <= start:
+                    raise HTTPException(status_code=400, detail={"code": 4, "message": "片段结束时间必须大于开始时间"})
+                # 淡入淡出超过片段时长时按片段长度截断（构建器会给很短的音效配长淡入淡出，
+                # 混音侧同样按片段长度收敛，这里不因此拒绝整份时间轴）
+                length = end - start
+                if fade_in > length:
+                    fade_in = length
+                if fade_in + fade_out > length:
+                    fade_out = max(0, length - fade_in)
+                item["start_ms"] = start
+                item["end_ms"] = end
+                item["fade_in_ms"] = fade_in
+                item["fade_out_ms"] = fade_out
+                max_end = max(max_end, end)
+        data["duration_ms"] = max(int(data.get("duration_ms") or 0), max_end)
+        path = store.timeline_path(chapter_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        return {"saved": True, "duration_ms": data["duration_ms"], "tracks": len(tracks)}
+
+    @app.post("/api/ui/timeline/build")
+    def build_timeline(body: dict) -> dict:
+        """构建（或重建）某章时间轴并返回结果。
+
+        参数:
+            body: `{path, chapter}`。
+
+        返回:
+            时间轴 JSON（与 `GET /api/project/timeline/{chapter}` 相同结构）。
+        """
+        store = _store(body.get("path"))
+        chapter_id = body.get("chapter")
+        result = _cli("--project", str(store.root), "--json", "timeline", "build", "--chapter", chapter_id)
+        if result.code != 0:
+            raise HTTPException(status_code=500, detail={"code": result.code, "message": result.text.strip() or "时间轴构建失败"})
+        timeline_path = store.timeline_path(chapter_id)
+        if not timeline_path.exists():
+            raise HTTPException(status_code=500, detail={"code": 3, "message": "时间轴构建后没有产物"})
+        return json.loads(timeline_path.read_text(encoding="utf-8"))
+
     @app.get("/api/project/info")
     def project_info(path: str | None = Query(default=None)) -> dict:
         """工程概览（作品、章节数、角色数）。"""
         store = _store(path)
         project = store.load_project()
         return {"root": str(store.root), "work": project["work"], "chapters": store.list_chapters(), "characters": len(store.load_characters()["characters"])}
+
+    @app.get("/api/ui/project/production")
+    def project_production(path: str | None = Query(default=None)) -> dict:
+        """读取项目级制作要求（静音间隔 + 音频导出参数）。
+
+        参数:
+            path: 工程目录。
+
+        返回:
+            `{production: {silences_ms, audio}}`。
+        """
+        return {"production": _store(path).production()}
+
+    @app.post("/api/ui/project/production")
+    def save_project_production(body: dict) -> dict:
+        """保存项目级制作要求，并同步输出采样率。
+
+        参数:
+            body: `{path, production: {silences_ms?, audio?}}`，允许只带其中一段。
+
+        返回:
+            `{production: 保存后的完整值}`。
+
+        异常:
+            HTTPException 400: 字段类型或取值范围不合法。
+        """
+        store = _store(body.get("path"))
+        incoming = body.get("production") or {}
+        clean: dict = {}
+        silences = incoming.get("silences_ms")
+        if isinstance(silences, dict):
+            clean["silences_ms"] = {}
+            for key, value in silences.items():
+                try:
+                    number = int(value)
+                except (TypeError, ValueError) as exc:
+                    raise HTTPException(status_code=400, detail=f"静音间隔 `{key}` 必须是整数毫秒") from exc
+                if number < 0 or number > 10000:
+                    raise HTTPException(status_code=400, detail=f"静音间隔 `{key}` 应在 0–10000 毫秒之间")
+                clean["silences_ms"][key] = number
+        audio = incoming.get("audio")
+        if isinstance(audio, dict):
+            fmt = str(audio.get("format") or "").lower()
+            if fmt not in {"mp3", "wav", "m4a"}:
+                raise HTTPException(status_code=400, detail="音频格式只支持 mp3 / wav / m4a")
+            try:
+                sample_rate = int(audio.get("sample_rate"))
+                bitrate = int(audio.get("bitrate_kbps"))
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(status_code=400, detail="采样率与码率必须是整数") from exc
+            if sample_rate not in {44100, 48000}:
+                raise HTTPException(status_code=400, detail="采样率只支持 44100 / 48000")
+            if bitrate not in {192, 256}:
+                raise HTTPException(status_code=400, detail="目标码率只支持 192 / 256 kbps")
+            clean["audio"] = {"format": fmt, "sample_rate": sample_rate, "bitrate_kbps": bitrate}
+        return {"production": store.save_production(clean)}
+
+    @app.post("/api/ui/chapter/rename")
+    def ui_chapter_rename(body: dict) -> dict:
+        """重命名章节。
+
+        参数:
+            body: `{path, chapter, title}`。
+
+        返回:
+            `{chapter_id, title}`。
+
+        异常:
+            HTTPException 400: 标题为空；404: 章节不存在。
+        """
+        title = str(body.get("title") or "").strip()
+        if not title:
+            raise HTTPException(status_code=400, detail="章节标题不能为空")
+        store = _store(body.get("path"))
+        chapter_id = body.get("chapter") or ""
+        try:
+            chapter = store.load_chapter(chapter_id)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        chapter["title"] = title
+        store.save_chapter(chapter)
+        return {"chapter_id": chapter_id, "title": title}
+
+    @app.post("/api/ui/chapter/delete")
+    def ui_chapter_delete(body: dict) -> dict:
+        """删除章节文件与其时间轴/脚本（保留已生成的音频资产）。
+
+        参数:
+            body: `{path, chapter}`。
+
+        返回:
+            `{ok, chapter_id}`。
+
+        异常:
+            HTTPException 400: 只剩一个章节；404: 章节不存在。
+        """
+        store = _store(body.get("path"))
+        chapter_id = body.get("chapter") or ""
+        if len(store.list_chapters()) <= 1:
+            raise HTTPException(status_code=400, detail="至少保留一个章节")
+        path = store.chapter_path(chapter_id)
+        if not path.exists():
+            raise HTTPException(status_code=404, detail="章节不存在")
+        path.unlink()
+        store.timeline_path(chapter_id).unlink(missing_ok=True)
+        store.script_path(chapter_id).unlink(missing_ok=True)
+        return {"ok": True, "chapter_id": chapter_id}
+
+    @app.post("/api/ui/chapter/mix")
+    def ui_chapter_mix(body: dict) -> dict:
+        """按时间轴执行本章混音（分轨 + 混音 + 响度规整）。
+
+        参数:
+            body: `{path, chapter}`。
+
+        返回:
+            CLI 的 JSON 结果（含 mix 路径与时长）。
+
+        异常:
+            HTTPException 500: 混音失败。
+        """
+        from .actions import run
+
+        store = _store(body.get("path"))
+        chapter_id = body.get("chapter") or ""
+        try:
+            result = run(
+                "--config", config_path, "--project", str(store.root),
+                "--json", "mix", "--chapter", chapter_id, "--render",
+            )
+        except Exception as exc:  # noqa: BLE001 - 统一转成 500
+            raise HTTPException(status_code=500, detail=f"混音失败：{exc}") from exc
+        if result.code != 0:
+            raise HTTPException(status_code=500, detail=f"混音失败：{result.stderr or result.text}")
+        return result.payload or {}
 
     @app.get("/api/project/chapters")
     def chapters(path: str | None = Query(default=None)) -> list[dict]:
@@ -1026,10 +1519,335 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         """章节目录（`chapter list --json`）。"""
         return _respond(_cli("--project", path, "--json", "chapter", "list"))
 
+    @app.get("/api/ui/chapters/search")
+    def ui_chapters_search(path: str = Query(...), q: str = Query("")) -> dict:
+        """章节搜索：标题 + 正文（含命中次数与首处片段）。
+
+        参数:
+            path: 工程目录。
+            q: 关键词（去首尾空格后至少 1 个字符）。
+
+        返回:
+            `{q, hits: [{id, title, count, snippet}]}`，按章节 index 升序。
+        """
+        keyword = (q or "").strip()
+        if not keyword:
+            return {"q": "", "hits": []}
+        store = _store(path)
+        lowered = keyword.lower()
+        hits = []
+        for meta in store.list_chapters():
+            chapter = store.load_chapter(meta["id"])
+            content = str(chapter.get("content") or "")
+            count = content.lower().count(lowered)
+            title = str(chapter.get("title") or "")
+            in_title = lowered in title.lower()
+            if not count and not in_title:
+                continue
+            position = content.lower().find(lowered)
+            snippet = ""
+            if position >= 0:
+                start = max(0, position - 18)
+                snippet = content[start : position + len(keyword) + 22].replace("\n", " ")
+            hits.append(
+                {
+                    "id": meta["id"],
+                    "title": title,
+                    "count": count,
+                    "snippet": snippet,
+                }
+            )
+        return {"q": keyword, "hits": hits}
+
+    @app.get("/api/ui/search")
+    def ui_search(
+        q: str = Query(""),
+        path: str | None = Query(default=None),
+        limit: int = Query(default=40),
+    ) -> dict:
+        """全局搜索：跨工程、跨章节正文与台词行。
+
+        参数:
+            q: 关键词（去首尾空格后至少 2 个字符，否则直接返回空结果）。
+            path: 限定工程目录；为空时搜索最近打开的多个工程（最多 12 个）。
+            limit: 章节 / 台词两组各自最多返回条数（1~100）。
+
+        返回:
+            `{q, scope, counts:{projects,chapters,lines}, chapters:[...], lines:[...], truncated}`。
+            章节命中带 `count` 与首处 `snippet`；台词命中带 `line_id`、说话人、状态与场景名，
+            供前端直达具体台词行。
+        """
+        keyword = (q or "").strip()
+        scope = "current" if path else "all"
+        payload = {
+            "q": keyword,
+            "scope": scope,
+            "counts": {"projects": 0, "chapters": 0, "lines": 0},
+            "chapters": [],
+            "lines": [],
+            "truncated": False,
+        }
+        if len(keyword) < 2:
+            return payload
+        lowered = keyword.lower()
+        cap = max(1, min(int(limit or 40), 100))
+        if path:
+            roots = [str(Path(path).expanduser())]
+        else:
+            roots = [
+                str(item.get("path"))
+                for item in list_workspaces()[:12]
+                if item.get("path")
+            ]
+        hit_projects: set[str] = set()
+        for root in roots:
+            if len(payload["chapters"]) >= cap and len(payload["lines"]) >= cap:
+                break
+            try:
+                store = ProjectStore(root)
+                project = store.load_project()
+            except Exception:  # noqa: BLE001 - 单个工程不可读不影响其它工程
+                continue
+            project_title = str((project.get("work") or {}).get("title") or Path(root).name)
+            try:
+                names = {
+                    str(item.get("id")): str(item.get("name") or "")
+                    for item in (store.load_characters().get("characters") or [])
+                }
+            except Exception:  # noqa: BLE001 - 角色表缺失时用 ID 兜底
+                names = {}
+            for meta in store.list_chapters():
+                try:
+                    chapter = store.load_chapter(meta.get("id"))
+                except Exception:  # noqa: BLE001 - 损坏章节跳过
+                    continue
+                chapter_id = str(chapter.get("id") or meta.get("id"))
+                chapter_title = str(chapter.get("title") or "")
+                chapter_index = chapter.get("index") or meta.get("index")
+                content = str(chapter.get("content") or "")
+                haystack = content.lower()
+                count = haystack.count(lowered)
+                if count or lowered in chapter_title.lower():
+                    if len(payload["chapters"]) < cap:
+                        offset = haystack.find(lowered)
+                        snippet = ""
+                        if offset >= 0:
+                            start = max(0, offset - 18)
+                            snippet = content[start : offset + len(keyword) + 22].replace("\n", " ")
+                        payload["chapters"].append(
+                            {
+                                "project": root,
+                                "project_title": project_title,
+                                "chapter_id": chapter_id,
+                                "chapter_title": chapter_title,
+                                "chapter_index": chapter_index,
+                                "count": count,
+                                "snippet": snippet,
+                            }
+                        )
+                        hit_projects.add(root)
+                for scene in chapter.get("scenes") or []:
+                    scene_title = str(scene.get("title") or "")
+                    for line in scene.get("lines") or []:
+                        text = str(line.get("text") or "")
+                        if lowered not in text.lower():
+                            continue
+                        if len(payload["lines"]) >= cap:
+                            break
+                        speaker_id = str(line.get("speaker_id") or "")
+                        payload["lines"].append(
+                            {
+                                "project": root,
+                                "project_title": project_title,
+                                "chapter_id": chapter_id,
+                                "chapter_title": chapter_title,
+                                "chapter_index": chapter_index,
+                                "line_id": str(line.get("id") or ""),
+                                "speaker": names.get(speaker_id)
+                                or ("旁白" if speaker_id == "chr_narrator" else speaker_id),
+                                "text": text,
+                                "state": str((line.get("tts") or {}).get("status") or "pending"),
+                                "scene_title": scene_title,
+                            }
+                        )
+                        hit_projects.add(root)
+                    if len(payload["lines"]) >= cap:
+                        break
+                if len(payload["lines"]) >= cap and len(payload["chapters"]) >= cap:
+                    break
+        payload["counts"] = {
+            "projects": len(hit_projects),
+            "chapters": len(payload["chapters"]),
+            "lines": len(payload["lines"]),
+        }
+        payload["truncated"] = (
+            len(payload["chapters"]) >= cap or len(payload["lines"]) >= cap
+        )
+        return payload
+
+    @app.get("/api/ui/chapters/stale")
+    def ui_chapters_stale(path: str = Query(...), chapter: str = Query(...)) -> dict:
+        """章节级下游过期汇总：列出过期/失败的台词行与其所在场景。
+
+        参数:
+            path: 工程目录。
+            chapter: 章节 ID。
+
+        返回:
+            `{chapter, title, counts, items: [{line_id, scene_id, scene_title, index, speaker, text, state}]}`。
+        """
+        store = _store(path)
+        payload = _respond(_cli("--project", path, "--json", "line", "list", "--chapter", chapter)) or {}
+        data = store.load_chapter(chapter)
+        scene_titles = {
+            str(scene.get("id")): str(scene.get("title") or f"场景 {int(scene.get('index') or 0) + 1}")
+            for scene in data.get("scenes") or []
+        }
+        items = [
+            {
+                "line_id": row.get("line_id"),
+                "scene_id": row.get("scene_id"),
+                "scene_title": scene_titles.get(str(row.get("scene_id")), ""),
+                "index": row.get("index"),
+                "speaker": row.get("speaker"),
+                "text": row.get("text"),
+                "state": row.get("state"),
+            }
+            for row in payload.get("lines") or []
+            if row.get("state") in ("stale", "failed")
+        ]
+        return {
+            "chapter": chapter,
+            "title": data.get("title"),
+            "counts": payload.get("counts") or {},
+            "items": items,
+        }
+
+    @app.get("/api/ui/chapters/facets")
+    def ui_chapters_facets(path: str = Query(...)) -> dict:
+        """章节目录三组筛选维度：全部场景 / 全部角色 / 全部状态。
+
+        全部按真实数据派生，不新增落盘字段：
+        - 角色：本章台词里出现过的说话人（旁白置顶）；
+        - 创作状态：无台词=画本中，有未就绪行=配音中，全部就绪未混音=后期中，
+          已混音未导出=审听中，已导出=创作完成；
+        - 成品音频：`renders/<chapter>.mix(.norm).wav` 是否存在；
+        - 工单：队列 `.ndw/queue.json` 是否有指向本章的任务。
+
+        参数:
+            path: 工程目录。
+
+        返回:
+            `{characters, scenes, chapters}`；chapters 为章节 ID → 维度值。
+        """
+        from ..tts import line_state
+
+        store = _store(path)
+        characters = store.load_characters().get("characters") or []
+        by_id = {item.get("id"): item for item in characters}
+        cfg = load_config(config_path) if config_path else load_config()
+        engine = line_state.engine_params(cfg)
+        live_ids = line_state.live_line_ids(store)
+        job_chapters = {
+            str((job.get("target") or {}).get("chapter_id"))
+            for job in QueueStore(store).load()
+            if (job.get("target") or {}).get("chapter_id")
+        }
+
+        char_seen: dict[str, dict] = {}
+        scene_seen: list[str] = []
+        per_chapter: dict[str, dict] = {}
+        for meta in store.list_chapters():
+            chapter = store.load_chapter(meta["id"])
+            chapter_id = meta["id"]
+            lines = [line for scene in chapter.get("scenes") or [] for line in scene.get("lines") or []]
+            snapshots = line_state.load_snapshots(store.root, chapter)
+            states = line_state.chapter_states(
+                chapter, by_id, snapshots, root=store.root, live_ids=live_ids, engine=engine
+            )
+            counts = line_state.state_counts(states)
+            total = len(lines)
+            ready = int(counts.get("ready") or 0)
+            pending = total - ready
+
+            renders = store.root / "renders"
+            has_audio = (renders / f"{chapter_id}.mix.norm.wav").exists() or (renders / f"{chapter_id}.mix.wav").exists()
+            has_export = (store.root / "exports" / f"{chapter_id}.manifest.json").exists() or (
+                renders / f"{chapter_id}.mp4"
+            ).exists()
+            if not total:
+                creative = "script"
+            elif pending:
+                creative = "voice"
+            elif not has_audio:
+                creative = "post"
+            elif not has_export:
+                creative = "review"
+            else:
+                creative = "done"
+
+            chapter_chars: list[str] = []
+            chapter_scenes: list[str] = []
+            for scene in chapter.get("scenes") or []:
+                title = str(scene.get("title") or "").strip()
+                if title:
+                    chapter_scenes.append(title)
+                    if title not in scene_seen:
+                        scene_seen.append(title)
+                for line in scene.get("lines") or []:
+                    speaker = line.get("speaker_id")
+                    if speaker and speaker not in chapter_chars:
+                        chapter_chars.append(speaker)
+            for speaker in chapter_chars:
+                if speaker not in char_seen:
+                    item = by_id.get(speaker) or {}
+                    name = item.get("name") or ("旁白" if speaker == "chr_narrator" else "未知角色")
+                    char_seen[speaker] = {"id": speaker, "name": name, "role": item.get("role")}
+
+            per_chapter[chapter_id] = {
+                "character_ids": chapter_chars,
+                "scene_titles": chapter_scenes,
+                "creative": creative,
+                "has_audio": has_audio,
+                "has_job": chapter_id in job_chapters,
+                "stale": int(counts.get("stale") or 0),
+                "failed": int(counts.get("failed") or 0),
+            }
+
+        ordered_chars = sorted(
+            char_seen.values(),
+            key=lambda item: (item["id"] != "chr_narrator", item.get("role") or "zz", item["id"]),
+        )
+        return {
+            "characters": ordered_chars,
+            "scenes": scene_seen,
+            "chapters": per_chapter,
+        }
+
     @app.get("/api/ui/chapter")
     def ui_chapter(path: str = Query(...), chapter: str = Query(...)):
         """章节详情（含场景，`chapter show <id> --json`）。"""
         return _respond(_cli("--project", path, "--json", "chapter", "show", chapter))
+
+    @app.post("/api/ui/chapter/add")
+    def ui_chapter_add(body: dict) -> dict:
+        """新建章节（`chapter add --json`），返回新章节 ID 供前端直接跳转。
+
+        参数:
+            body: `{path, title, index?, outline?}`。
+
+        异常:
+            HTTPException 400: 标题为空。
+        """
+        title = str(body.get("title") or "").strip()
+        if not title:
+            raise HTTPException(status_code=400, detail={"code": 2, "message": "章节标题不能为空"})
+        argv = ["--project", body["path"], "--json", "chapter", "add", "--title", title]
+        if body.get("index") is not None:
+            argv += ["--index", str(int(body["index"]))]
+        if body.get("outline"):
+            argv += ["--outline", str(body["outline"])]
+        return _respond(_cli(*argv))
 
     @app.get("/api/ui/lines")
     def ui_lines(
@@ -1044,7 +1862,18 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         argv = ["--project", path, "--json", "line", "list", "--chapter", chapter]
         if status:
             argv += ["--status", status]
-        return _respond(_cli(*argv))
+        payload = _respond(_cli(*argv))
+        # 正文与切分是否还对得上：只读检查，让编辑区能直接给出「重新切分」出口
+        try:
+            payload["consistency"] = chapter_consistency(_store(path).load_chapter(chapter))
+        except Exception:  # noqa: BLE001 - 检查失败不影响台词展示
+            payload["consistency"] = None
+        return payload
+
+    @app.get("/api/ui/chapter/consistency")
+    def ui_chapter_consistency(path: str = Query(...), chapter: str = Query(...)) -> dict:
+        """正文与切分对位检查（只读）：任务页、配音页共用同一出口。"""
+        return chapter_consistency(_store(path).load_chapter(chapter))
 
     @app.get("/api/ui/line/diff")
     def ui_line_diff(path: str = Query(...), chapter: str = Query(...), line: str = Query(...)) -> dict:
@@ -1065,6 +1894,41 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
     def ui_queue(path: str = Query(...)):
         """队列快照（`queue list --json`）：轮询只打这个接口。"""
         return _respond(_cli("--project", path, "--json", "queue", "list"))
+
+    @app.get("/api/ui/gpu/status")
+    def ui_gpu_status(path: str = Query(...)) -> dict:
+        """GPU 锁与并发明细：锁文件持有人 + 队列状态计数（任务页展示）。
+
+        参数:
+            path: 工程根目录。
+
+        返回:
+            `{lock, queue, paused, max_concurrent, poll_interval_s}`。
+        """
+        from ..orchestration.gpu_queue import GpuLock
+
+        store = _store(path)
+        cfg = load_config(config_path) if config_path else load_config()
+        lock_path = str(cfg.get("gpu.lock_path") or "")
+        lock = GpuLock(lock_path).inspect() if lock_path else {
+            "path": "",
+            "exists": False,
+            "alive": False,
+            "holder": None,
+        }
+        jobs = QueueStore(store).load()
+        counts = {"total": len(jobs), "queued": 0, "running": 0, "failed": 0, "succeeded": 0}
+        for job in jobs:
+            status = str(job.get("status") or "")
+            if status in counts:
+                counts[status] += 1
+        return {
+            "lock": lock,
+            "queue": counts,
+            "paused": QueueStore(store).paused(),
+            "max_concurrent": int(cfg.get("gpu.max_concurrent") or 1),
+            "poll_interval_s": float(cfg.get("gpu.poll_interval_s") or 2),
+        }
 
     @app.get("/api/ui/readiness")
     def ui_readiness() -> dict:
@@ -1111,6 +1975,9 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
             return {"started": False, "active": len(active), "since": since}
 
         store = ProjectStore(path)
+        # 主动启动意味着「继续跑」：清掉暂停标记，避免新批次刚开始就卡住
+        (store.root / ".ndw" / "tts.paused").unlink(missing_ok=True)
+        QueueStore(store).set_paused(False)
         # pid 文件显示已有进程活着时直接拒绝，避免重复启动第二个批次
         pid_file = store.root / ".ndw" / "web-tts.pid"
         if pid_file.is_file():
@@ -1165,9 +2032,52 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         返回:
             {stopped 是否确实停下, killed 是否终止了进程, canceled 被取消的任务数}。
         """
+        store = ProjectStore(body["path"])
         result = _stop_tts_project(body["path"])
-        _ACTIVE_TTS_PROJECTS.discard(str(ProjectStore(body["path"]).root))
+        _ACTIVE_TTS_PROJECTS.discard(str(store.root))
+        # 停止优先于暂停：清掉两个标记，避免下次启动直接卡在暂停态
+        (store.root / ".ndw" / "tts.paused").unlink(missing_ok=True)
+        QueueStore(store).set_paused(False)
         return result
+
+    @app.get("/api/ui/tts/pause")
+    def ui_tts_pause_state(path: str = Query(...)) -> dict:
+        """读取配音批次与媒体队列的暂停状态。
+
+        参数:
+            path: 工程目录。
+
+        返回:
+            `{paused 配音批次暂停, queue_paused 队列暂停}`。
+        """
+        store = _store(path)
+        return {
+            "paused": (store.root / ".ndw" / "tts.paused").exists(),
+            "queue_paused": QueueStore(store).paused(),
+        }
+
+    @app.post("/api/ui/tts/pause")
+    def ui_tts_pause(body: dict) -> dict:
+        """暂停或继续配音批次（同时暂停媒体队列消费）。
+
+        暂停只阻止「下一行开始」，正在合成的那一行会跑完；删除标记后自动续跑。
+
+        参数:
+            body: `{path, paused}`。
+
+        返回:
+            `{paused}`。
+        """
+        store = _store(body["path"])
+        paused = bool(body.get("paused"))
+        marker = store.root / ".ndw" / "tts.paused"
+        if paused:
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_text(now_iso(), encoding="utf-8")
+        else:
+            marker.unlink(missing_ok=True)
+        QueueStore(store).set_paused(paused)
+        return {"paused": paused}
 
     @app.post("/api/ui/line/set")
     def ui_line_set(body: dict) -> dict:
@@ -1230,6 +2140,57 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         for key, flag in mapping.items():
             if body.get(key) is not None:
                 argv += [flag, str(body[key])]
+        return _respond(_cli(*argv))
+
+    @app.post("/api/ui/line/merge")
+    def ui_line_merge(body: dict) -> dict:
+        """合并同一场景内相邻的台词行（`line merge --json`）。
+
+        参数:
+            body: `{path, chapter, lines: [行 ID]}`，必须同场景且 index 连续。
+
+        返回:
+            `{changed, merged: {line_id, text, chars, removed, lost_audio}, revision}`。
+
+        异常:
+            HTTPException 400: 少于两行、跨场景、不相邻或正文对不上。
+        """
+        lines = [str(item).strip() for item in (body.get("lines") or []) if str(item).strip()]
+        if len(lines) < 2:
+            raise HTTPException(status_code=400, detail={"code": 2, "message": "至少选择两行才能合并"})
+        return _respond(
+            _cli(
+                "--project",
+                body["path"],
+                "--json",
+                "line",
+                "merge",
+                "--chapter",
+                body["chapter"],
+                "--lines",
+                ",".join(lines),
+            )
+        )
+
+    @app.post("/api/ui/line/merge-narration")
+    def ui_line_merge_narration(body: dict) -> dict:
+        """按期望字数批量合并相邻旁白（`line merge-narration --json`）。
+
+        参数:
+            body: `{path, chapter, scene?|scenes?: [...], max_chars?, dry_run?}`；
+                  `dry_run` 缺省为 true，只返回预览分组。
+
+        返回:
+            `{mode, dry_run, groups, counts, changed?}`。
+        """
+        argv = ["--project", body["path"], "--json", "line", "merge-narration", "--chapter", body["chapter"]]
+        scenes = body.get("scenes") or ([body["scene"]] if body.get("scene") else [])
+        for scene in scenes:
+            argv += ["--scene", str(scene)]
+        if body.get("max_chars") is not None:
+            argv += ["--max-chars", str(int(body["max_chars"]))]
+        if body.get("dry_run", True):
+            argv.append("--dry-run")
         return _respond(_cli(*argv))
 
     @app.post("/api/ui/line/edit")
@@ -1497,6 +2458,32 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         if body.get("keep_manual"):
             argv.append("--keep-manual")
         return _respond(_cli(*argv))
+
+    @app.post("/api/ui/line/split-at")
+    def ui_line_split_at(body: dict) -> dict:
+        """在光标处拆分一条台词（`line split-at --offset`）。
+
+        参数:
+            body: `{path, chapter, line, offset}`；offset 为 0 基字符位置。
+
+        返回:
+            `{changed, line_id, new_line_id, first_text, second_text}`。
+        """
+        return _respond(
+            _cli(
+                "--project",
+                body["path"],
+                "--json",
+                "line",
+                "split-at",
+                "--chapter",
+                body["chapter"],
+                "--line",
+                body["line"],
+                "--offset",
+                str(int(body.get("offset") or 0)),
+            )
+        )
 
     @app.post("/api/ui/line/split/impact")
     def ui_line_split_impact(body: dict) -> dict:
@@ -1796,6 +2783,113 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
                     }
                 )
         return {"root": str(root), "files": files}
+
+    @app.get("/api/ui/export/preflight")
+    def ui_export_preflight(path: str = Query(...), chapter: str = Query(...)) -> dict:
+        """导出前检查：缺配音行、音色编排提示、时间轴状态。
+
+        参数:
+            path: 工程目录。
+            chapter: 章节 ID。
+
+        返回:
+            见 `_export_preflight`。
+        """
+        return _export_preflight(_store(path), chapter)
+
+    @app.post("/api/ui/export/bundle")
+    def ui_export_bundle(body: dict) -> dict:
+        """导出本章交付包并打成 zip（新版前端「导出」页使用）。
+
+        流程：先构建时间轴（幂等派生物），再走 `export --format bundle` 产出
+        SRT / 清单 / MP3 / MP4，最后把成品与逐行配音音频、台词脚本一起打包。
+
+        参数:
+            body: `{path, chapter}`。
+
+        返回:
+            `{ok, zip, rel, name, missing, entries}`；`rel` 可直接交给
+            `/api/ui/file?path=...&project=...` 下载。
+
+        异常:
+            HTTPException: 时间轴构建或导出失败时透传 CLI 的中文说明。
+        """
+        import zipfile
+        from datetime import datetime
+
+        path = body["path"]
+        chapter_id = body["chapter"]
+        store = _store(path)
+        # 导出前检查：有缺音频/编排问题时必须显式忽略，避免「静默交付半成品」
+        check = _export_preflight(store, chapter_id)
+        blocking = check["missing_total"] or any(item["level"] == "error" for item in check["issues"])
+        if blocking and not body.get("ignore_issues"):
+            raise HTTPException(
+                status_code=412,
+                detail={
+                    "code": 4,
+                    "message": (
+                        f"导出前检查未通过：{check['missing_total']} 行缺音频，"
+                        f"{len(check['issues'])} 条问题；确认忽略后再导出"
+                    ),
+                    "preflight": check,
+                },
+            )
+        # 时间轴是导出前置；重建是幂等的，避免用户改词后导出到旧时间轴
+        _respond(_cli("--project", path, "--json", "timeline", "build", "--chapter", chapter_id))
+        result = _respond(_cli("--project", path, "--json", "export", "--chapter", chapter_id, "--format", "bundle"))
+        if not isinstance(result, dict):
+            raise HTTPException(status_code=500, detail={"code": 3, "message": "导出结果格式异常"})
+
+        lines_payload = _respond(_cli("--project", path, "--json", "line", "list", "--chapter", chapter_id))
+        rows = (lines_payload or {}).get("lines") or []
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        export_dir = store.root / "exports"
+        export_dir.mkdir(parents=True, exist_ok=True)
+        zip_path = export_dir / f"{chapter_id}.bundle-{stamp}.zip"
+
+        entries: list[str] = []
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as archive:
+            # 1) 交付包成品（srt / manifest / mp3 / mp4 里有就收）
+            for item in result.get("artifacts") or []:
+                target = Path(str(item.get("path") or ""))
+                if target.is_file():
+                    archive.write(target, target.name)
+                    entries.append(target.name)
+            for key in ("readme", "bundle"):
+                target = Path(str(result.get(key) or ""))
+                if target.is_file():
+                    archive.write(target, target.name)
+                    entries.append(target.name)
+            # 2) 台词脚本：没有成片时也能直接读稿
+            script = "\n".join(
+                f"[{int(row.get('ordinal') or 0):03d}] {row.get('speaker') or ''}：{row.get('text') or ''}"
+                for row in rows
+            )
+            archive.writestr("台词脚本.txt", script + "\n")
+            entries.append("台词脚本.txt")
+            # 3) 已配好的逐行音频：交付包里最实用的部分
+            audio_count = 0
+            for row in rows:
+                rel = row.get("audio")
+                if not rel:
+                    continue
+                source = store.root / str(rel)
+                if not source.is_file():
+                    continue
+                archive.write(source, f"audio/{source.name}")
+                audio_count += 1
+            if audio_count:
+                entries.append(f"audio/（{audio_count} 个文件）")
+
+        return {
+            "ok": True,
+            "zip": str(zip_path),
+            "rel": str(zip_path.relative_to(store.root)),
+            "name": zip_path.name,
+            "missing": result.get("missing") or [],
+            "entries": entries,
+        }
 
     @app.post("/api/ui/project/init")
     def ui_project_init(body: dict) -> dict:
@@ -2179,6 +3273,45 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
             raise HTTPException(status_code=400, detail={"code": 2, "message": str(exc)})
         return {"ok": True, **data}
 
+    @app.get("/api/ui/cast/character")
+    def ui_cast_character(path: str = Query(...), character: str = Query(...)) -> dict:
+        """某个角色在各章的生效音色（角色默认 + 章节覆盖）。
+
+        参数:
+            path: 工程根目录。
+            character: 角色 ID。
+
+        返回:
+            `{character, chapters: [{id, index, title, overridable, mode, override, inherited, effective}], voices}`。
+        """
+        from ..store.voice_cast import chapter_override_rows
+
+        store = _store(path)
+        rows: list[dict] = []
+        voices: list[dict] = []
+        for meta in store.list_chapters():
+            try:
+                data = chapter_override_rows(store, meta["id"])
+            except FileNotFoundError:
+                continue
+            row = next((item for item in data.get("rows") or [] if item.get("character_id") == character), None)
+            if row is None:
+                continue
+            voices = data.get("voices") or voices
+            rows.append(
+                {
+                    "id": meta["id"],
+                    "index": meta.get("index"),
+                    "title": meta.get("title"),
+                    "overridable": bool(row.get("overridable")),
+                    "mode": row.get("mode"),
+                    "override": row.get("override"),
+                    "inherited": row.get("inherited"),
+                    "effective": row.get("effective"),
+                }
+            )
+        return {"character": character, "chapters": rows, "voices": voices}
+
     @app.get("/api/ui/cast/autofill")
     def ui_cast_autofill_preview(path: str = Query(...)) -> dict:
         """预览「按角色自动补齐」计划（只读，不落盘）。
@@ -2485,6 +3618,21 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
                 argv += ["--relationship-remove", str(target_id).strip()]
         return _respond(_cli(*argv))
 
+    @app.get("/api/ui/characters/refs")
+    def ui_character_refs(path: str = Query(...), character: str = Query(...)) -> dict:
+        """角色引用位置：哪些章节/台词行仍在使用该角色（删除前提示）。
+
+        参数:
+            path: 工程目录。
+            character: 角色 ID。
+
+        返回:
+            `{total, chapters: [{id, index, title, lines}]}`。
+        """
+        from ..cli_character import character_refs
+
+        return character_refs(_store(path), character)
+
     @app.post("/api/ui/characters/delete")
     def ui_characters_delete(body: dict) -> dict:
         """按 ID 删除人物（`character remove`，旁白会被拒绝）。
@@ -2501,6 +3649,42 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         if not character_id:
             raise HTTPException(status_code=400, detail={"code": 2, "message": "缺少 id 参数"})
         return _respond(_cli("--project", path, "--json", "character", "remove", "--id", str(character_id)))
+
+    @app.get("/api/ui/characters/stats")
+    def ui_character_stats(path: str = Query(...)) -> dict:
+        """按角色汇总全书出场行数与首次登场章节（角色档案「查看出场」用）。
+
+        参数:
+            path: 工程目录。
+
+        返回:
+            `{characters: {角色ID: {lines, chapters: [{id, title, index, lines}]}}}`。
+        """
+        store = _store(path)
+        stats: dict[str, dict] = {}
+        for chapter in store.list_chapters():
+            chapter_id = chapter.get("id")
+            if not chapter_id:
+                continue
+            data = store.load_chapter(chapter_id)
+            for scene in data.get("scenes") or []:
+                for line in scene.get("lines") or []:
+                    speaker = line.get("speaker_id")
+                    if not speaker:
+                        continue
+                    row = stats.setdefault(speaker, {"lines": 0, "chapters": []})
+                    row["lines"] += 1
+                    bucket = row["chapters"][-1] if row["chapters"] else None
+                    if not bucket or bucket["id"] != chapter_id:
+                        bucket = {
+                            "id": chapter_id,
+                            "title": chapter.get("title") or "",
+                            "index": chapter.get("index") or 0,
+                            "lines": 0,
+                        }
+                        row["chapters"].append(bucket)
+                    bucket["lines"] += 1
+        return {"characters": stats}
 
     # ---------------- 音色库（内置参考音色 / 录音上传 / 绑定角色）----------------
 
@@ -3409,6 +4593,8 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
     register_models_routes(app, config_path)
     # 单行重录 / 版本对比 / Casting 试听 / 整本批量（独立模块）
     register_voice_tools_routes(app, config_path)
+    # 智能对轨：上传播音按静音切分写入台词行（独立模块）
+    register_align_routes(app, config_path)
     # 人物音色 / 外貌中英文描述补全（独立模块）
     register_character_desc_routes(app, config_path)
     # 章节/大纲续写（独立模块）
@@ -3422,29 +4608,26 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
     # 媒体页音效生成：Stable Audio 3 provider + 进度轮询（独立模块）
     register_sfx_routes(app, config_path)
 
-    if STATIC_DIR.exists():
-        from fastapi.responses import FileResponse
-        from fastapi.staticfiles import StaticFiles
+    from fastapi.staticfiles import StaticFiles
 
-        class NoCacheStaticFiles(StaticFiles):
-            """静态资源禁用强缓存。
+    class NoCacheStaticFiles(StaticFiles):
+        """静态资源禁用强缓存。
 
-            本地工作台改完前端只需刷新页面即可生效，避免浏览器按启发式缓存
-            继续使用旧 JS，导致改了代码但界面没变化。
-            """
+        本地工作台改完前端只需刷新页面即可生效，避免浏览器按启发式缓存
+        继续使用旧 JS，导致改了代码但界面没变化。
+        """
 
-            def file_response(self, *args, **kwargs):
-                """在原始静态响应上补一条 no-cache。"""
-                response = super().file_response(*args, **kwargs)
-                response.headers["Cache-Control"] = "no-cache"
-                return response
+        def file_response(self, *args, **kwargs):
+            """在原始静态响应上补一条 no-cache。"""
+            response = super().file_response(*args, **kwargs)
+            response.headers["Cache-Control"] = "no-cache"
+            return response
 
-        app.mount("/static", NoCacheStaticFiles(directory=STATIC_DIR), name="static")
-
-        @app.get("/")
-        def index() -> FileResponse:
-            """台词校对页。"""
-            return FileResponse(STATIC_DIR / "index.html", headers={"Cache-Control": "no-cache"})
+    # 前端只有 web-next 一套：直接挂在根路径。hash 路由不需要服务端回退。
+    # 缺少目录时直接报错，不回退到旧的 static 界面。
+    if not WEB_NEXT_DIR.exists():
+        raise RuntimeError(f"缺少前端目录：{WEB_NEXT_DIR}；请从仓库根启动，旧 static 界面已废弃")
+    app.mount("/", NoCacheStaticFiles(directory=WEB_NEXT_DIR, html=True), name="web")
 
     return app
 

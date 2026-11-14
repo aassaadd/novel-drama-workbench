@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>大纲 · 长夜将明</title>
+<link rel="stylesheet" href="assets/app.css" />
+</head>
+<body>
+<header class="topbar">
+  <div class="tb-left">
+    <a class="btn icon" href="01-projects.html" title="返回工程列表"><span class="ic ic-back"></span></a>
+    <div class="tb-views">
+      <button class="btn icon" title="画本编辑视图"><span class="ic ic-doc"></span></button>
+      <button class="btn icon" title="配音视图"><span class="ic ic-mic"></span></button>
+      <button class="btn icon" title="后期制作视图"><span class="ic ic-media"></span></button>
+      <button class="btn icon" title="更多视图"><span class="ic ic-more"></span></button>
+    </div>
+  </div>
+  <div class="tb-mid">
+    <button class="btn icon sm" title="上一章"><span class="ic ic-prev"></span></button>
+    <div class="crumbs">
+      <a href="01-projects.html">长夜将明</a><span class="sep">/</span>
+      <span class="cur">大纲</span>
+      <span class="ic ic-chev" style="color:var(--text-4)"></span>
+    </div>
+    <span class="state ok" style="margin-left:4px"><span class="ic ic-check"></span>已自动保存</span>
+    <button class="btn icon sm" title="下一章"><span class="ic ic-next"></span></button>
+  </div>
+  <div class="tb-right">
+    <button class="btn icon" title="撤销"><span class="tb-glyph">↶</span></button>
+    <button class="btn icon" title="重做"><span class="tb-glyph">↷</span></button>
+    <div class="zoom">
+      <button class="btn icon sm" title="缩小"><span class="ic ic-minus"></span></button>
+      <span class="z-val">100%</span>
+      <button class="btn icon sm" title="放大"><span class="ic ic-plus"></span></button>
+    </div>
+    <button class="btn icon" title="查找"><span class="ic ic-search"></span></button>
+    <button class="btn icon" title="更多"><span class="ic ic-more"></span></button>
+    <a class="btn icon" href="11-settings.html" title="设置"><span class="ic ic-sliders"></span></a>
+  </div>
+</header>
+
+<div class="studio no-right">
+  <nav class="railbar">
+    <a class="rail-item" href="01-projects.html" title="项目"><span class="ic ic-project"></span>项目<span class="rail-n">5</span></a>
+    <a class="rail-item" href="02-world.html" title="世界"><span class="ic ic-world"></span>世界<span class="rail-n">4</span></a>
+    <a class="rail-item" href="03-characters.html" title="人物"><span class="ic ic-user"></span>人物<span class="rail-n">9</span></a>
+    <a class="rail-item active" href="05-outline.html" title="大纲"><span class="ic ic-outline"></span>大纲<span class="rail-n">3</span></a>
+    <a class="rail-item" href="06-chapter.html" title="章节"><span class="ic ic-doc"></span>章节<span class="rail-n">12</span></a>
+    <a class="rail-item" href="07-script.html" title="标注"><span class="ic ic-clap"></span>标注<span class="rail-n">8</span></a>
+    <a class="rail-item" href="08-voice.html" title="配音"><span class="ic ic-mic"></span>配音<span class="rail-n">86%</span></a>
+    <a class="rail-item" href="09-media.html" title="媒体"><span class="ic ic-media"></span>媒体<span class="rail-n">24</span></a>
+    <a class="rail-item" href="10-export.html" title="导出"><span class="ic ic-export"></span>导出</a>
+    <div class="rail-sep"></div>
+    <a class="rail-item" href="04-voices.html" title="音色库"><span class="ic ic-mic"></span>音色</a>
+    <div class="rail-foot">
+      <a class="rail-item" href="10-export.html" title="运行记录"><span class="ic ic-clock"></span>记录</a>
+      <a class="rail-item" href="11-settings.html" title="设置"><span class="ic ic-sliders"></span>设置</a>
+    </div>
+  </nav>
+
+  <section class="ctx">
+    <div class="ctx-head">
+      <span class="ct">幕结构</span>
+      <span class="badge" style="font-weight:400">3 幕 · 12 章</span>
+      <div class="right">
+        <button class="btn icon sm" title="全部展开"><span class="ic ic-chev"></span></button>
+        <button class="btn icon sm" title="折叠面板"><span class="ic ic-back"></span></button>
+      </div>
+    </div>
+    <div class="ctx-tools">
+      <div class="toolrow">
+        <div class="search"><span class="ic ic-search"></span><input placeholder="搜索幕 / 章节节拍" /><span class="ic ic-close" style="opacity:.5"></span></div>
+        <button class="btn sm primary" title="新增大纲节点"><span class="ic ic-plus"></span>新增节点</button>
+      </div>
+    </div>
+    <div class="chap-list">
+      <div class="chap-row on"><span class="dot accent"></span><span class="cn">第一幕 · 起势</span><span class="cw">3 章</span></div>
+      <div class="chap-row"><span class="dot ok"></span><span class="cn">第二幕 · 追索</span><span class="cw">5 章</span></div>
+      <div class="chap-row"><span class="dot warn"></span><span class="cn">第三幕 · 收束</span><span class="cw">4 章</span></div>
+      <div class="tree-label" style="padding-left:14px">未归入幕 <span class="right">2</span></div>
+      <div class="chap-row"><span class="dot" style="background:transparent"></span><span class="cn">开场：雨夜的车</span><span class="cw">节拍</span></div>
+      <div class="chap-row"><span class="dot" style="background:transparent"></span><span class="cn">支线：记者的录音</span><span class="cw">节拍</span></div>
+    </div>
+    <div class="col-foot" style="padding:9px 14px;border-top:1px solid var(--line);font-size:10.5px;color:var(--text-3)">
+      大纲 v4 · 已落地 5 / 12 章 · 更新于 14:20
+    </div>
+  </section>
+
+  <section class="editor">
+    <div class="ed-head">
+      <span class="et">大纲 · 长夜将明</span>
+      <span class="em">3 幕 12 章 · 每章 3–5 个节拍</span>
+      <div class="right">
+        <button class="btn sm" title="重新生成整篇大纲"><span class="ic ic-refresh"></span>生成大纲</button>
+        <button class="btn sm primary" title="从当前幕续写"><span class="ic ic-spark"></span>续写大纲</button>
+        <button class="btn icon" title="更多"><span class="ic ic-more"></span></button>
+      </div>
+    </div>
+
+    <div class="ed-body" style="padding:12px">
+      <div class="banner warn" style="margin-bottom:12px">
+        <span class="ic ic-warn b-icon"></span>
+        <div class="b-body">
+          <div class="b-title">正文变更，下游需重跑</div>
+          <div class="muted" style="font-size:11px">第一章新增 2 段 · 大纲节拍 / 场景切分 / 标注均已标记为过期</div>
+        </div>
+        <div class="b-actions">
+          <button class="btn sm">查看影响</button>
+          <button class="btn sm"><span class="ic ic-refresh"></span>重跑下游</button>
+        </div>
+      </div>
+
+      <div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;align-items:start">
+        <div class="act">
+          <div class="act-head">
+            <span class="act-no">ACT 1</span>
+            <h3>第一幕 起势</h3>
+            <div class="right">
+              <span class="badge">3 章</span>
+              <button class="btn icon sm" title="更多"><span class="ic ic-more"></span></button>
+            </div>
+          </div>
+          <div class="chapter-block" style="background:rgba(232,180,76,.05)">
+            <div class="cb-head"><span class="cb-no">01</span><span class="cb-title">雨夜归人</span><span class="badge ok" style="margin-left:auto">已配音</span></div>
+            <div class="cb-sum">雨夜街口，卷宗少一页</div>
+          </div>
+          <div class="chapter-block">
+            <div class="cb-head"><span class="cb-no">02</span><span class="cb-title">缺失的卷宗</span><span class="badge accent" style="margin-left:auto">已拆场景</span></div>
+            <div class="cb-sum">档案室缺页，指纹被抹</div>
+          </div>
+          <div class="chapter-block">
+            <div class="cb-head"><span class="cb-no">03</span><span class="cb-title">第十三通电话</span><span class="badge muted" style="margin-left:auto">草稿</span></div>
+            <div class="cb-sum">第十三通来电无人应</div>
+          </div>
+        </div>
+
+        <div class="act">
+          <div class="act-head">
+            <span class="act-no">ACT 2</span>
+            <h3>第二幕 追索</h3>
+            <div class="right">
+              <span class="badge">5 章</span>
+              <button class="btn icon sm" title="更多"><span class="ic ic-more"></span></button>
+            </div>
+          </div>
+          <div class="chapter-block">
+            <div class="cb-head"><span class="cb-no">04</span><span class="cb-title">旧城区的灯</span><span class="badge muted" style="margin-left:auto">草稿</span></div>
+            <div class="cb-sum">旧城区灯火忽明忽暗</div>
+          </div>
+          <div class="chapter-block">
+            <div class="cb-head"><span class="cb-no">05</span><span class="cb-title">密钥</span><span class="badge muted" style="margin-left:auto">草稿</span></div>
+            <div class="cb-sum">老周交出抽屉钥匙</div>
+          </div>
+          <div class="chapter-block">
+            <div class="cb-head"><span class="cb-no">06</span><span class="cb-title">天台</span><span class="badge muted" style="margin-left:auto">草稿</span></div>
+            <div class="cb-sum">天台对峙，雨势转急</div>
+          </div>
+          <div class="chapter-block">
+            <div class="cb-head"><span class="cb-no">07</span><span class="cb-title">回声</span><span class="badge muted" style="margin-left:auto">草稿</span></div>
+            <div class="cb-sum">录音回放出现回声</div>
+          </div>
+          <div class="chapter-block">
+            <div class="cb-head"><span class="cb-no">08</span><span class="cb-title">雨停之前</span><span class="badge muted" style="margin-left:auto">草稿</span></div>
+            <div class="cb-sum">雨停前，陈默失踪</div>
+          </div>
+        </div>
+
+        <div class="act">
+          <div class="act-head">
+            <span class="act-no">ACT 3</span>
+            <h3>第三幕 收束</h3>
+            <div class="right">
+              <span class="badge">4 章</span>
+              <button class="btn icon sm" title="更多"><span class="ic ic-more"></span></button>
+            </div>
+          </div>
+          <div class="chapter-block">
+            <div class="cb-head"><span class="cb-no">09</span><span class="cb-title">旧案重提</span><span class="badge muted" style="margin-left:auto">草稿</span></div>
+            <div class="cb-sum">旧案卷宗重见天日</div>
+          </div>
+          <div class="chapter-block">
+            <div class="cb-head"><span class="cb-no">10</span><span class="cb-title">对峙</span><span class="badge muted" style="margin-left:auto">草稿</span></div>
+            <div class="cb-sum">正面对峙，证据翻转</div>
+          </div>
+          <div class="chapter-block">
+            <div class="cb-head"><span class="cb-no">11</span><span class="cb-title">余烬</span><span class="badge muted" style="margin-left:auto">草稿</span></div>
+            <div class="cb-sum">余烬里找到第二份名单</div>
+          </div>
+          <div class="chapter-block">
+            <div class="cb-head"><span class="cb-no">12</span><span class="cb-title">长夜将明</span><span class="badge muted" style="margin-left:auto">草稿</span></div>
+            <div class="cb-sum">长夜尽头，真相落定</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card tight" style="margin-top:12px">
+        <div class="card-head">
+          <h3>节奏检查</h3>
+          <span class="sub">3 条建议 · 检查于 3 分钟前</span>
+          <div class="right">
+            <button class="btn sm" title="重新检查三幕节奏"><span class="ic ic-refresh"></span>检查节奏</button>
+            <button class="btn sm primary" title="把大纲节点落地为章节"><span class="ic ic-outline"></span>落地成章节</button>
+          </div>
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px">
+          <div class="warn-item" style="border-bottom:0;padding:0">
+            <span class="ic ic-warn w-ic"></span>
+            <div class="w-body">
+              <div class="w-text">中段偏慢：第六至八章连续 3 章没有新信息</div>
+              <div class="w-meta">建议合并第七章、第八章</div>
+            </div>
+          </div>
+          <div class="warn-item" style="border-bottom:0;padding:0">
+            <span class="ic ic-warn w-ic"></span>
+            <div class="w-body">
+              <div class="w-text">第二幕冲突不足：陈默的动机始终未揭示</div>
+              <div class="w-meta">建议把对峙提前到第五章</div>
+            </div>
+          </div>
+          <div class="warn-item" style="border-bottom:0;padding:0">
+            <span class="ic ic-warn w-ic"></span>
+            <div class="w-body">
+              <div class="w-text">第三幕收束过快：真相在终章一次给出</div>
+              <div class="w-meta">建议把名单线索拆到第十一章</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+</div>
+</body>
+</html>

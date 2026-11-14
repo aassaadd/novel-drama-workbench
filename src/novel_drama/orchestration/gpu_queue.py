@@ -154,6 +154,32 @@ class GpuLock:
         except (FileNotFoundError, json.JSONDecodeError, OSError, ValueError):
             return
 
+    def inspect(self) -> dict:
+        """查看锁当前状态（只读，不做接管或清理）。
+
+        返回:
+            `{path, exists, alive, holder}`；`holder` 为
+            `{pid, job_id, started_at}`，锁内容不可解析时为 None。
+        """
+        exists = self.path.exists()
+        holder = None
+        if exists:
+            try:
+                data = json.loads(self.path.read_text(encoding="utf-8") or "{}")
+                holder = {
+                    "pid": int(data.get("pid") or 0),
+                    "job_id": str(data.get("job_id") or ""),
+                    "started_at": str(data.get("started_at") or ""),
+                }
+            except (OSError, json.JSONDecodeError, ValueError):
+                holder = None
+        return {
+            "path": str(self.path),
+            "exists": exists,
+            "alive": self._holder_alive() if exists else False,
+            "holder": holder,
+        }
+
     @contextmanager
     def hold(self, job_id: str = "") -> Iterator[None]:
         """以 with 语法持有锁。"""
@@ -232,6 +258,12 @@ class GpuQueue:
         self.queue.mark_interrupted()
         processed = 0
         while True:
+            # 暂停标记只让消费循环原地等待，不退出进程，继续后从下一条任务接着跑
+            if self.queue.paused():
+                if once:
+                    return processed
+                time.sleep(self.poll_interval_s)
+                continue
             job = self.run_once()
             if job is None:
                 if once or processed == 0:

@@ -189,6 +189,29 @@ def analyze_scene_split(store, chapter: dict, characters: list[dict], max_chars:
 
     script = _script_info(store, chapter)
     created = len(drafts) - len(reused) if keep_lines else len(drafts)
+    # 页面「拆场景预览」需要逐段展示「原文段落 → 归属场景」，这里直接给出规则切分结果
+    reused_ids = {id(scene) for scene, _ in reused}
+    preview = {
+        "scenes": [
+            {
+                "index": index,
+                "title": draft.get("title") or f"场景 {index + 1}",
+                "chars": len(draft.get("content") or ""),
+                "excerpt": (draft.get("content") or "").strip()[:60],
+            }
+            for index, draft in enumerate(drafts)
+        ],
+        "reused": [
+            {"index": int(scene.get("index") or 0), "title": scene.get("title") or "", "lines": len(_scene_lines(scene))}
+            for scene in old_scenes
+            if id(scene) in reused_ids
+        ],
+        "rebuilt": [
+            {"index": int(scene.get("index") or 0), "title": scene.get("title") or "", "lines": len(_scene_lines(scene))}
+            for scene in old_scenes
+            if id(scene) not in reused_ids
+        ],
+    }
 
     text = [
         f"重新切分场景影响：已有 {len(old_scenes)} 个场景 / {total_lines} 行台词，规则将切出 {len(drafts)} 个场景。",
@@ -228,6 +251,7 @@ def analyze_scene_split(store, chapter: dict, characters: list[dict], max_chars:
         "created": created,
         "need_audio": lost_lines,
         "script": script,
+        "preview": preview,
         "text": "\n".join(text),
     }
 

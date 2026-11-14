@@ -91,3 +91,32 @@ class QueueStore:
         if count:
             self.save(jobs)
         return count
+
+    @property
+    def pause_file(self):
+        """队列暂停标记文件（存在即暂停，不落 queue.json，避免打断任务状态）。"""
+        return self.store.root / ".ndw" / "queue.paused"
+
+    def paused(self) -> bool:
+        """队列是否处于暂停状态。
+
+        返回:
+            True 表示已暂停；消费循环会原地等待。
+        """
+        return self.pause_file.exists()
+
+    def set_paused(self, paused: bool) -> bool:
+        """设置队列暂停状态。
+
+        参数:
+            paused: True 写标记；False 删除标记（自动继续）。
+
+        返回:
+            设置后的暂停状态。
+        """
+        if paused:
+            self.pause_file.parent.mkdir(parents=True, exist_ok=True)
+            self.pause_file.write_text(now_iso(), encoding="utf-8")
+        else:
+            self.pause_file.unlink(missing_ok=True)
+        return bool(paused)

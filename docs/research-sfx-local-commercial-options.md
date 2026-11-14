@@ -114,7 +114,7 @@ ComfyUI + MPS 下的实际耗时、峰值内存**均未实测**，不填推测�
 **落地改造点（仅设计，未实施）**
 1. `config/comfy/` 新增平面模板 `sa3_small_sfx.json`，`manifest.json` 增加一条 `kind: "sfx"` 登记，`bindings` 建议：`prompt → CLIPTextEncode.text`、`duration → EmptyLatentAudio.seconds`、`seed → KSampler.seed`、`filename_prefix → SaveAudio*.filename_prefix`。
 2. `comfy_media.py` 的 `_BUILTIN_TEMPLATES` 增加 `"sfx": ["sa3_small_sfx"]`，并同步 `builtin_template_ids` 的中文报错可选值文案。
-3. `comfy_media`/`runner` 放开 `plan_media` 对 sfx 的限制，`run_media` 在 `providers.sfx == "comfyui"` 时走 Comfy 分支，否则维持 `render_sfx` 离线合成（保持向后兼容）。
+3. `comfy_media`/`runner` 放开 `plan_media` 对 sfx 的限制，`run_media` 在 `providers.sfx == "comfyui"` 时走 Comfy 分支，否则维持 `render_sfx` 离线合成（保持向后兼容）（**未上线阶段暂不要求**：无需保留旧链路兜底）。
 4. `config/comfy/models.json` 登记两个新文件并标注 `license: "Stability AI Community License"`、`license_gate: "community_1m_usd"`、`commercial_use: true`。
 5. 配置层：`providers.sfx` 增加 `comfyui` 取值；`comfyui.templates.sfx` 指向新模板。
 6. 适配层：新增 `ComfySfxAdapter` 实现 `SfxAdapter.generate`，内部做「中文描述→英文提示词」与 `Length: N seconds` 后缀拼接（官方音效 reprompt 示例即此格式），并把 `<1 s` 的条目按 1 s 生成后用 ffmpeg 裁切。

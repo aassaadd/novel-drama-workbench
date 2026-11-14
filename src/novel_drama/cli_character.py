@@ -337,8 +337,42 @@ def cmd_character_update(args, config: AppConfig) -> int:
     return 0
 
 
+def character_refs(store, character_id: str) -> dict:
+    """汇总某个角色被哪些章节/台词行引用（删除前保护与页面提示用）。
+
+    参数:
+        store: 工程读写入口。
+        character_id: 角色 ID。
+
+    返回:
+        `{total, chapters: [{id, index, title, lines: [{line_id, text}]}]}`，只含有引用的章节。
+    """
+    chapters: list[dict] = []
+    total = 0
+    for meta in store.list_chapters():
+        chapter = store.load_chapter(meta["id"])
+        rows = [
+            {"line_id": line.get("id"), "text": line.get("text")}
+            for scene in chapter.get("scenes") or []
+            for line in scene.get("lines") or []
+            if line.get("speaker_id") == character_id
+        ]
+        if not rows:
+            continue
+        total += len(rows)
+        chapters.append(
+            {
+                "id": meta["id"],
+                "index": meta.get("index"),
+                "title": meta.get("title"),
+                "lines": rows[:50],
+            }
+        )
+    return {"total": total, "chapters": chapters}
+
+
 def cmd_character_remove(args, config: AppConfig) -> int:
-    """按 ID 删除角色（旁白不可删除）。
+    """按 ID 删除角色（旁白不可删除；仍被台词引用时拒绝并列出位置）。
 
     参数:
         args: 已解析参数（id / json）。
@@ -348,17 +382,23 @@ def cmd_character_remove(args, config: AppConfig) -> int:
         进程退出码。
 
     异常:
-        ValueError: 试图删除旁白。
+        ValueError: 试图删除旁白，或角色仍被台词引用。
         PreconditionError: 角色不存在。
     """
     store = _resolve_store(args, config)
     if args.id == entities.NARRATOR_ID:
         raise ValueError("旁白是保留角色，不能删除")
     table = store.load_characters()
-    before = len(table["characters"])
-    table["characters"] = [item for item in table["characters"] if item.get("id") != args.id]
-    if len(table["characters"]) == before:
+    if not any(item.get("id") == args.id for item in table["characters"]):
         raise PreconditionError(f"角色不存在: {args.id}")
+    refs = character_refs(store, args.id)
+    if refs["total"]:
+        chapters = "、".join(str(item.get("title") or item.get("id")) for item in refs["chapters"][:6])
+        raise ValueError(
+            f"角色仍被 {refs['total']} 行台词引用（{len(refs['chapters'])} 章：{chapters}），"
+            "请先把这些行的说话人改派给其它角色，再删除"
+        )
+    table["characters"] = [item for item in table["characters"] if item.get("id") != args.id]
     store.save_characters(table)
     _emit(args, f"已删除角色 {args.id}", {"removed": args.id, "characters": len(table["characters"])})
     return 0

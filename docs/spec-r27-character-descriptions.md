@@ -29,6 +29,8 @@
 
 ## 兼容
 
+> **未上线阶段暂不要求**：旧工程数据可直接重建，下面三条兼容说明保留供上线后参考，不作为当前实现约束。
+
 - `schema/character.schema.json` 只新增可选字段，不加 required；旧工程缺字段可正常读取与保存；
 - `models/entities.new_character` 新增字段默认空串，新建人物字段齐全；
 - 旧字段 `appearance_prompt` / `negative_prompt` 为空时，用 `appearance_desc_en` / `appearance_negative_en` 回填，

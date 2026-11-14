@@ -1,0 +1,527 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>弹窗与浮层 · 小说改编有声剧工作台</title>
+<link rel="stylesheet" href="assets/app.css" />
+<style>
+  /* 本页仅用于弹窗陈列：标题行、下拉菜单卡、候选音色卡 */
+  .stage-item { min-width: 0; display: flex; flex-direction: column; gap: 7px; }
+  .stage-label {
+    display: flex; align-items: center; gap: 8px; min-height: 16px; padding: 0 2px;
+    font-size: 10.5px; color: var(--text-3); min-width: 0;
+  }
+  .stage-label .no { font-family: var(--mono); font-size: 9.5px; color: var(--text-4); flex: 0 0 auto; }
+  .stage-label .trig {
+    margin-left: auto; font-size: 10px; color: var(--text-4);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0;
+  }
+  .menu-card {
+    width: 252px; padding: 6px; border-radius: 10px;
+    box-shadow: 0 18px 44px rgba(0, 0, 0, 0.45);
+  }
+  .menu-item {
+    display: flex; align-items: center; gap: 8px; height: 32px; padding: 0 8px;
+    border-radius: 6px; font-size: 12px; color: var(--text-2); cursor: pointer;
+  }
+  .menu-item:hover { background: var(--bg-3); color: var(--text); }
+  .menu-item .ic { color: var(--text-3); }
+  .menu-item .kbd {
+    margin-left: auto; font-family: var(--mono); font-size: 9.5px; color: var(--text-4);
+    border: 1px solid var(--line-2); border-radius: 4px; padding: 0 4px; line-height: 15px;
+  }
+  .menu-sep { height: 1px; background: var(--line); margin: 5px 6px; }
+  .cand {
+    display: flex; flex-direction: column; gap: 7px;
+    padding: 9px 10px; border: 1px solid var(--line-2); border-radius: 8px;
+    background: var(--bg-1); min-width: 0;
+  }
+  .cand.on {
+    border-color: var(--accent-line);
+    background: rgba(232, 180, 76, 0.07);
+    box-shadow: inset 0 0 0 1px rgba(232, 180, 76, 0.18);
+  }
+  .cand-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .cand-head .ch-body { flex: 1; min-width: 0; }
+  .cand-name {
+    font-size: 12px; color: var(--text); font-weight: 500;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .cand-sub { font-size: 10px; color: var(--text-4); margin-top: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .cand-meta { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  .tl-wave { height: 44px; padding: 5px 8px; gap: 1.5px; }
+  .tl-wave i { flex: 1 1 0; min-width: 2px; }
+</style>
+</head>
+<body>
+<header class="topbar">
+  <div class="tb-left">
+    <a class="btn icon" href="01-projects.html" title="返回工程列表"><span class="ic ic-back"></span></a>
+    <div class="tb-views">
+      <button class="btn icon" title="画本编辑视图"><span class="ic ic-doc"></span></button>
+      <button class="btn icon" title="配音视图"><span class="ic ic-mic"></span></button>
+      <button class="btn icon" title="后期制作视图"><span class="ic ic-media"></span></button>
+      <button class="btn icon" title="审听与对轨视图"><span class="ic ic-more"></span></button>
+    </div>
+  </div>
+  <div class="tb-mid">
+    <button class="btn icon sm" title="上一章"><span class="ic ic-back"></span></button>
+    <div class="crumbs">
+      <a href="01-projects.html">长夜将明</a><span class="sep">/</span>
+      <span class="cur">弹窗与浮层</span>
+      <span class="ic ic-chev" style="color:var(--text-4)"></span>
+    </div>
+    <span class="badge" style="font-weight:400">设计稿 · 静态</span>
+    <button class="btn icon sm" title="下一章"><span class="ic ic-next"></span></button>
+  </div>
+  <div class="tb-right">
+    <button class="btn icon" title="撤销（⌘Z）"><span class="tb-glyph">↶</span></button>
+    <button class="btn icon" title="重做（⇧⌘Z）"><span class="tb-glyph">↷</span></button>
+    <div class="zoom">
+      <button class="btn icon sm" title="缩小"><span class="ic ic-minus"></span></button>
+      <span class="z-val">100%</span>
+      <button class="btn icon sm" title="放大"><span class="ic ic-plus"></span></button>
+    </div>
+    <button class="btn icon" title="查找替换（⌘F）"><span class="ic ic-search"></span></button>
+    <button class="btn icon" title="更多"><span class="ic ic-more"></span></button>
+    <a class="btn icon" href="11-settings.html" title="项目设定"><span class="ic ic-sliders"></span></a>
+  </div>
+</header>
+
+<div class="studio no-right">
+  <!-- 56px 图标栏 -->
+  <nav class="railbar">
+    <a class="rail-item" href="01-projects.html" title="项目"><span class="ic ic-project"></span>项目<span class="rail-n">5</span></a>
+    <a class="rail-item" href="02-world.html" title="世界"><span class="ic ic-world"></span>世界<span class="rail-n">4</span></a>
+    <a class="rail-item" href="03-characters.html" title="人物"><span class="ic ic-user"></span>人物<span class="rail-n">9</span></a>
+    <a class="rail-item" href="05-outline.html" title="大纲"><span class="ic ic-outline"></span>大纲<span class="rail-n">3</span></a>
+    <a class="rail-item" href="06-chapter.html" title="章节"><span class="ic ic-doc"></span>章节<span class="rail-n">12</span></a>
+    <a class="rail-item" href="07-script.html" title="标注"><span class="ic ic-clap"></span>标注<span class="rail-n">8</span></a>
+    <a class="rail-item active" href="08-voice.html" title="配音"><span class="ic ic-mic"></span>配音<span class="rail-n">86%</span></a>
+    <a class="rail-item" href="09-media.html" title="媒体"><span class="ic ic-media"></span>媒体<span class="rail-n">24</span></a>
+    <a class="rail-item" href="10-export.html" title="导出"><span class="ic ic-export"></span>导出</a>
+    <div class="rail-sep"></div>
+    <a class="rail-item" href="04-voices.html" title="音色库"><span class="ic ic-mic"></span>音色</a>
+    <div class="rail-foot">
+      <a class="rail-item" href="10-export.html" title="运行记录"><span class="ic ic-clock"></span>记录</a>
+      <a class="rail-item" href="11-settings.html" title="设置"><span class="ic ic-sliders"></span>设置</a>
+    </div>
+  </nav>
+
+  <!-- 360px 上下文面板：弹窗清单 -->
+  <section class="ctx">
+    <div class="ctx-head">
+      <span class="ct">弹窗清单</span>
+      <span class="badge" style="font-weight:400">8 个</span>
+      <div class="right">
+        <span class="state bad"><span class="dot bad"></span>2 危险</span>
+        <button class="btn icon sm" title="折叠面板"><span class="ic ic-back"></span></button>
+      </div>
+    </div>
+    <div class="ctx-tools">
+      <div class="toolrow">
+        <div class="search"><span class="ic ic-search"></span><input placeholder="搜索弹窗 / 触发场景" /></div>
+        <button class="btn icon sm" title="筛选"><span class="ic ic-outline"></span></button>
+      </div>
+      <div style="display:flex;align-items:center;gap:6px">
+        <button class="chip on" style="height:25px;font-size:11px">全部 <span class="cnt">8</span></button>
+        <button class="chip" style="height:25px;font-size:11px">运行 <span class="cnt">1</span></button>
+        <button class="chip" style="height:25px;font-size:11px;color:var(--bad);border-color:rgba(238,107,107,.3)">危险 <span class="cnt">2</span></button>
+      </div>
+    </div>
+    <div class="chap-list">
+      <a class="chap-row" href="#dlg-merge"><span class="dot accent"></span><span class="cn"><span class="mono" style="font-size:9px;color:var(--text-4);margin-right:5px">01</span>批量合并旁白</span><span class="cw">合并</span></a>
+      <a class="chap-row" href="#dlg-find"><span class="dot" style="background:var(--text-4)"></span><span class="cn"><span class="mono" style="font-size:9px;color:var(--text-4);margin-right:5px">02</span>查找替换浮层</span><span class="cw">查找</span></a>
+      <a class="chap-row" href="#dlg-more"><span class="dot" style="background:var(--text-4)"></span><span class="cn"><span class="mono" style="font-size:9px;color:var(--text-4);margin-right:5px">03</span>更多菜单</span><span class="cw">菜单</span></a>
+      <a class="chap-row" href="#dlg-timeline"><span class="dot ok"></span><span class="cn"><span class="mono" style="font-size:9px;color:var(--text-4);margin-right:5px">04</span>时间轴展开态</span><span class="cw">时间轴</span></a>
+      <a class="chap-row" href="#dlg-progress"><span class="dot run" style="border-color:var(--run);background:var(--run)"></span><span class="cn"><span class="mono" style="font-size:9px;color:var(--text-4);margin-right:5px">05</span>生成进度</span><span class="cw">运行中</span></a>
+      <a class="chap-row" href="#dlg-impact"><span class="dot warn"></span><span class="cn"><span class="mono" style="font-size:9px;color:var(--text-4);margin-right:5px">06</span>影响清单确认</span><span class="cw">确认</span></a>
+      <a class="chap-row" href="#dlg-delete"><span class="dot bad"></span><span class="cn"><span class="mono" style="font-size:9px;color:var(--text-4);margin-right:5px">07</span>删除确认</span><span class="cw">危险</span></a>
+      <a class="chap-row" href="#dlg-voice"><span class="dot accent"></span><span class="cn"><span class="mono" style="font-size:9px;color:var(--text-4);margin-right:5px">08</span>候选音色选择</span><span class="cw">音色</span></a>
+    </div>
+    <div class="col-foot" style="padding:9px 14px;border-top:1px solid var(--line);font-size:10.5px;color:var(--text-3)">
+      常规 5 · 危险 2 · 运行 1 · 全部无脚本
+    </div>
+  </section>
+
+  <!-- 主区：弹窗陈列 -->
+  <section class="editor">
+    <div class="ed-head">
+      <span class="et">弹窗与浮层</span>
+      <span class="em">8 个 · 触发场景 · 状态色</span>
+      <div class="right">
+        <span class="badge warn"><span class="ic ic-warn" style="width:11px;height:11px"></span>危险 2</span>
+        <span class="badge run"><span class="dot run"></span>生成中 1</span>
+        <a class="btn sm" href="08-voice.html"><span class="ic ic-mic"></span>返回配音</a>
+      </div>
+    </div>
+
+    <div class="ed-body" style="padding:14px 16px 28px;background:#0a0b0d">
+      <div class="modal-stage">
+
+        <!-- 01 批量合并旁白 -->
+        <div class="stage-item" id="dlg-merge">
+          <div class="stage-label"><span class="no">01</span><span>批量合并旁白</span><span class="trig">触发：编辑器工具栏「批量合并旁白」</span></div>
+          <div class="modal">
+            <div class="modal-head">
+              <div class="m-body">
+                <h3>批量合并旁白</h3>
+                <div class="m-sub">把相邻旁白合并成更长的段落，减少碎片感。</div>
+              </div>
+              <button class="close" title="关闭"><span class="ic ic-close"></span></button>
+            </div>
+            <div class="modal-body">
+              <div class="form-grid">
+                <label class="field"><span class="label">期望字数 / 段</span><input class="input" value="120" /></label>
+                <label class="field"><span class="label">合并范围</span><select class="select"><option>本场景 · 雨夜街口</option><option>本章 32 段</option></select></label>
+              </div>
+              <label class="check"><input type="checkbox" checked />保留人工标注（停顿 / 重音）</label>
+              <div class="impact">
+                <div class="imp-row"><span>合并预览</span><b>6 段 → 3 段</b></div>
+                <div class="imp-row"><span>预计时长</span><b>00:18.4</b></div>
+              </div>
+              <div class="hint">覆盖本场景内的相邻旁白；角色台词与音效标记不会被合并。</div>
+            </div>
+            <div class="modal-foot">
+              <span class="hint">可撤销 · ⌘Z</span>
+              <span class="right"><button class="btn">取消</button><button class="btn primary">合并</button></span>
+            </div>
+          </div>
+        </div>
+
+        <!-- 02 查找替换浮层 -->
+        <div class="stage-item" id="dlg-find">
+          <div class="stage-label"><span class="no">02</span><span>查找替换浮层</span><span class="trig">触发：⌘F / 顶栏搜索</span></div>
+          <div class="modal narrow">
+            <div class="modal-head">
+              <div class="m-body">
+                <h3>查找替换</h3>
+                <div class="m-sub">第一章 雨夜归人 · 1,284 字</div>
+              </div>
+              <button class="close" title="关闭"><span class="ic ic-close"></span></button>
+            </div>
+            <div class="modal-body">
+              <label class="field"><span class="label">查找</span><input class="input" value="卷宗" /></label>
+              <label class="field"><span class="label">替换为</span><input class="input" value="案卷" /></label>
+              <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+                <div class="seg"><button class="on">本章</button><button>整本 12 章</button></div>
+                <label class="check" style="margin-left:auto"><input type="checkbox" checked />区分全半角</label>
+              </div>
+              <div style="display:flex;align-items:center;gap:8px;padding:7px 9px;border:1px solid var(--line);border-radius:7px;background:var(--bg-1)">
+                <span class="dot accent"></span>
+                <span style="font-size:11.5px;color:var(--text-2)">匹配 <b style="color:var(--text);font-weight:600">12</b> 处</span>
+                <span class="hint" style="margin-left:auto">第 3 / 12 处 · 沈砚</span>
+              </div>
+            </div>
+            <div class="modal-foot">
+              <button class="btn sm"><span class="ic ic-back"></span>上一个</button>
+              <button class="btn sm">下一个<span class="ic ic-next"></span></button>
+              <span class="right"><button class="btn primary">全部替换</button></span>
+            </div>
+          </div>
+        </div>
+
+        <!-- 03 更多菜单 -->
+        <div class="stage-item" id="dlg-more">
+          <div class="stage-label"><span class="no">03</span><span>更多菜单</span><span class="trig">触发：顶栏「⋯」按钮</span></div>
+          <div class="card tight menu-card">
+            <div style="display:flex;align-items:center;padding:3px 8px 5px">
+              <span style="font-size:10px;letter-spacing:.09em;color:var(--text-4)">更多操作</span>
+              <span class="badge muted" style="margin-left:auto;height:17px;padding:0 5px">当前章节</span>
+            </div>
+            <div class="menu-item"><span class="ic ic-spark"></span>智能对轨<span class="kbd">⌘T</span></div>
+            <div class="menu-item"><span class="ic ic-check"></span>一致性校验<span class="kbd">⇧⌘V</span></div>
+            <div class="menu-item"><span class="ic ic-export"></span>导出本章<span class="kbd">⌘E</span></div>
+            <div class="menu-sep"></div>
+            <div class="menu-item"><span class="ic ic-sliders"></span>快捷键<span class="kbd">⌘K</span></div>
+            <div class="menu-item"><span class="ic ic-project"></span>项目设定<span class="kbd">⌘,</span></div>
+          </div>
+        </div>
+
+        <!-- 04 时间轴展开态 -->
+        <div class="stage-item stage-full" id="dlg-timeline">
+          <div class="stage-label"><span class="no">04</span><span>时间轴展开态</span><span class="trig">触发：播放条「展开时间轴」/ ~</span></div>
+          <div class="modal wide">
+            <div class="modal-head">
+              <div class="m-body">
+                <h3>时间轴 · 第一章 雨夜归人</h3>
+                <div class="m-sub">03:48.20 · 32 段 · 3 条轨道 · 播放头 00:48.32</div>
+              </div>
+              <span class="badge accent">选区 50.2s</span>
+              <button class="close" title="关闭"><span class="ic ic-close"></span></button>
+            </div>
+            <div class="modal-body">
+              <div class="transport" style="flex-wrap:wrap;gap:8px">
+                <button class="btn icon" title="播放"><span class="ic ic-play"></span></button>
+                <button class="btn icon" title="暂停"><span class="ic ic-pause"></span></button>
+                <button class="btn icon" title="停止"><span class="ic ic-stop"></span></button>
+                <span class="t-time"><span class="now">00:48.32</span> <span class="total">/ 03:48.20</span></span>
+                <span class="badge">1.0×</span>
+                <div style="margin-left:auto;display:flex;align-items:center;gap:5px">
+                  <span class="hint">缩放</span>
+                  <button class="btn icon sm" title="缩小"><span class="ic ic-minus"></span></button>
+                  <span class="mono" style="font-size:10px;color:var(--text-2);width:34px;text-align:center">100%</span>
+                  <button class="btn icon sm" title="放大"><span class="ic ic-plus"></span></button>
+                </div>
+              </div>
+
+              <div style="position:relative;border:1px solid var(--line);border-radius:6px;background:var(--bg-1);overflow:hidden">
+                <div class="wave tl-wave" style="color:var(--accent-hi)">
+                  <i style="--h:22%"></i><i style="--h:38%"></i><i style="--h:56%"></i><i style="--h:44%"></i><i style="--h:72%"></i><i style="--h:34%"></i><i style="--h:62%"></i><i style="--h:80%"></i><i style="--h:46%"></i><i style="--h:28%"></i>
+                  <i style="--h:66%"></i><i style="--h:52%"></i><i style="--h:88%"></i><i style="--h:42%"></i><i style="--h:58%"></i><i style="--h:30%"></i><i style="--h:74%"></i><i style="--h:48%"></i><i style="--h:64%"></i><i style="--h:36%"></i>
+                  <i style="--h:82%"></i><i style="--h:54%"></i><i style="--h:40%"></i><i style="--h:68%"></i><i style="--h:26%"></i><i style="--h:60%"></i><i style="--h:78%"></i><i style="--h:44%"></i><i style="--h:50%"></i><i style="--h:32%"></i>
+                  <i style="--h:70%"></i><i style="--h:86%"></i><i style="--h:48%"></i><i style="--h:62%"></i><i style="--h:38%"></i><i style="--h:76%"></i><i style="--h:52%"></i><i style="--h:30%"></i><i style="--h:66%"></i><i style="--h:90%"></i>
+                  <i style="--h:42%"></i><i style="--h:58%"></i><i style="--h:34%"></i><i style="--h:72%"></i><i style="--h:50%"></i><i style="--h:84%"></i><i style="--h:40%"></i><i style="--h:64%"></i><i style="--h:28%"></i><i style="--h:56%"></i>
+                  <i style="--h:78%"></i><i style="--h:46%"></i><i style="--h:68%"></i><i style="--h:36%"></i><i style="--h:60%"></i><i style="--h:82%"></i><i style="--h:44%"></i><i style="--h:54%"></i><i style="--h:30%"></i><i style="--h:74%"></i>
+                  <i style="--h:48%"></i><i style="--h:66%"></i><i style="--h:38%"></i><i style="--h:86%"></i><i style="--h:52%"></i><i style="--h:32%"></i><i style="--h:70%"></i><i style="--h:46%"></i><i style="--h:62%"></i><i style="--h:40%"></i>
+                  <i style="--h:80%"></i><i style="--h:50%"></i><i style="--h:58%"></i><i style="--h:34%"></i><i style="--h:76%"></i><i style="--h:44%"></i><i style="--h:68%"></i><i style="--h:28%"></i><i style="--h:54%"></i><i style="--h:64%"></i>
+                </div>
+                <div style="position:absolute;top:0;bottom:0;left:16%;width:22%;background:rgba(232,180,76,.14);border-left:1px solid var(--accent);border-right:1px solid var(--accent)"></div>
+                <div class="tl-playhead" style="left:21%"></div>
+              </div>
+
+              <div class="tl">
+                <div class="tl-ruler"><span>00:00</span><span>00:30</span><span>01:00</span><span>01:30</span><span>02:00</span><span>02:30</span><span>03:00</span><span>03:30</span></div>
+                <div class="tl-track">
+                  <div class="tl-name"><span class="dot accent"></span>语音</div>
+                  <div class="tl-lane">
+                    <div style="position:absolute;top:0;bottom:0;left:16%;width:22%;background:rgba(232,180,76,.08);border-left:1px dashed var(--accent);border-right:1px dashed var(--accent)"></div>
+                    <div class="tl-clip voice" style="left:2%;width:12%">旁白</div>
+                    <div class="tl-clip voice sel" style="left:16%;width:10%">沈砚</div>
+                    <div class="tl-clip voice sel" style="left:27%;width:11%">林晚</div>
+                    <div class="tl-clip voice" style="left:41%;width:8%">老周</div>
+                    <div class="tl-clip voice" style="left:52%;width:8%">陈默</div>
+                    <div class="tl-clip voice" style="left:62%;width:10%">旁白</div>
+                    <div class="tl-clip voice" style="left:74%;width:14%">林晚</div>
+                    <div class="tl-playhead" style="left:21%"></div>
+                  </div>
+                </div>
+                <div class="tl-track">
+                  <div class="tl-name"><span class="dot run"></span>音效</div>
+                  <div class="tl-lane">
+                    <div style="position:absolute;top:0;bottom:0;left:16%;width:22%;background:rgba(232,180,76,.05);border-left:1px dashed rgba(232,180,76,.5);border-right:1px dashed rgba(232,180,76,.5)"></div>
+                    <div class="tl-clip sfx" style="left:1%;width:8%">雨声</div>
+                    <div class="tl-clip sfx" style="left:28%;width:5%">关门</div>
+                    <div class="tl-clip sfx" style="left:45%;width:5%">脚步</div>
+                    <div class="tl-clip sfx" style="left:66%;width:6%">电话铃</div>
+                    <div class="tl-playhead" style="left:21%"></div>
+                  </div>
+                </div>
+                <div class="tl-track">
+                  <div class="tl-name"><span class="dot" style="background:#a084f0"></span>音乐</div>
+                  <div class="tl-lane">
+                    <div style="position:absolute;top:0;bottom:0;left:16%;width:22%;background:rgba(232,180,76,.05);border-left:1px dashed rgba(232,180,76,.5);border-right:1px dashed rgba(232,180,76,.5)"></div>
+                    <div class="tl-clip bgm" style="left:0;width:55%">低沉弦乐 · 雨夜</div>
+                    <div class="tl-clip bgm" style="left:58%;width:38%">雨停之前</div>
+                    <div class="tl-playhead" style="left:21%"></div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="kv-inline" style="flex-wrap:wrap;gap:7px">
+                <span class="badge accent">选区 00:36.50 → 01:26.70</span>
+                <span class="badge">时长 50.2s</span>
+                <span class="state idle"><span class="dot"></span>2 段语音 · 1 条音效</span>
+                <span class="hint" style="margin-left:auto">拖动轨道空白处可重新框选</span>
+              </div>
+            </div>
+            <div class="modal-foot">
+              <span class="hint">空格 播放 · I / O 设选区</span>
+              <span class="right"><button class="btn">关闭</button><button class="btn primary"><span class="ic ic-clap"></span>裁剪选区</button></span>
+            </div>
+          </div>
+        </div>
+
+        <!-- 05 生成进度 -->
+        <div class="stage-item" id="dlg-progress">
+          <div class="stage-label"><span class="no">05</span><span>生成进度</span><span class="trig">触发：提交整章生成后</span></div>
+          <div class="modal">
+            <div class="modal-head">
+              <div class="m-body">
+                <h3>正在生成音频</h3>
+                <div class="m-sub">第一章 雨夜归人 · 可关闭窗口后台运行</div>
+              </div>
+              <span class="badge run"><span class="dot run"></span>运行中</span>
+              <button class="close" title="关闭"><span class="ic ic-close"></span></button>
+            </div>
+            <div class="modal-body">
+              <div style="display:flex;align-items:flex-end;gap:7px">
+                <span class="mono" style="font-size:26px;font-weight:600;line-height:1">22</span>
+                <span style="font-size:12px;color:var(--text-3);margin-bottom:2px">/ 32 段</span>
+                <span class="mono" style="margin-left:auto;font-size:11px;color:var(--text-3);margin-bottom:2px">68%</span>
+              </div>
+              <div class="prog run"><span style="width:68%"></span></div>
+              <div style="display:flex;gap:6px;font-size:11.5px;color:var(--text-3);flex-wrap:wrap">
+                <span>当前：<b style="color:var(--text);font-weight:500">第 008 段 · 陈默 · 阴冷男声</b></span>
+                <span class="mono" style="margin-left:auto">预计剩余 4:12</span>
+              </div>
+              <div style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px;padding:8px 9px;border:1px solid var(--line);border-radius:8px;background:var(--bg-1)">
+                <div><div class="muted" style="font-size:10px">成功</div><div class="mono" style="font-size:15px;color:var(--ok)">22</div></div>
+                <div><div class="muted" style="font-size:10px">跳过</div><div class="mono" style="font-size:15px">2</div></div>
+                <div><div class="muted" style="font-size:10px">失败</div><div class="mono" style="font-size:15px;color:var(--bad)">2</div></div>
+                <div><div class="muted" style="font-size:10px">待配</div><div class="mono" style="font-size:15px">6</div></div>
+              </div>
+              <div class="state run" style="font-size:11px"><span class="dot run"></span>已用时 6:48 · 失败 2 段将在结尾自动重试一次</div>
+            </div>
+            <div class="modal-foot">
+              <span class="hint">关闭窗口不会中断任务</span>
+              <span class="right">
+                <button class="btn"><span class="ic ic-pause"></span>暂停</button>
+                <button class="btn danger"><span class="ic ic-stop"></span>停止生成</button>
+              </span>
+            </div>
+          </div>
+        </div>
+
+        <!-- 06 影响清单确认 -->
+        <div class="stage-item" id="dlg-impact">
+          <div class="stage-label"><span class="no">06</span><span>影响清单确认</span><span class="trig">触发：上游正文变更后重跑</span></div>
+          <div class="modal">
+            <div class="modal-head">
+              <div class="m-body">
+                <h3>正文变更 · 影响确认</h3>
+                <div class="m-sub">第 2 段由 42 字改为 57 字</div>
+              </div>
+              <span class="badge warn">3 项受影响</span>
+              <button class="close" title="关闭"><span class="ic ic-close"></span></button>
+            </div>
+            <div class="modal-body">
+              <div class="banner warn" style="padding:8px 10px;font-size:11.5px">
+                <span class="ic ic-warn b-icon"></span>
+                <div class="b-body">上游正文已修改，以下已生成内容会与新版不一致，需要重跑。</div>
+              </div>
+              <div class="impact">
+                <div class="imp-row"><span>场景</span><b>3 个场景</b></div>
+                <div class="imp-row"><span>台词</span><b>32 行台词</b></div>
+                <div class="imp-row"><span>音色绑定</span><b>2 段音色绑定</b></div>
+              </div>
+              <div class="check-list">
+                <label class="check"><input type="checkbox" checked />重跑受影响的 32 行台词</label>
+                <label class="check"><input type="checkbox" checked />保留旧版音频，便于回滚</label>
+                <label class="check"><input type="checkbox" />同步更新字幕时间码</label>
+              </div>
+            </div>
+            <div class="modal-foot">
+              <span class="hint">预计耗时 3:20</span>
+              <span class="right"><button class="btn">取消</button><button class="btn primary"><span class="ic ic-refresh"></span>重跑影响项</button></span>
+            </div>
+          </div>
+        </div>
+
+        <!-- 07 删除确认 -->
+        <div class="stage-item" id="dlg-delete">
+          <div class="stage-label"><span class="no">07</span><span>删除确认</span><span class="trig">触发：章节目录右键「删除」</span></div>
+          <div class="modal">
+            <div class="modal-head">
+              <div class="m-body">
+                <h3>删除第一章？</h3>
+                <div class="m-sub">第一章 雨夜归人 · 1,284 字 · 32 段</div>
+              </div>
+              <span class="badge bad">不可撤销</span>
+              <button class="close" title="关闭"><span class="ic ic-close"></span></button>
+            </div>
+            <div class="modal-body">
+              <div class="banner bad" style="padding:8px 10px;font-size:11.5px">
+                <span class="ic ic-warn b-icon"></span>
+                <div class="b-body">
+                  <div class="b-title">删除后无法撤销</div>
+                  该章节的台词、音频与配图会一起移入回收站，30 天后清理。
+                </div>
+              </div>
+              <div class="impact">
+                <div class="imp-row"><span>台词</span><b>32 段台词</b></div>
+                <div class="imp-row"><span>音频</span><b>1 段音频</b></div>
+                <div class="imp-row"><span>配图</span><b>2 张配图</b></div>
+              </div>
+              <label class="field">
+                <span class="label">输入章节名「雨夜归人」以确认</span>
+                <input class="input" placeholder="雨夜归人" />
+              </label>
+            </div>
+            <div class="modal-foot">
+              <span class="hint" style="color:var(--bad)">此操作不可恢复</span>
+              <span class="right"><button class="btn">取消</button><button class="btn danger-solid"><span class="ic ic-trash"></span>删除第一章</button></span>
+            </div>
+          </div>
+        </div>
+
+        <!-- 08 候选音色选择 -->
+        <div class="stage-item" id="dlg-voice">
+          <div class="stage-label"><span class="no">08</span><span>候选音色选择</span><span class="trig">触发：行内编辑「更换音色」</span></div>
+          <div class="modal">
+            <div class="modal-head">
+              <div class="m-body">
+                <h3>候选音色</h3>
+                <div class="m-sub">第 008 段 · 陈默 · 情绪 阴冷</div>
+              </div>
+              <span class="badge accent">3 个候选</span>
+              <button class="close" title="关闭"><span class="ic ic-close"></span></button>
+            </div>
+            <div class="modal-body" style="gap:8px">
+              <div class="cand on">
+                <div class="cand-head">
+                  <span class="avatar tone-a" style="width:28px;height:28px;flex-basis:28px;font-size:10px">陈</span>
+                  <div class="ch-body">
+                    <div class="cand-name">陈默-阴冷男声 A <span class="badge accent" style="height:17px;padding:0 5px">已选</span></div>
+                    <div class="cand-sub">候选 A · 24kHz · 参考音 12.4s</div>
+                  </div>
+                  <button class="btn sm"><span class="ic ic-play"></span>试听</button>
+                </div>
+                <div class="cand-meta">
+                  <span class="badge accent">相似度 92%</span>
+                  <span class="badge">语速 0.96×</span>
+                  <span class="badge ok">情绪适配 · 阴冷</span>
+                </div>
+                <div class="wave mini" style="height:14px;color:var(--accent-hi)"><i style="--h:32%"></i><i style="--h:58%"></i><i style="--h:44%"></i><i style="--h:76%"></i><i style="--h:38%"></i><i style="--h:62%"></i><i style="--h:86%"></i><i style="--h:48%"></i><i style="--h:30%"></i><i style="--h:68%"></i><i style="--h:52%"></i><i style="--h:80%"></i><i style="--h:42%"></i><i style="--h:60%"></i><i style="--h:34%"></i><i style="--h:72%"></i><i style="--h:46%"></i><i style="--h:56%"></i><i style="--h:28%"></i><i style="--h:64%"></i><i style="--h:50%"></i><i style="--h:78%"></i><i style="--h:36%"></i><i style="--h:54%"></i></div>
+              </div>
+
+              <div class="cand">
+                <div class="cand-head">
+                  <span class="avatar tone-b" style="width:28px;height:28px;flex-basis:28px;font-size:10px">陈</span>
+                  <div class="ch-body">
+                    <div class="cand-name">陈默-低沉男声 B</div>
+                    <div class="cand-sub">候选 B · 24kHz · 参考音 9.8s</div>
+                  </div>
+                  <button class="btn sm"><span class="ic ic-play"></span>试听</button>
+                </div>
+                <div class="cand-meta">
+                  <span class="badge">相似度 88%</span>
+                  <span class="badge">语速 1.02×</span>
+                  <span class="badge warn">情绪适配 · 试探</span>
+                </div>
+                <div class="wave mini dim" style="height:14px"><i style="--h:40%"></i><i style="--h:54%"></i><i style="--h:36%"></i><i style="--h:66%"></i><i style="--h:48%"></i><i style="--h:30%"></i><i style="--h:72%"></i><i style="--h:42%"></i><i style="--h:58%"></i><i style="--h:34%"></i><i style="--h:64%"></i><i style="--h:46%"></i><i style="--h:76%"></i><i style="--h:38%"></i><i style="--h:52%"></i><i style="--h:28%"></i><i style="--h:60%"></i><i style="--h:44%"></i><i style="--h:70%"></i><i style="--h:32%"></i><i style="--h:50%"></i><i style="--h:62%"></i><i style="--h:36%"></i><i style="--h:56%"></i></div>
+              </div>
+
+              <div class="cand">
+                <div class="cand-head">
+                  <span class="avatar tone-c" style="width:28px;height:28px;flex-basis:28px;font-size:10px">陈</span>
+                  <div class="ch-body">
+                    <div class="cand-name">陈默-沙哑男声 C</div>
+                    <div class="cand-sub">候选 C · 24kHz · 参考音 15.1s</div>
+                  </div>
+                  <button class="btn sm"><span class="ic ic-play"></span>试听</button>
+                </div>
+                <div class="cand-meta">
+                  <span class="badge">相似度 85%</span>
+                  <span class="badge">语速 0.92×</span>
+                  <span class="badge ok">情绪适配 · 压抑</span>
+                </div>
+                <div class="wave mini dim" style="height:14px"><i style="--h:26%"></i><i style="--h:44%"></i><i style="--h:60%"></i><i style="--h:34%"></i><i style="--h:70%"></i><i style="--h:46%"></i><i style="--h:56%"></i><i style="--h:30%"></i><i style="--h:64%"></i><i style="--h:40%"></i><i style="--h:74%"></i><i style="--h:36%"></i><i style="--h:52%"></i><i style="--h:28%"></i><i style="--h:68%"></i><i style="--h:42%"></i><i style="--h:58%"></i><i style="--h:32%"></i><i style="--h:66%"></i><i style="--h:48%"></i><i style="--h:54%"></i><i style="--h:38%"></i><i style="--h:72%"></i><i style="--h:30%"></i></div>
+              </div>
+
+              <div class="hint">应用后仅影响第 008 段；其他段落继续使用角色默认音色。</div>
+            </div>
+            <div class="modal-foot">
+              <span class="hint">先试听再应用</span>
+              <span class="right"><button class="btn">取消</button><button class="btn primary">应用这个音色</button></span>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </section>
+</div>
+</body>
+</html>

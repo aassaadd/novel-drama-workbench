@@ -20,12 +20,13 @@ from ..models.entities import provisional_line_duration_ms, speaker_display_name
 DEFAULT_IMAGE_HOLD_MS = 3000
 
 
-def compute_source_hash(chapter: dict, silence_events: list[dict] | None = None) -> str:
-    """计算时间轴输入哈希（行 revision、实测时长、音效/图/视频 revision、静音事件）。
+def compute_source_hash(chapter: dict, silence_events: list[dict] | None = None, production: dict | None = None) -> str:
+    """计算时间轴输入哈希（行 revision、实测时长、音效/图/视频 revision、静音事件、制作要求）。
 
     参数:
         chapter: 章节 dict。
         silence_events: 导演脚本静音事件（影响行间停顿）。
+        production: 项目级制作要求（静音间隔影响行间停顿）。
 
     返回:
         `sha256:<hex>`，用于判断时间轴是否需要重建。
@@ -42,6 +43,8 @@ def compute_source_hash(chapter: dict, silence_events: list[dict] | None = None)
             payload.append(["video", video.get("id"), video.get("revision")])
     for event in silence_events or []:
         payload.append(["silence", event.get("id"), event.get("duration_ms"), (event.get("position") or {})])
+    if production:
+        payload.append(["production", (production.get("silences_ms") or {})])
     raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     return "sha256:" + hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
@@ -52,6 +55,20 @@ def _ordered_lines(chapter: dict) -> list[dict]:
     for scene in sorted(chapter.get("scenes") or [], key=lambda item: item.get("index") or 0):
         lines.extend(sorted(scene.get("lines") or [], key=lambda item: item.get("index") or 0))
     return lines
+
+
+def _line_kind(line: dict) -> str:
+    """台词行的类型：旁白 / 对话（内心独白按对话处理）。
+
+    参数:
+        line: 台词行 dict。
+
+    返回:
+        `"narration"` 或 `"dialogue"`。
+    """
+    if line.get("kind") == "narration" or line.get("speaker_id") == "chr_narrator":
+        return "narration"
+    return "dialogue"
 
 
 def apply_silences(silence_events: list[dict] | None, chapter: dict) -> tuple[dict, dict, list[str]]:
@@ -220,6 +237,11 @@ def build_timeline(chapter: dict, settings: dict | None = None, existing: dict |
     sample_rate = int(output.get("sample_rate") or 48000)
     channels = int(output.get("channels") or 2)
     silence_before, silence_after, silence_warnings = apply_silences(silence_events, chapter)
+    production = (settings or {}).get("production") or {}
+    silences = production.get("silences_ms") or {}
+    start_gap = int(silences.get("start") or 0)
+    title_gap = int(silences.get("title_to_body") or 0)
+    end_gap = int(silences.get("end") or 0)
 
     voice_items: list[dict] = []
     sfx_items: list[dict] = []
@@ -228,17 +250,30 @@ def build_timeline(chapter: dict, settings: dict | None = None, existing: dict |
     markers: list[dict] = []
     warnings: list[str] = []
 
-    cursor = 0
+    # 起始留白：整章第一条台词前先空出
+    cursor = max(0, start_gap)
     line_windows: dict[str, tuple[int, int]] = {}
+    line_kinds: dict[str, str] = {}
+    prev_kind: str | None = None
+    first_line = True
 
     for scene in sorted(chapter.get("scenes") or [], key=lambda item: item.get("index") or 0):
         scene_start = cursor
         markers.append({"at_ms": scene_start, "label": scene.get("title") or f"场景 {scene.get('index', 0) + 1}"})
+        scene_first_line = True
 
         for line in sorted(scene.get("lines") or [], key=lambda item: item.get("index") or 0):
             duration, estimated = provisional_line_duration_ms(line)
             line_id = line.get("id", "")
-            start = cursor + int(line.get("pause_before_ms") or 0) + silence_before.get(line_id, 0)
+            kind = _line_kind(line)
+            # 行间静音：由项目制作要求按「前一行类型 → 当前行类型」决定
+            if first_line:
+                gap = 0
+            elif scene_first_line:
+                gap = max(0, title_gap)
+            else:
+                gap = max(0, int(silences.get(f"{prev_kind}_to_{kind}") or 0))
+            start = cursor + gap + int(line.get("pause_before_ms") or 0) + silence_before.get(line_id, 0)
             end = start + duration
             tts = line.get("tts") or {}
             voice_items.append(
@@ -256,6 +291,10 @@ def build_timeline(chapter: dict, settings: dict | None = None, existing: dict |
                 }
             )
             line_windows[line.get("id", "")] = (start, end)
+            line_kinds[line_id] = kind
+            prev_kind = kind
+            first_line = False
+            scene_first_line = False
             if estimated:
                 warnings.append(f"{line.get('id')} 使用估算时长（未合成）")
             if line.get("speaker_id") == "chr_unknown":
@@ -271,17 +310,20 @@ def build_timeline(chapter: dict, settings: dict | None = None, existing: dict |
                 continue
             position = sfx.get("position") or {}
             line_id = position.get("line_id")
+            duration = int(asset.get("actual_duration_ms") or sfx.get("duration_ms") or 0)
+            # 音效与台词之间的留白：由制作要求的「音效→对白 / 音效→旁白」决定
+            sfx_gap = max(0, int(silences.get(f"sfx_to_{line_kinds.get(line_id, 'dialogue')}") or 0))
             if position.get("mode") == "absolute" or not line_id:
                 start = int(position.get("offset_ms") or 0) + scene_start
             else:
                 anchor_start, anchor_end = line_windows.get(line_id, (scene_start, scene_end))
                 if position.get("mode") == "before_line":
-                    start = anchor_start
+                    # 提前摆放，让音效结束与台词开始之间留出设定间隔
+                    start = max(0, anchor_start - sfx_gap - duration)
                 elif position.get("mode") == "after_line":
-                    start = anchor_end
+                    start = anchor_end + sfx_gap
                 else:  # during_line
                     start = anchor_start + int(position.get("offset_ms") or 0)
-            duration = int(asset.get("actual_duration_ms") or sfx.get("duration_ms") or 0)
             end = scene_end if sfx.get("loop") else start + duration
             sfx_items.append(
                 {
@@ -344,6 +386,9 @@ def build_timeline(chapter: dict, settings: dict | None = None, existing: dict |
             )
 
     duration_ms = max([item["end_ms"] for item in voice_items + sfx_items + image_items + video_items] or [0])
+    # 结束留白：整章末尾保留静音，拼接与导出按时间轴总时长 apad
+    if voice_items and end_gap > 0:
+        duration_ms += end_gap
     warnings.extend(silence_warnings)
     return {
         "schema_version": 1,
@@ -354,7 +399,7 @@ def build_timeline(chapter: dict, settings: dict | None = None, existing: dict |
         "sample_rate": sample_rate,
         "channels": channels,
         "built_at": None,
-        "source_hash": compute_source_hash(chapter, silence_events),
+        "source_hash": compute_source_hash(chapter, silence_events, production),
         "tracks": [
             {"id": "trk_voice", "kind": "voice", "name": "配音", "items": voice_items},
             {"id": "trk_sfx", "kind": "sfx", "name": "音效", "items": sfx_items},

@@ -2,7 +2,7 @@
 
 产物形态（全部可在任意播放器打开）：
 - `<chapter>.srt` 字幕、`<chapter>.manifest.json` 时间轴清单、`<chapter>.schedule.tsv` 时间表；
-- `<chapter>.mp3` 整章音频（由混音规整轨转码）；
+- `<chapter>.<mp3|wav|m4a>` 整章音频（格式、采样率、码率取自项目制作要求）；
 - `<chapter>.mp4` 音画成品（混流结果存在时才收录）；
 - `<chapter>.bundle.json` 交付清单（kind/status/path/size/sha256）；
 - `README.txt` 一句话交付说明。
@@ -40,7 +40,7 @@ def _artifact(kind: str, path: Path, scope: str = "chapter") -> dict:
     """构造一条交付产物记录（对齐 export-artifact schema）。
 
     参数:
-        kind: mp4/mp3/wav/srt/manifest。
+        kind: mp4/mp3/wav/m4a/srt/manifest。
         path: 产物路径。
         scope: chapter/work。
 
@@ -60,25 +60,39 @@ def _artifact(kind: str, path: Path, scope: str = "chapter") -> dict:
     }
 
 
-def _to_mp3(source: Path, target: Path, binary: str = "ffmpeg") -> None:
-    """把 wav 转成 192kbps MP3。
+def _transcode_audio(
+    source: Path,
+    target: Path,
+    fmt: str = "mp3",
+    sample_rate: int = 48000,
+    bitrate_kbps: int = 192,
+    binary: str = "ffmpeg",
+) -> None:
+    """按项目制作要求把 wav 转成目标格式（mp3 / wav / m4a）。
 
     参数:
         source: 源 wav。
-        target: 目标 mp3。
+        target: 目标文件（扩展名由 fmt 决定）。
+        fmt: mp3 / wav / m4a。
+        sample_rate: 采样率（44100 / 48000）。
+        bitrate_kbps: 目标码率；wav 为无损，忽略码率。
         binary: ffmpeg。
 
     异常:
         RuntimeError: 转码失败。
     """
-    proc = subprocess.run(
-        [binary, "-hide_banner", "-loglevel", "error", "-y", "-i", str(source), "-codec:a", "libmp3lame", "-b:a", "192k", str(target)],
-        capture_output=True,
-        text=True,
-    )
+    args = [binary, "-hide_banner", "-loglevel", "error", "-y", "-i", str(source), "-ar", str(sample_rate)]
+    if fmt == "mp3":
+        args += ["-codec:a", "libmp3lame", "-b:a", f"{bitrate_kbps}k"]
+    elif fmt == "m4a":
+        args += ["-codec:a", "aac", "-b:a", f"{bitrate_kbps}k"]
+    else:
+        args += ["-c:a", "pcm_s16le"]
+    args.append(str(target))
+    proc = subprocess.run(args, capture_output=True, text=True)
     if proc.returncode != 0:
         tail = (proc.stderr or "").strip().splitlines()[-6:]
-        raise RuntimeError(f"MP3 转码失败（退出码 {proc.returncode}）：\n" + "\n".join(tail))
+        raise RuntimeError(f"{fmt.upper()} 转码失败（退出码 {proc.returncode}）：\n" + "\n".join(tail))
 
 
 def export_bundle(
@@ -120,10 +134,23 @@ def export_bundle(
     missing: list[str] = []
 
     mix_candidate = Path(mix_path) if mix_path else store.root / "renders" / f"{chapter_id}.mix.norm.wav"
-    mp3_path = target_dir / f"{chapter_id}.mp3"
+    production_audio = (store.production().get("audio") if hasattr(store, "production") else None) or {}
+    audio_format = str(production_audio.get("format") or "mp3").lower()
+    if audio_format not in {"mp3", "wav", "m4a"}:
+        audio_format = "mp3"
+    sample_rate = int(production_audio.get("sample_rate") or 48000)
+    bitrate_kbps = int(production_audio.get("bitrate_kbps") or 192)
+    audio_path = target_dir / f"{chapter_id}.{audio_format}"
     if mix_candidate.exists():
-        _to_mp3(mix_candidate, mp3_path, binary=binary)
-        artifacts.insert(0, _artifact("mp3", mp3_path))
+        _transcode_audio(
+            mix_candidate,
+            audio_path,
+            fmt=audio_format,
+            sample_rate=sample_rate,
+            bitrate_kbps=bitrate_kbps,
+            binary=binary,
+        )
+        artifacts.insert(0, _artifact(audio_format, audio_path))
     else:
         missing.append(f"混音轨缺失：{mix_candidate}（先执行 ndw mix --render）")
 

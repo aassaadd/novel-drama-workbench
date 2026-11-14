@@ -42,7 +42,13 @@ def plan_mux(
         {status, audio, video_segments, images, visual_items, output, codec, aspect_ratio, blockers}。
     """
     aspect = resolve_aspect(settings or {}, "image", manifest=manifest)
-    codec = {**CODEC, "width": aspect["width"], "height": aspect["height"]}
+    production_audio = ((settings or {}).get("production") or {}).get("audio") or {}
+    codec = {
+        **CODEC,
+        "width": aspect["width"],
+        "height": aspect["height"],
+        "audio_bitrate": f"{int(production_audio.get('bitrate_kbps') or 192)}k",
+    }
     root = Path(project_root)
     videos: list[dict] = []
     images: list[dict] = []
@@ -315,7 +321,7 @@ def mux(plan: dict) -> dict:
             "-c:a",
             codec["audio"],
             "-b:a",
-            "192k",
+            codec.get("audio_bitrate") or "192k",
             "-shortest",
             "-movflags",
             "+faststart",

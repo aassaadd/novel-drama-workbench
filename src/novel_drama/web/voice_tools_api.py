@@ -13,16 +13,18 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import HTTPException
+from fastapi import HTTPException, Request
 
 from ..config import load_config
 from ..models.ids import now_iso
 from ..store import ProjectStore
+from ..store.queue_store import QueueStore
 from .actions import fail_body, run
 
 #: 单行重录串行锁：同一时间只允许一个重录，避免两个进程同时改同一章
@@ -116,6 +118,89 @@ def _find_line(store: ProjectStore, chapter_id: str, line_id: str) -> dict:
     raise HTTPException(status_code=404, detail=f"台词行不存在: {line_id}")
 
 
+def _takes_index_path(store: ProjectStore) -> Path:
+    """真人录音的元数据文件路径（记录哪一版是实录、时长等）。
+
+    参数:
+        store: 工程。
+
+    返回:
+        `.ndw/line_takes.json` 的绝对路径。
+    """
+    return store.root / ".ndw" / "line_takes.json"
+
+
+def _load_takes(store: ProjectStore) -> dict:
+    """读取真人录音元数据，文件缺失或损坏时返回空字典。
+
+    参数:
+        store: 工程。
+
+    返回:
+        `{行ID_r版本: {source, duration_ms, created_at}}`。
+    """
+    path = _takes_index_path(store)
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _save_takes(store: ProjectStore, data: dict) -> None:
+    """写回真人录音元数据（失败不影响主流程）。
+
+    参数:
+        store: 工程。
+        data: 完整元数据字典。
+    """
+    path = _takes_index_path(store)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _safe_duration(path: Path) -> int:
+    """读取音频时长（毫秒），ffprobe 缺失或解析失败时返回 0。
+
+    参数:
+        path: 音频文件。
+
+    返回:
+        时长毫秒。
+    """
+    try:
+        from ..media.ffmpeg import probe_duration_ms
+
+        return int(probe_duration_ms(path) or 0)
+    except Exception:  # noqa: BLE001 - 探测失败不应阻断版本列表
+        return 0
+
+
+def _take_params(path: Path) -> dict:
+    """读取某一版音频的侧车参数（TTS 产物才有）。
+
+    参数:
+        path: 音频文件。
+
+    返回:
+        侧车里的 `params` 字典；没有侧车或解析失败时返回空字典。
+    """
+    sidecar = Path(str(path) + ".json")
+    if not sidecar.is_file():
+        return {}
+    try:
+        data = json.loads(sidecar.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    params = data.get("params") if isinstance(data, dict) else None
+    return params if isinstance(params, dict) else {}
+
+
 def _line_versions(store: ProjectStore, line_id: str, active: str | None) -> list[dict]:
     """扫描某行已存在的所有音频版本。
 
@@ -125,28 +210,51 @@ def _line_versions(store: ProjectStore, line_id: str, active: str | None) -> lis
         active: 当前生效的相对路径（`line.tts.asset_id`）。
 
     返回:
-        按 revision 倒序排列的版本列表。
+        按 revision 倒序排列的版本列表，含来源（tts / human）与时长。
     """
     folder = store.root / "assets" / "voice" / "lines"
     if not folder.is_dir():
         return []
+    takes = _load_takes(store)
     pattern = re.compile(rf"^{re.escape(line_id)}_r(\d+)\.wav$")
     rows: list[dict] = []
     for item in folder.iterdir():
         match = pattern.match(item.name)
         if not match or not item.is_file():
             continue
+        revision = int(match.group(1))
         rel = str(item.relative_to(store.root))
+        meta = takes.get(f"{line_id}_r{revision}") or {}
         rows.append(
             {
-                "revision": int(match.group(1)),
+                "revision": revision,
                 "path": rel,
                 "size": item.stat().st_size,
                 "active": bool(active) and rel == active,
+                "source": str(meta.get("source") or "tts"),
+                "duration_ms": int(meta.get("duration_ms") or _safe_duration(item)),
             }
         )
     rows.sort(key=lambda row: row["revision"], reverse=True)
     return rows
+
+
+def _find_scene_line(chapter: dict, line_id: str) -> dict | None:
+    """在章节里按 ID 找台词行。
+
+    参数:
+        chapter: 章节 dict。
+        line_id: 台词行 ID。
+
+    返回:
+        台词行；找不到时返回 None。
+    """
+    for scene in chapter.get("scenes") or []:
+        for item in scene.get("lines") or []:
+            if item.get("id") == line_id:
+                return item
+    return None
+
 
 
 def _error_text(error: dict | None, fallback: str = "") -> str:
@@ -514,6 +622,290 @@ def register_voice_tools_routes(app, config_path: str | None = None) -> None:
         finally:
             _RERUN_LOCK.release()
 
+    @app.post("/api/ui/line/audio/delete")
+    def ui_line_audio_delete(body: dict) -> dict:
+        """删除某一行的生效音频，让该行退回「待配」状态。
+
+        参数:
+            body: `{path, chapter, line}`。
+
+        返回:
+            `{ok, line_id, changed, timeline_rebuilt}`；该行本来没有音频时 changed=False。
+
+        说明:
+            只清空章节里的 `tts` 记录，不删磁盘上的历史 wav（版本记录仍可试听/找回）；
+            已有时间轴时同步重建，保证底栏时长与行状态一致。
+        """
+        path = body.get("path")
+        chapter_id = body.get("chapter")
+        line_id = body.get("line")
+        if not line_id:
+            raise HTTPException(status_code=400, detail="缺少 line 参数（台词行 ID）")
+        store = _store(path)
+        chapter = store.load_chapter(chapter_id)
+        target = None
+        for scene in chapter.get("scenes") or []:
+            for item in scene.get("lines") or []:
+                if item.get("id") == line_id:
+                    target = item
+                    break
+            if target:
+                break
+        if target is None:
+            raise HTTPException(status_code=404, detail=f"台词行不存在: {line_id}")
+        if not target.get("tts"):
+            return {"ok": True, "line_id": line_id, "changed": False, "timeline_rebuilt": False}
+        target["tts"] = {"status": "pending"}
+        store.save_chapter(chapter)
+        timeline_rebuilt = False
+        if store.timeline_path(chapter_id).exists():
+            timeline = _cli(config_path, "--project", str(store.root), "--json", "timeline", "build", "--chapter", chapter_id)
+            timeline_rebuilt = timeline.code == 0
+        return {"ok": True, "line_id": line_id, "changed": True, "timeline_rebuilt": timeline_rebuilt}
+
+    @app.post("/api/ui/line/audio/upload")
+    async def ui_line_audio_upload(
+        request: Request,
+        path: str,
+        chapter: str,
+        line: str,
+        ext: str = "webm",
+    ) -> dict:
+        """上传一段真人录音，作为该行的新 take 写入并生效。
+
+        参数:
+            request: FastAPI 请求（原始音频字节放在 body）。
+            path: 工程根目录。
+            chapter: 章节 ID。
+            line: 台词行 ID。
+            ext: 上传容器格式（webm / mp4 / wav / m4a），只用于临时文件后缀。
+
+        返回:
+            `{ok, line_id, revision, active, duration_ms, versions, timeline_rebuilt}`
+
+        异常:
+            HTTPException 400: 请求体为空或过大。
+            HTTPException 409: 已有重录任务在进行。
+            HTTPException 500: ffmpeg 转码失败（中文原因）。
+        """
+        payload = await request.body()
+        if not payload:
+            raise HTTPException(status_code=400, detail="上传内容为空")
+        if len(payload) > 64 * 1024 * 1024:
+            raise HTTPException(status_code=400, detail="录音文件超过 64MB，请分段录制")
+        suffix = "." + re.sub(r"[^a-zA-Z0-9]", "", ext or "webm")[:8]
+        store = _store(path)
+        if not _RERUN_LOCK.acquire(blocking=False):
+            raise HTTPException(status_code=409, detail={"code": 1, "message": "已有重录任务在进行，请等它结束"})
+        try:
+            chapter_data = store.load_chapter(chapter)
+            target = _find_scene_line(chapter_data, line)
+            if target is None:
+                raise HTTPException(status_code=404, detail=f"台词行不存在: {line}")
+            revision = int(target.get("revision") or 1) + 1
+            folder = store.root / "assets" / "voice" / "lines"
+            folder.mkdir(parents=True, exist_ok=True)
+            out_path = folder / f"{line}_r{revision}.wav"
+
+            tmp_dir = store.root / ".ndw" / "tmp"
+            tmp_dir.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(suffix=suffix, dir=tmp_dir, delete=False) as handle:
+                handle.write(payload)
+                raw_path = Path(handle.name)
+            try:
+                from ..media.ffmpeg import binary_available, run as ffmpeg_run
+
+                if not binary_available("ffmpeg"):
+                    raise HTTPException(status_code=500, detail="未找到 ffmpeg，无法转码录音（macOS 可用 brew install ffmpeg）")
+                try:
+                    ffmpeg_run(
+                        [
+                            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-nostdin",
+                            "-i", str(raw_path), "-ac", "1", "-ar", "48000", "-c:a", "pcm_s16le", str(out_path),
+                        ],
+                        timeout_s=120,
+                    )
+                except Exception as exc:  # noqa: BLE001 - 统一转成中文可操作提示
+                    raise HTTPException(status_code=500, detail=f"录音转码失败：{exc}") from exc
+            finally:
+                raw_path.unlink(missing_ok=True)
+
+            rel = str(out_path.relative_to(store.root))
+            duration_ms = _safe_duration(out_path)
+            target["revision"] = revision
+            target["tts"] = {
+                "status": "ready",
+                "asset_id": rel,
+                "duration_ms": duration_ms,
+                "adapter": "human",
+                "provider_id": "human",
+                "voice_id": None,
+                "variant_id": None,
+                "chunks": [
+                    {
+                        "index": 0,
+                        "text": target.get("text") or "",
+                        "asset_id": rel,
+                        "duration_ms": duration_ms,
+                        "provider_id": "human",
+                        "variant_id": None,
+                        "status": "ready",
+                    }
+                ],
+                "synthesized_revision": revision,
+                "actual_speed": 1.0,
+                "error": None,
+                "updated_at": _now(),
+            }
+            store.save_chapter(chapter_data)
+            takes = _load_takes(store)
+            takes[f"{line}_r{revision}"] = {
+                "source": "human",
+                "duration_ms": duration_ms,
+                "created_at": _now(),
+            }
+            _save_takes(store, takes)
+            timeline_rebuilt = False
+            if store.timeline_path(chapter).exists():
+                result = _cli(config_path, "--project", str(store.root), "--json", "timeline", "build", "--chapter", chapter)
+                timeline_rebuilt = result.code == 0
+            return {
+                "ok": True,
+                "line_id": line,
+                "revision": revision,
+                "active": rel,
+                "duration_ms": duration_ms,
+                "timeline_rebuilt": timeline_rebuilt,
+                "versions": _line_versions(store, line, rel),
+            }
+        finally:
+            _RERUN_LOCK.release()
+
+    @app.post("/api/ui/line/audio/activate")
+    def ui_line_audio_activate(body: dict) -> dict:
+        """把某一版历史录音切回生效版本（不重新合成）。
+
+        参数:
+            body: `{path, chapter, line, revision}`。
+
+        返回:
+            `{ok, line_id, active, duration_ms, versions, timeline_rebuilt}`
+
+        异常:
+            HTTPException 404: 版本文件不存在。
+        """
+        path = body.get("path")
+        chapter_id = body.get("chapter")
+        line_id = body.get("line")
+        revision = int(body.get("revision") or 0)
+        if not line_id or revision <= 0:
+            raise HTTPException(status_code=400, detail="缺少 line / revision 参数")
+        store = _store(path)
+        chapter_data = store.load_chapter(chapter_id)
+        target = _find_scene_line(chapter_data, line_id)
+        if target is None:
+            raise HTTPException(status_code=404, detail=f"台词行不存在: {line_id}")
+        rel = f"assets/voice/lines/{line_id}_r{revision}.wav"
+        source_path = store.root / rel
+        if not source_path.is_file():
+            raise HTTPException(status_code=404, detail=f"录音版本不存在: r{revision}")
+        duration_ms = _safe_duration(source_path)
+        takes = _load_takes(store)
+        meta = takes.get(f"{line_id}_r{revision}") or {}
+        params = _take_params(source_path)
+        tts = dict(target.get("tts") or {})
+        tts.update(
+            {
+                "status": "ready",
+                "asset_id": rel,
+                "duration_ms": duration_ms,
+                "synthesized_revision": revision,
+                "error": None,
+                "updated_at": _now(),
+            }
+        )
+        if params:
+            # TTS take：恢复该版侧车里的音色/供应商，避免切回后被判成「音色已更换」
+            tts.update(
+                {
+                    "adapter": params.get("provider_id") or tts.get("adapter"),
+                    "provider_id": params.get("provider_id") or tts.get("provider_id"),
+                    "voice_id": params.get("voice_id"),
+                    "variant_id": params.get("variant_id"),
+                    "model_version": params.get("model_version"),
+                }
+            )
+        if str(meta.get("source") or "") == "human":
+            tts.update({"adapter": "human", "provider_id": "human", "voice_id": None, "variant_id": None})
+        target["tts"] = tts
+        store.save_chapter(chapter_data)
+        timeline_rebuilt = False
+        if store.timeline_path(chapter_id).exists():
+            result = _cli(config_path, "--project", str(store.root), "--json", "timeline", "build", "--chapter", chapter_id)
+            timeline_rebuilt = result.code == 0
+        return {
+            "ok": True,
+            "line_id": line_id,
+            "active": rel,
+            "duration_ms": duration_ms,
+            "timeline_rebuilt": timeline_rebuilt,
+            "versions": _line_versions(store, line_id, rel),
+        }
+
+    @app.post("/api/ui/line/audio/version/delete")
+    def ui_line_audio_version_delete(body: dict) -> dict:
+        """删除某一版录音文件；若删的是生效版本，该行退回「待配」。
+
+        参数:
+            body: `{path, chapter, line, revision}`。
+
+        返回:
+            `{ok, line_id, deleted, was_active, timeline_rebuilt, versions}`
+
+        异常:
+            HTTPException 404: 版本文件不存在。
+        """
+        path = body.get("path")
+        chapter_id = body.get("chapter")
+        line_id = body.get("line")
+        revision = int(body.get("revision") or 0)
+        if not line_id or revision <= 0:
+            raise HTTPException(status_code=400, detail="缺少 line / revision 参数")
+        store = _store(path)
+        rel = f"assets/voice/lines/{line_id}_r{revision}.wav"
+        source_path = store.root / rel
+        if not source_path.is_file():
+            raise HTTPException(status_code=404, detail=f"录音版本不存在: r{revision}")
+        chapter_data = store.load_chapter(chapter_id)
+        target = _find_scene_line(chapter_data, line_id)
+        if target is None:
+            raise HTTPException(status_code=404, detail=f"台词行不存在: {line_id}")
+        tts = target.get("tts") or {}
+        was_active = tts.get("asset_id") == rel
+        try:
+            source_path.unlink()
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail=f"删除失败：{exc}") from exc
+        takes = _load_takes(store)
+        if takes.pop(f"{line_id}_r{revision}", None) is not None:
+            _save_takes(store, takes)
+        if was_active:
+            target["tts"] = {"status": "pending"}
+            store.save_chapter(chapter_data)
+        timeline_rebuilt = False
+        if was_active and store.timeline_path(chapter_id).exists():
+            result = _cli(config_path, "--project", str(store.root), "--json", "timeline", "build", "--chapter", chapter_id)
+            timeline_rebuilt = result.code == 0
+        active = (target.get("tts") or {}).get("asset_id")
+        return {
+            "ok": True,
+            "line_id": line_id,
+            "deleted": rel,
+            "was_active": was_active,
+            "timeline_rebuilt": timeline_rebuilt,
+            "versions": _line_versions(store, line_id, active),
+        }
+
     @app.post("/api/ui/cast/preview")
     def ui_cast_preview(body: dict) -> dict:
         """用本书真实台词试听某个角色的候选音色。
@@ -730,6 +1122,9 @@ def register_voice_tools_routes(app, config_path: str | None = None) -> None:
             "blockers": blockers,
             "unknown_total": unknown_total,
             "unknown_rows": unknown_rows,
+            "items": plan.get("items") or [],
+            "items_truncated": bool(plan.get("items_truncated")),
+            "assets": int(plan.get("assets") or 0),
             "ready": ready,
             "ready_reason": ready_reason,
         }
@@ -752,6 +1147,9 @@ def register_voice_tools_routes(app, config_path: str | None = None) -> None:
         scope = "all" if body.get("scope") == "all" else "chapter"
         chapter = body.get("chapter")
         skip_unknown = bool(body.get("skip_unknown"))
+        # 用户主动启动时清掉暂停标记，避免新批次一开始就停在暂停态
+        (store.root / ".ndw" / "tts.paused").unlink(missing_ok=True)
+        QueueStore(store).set_paused(False)
         plan = ui_batch_all_plan(str(store.root), scope, chapter)
         if not plan["ready"]:
             raise HTTPException(status_code=412, detail={"code": 4, "message": plan["ready_reason"]})

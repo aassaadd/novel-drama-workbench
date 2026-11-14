@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>切换工程 · 小说改编有声剧工作台</title>
+<link rel="stylesheet" href="assets/app.css" />
+</head>
+<body>
+<header class="topbar">
+  <div class="tb-left">
+    <a class="btn icon" href="01-projects.html" title="返回工程列表"><span class="ic ic-back"></span></a>
+    <div class="tb-views">
+      <button class="btn icon" title="画本编辑视图"><span class="ic ic-doc"></span></button>
+      <button class="btn icon" title="配音视图"><span class="ic ic-mic"></span></button>
+      <button class="btn icon" title="后期制作视图"><span class="ic ic-media"></span></button>
+      <button class="btn icon" title="审听与对轨视图"><span class="ic ic-more"></span></button>
+    </div>
+  </div>
+  <div class="tb-mid">
+    <button class="btn icon sm" title="上一章"><span class="ic ic-back"></span></button>
+    <div class="crumbs">
+      <a href="01-projects.html">长夜将明</a><span class="sep">/</span>
+      <span class="cur">第一章 雨夜归人</span>
+      <span class="ic ic-chev" style="color:var(--text-4)"></span>
+    </div>
+    <span class="state ok" style="margin-left:4px"><span class="ic ic-check"></span>已自动保存</span>
+    <button class="btn icon sm" title="下一章"><span class="ic ic-next"></span></button>
+  </div>
+  <div class="tb-right">
+    <button class="btn icon" title="撤销（⌘Z）"><span class="tb-glyph">↶</span></button>
+    <button class="btn icon" title="重做（⇧⌘Z）"><span class="tb-glyph">↷</span></button>
+    <div class="zoom">
+      <button class="btn icon sm" title="缩小"><span class="ic ic-minus"></span></button>
+      <span class="z-val">100%</span>
+      <button class="btn icon sm" title="放大"><span class="ic ic-plus"></span></button>
+    </div>
+    <button class="btn icon" title="查找替换（⌘F）"><span class="ic ic-search"></span></button>
+    <button class="btn icon" title="更多"><span class="ic ic-more"></span></button>
+    <a class="btn icon" href="11-settings.html" title="项目设定"><span class="ic ic-sliders"></span></a>
+  </div>
+</header>
+
+<div class="studio no-right">
+  <!-- 56px 图标栏 -->
+  <nav class="railbar">
+    <a class="rail-item" href="01-projects.html" title="项目"><span class="ic ic-project"></span>项目<span class="rail-n">5</span></a>
+    <a class="rail-item" href="02-world.html" title="世界"><span class="ic ic-world"></span>世界<span class="rail-n">4</span></a>
+    <a class="rail-item" href="03-characters.html" title="人物"><span class="ic ic-user"></span>人物<span class="rail-n">9</span></a>
+    <a class="rail-item" href="05-outline.html" title="大纲"><span class="ic ic-outline"></span>大纲<span class="rail-n">3</span></a>
+    <a class="rail-item" href="06-chapter.html" title="章节"><span class="ic ic-doc"></span>章节<span class="rail-n">12</span></a>
+    <a class="rail-item" href="07-script.html" title="标注"><span class="ic ic-clap"></span>标注<span class="rail-n">8</span></a>
+    <a class="rail-item active" href="08-voice.html" title="配音"><span class="ic ic-mic"></span>配音<span class="rail-n">86%</span></a>
+    <a class="rail-item" href="09-media.html" title="媒体"><span class="ic ic-media"></span>媒体<span class="rail-n">24</span></a>
+    <a class="rail-item" href="10-export.html" title="导出"><span class="ic ic-export"></span>导出</a>
+    <div class="rail-sep"></div>
+    <a class="rail-item" href="04-voices.html" title="音色库"><span class="ic ic-mic"></span>音色</a>
+    <div class="rail-foot">
+      <a class="rail-item" href="10-export.html" title="运行记录"><span class="ic ic-clock"></span>记录</a>
+      <a class="rail-item" href="11-settings.html" title="设置"><span class="ic ic-sliders"></span>设置</a>
+    </div>
+  </nav>
+
+  <!-- 360px 上下文面板：章节目录 -->
+  <section class="ctx">
+    <div class="ctx-head">
+      <span class="ct">章节目录</span>
+      <span class="badge" style="font-weight:400">12 章</span>
+      <div class="right">
+        <button class="btn icon sm" title="播放器"><span class="ic ic-play"></span></button>
+        <button class="btn icon sm" title="快捷键"><span class="ic ic-sliders"></span></button>
+        <button class="btn icon sm" title="折叠面板"><span class="ic ic-back"></span></button>
+      </div>
+    </div>
+    <div class="ctx-tools">
+      <div class="three">
+        <select class="select"><option>全部场景</option><option>雨夜街口</option><option>卷宗室</option></select>
+        <select class="select"><option>全部角色</option><option>旁白</option><option>沈砚</option><option>林晚</option></select>
+        <select class="select"><option>全部状态</option><option>待配</option><option>失败</option><option>已过期</option></select>
+      </div>
+      <div class="toolrow">
+        <div class="search"><span class="ic ic-search"></span><input placeholder="搜索章节" /><span class="ic ic-close" style="opacity:.5"></span></div>
+        <button class="btn icon sm" title="排序"><span class="ic ic-outline"></span></button>
+        <button class="btn icon sm" title="批量操作"><span class="ic ic-clap"></span></button>
+        <button class="btn icon sm" title="新增章节"><span class="ic ic-plus"></span></button>
+      </div>
+    </div>
+    <div class="chap-list">
+      <div class="chap-row on"><span class="cn">第一章 雨夜归人</span><span class="dot bad"></span><span class="cw">1,284字</span></div>
+      <div class="chap-row"><span class="cn">第二章 缺失的卷宗</span><span class="dot ok"></span><span class="cw">1,102字</span></div>
+      <div class="chap-row"><span class="cn">第三章 第十三通电话</span><span class="dot warn"></span><span class="cw">986字</span></div>
+      <div class="chap-row"><span class="cn">第四章 旧城区的灯</span><span class="dot ok"></span><span class="cw">1,340字</span></div>
+      <div class="chap-row"><span class="cn">第五章 密钥</span><span class="dot ok"></span><span class="cw">1,215字</span></div>
+      <div class="chap-row"><span class="cn">第六章 天台</span><span class="dot ok"></span><span class="cw">1,022字</span></div>
+      <div class="chap-row"><span class="cn">第七章 回声</span><span class="dot" style="background:var(--text-4)"></span><span class="cw">1,188字</span></div>
+      <div class="chap-row"><span class="cn">第八章 雨停之前</span><span class="dot" style="background:var(--text-4)"></span><span class="cw">1,090字</span></div>
+      <div class="chap-row"><span class="cn">第九章 旧案重提</span><span class="dot" style="background:var(--text-4)"></span><span class="cw">1,164字</span></div>
+      <div class="chap-row"><span class="cn">第十章 对峙</span><span class="dot" style="background:var(--text-4)"></span><span class="cw">1,278字</span></div>
+      <div class="chap-row"><span class="cn">第十一章 余烬</span><span class="dot" style="background:var(--text-4)"></span><span class="cw">1,096字</span></div>
+      <div class="chap-row"><span class="cn">第十二章 长夜将明</span><span class="dot" style="background:var(--text-4)"></span><span class="cw">1,320字</span></div>
+    </div>
+    <div class="col-foot" style="padding:9px 14px;border-top:1px solid var(--line);font-size:10.5px;color:var(--text-3)">
+      本章 32 段 · 已配 22 · 失败 2 · 待配 6
+    </div>
+  </section>
+
+  <!-- 主编辑区（背景） -->
+  <section class="editor">
+    <div class="ed-head">
+      <span class="et">画本编辑</span>
+      <span class="em">32 段 · 1,284 字</span>
+      <div class="right">
+        <button class="btn icon" title="整章试听"><span class="ic ic-play"></span></button>
+        <button class="btn icon" title="查看原文"><span class="ic ic-doc"></span></button>
+        <button class="btn icon" title="隐藏标签"><span class="ic ic-close"></span></button>
+        <button class="btn icon" title="查找替换"><span class="ic ic-search"></span></button>
+        <button class="btn icon" title="字号"><span class="ic ic-sliders"></span></button>
+        <button class="btn sm" title="批量合并相邻旁白">批量合并旁白</button>
+        <button class="btn icon" title="更多"><span class="ic ic-more"></span></button>
+      </div>
+    </div>
+
+    <div class="ed-filters">
+      <button class="chip on" style="height:26px;font-size:11.5px">全部 <span class="cnt">32</span></button>
+      <button class="chip" style="height:26px;font-size:11.5px">待配 <span class="cnt">6</span></button>
+      <button class="chip" style="height:26px;font-size:11.5px;color:var(--bad);border-color:rgba(238,107,107,.3)">失败 <span class="cnt">2</span></button>
+      <button class="chip" style="height:26px;font-size:11.5px;color:var(--warn);border-color:rgba(240,138,75,.3)">过期 <span class="cnt">1</span></button>
+      <div style="margin-left:auto;display:flex;align-items:center;gap:7px">
+        <div class="search" style="min-width:150px;height:28px"><span class="ic ic-search"></span><input value="卷宗" /></div>
+        <button class="btn sm"><span class="ic ic-check"></span>批量设置说话人</button>
+        <button class="btn sm danger">重配本章</button>
+        <button class="btn sm primary"><span class="ic ic-play"></span>补齐缺失 9 行</button>
+      </div>
+    </div>
+
+    <div class="ed-body">
+      <div class="seg-row" data-tone="n">
+        <div class="seg-spk"><button class="btn icon sm seg-play" title="试听"><span class="ic ic-play"></span></button><div class="spk-body"><div class="sn">旁白</div><div class="sv">叙述女声 · 全剧固定</div></div><span class="avatar" style="width:26px;height:26px;flex-basis:26px;font-size:9px;background:#242a33;color:#aaa">旁</span></div>
+        <div class="seg-text"><span class="stag cue">雨声</span>雨声先起。街口的灯闪了两下，熄了。</div>
+        <div class="seg-act"><button class="btn icon sm" title="更多"><span class="ic ic-more"></span></button></div>
+        <span class="mini-state">00:03.2</span>
+      </div>
+
+      <div class="seg-row" data-tone="a">
+        <div class="seg-spk"><button class="btn icon sm seg-play" title="试听"><span class="ic ic-play"></span></button><div class="spk-body"><div class="sn">沈砚</div><div class="sv">低沉男声 · 项声</div></div><span class="avatar tone-a" style="width:26px;height:26px;flex-basis:26px;font-size:9px">沈</span></div>
+        <div class="seg-text"><span class="stag em">压抑</span>“<mark>卷宗</mark>少了一页。”</div>
+        <div class="seg-act"><button class="btn icon sm" title="更多"><span class="ic ic-more"></span></button></div>
+        <span class="mini-state">00:02.4</span>
+      </div>
+
+      <div class="seg-row" data-tone="n">
+        <div class="seg-spk"><button class="btn icon sm seg-play" title="试听"><span class="ic ic-play"></span></button><div class="spk-body"><div class="sn">旁白</div><div class="sv">叙述女声 · 全剧固定</div></div><span class="avatar" style="width:26px;height:26px;flex-basis:26px;font-size:9px;background:#242a33;color:#aaa">旁</span></div>
+        <div class="seg-text">他把最后一页翻回去，指腹在缺口上停住。纸是新的，断口却很旧。</div>
+        <div class="seg-act"><button class="btn icon sm" title="更多"><span class="ic ic-more"></span></button></div>
+        <span class="mini-state">00:04.1</span>
+      </div>
+
+      <div class="seg-row sel fail" data-tone="c">
+        <div class="seg-spk"><button class="btn icon sm seg-play" title="试听旧版"><span class="ic ic-play"></span></button><div class="spk-body"><div class="sn">林晚</div><div class="sv">清冷女声 · 林晚</div></div><span class="avatar tone-b" style="width:26px;height:26px;flex-basis:26px;font-size:9px">林</span></div>
+        <div class="seg-text"><span class="stag em">冷静</span>“页码是后补的。有人比我们早到。”</div>
+        <div class="seg-act"><button class="btn icon sm" title="更多"><span class="ic ic-more"></span></button></div>
+        <span class="mini-state">生成失败</span>
+      </div>
+
+      <div class="seg-row" data-tone="a">
+        <div class="seg-spk"><button class="btn icon sm seg-play" title="试听"><span class="ic ic-play"></span></button><div class="spk-body"><div class="sn">沈砚</div><div class="sv">低沉男声 · 项声</div></div><span class="avatar tone-a" style="width:26px;height:26px;flex-basis:26px;font-size:9px">沈</span></div>
+        <div class="seg-text"><span class="stag em">试探</span>“谁碰过这份<mark>卷宗</mark>？”</div>
+        <div class="seg-act"><button class="btn icon sm" title="更多"><span class="ic ic-more"></span></button></div>
+        <span class="mini-state">00:01.9</span>
+      </div>
+
+      <div class="seg-row" data-tone="d">
+        <div class="seg-spk"><button class="btn icon sm seg-play" title="试听"><span class="ic ic-play"></span></button><div class="spk-body"><div class="sn">老周</div><div class="sv">沙哑中年 · 周声</div></div><span class="avatar tone-c" style="width:26px;height:26px;flex-basis:26px;font-size:9px">周</span></div>
+        <div class="seg-text"><span class="stag em">迟疑</span>“除了我，没人。钥匙一直在我抽屉里。”</div>
+        <div class="seg-act"><button class="btn icon sm" title="更多"><span class="ic ic-more"></span></button></div>
+        <span class="mini-state">待配</span>
+      </div>
+
+      <div class="seg-row run" data-tone="b">
+        <div class="seg-spk"><button class="btn icon sm seg-play" title="停止这一行"><span class="ic ic-stop"></span></button><div class="spk-body"><div class="sn">陈默</div><div class="sv">阴冷男声 · 候选 A</div></div><span class="avatar tone-d" style="width:26px;height:26px;flex-basis:26px;font-size:9px">陈</span></div>
+        <div class="seg-text"><span class="stag em">阴冷</span>“沈队，好久不见。”</div>
+        <div class="seg-act"><button class="btn icon sm" title="更多"><span class="ic ic-more"></span></button></div>
+        <span class="mini-state run">生成中 62%</span>
+      </div>
+
+      <div class="seg-row" data-tone="n">
+        <div class="seg-spk"><button class="btn icon sm seg-play" title="试听"><span class="ic ic-play"></span></button><div class="spk-body"><div class="sn">旁白</div><div class="sv">叙述女声 · 全剧固定</div></div><span class="avatar" style="width:26px;height:26px;flex-basis:26px;font-size:9px;background:#242a33;color:#aaa">旁</span></div>
+        <div class="seg-text">他没有回头。雨声把所有回答都盖了过去。</div>
+        <div class="seg-act"><button class="btn icon sm" title="更多"><span class="ic ic-more"></span></button></div>
+        <span class="mini-state">待配</span>
+      </div>
+    </div>
+
+    <div class="playerbar">
+      <button class="btn icon" title="播放"><span class="ic ic-play"></span></button>
+      <button class="btn icon" title="停止"><span class="ic ic-stop"></span></button>
+      <span class="pb-time"><span style="color:var(--text)">00:12.48</span> / 03:48.20</span>
+      <div class="pb-wave">
+        <div class="wave mini" style="height:22px;width:100%"><i style="--h:24%"></i><i style="--h:46%"></i><i style="--h:62%"></i><i style="--h:38%"></i><i style="--h:72%"></i><i style="--h:50%"></i><i style="--h:84%"></i><i style="--h:42%"></i><i style="--h:58%"></i><i style="--h:30%"></i><i style="--h:66%"></i><i style="--h:48%"></i><i style="--h:76%"></i><i style="--h:36%"></i><i style="--h:54%"></i><i style="--h:28%"></i><i style="--h:64%"></i><i style="--h:44%"></i><i style="--h:80%"></i><i style="--h:34%"></i><i style="--h:56%"></i><i style="--h:70%"></i><i style="--h:40%"></i><i style="--h:52%"></i></div>
+      </div>
+      <span class="badge">1.0×</span>
+      <button class="btn sm">展开时间轴<span class="ic ic-chev"></span></button>
+    </div>
+  </section>
+</div>
+
+<!-- 工程切换器 -->
+<div class="modal-mask">
+  <div class="modal narrow" role="dialog" aria-label="切换工程">
+    <div class="modal-head">
+      <div class="m-body">
+        <h3>切换工程</h3>
+        <div class="m-sub">当前工程：长夜将明</div>
+        <div class="m-sub mono" style="margin-top:1px;font-size:10.5px;color:var(--text-4)">~/novels/changye</div>
+      </div>
+      <button class="close" title="关闭"><span class="ic ic-close"></span></button>
+    </div>
+
+    <div class="modal-body" style="gap:12px">
+      <div class="task-title" style="margin-bottom:0">
+        最近打开
+        <span class="right"><span class="badge" style="font-weight:400">4 个</span></span>
+      </div>
+
+      <div class="row-list" style="border:1px solid var(--line-2);border-radius:8px;overflow:hidden;background:var(--bg-1)">
+        <div class="row sel">
+          <span class="avatar sq tone-d" style="width:26px;height:26px;flex-basis:26px;font-size:10px">长</span>
+          <div class="grow">
+            <div class="r-title">长夜将明 <span class="badge accent" style="height:17px;padding:0 5px">当前</span></div>
+            <div class="r-sub mono">~/novels/changye</div>
+          </div>
+          <div style="text-align:right;flex:0 0 auto">
+            <div style="font-size:10px;color:var(--text-3)">今天 14:32</div>
+            <div class="mono" style="font-size:9.5px;color:var(--text-4)">12 章</div>
+          </div>
+          <button class="btn sm primary" style="flex:0 0 auto">打开</button>
+        </div>
+
+        <div class="row">
+          <span class="avatar sq tone-b" style="width:26px;height:26px;flex-basis:26px;font-size:10px">春</span>
+          <div class="grow">
+            <div class="r-title">春山旧事</div>
+            <div class="r-sub mono">~/novels/chunshan</div>
+          </div>
+          <div style="text-align:right;flex:0 0 auto">
+            <div style="font-size:10px;color:var(--text-3)">昨天 21:08</div>
+            <div class="mono" style="font-size:9.5px;color:var(--text-4)">9 章</div>
+          </div>
+          <button class="btn sm" style="flex:0 0 auto">打开</button>
+        </div>
+
+        <div class="row">
+          <span class="avatar sq tone-c" style="width:26px;height:26px;flex-basis:26px;font-size:10px">雾</span>
+          <div class="grow">
+            <div class="r-title">雾港来信</div>
+            <div class="r-sub mono">~/novels/wugang</div>
+          </div>
+          <div style="text-align:right;flex:0 0 auto">
+            <div style="font-size:10px;color:var(--text-3)">11月6日</div>
+            <div class="mono" style="font-size:9.5px;color:var(--text-4)">7 章</div>
+          </div>
+          <button class="btn sm" style="flex:0 0 auto">打开</button>
+        </div>
+
+        <div class="row">
+          <span class="avatar sq" style="width:26px;height:26px;flex-basis:26px;font-size:10px">未</span>
+          <div class="grow">
+            <div class="r-title" style="color:var(--text-3)">未命名工程 3</div>
+            <div class="r-sub mono">~/novels/untitled-3</div>
+          </div>
+          <div style="text-align:right;flex:0 0 auto">
+            <div style="font-size:10px;color:var(--text-3)">11月2日</div>
+            <div class="mono" style="font-size:9.5px;color:var(--text-4)">0 章</div>
+          </div>
+          <button class="btn sm" style="flex:0 0 auto">打开</button>
+        </div>
+      </div>
+
+      <div style="height:1px;background:var(--line);margin:2px 0"></div>
+
+      <label class="field">
+        <span class="label">打开本地工程</span>
+        <div class="input-row">
+          <input class="input mono" value="~/novels/" placeholder="选择或输入工程目录" style="font-size:11.5px" />
+          <button class="btn sm" style="height:30px;flex:0 0 auto"><span class="ic ic-project"></span>浏览…</button>
+          <button class="btn primary" style="height:30px;flex:0 0 auto">打开工程</button>
+        </div>
+      </label>
+
+      <div class="banner info" style="padding:8px 10px;font-size:11.5px;align-items:center">
+        <span class="ic ic-check b-icon" style="color:var(--accent-hi)"></span>
+        <div class="b-body">打开新工程会先自动保存当前修改。</div>
+      </div>
+    </div>
+
+    <div class="modal-foot">
+      <button class="btn"><span class="ic ic-plus"></span>新建工程</button>
+      <span class="right"><button class="btn">取消</button></span>
+    </div>
+  </div>
+</div>
+</body>
+</html>

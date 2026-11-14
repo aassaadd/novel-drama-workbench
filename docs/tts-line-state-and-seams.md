@@ -78,6 +78,8 @@ if tts.get("synthesized_revision") != line.get("revision"): return True
 5) 其余原样返回
 ```
 
+> **未上线阶段暂不要求**：规则 4c（侧车不存在的旧数据）属旧数据兜底分支，可不实现；新代码为唯一实现，旧工程数据可直接重建。
+
 规则 3 的「活跃批次」判定复用 `.ndw/tts_batches/*.json` 里的 `status=running` 且未超时（默认 30 分钟无心跳视为死亡）。
 
 ### 2.4 为什么 `stale` 不落盘
@@ -435,7 +437,7 @@ ndw group apply --chapter CH --group grp_a1b2   # 实际写入行，revision += 
 
 - 必须升 `schema_version`；
 - 侧车与字段两处真相，必然出现不一致；
-- 旧数据迁移要重算全部指纹。
+- 旧数据迁移要重算全部指纹（**未上线阶段暂不要求**：不做旧数据迁移，旧数据可直接重建）。
 
 结论：先不做。若实测 `line list` 超过 300ms 再考虑，并把指纹**只作为缓存**（侧车仍是唯一真相）。
 

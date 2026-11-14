@@ -295,6 +295,9 @@ def cmd_tts_batch(args, config: AppConfig) -> int:
         lines_total = 0
         skipped_unknown = 0
         unknown_rows: list[dict] = []
+        # 影响清单：给页面列出「本次会动到哪些场景/行」，最多 300 条，避免整本工程一次返回过大
+        items: list[dict] = []
+        item_limit = 300
         per_chapter: list[dict] = []
         for chapter in chapters:
             rows = plan_batch(
@@ -316,8 +319,8 @@ def cmd_tts_batch(args, config: AppConfig) -> int:
                 for line in scene.get("lines") or []
                 if (line.get("text") or "").strip()
             )
+            locator = _line_locator(chapter)
             if skip_ids:
-                locator = _line_locator(chapter)
                 kept = []
                 for row in rows:
                     line = row["line"]
@@ -351,9 +354,25 @@ def cmd_tts_batch(args, config: AppConfig) -> int:
                 }
             )
             for row in rows:
+                line = row["line"]
                 lines.append(
-                    f"{chapter.get('id')}  {row['line']['id']}  {row['line'].get('speaker_id')}  {row['line']['text'][:24]}"
+                    f"{chapter.get('id')}  {line['id']}  {line.get('speaker_id')}  {line['text'][:24]}"
                 )
+                if len(items) < item_limit:
+                    scene_no, line_no = locator.get(str(line.get("id")), (0, 0))
+                    items.append(
+                        {
+                            "chapter_id": chapter.get("id"),
+                            "chapter_title": chapter.get("title"),
+                            "scene_id": row.get("scene_id"),
+                            "scene_index": scene_no,
+                            "line_id": line.get("id"),
+                            "line_index": line_no,
+                            "speaker_id": line.get("speaker_id"),
+                            "text": line.get("text"),
+                            "has_audio": bool((line.get("tts") or {}).get("asset_id")),
+                        }
+                    )
         head = f"[dry-run] 待合成 {total} 行（{len(chapters)} 章，跳过 {max(0, lines_total - total)} 行"
         if skipped_unknown:
             head += f"，其中说话人未识别 {skipped_unknown} 行"
@@ -369,6 +388,9 @@ def cmd_tts_batch(args, config: AppConfig) -> int:
                 "skipped_unknown": skipped_unknown,
                 "unknown_rows": unknown_rows,
                 "unknown_line_ids": sorted(skip_ids),
+                "items": items,
+                "items_truncated": total > len(items),
+                "assets": sum(1 for item in items if item["has_audio"]),
             },
         )
         return EXIT_OK

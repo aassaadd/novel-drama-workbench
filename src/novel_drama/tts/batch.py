@@ -371,6 +371,26 @@ def _mark_failed(store, chapter, line, entry, batch_results, stats, error) -> No
     batch_results.append(entry)
 
 
+def wait_while_paused(store) -> None:
+    """暂停期间原地等待，删除标记后自动继续。
+
+    暂停只影响「下一行是否开始」，不打断正在合成的那一行；停止仍由进程终止负责。
+
+    参数:
+        store: 工程读写入口。
+
+    返回:
+        None。
+    """
+    marker = store.root / ".ndw" / "tts.paused"
+    announced = False
+    while marker.exists():
+        if not announced:
+            print("[pause] 已暂停，等待继续…", flush=True)
+            announced = True
+        time.sleep(1.0)
+
+
 def run_batch(
     service,
     store,
@@ -416,6 +436,7 @@ def run_batch(
         batch_rows = rows[offset : offset + batch_size]
         batch_results = []
         for row in batch_rows:
+            wait_while_paused(store)
             line = row["line"]
             voice_info = _line_voice(store, characters_table, line, service, chapter)
             rel_path = f"assets/voice/lines/{line['id']}_r{line['revision']}.wav"

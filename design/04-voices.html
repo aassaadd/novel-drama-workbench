@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>音色库 · 小说改编有声剧工作台</title>
+<link rel="stylesheet" href="assets/app.css" />
+</head>
+<body>
+<header class="topbar">
+  <div class="tb-left"><a class="btn icon" href="01-projects.html" title="返回工程列表"><span class="ic ic-back"></span></a>
+    <div class="tb-views"><button class="btn icon" title="画本编辑视图"><span class="ic ic-doc"></span></button><button class="btn icon" title="配音视图"><span class="ic ic-mic"></span></button><button class="btn icon" title="后期制作视图"><span class="ic ic-media"></span></button><button class="btn icon" title="更多视图"><span class="ic ic-more"></span></button></div></div>
+  <div class="tb-mid"><button class="btn icon sm" title="上一章"><span class="ic ic-prev"></span></button>
+    <div class="crumbs"><a href="01-projects.html">长夜将明</a><span class="sep">/</span><span class="cur">音色库</span><span class="ic ic-chev"></span></div>
+    <span class="state ok"><span class="ic ic-check"></span>已自动保存</span>
+    <button class="btn icon sm" title="下一章"><span class="ic ic-next"></span></button></div>
+  <div class="tb-right"><button class="btn icon" title="撤销"><span class="tb-glyph">↶</span></button><button class="btn icon" title="重做"><span class="tb-glyph">↷</span></button>
+    <div class="zoom"><button class="btn icon sm"><span class="ic ic-minus"></span></button><span class="z-val">100%</span><button class="btn icon sm"><span class="ic ic-plus"></span></button></div>
+    <button class="btn icon" title="查找"><span class="ic ic-search"></span></button><button class="btn icon" title="更多"><span class="ic ic-more"></span></button><a class="btn icon" href="11-settings.html" title="设置"><span class="ic ic-sliders"></span></a></div>
+</header>
+
+<div class="studio no-right">
+  <nav class="railbar">
+    <a class="rail-item" href="01-projects.html" title="项目"><span class="ic ic-project"></span>项目<span class="rail-n">5</span></a>
+    <a class="rail-item" href="02-world.html" title="世界"><span class="ic ic-world"></span>世界<span class="rail-n">4</span></a>
+    <a class="rail-item" href="03-characters.html" title="人物"><span class="ic ic-user"></span>人物<span class="rail-n">9</span></a>
+    <a class="rail-item" href="05-outline.html" title="大纲"><span class="ic ic-outline"></span>大纲<span class="rail-n">3</span></a>
+    <a class="rail-item" href="06-chapter.html" title="章节"><span class="ic ic-doc"></span>章节<span class="rail-n">12</span></a>
+    <a class="rail-item" href="07-script.html" title="标注"><span class="ic ic-clap"></span>标注<span class="rail-n">8</span></a>
+    <a class="rail-item" href="08-voice.html" title="配音"><span class="ic ic-mic"></span>配音<span class="rail-n">78%</span></a>
+    <a class="rail-item" href="09-media.html" title="媒体"><span class="ic ic-media"></span>媒体<span class="rail-n">24</span></a>
+    <a class="rail-item" href="10-export.html" title="导出"><span class="ic ic-export"></span>导出</a>
+    <div class="rail-sep"></div>
+    <a class="rail-item active" href="04-voices.html" title="音色库"><span class="ic ic-mic"></span>音色</a>
+    <div class="rail-foot">
+      <a class="rail-item" href="10-export.html" title="运行记录"><span class="ic ic-clock"></span>记录</a>
+      <a class="rail-item" href="11-settings.html" title="设置"><span class="ic ic-sliders"></span>设置</a>
+    </div>
+  </nav>
+
+  <section class="ctx">
+    <div class="ctx-head">
+      <span class="ct">音色池</span>
+      <span class="badge" style="font-weight:400">12 个</span>
+      <div class="right">
+        <button class="btn icon sm" title="按最近使用排序"><span class="ic ic-outline"></span></button>
+        <button class="btn icon sm" title="更多"><span class="ic ic-more"></span></button>
+      </div>
+    </div>
+    <div class="ctx-tools">
+      <div style="display:flex;align-items:center;gap:5px;flex-wrap:wrap">
+        <button class="chip on" style="height:25px;font-size:11px;padding:0 9px">全部 <span class="cnt">12</span></button>
+        <button class="chip" style="height:25px;font-size:11px;padding:0 9px">男声 <span class="cnt">7</span></button>
+        <button class="chip" style="height:25px;font-size:11px;padding:0 9px">女声 <span class="cnt">5</span></button>
+        <button class="chip" style="height:25px;font-size:11px;padding:0 9px">克隆 <span class="cnt">2</span></button>
+      </div>
+      <div class="toolrow">
+        <div class="search" style="flex:1"><span class="ic ic-search"></span><input placeholder="搜索音色 / 风格" /></div>
+        <button class="btn icon sm" title="筛选"><span class="ic ic-sliders"></span></button>
+      </div>
+      <button class="btn sm" style="width:100%"><span class="ic ic-mic"></span>从音频克隆</button>
+    </div>
+
+    <div class="chap-list" style="padding-top:2px">
+      <div class="row">
+        <span class="avatar sq tone-a" style="width:26px;height:26px;flex-basis:26px;font-size:10px">项</span>
+        <div class="grow"><div class="r-title">项深</div><div class="r-sub">男 · 35 岁 · 低沉 / 克制 · 3 个角色</div></div>
+        <button class="btn icon sm" title="试听"><span class="ic ic-play"></span></button>
+      </div>
+      <div class="row">
+        <span class="avatar sq tone-b" style="width:26px;height:26px;flex-basis:26px;font-size:10px">林</span>
+        <div class="grow"><div class="r-title">林晚-清冷女声</div><div class="r-sub">女 · 29 岁 · 清冷 / 气声轻 · 1 个角色</div></div>
+        <button class="btn icon sm" title="试听"><span class="ic ic-play"></span></button>
+      </div>
+      <div class="row">
+        <span class="avatar sq tone-c" style="width:26px;height:26px;flex-basis:26px;font-size:10px">周</span>
+        <div class="grow"><div class="r-title">周声</div><div class="r-sub">男 · 52 岁 · 沙哑 / 中年 · 2 个角色</div></div>
+        <button class="btn icon sm" title="试听"><span class="ic ic-play"></span></button>
+      </div>
+      <div class="row">
+        <span class="avatar sq tone-d" style="width:26px;height:26px;flex-basis:26px;font-size:10px">陈</span>
+        <div class="grow"><div class="r-title">陈默-阴冷男声</div><div class="r-sub">男 · 38 岁 · 阴冷 / 缓慢 · 2 个角色</div></div>
+        <button class="btn icon sm" title="试听"><span class="ic ic-play"></span></button>
+      </div>
+      <div class="row">
+        <span class="avatar sq" style="width:26px;height:26px;flex-basis:26px;font-size:10px">叙</span>
+        <div class="grow"><div class="r-title">叙述女声</div><div class="r-sub">女 · 32 岁 · 平稳 / 旁白固定</div></div>
+        <button class="btn icon sm" title="试听"><span class="ic ic-play"></span></button>
+      </div>
+      <div class="row">
+        <span class="avatar sq" style="width:26px;height:26px;flex-basis:26px;font-size:10px">青</span>
+        <div class="grow"><div class="r-title">青年警员</div><div class="r-sub">男 · 27 岁 · 清亮 / 偏快</div></div>
+        <button class="btn icon sm" title="试听"><span class="ic ic-play"></span></button>
+      </div>
+      <div class="row">
+        <span class="avatar sq" style="width:26px;height:26px;flex-basis:26px;font-size:10px">王</span>
+        <div class="grow"><div class="r-title">王姨</div><div class="r-sub">女 · 58 岁 · 絮叨 / 市井</div></div>
+        <button class="btn icon sm" title="试听"><span class="ic ic-play"></span></button>
+      </div>
+      <div class="row">
+        <span class="avatar sq" style="width:26px;height:26px;flex-basis:26px;font-size:10px">备</span>
+        <div class="grow"><div class="r-title">旁白-男声备选</div><div class="r-sub">男 · 45 岁 · 厚重 / 纪录片</div></div>
+        <button class="btn icon sm" title="试听"><span class="ic ic-play"></span></button>
+      </div>
+      <div class="row">
+        <span class="avatar sq tone-d" style="width:26px;height:26px;flex-basis:26px;font-size:10px">记</span>
+        <div class="grow"><div class="r-title">记者-急促 <span class="badge run" style="height:16px;font-size:9px">克隆</span></div><div class="r-sub">男 · 31 岁 · 急促 / 紧</div></div>
+        <button class="btn icon sm" title="试听"><span class="ic ic-play"></span></button>
+      </div>
+      <div class="row">
+        <span class="avatar sq tone-b" style="width:26px;height:26px;flex-basis:26px;font-size:10px">学</span>
+        <div class="grow"><div class="r-title">学生-清甜 <span class="badge run" style="height:16px;font-size:9px">克隆</span></div><div class="r-sub">女 · 19 岁 · 清甜 / 轻</div></div>
+        <button class="btn icon sm" title="试听"><span class="ic ic-play"></span></button>
+      </div>
+      <div class="row">
+        <span class="avatar sq" style="width:26px;height:26px;flex-basis:26px;font-size:10px">播</span>
+        <div class="grow"><div class="r-title">电台主播</div><div class="r-sub">女 · 40 岁 · 中性 / 播音</div></div>
+        <button class="btn icon sm" title="试听"><span class="ic ic-play"></span></button>
+      </div>
+      <div class="row">
+        <span class="avatar sq" style="width:26px;height:26px;flex-basis:26px;font-size:10px">混</span>
+        <div class="grow"><div class="r-title">街头混混</div><div class="r-sub">男 · 28 岁 · 油滑 / 痞</div></div>
+        <button class="btn icon sm" title="试听"><span class="ic ic-play"></span></button>
+      </div>
+    </div>
+    <div class="col-foot" style="display:flex;align-items:center;justify-content:space-between">
+      <span>12 个音色 · 8 个已绑定</span>
+      <span class="state warn" style="font-size:10.5px"><span class="dot warn"></span>2 个角色缺音色</span>
+    </div>
+  </section>
+
+  <section class="editor">
+    <div class="ed-head">
+      <span class="et">音色库</span>
+      <span class="em">12 个音色 · 8 个已绑定</span>
+      <div class="right">
+        <span class="badge accent"><span class="ic ic-spark"></span>自动推荐已开启</span>
+        <button class="btn icon" title="试听全部"><span class="ic ic-play"></span></button>
+        <button class="btn icon" title="更多"><span class="ic ic-more"></span></button>
+      </div>
+    </div>
+
+    <div class="ed-body" style="padding:18px 20px 24px">
+      <div class="page-head" style="flex-wrap:wrap;align-items:flex-start">
+        <div class="ph-body">
+          <div class="eyebrow"><span class="line"></span>音色管理 · 第 4 / 9 步</div>
+          <h1 class="page-title">音色库</h1>
+          <p class="page-sub">按角色的定位、年龄、性格与说话风格自动匹配音色，<b>★ 为推荐项</b>。绑定后全剧生效，章节或单行仍可覆盖。</p>
+        </div>
+        <div class="ph-actions" style="flex-wrap:wrap">
+          <button class="btn"><span class="ic ic-refresh"></span>重新计算</button>
+          <button class="btn primary"><span class="ic ic-spark"></span>应用全部推荐</button>
+        </div>
+      </div>
+
+      <div class="banner info" style="margin-top:14px">
+        <span class="ic ic-spark b-icon"></span>
+        <div class="b-body">
+          <div class="b-title">自动推荐说明</div>
+          推荐综合角色定位、年龄、性格关键词与同场角色音色差异；相似度低于 80% 时只给候选，不会自动绑定。修改人物档案后会自动重算。
+        </div>
+        <div class="b-actions"><a class="btn sm" href="03-characters.html">查看人物档案</a></div>
+      </div>
+
+      <div class="card" style="margin-top:14px;padding:0;overflow:hidden">
+        <div class="card-head" style="padding:14px 16px 10px;margin-bottom:0">
+          <h3>角色 → 音色编排</h3>
+          <span class="sub">7 个主要角色 · 2 个待绑定</span>
+          <div class="right"><button class="btn sm"><span class="ic ic-check"></span>批量绑定推荐</button></div>
+        </div>
+        <table class="tbl">
+          <colgroup><col style="width:154px" /><col /><col /><col style="width:78px" /><col style="width:46px" /><col style="width:72px" /></colgroup>
+          <thead>
+            <tr><th>角色</th><th>当前音色</th><th>建议音色</th><th>状态</th><th>试听</th><th>操作</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><div style="display:flex;align-items:center;gap:8px"><span class="avatar" style="width:24px;height:24px;flex-basis:24px;font-size:9px;background:#242a33;color:#aaa">旁</span><div><div class="strong">旁白</div><div class="muted" style="font-size:10px">全剧固定</div></div></div></td>
+              <td>叙述女声</td>
+              <td><span style="color:var(--accent-hi)">★ 叙述女声</span></td>
+              <td><span class="badge ok">已绑定</span></td>
+              <td><button class="btn icon sm" title="试听"><span class="ic ic-play"></span></button></td>
+              <td><button class="btn sm">更换</button></td>
+            </tr>
+            <tr>
+              <td><div style="display:flex;align-items:center;gap:8px"><span class="avatar tone-a" style="width:24px;height:24px;flex-basis:24px;font-size:9px">沈</span><div><div class="strong">沈砚</div><div class="muted" style="font-size:10px">主角</div></div></div></td>
+              <td>项深</td>
+              <td><span style="color:var(--accent-hi)">★ 项深</span> <span class="muted">100%</span></td>
+              <td><span class="badge ok">已绑定</span></td>
+              <td><button class="btn icon sm" title="试听"><span class="ic ic-play"></span></button></td>
+              <td><button class="btn sm">更换</button></td>
+            </tr>
+            <tr>
+              <td><div style="display:flex;align-items:center;gap:8px"><span class="avatar tone-b" style="width:24px;height:24px;flex-basis:24px;font-size:9px">林</span><div><div class="strong">林晚</div><div class="muted" style="font-size:10px">主角</div></div></div></td>
+              <td>林晚-清冷女声</td>
+              <td><span style="color:var(--accent-hi)">★ 林晚-清冷女声</span></td>
+              <td><span class="badge ok">已绑定</span></td>
+              <td><button class="btn icon sm" title="试听"><span class="ic ic-play"></span></button></td>
+              <td><button class="btn sm">更换</button></td>
+            </tr>
+            <tr>
+              <td><div style="display:flex;align-items:center;gap:8px"><span class="avatar tone-c" style="width:24px;height:24px;flex-basis:24px;font-size:9px">周</span><div><div class="strong">老周</div><div class="muted" style="font-size:10px">配角</div></div></div></td>
+              <td>周声</td>
+              <td><span style="color:var(--accent-hi)">★ 周声</span></td>
+              <td><span class="badge ok">已绑定</span></td>
+              <td><button class="btn icon sm" title="试听"><span class="ic ic-play"></span></button></td>
+              <td><button class="btn sm">更换</button></td>
+            </tr>
+            <tr>
+              <td><div style="display:flex;align-items:center;gap:8px"><span class="avatar tone-d" style="width:24px;height:24px;flex-basis:24px;font-size:9px">陈</span><div><div class="strong">陈默</div><div class="muted" style="font-size:10px">配角</div></div></div></td>
+              <td>陈默-阴冷男声</td>
+              <td><span style="color:var(--accent-hi)">★ 陈默-阴冷男声</span></td>
+              <td><span class="badge ok">已绑定</span></td>
+              <td><button class="btn icon sm" title="试听"><span class="ic ic-play"></span></button></td>
+              <td><button class="btn sm">更换</button></td>
+            </tr>
+            <tr>
+              <td><div style="display:flex;align-items:center;gap:8px"><span class="avatar" style="width:24px;height:24px;flex-basis:24px;font-size:9px;border-color:rgba(240,138,75,.4);color:var(--warn)">记</span><div><div class="strong" style="color:var(--warn)">记者乙</div><div class="muted" style="font-size:10px">配角</div></div></div></td>
+              <td><span style="color:var(--warn)">未绑定</span></td>
+              <td><span style="color:var(--accent-hi)">★ 记者-急促</span> <span class="muted">92%</span></td>
+              <td><span class="badge warn">缺音色</span></td>
+              <td><button class="btn icon sm" title="试听候选"><span class="ic ic-play"></span></button></td>
+              <td><button class="btn sm primary">绑定</button></td>
+            </tr>
+            <tr>
+              <td><div style="display:flex;align-items:center;gap:8px"><span class="avatar" style="width:24px;height:24px;flex-basis:24px;font-size:9px;border-color:rgba(240,138,75,.4);color:var(--warn)">凯</span><div><div class="strong" style="color:var(--warn)">线人·阿凯</div><div class="muted" style="font-size:10px">群演</div></div></div></td>
+              <td><span style="color:var(--warn)">未绑定</span></td>
+              <td><span style="color:var(--accent-hi)">街头混混</span> <span class="muted">88%</span></td>
+              <td><span class="badge warn">缺音色</span></td>
+              <td><button class="btn icon sm" title="试听候选"><span class="ic ic-play"></span></button></td>
+              <td><button class="btn sm primary">绑定</button></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="card" style="margin-top:14px">
+        <div class="card-head">
+          <h3>候选音色对比 · 记者乙</h3>
+          <span class="sub">按相似度排序 · 仅展示前 3</span>
+          <div class="right"><button class="btn sm">查看全部 12 个</button></div>
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px">
+          <div style="border:1px solid var(--accent-line);border-radius:9px;background:rgba(232,180,76,.05);padding:12px">
+            <div style="display:flex;align-items:center;gap:7px"><span style="font-size:12.5px;color:var(--text)">记者-急促</span><span class="badge accent">★ 推荐</span></div>
+            <div class="muted" style="margin-top:3px">男 · 31 岁 · 克隆音色</div>
+            <div class="wave mini" style="height:24px;margin-top:9px"><i style="--h:30%"></i><i style="--h:58%"></i><i style="--h:44%"></i><i style="--h:78%"></i><i style="--h:36%"></i><i style="--h:64%"></i><i style="--h:50%"></i><i style="--h:84%"></i><i style="--h:40%"></i><i style="--h:68%"></i><i style="--h:34%"></i><i style="--h:56%"></i><i style="--h:74%"></i><i style="--h:46%"></i></div>
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-top:9px"><span class="muted">相似度</span><span class="mono" style="font-size:11px;color:var(--accent-hi)">92%</span></div>
+            <div class="prog" style="margin-top:4px"><span style="width:92%"></span></div>
+            <div class="tag-list" style="margin-top:9px"><span class="tag">语速 1.08</span><span class="tag">情绪：急切</span></div>
+            <div class="btn-row" style="margin-top:10px"><button class="btn sm"><span class="ic ic-play"></span>试听</button><button class="btn sm primary" style="margin-left:auto">绑定</button></div>
+          </div>
+
+          <div style="border:1px solid var(--line);border-radius:9px;background:var(--bg-2);padding:12px">
+            <div style="display:flex;align-items:center;gap:7px"><span style="font-size:12.5px;color:var(--text)">青年警员</span><span class="badge">备选</span></div>
+            <div class="muted" style="margin-top:3px">男 · 27 岁 · 库内音色</div>
+            <div class="wave mini dim" style="height:24px;margin-top:9px"><i style="--h:36%"></i><i style="--h:62%"></i><i style="--h:50%"></i><i style="--h:70%"></i><i style="--h:42%"></i><i style="--h:58%"></i><i style="--h:46%"></i><i style="--h:76%"></i><i style="--h:38%"></i><i style="--h:60%"></i><i style="--h:44%"></i><i style="--h:54%"></i><i style="--h:66%"></i><i style="--h:40%"></i></div>
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-top:9px"><span class="muted">相似度</span><span class="mono" style="font-size:11px">78%</span></div>
+            <div class="prog" style="margin-top:4px"><span style="width:78%"></span></div>
+            <div class="tag-list" style="margin-top:9px"><span class="tag">语速 1.02</span><span class="tag">情绪：清亮</span></div>
+            <div class="btn-row" style="margin-top:10px"><button class="btn sm"><span class="ic ic-play"></span>试听</button><button class="btn sm" style="margin-left:auto">绑定</button></div>
+          </div>
+
+          <div style="border:1px solid var(--line);border-radius:9px;background:var(--bg-2);padding:12px">
+            <div style="display:flex;align-items:center;gap:7px"><span style="font-size:12.5px;color:var(--text)">街头混混</span><span class="badge warn">差异大</span></div>
+            <div class="muted" style="margin-top:3px">男 · 28 岁 · 库内音色</div>
+            <div class="wave mini dim" style="height:24px;margin-top:9px"><i style="--h:52%"></i><i style="--h:34%"></i><i style="--h:68%"></i><i style="--h:44%"></i><i style="--h:74%"></i><i style="--h:38%"></i><i style="--h:56%"></i><i style="--h:48%"></i><i style="--h:66%"></i><i style="--h:30%"></i><i style="--h:72%"></i><i style="--h:42%"></i><i style="--h:58%"></i><i style="--h:50%"></i></div>
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-top:9px"><span class="muted">相似度</span><span class="mono" style="font-size:11px">64%</span></div>
+            <div class="prog warn" style="margin-top:4px"><span style="width:64%"></span></div>
+            <div class="tag-list" style="margin-top:9px"><span class="tag">语速 0.98</span><span class="tag">情绪：油滑</span></div>
+            <div class="btn-row" style="margin-top:10px"><button class="btn sm"><span class="ic ic-play"></span>试听</button><button class="btn sm" style="margin-left:auto">绑定</button></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="playerbar" style="gap:8px">
+      <label class="check"><input type="checkbox" checked />已选 2 项</label>
+      <span class="muted">记者乙、线人·阿凯</span>
+      <div style="margin-left:auto;display:flex;align-items:center;gap:8px">
+        <button class="btn sm">全选</button>
+        <button class="btn sm"><span class="ic ic-play"></span>批量试听</button>
+        <button class="btn sm primary"><span class="ic ic-check"></span>批量绑定推荐</button>
+      </div>
+    </div>
+  </section>
+</div>
+</body>
+</html>

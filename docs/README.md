@@ -1,5 +1,7 @@
 # 文档索引
 
+> **项目状态：未上线（内部开发中）**——所有改动以新代码为唯一实现，不为旧工程、旧数据、旧代码做兜底、兼容分支、迁移脚本或双写；旧工程数据可直接重建或丢弃。仅当用户明确声明「当前项目已上线」后才要求兼容。本目录中所有「兼容旧数据」「零改动兼容」「旧工程平滑升级」「迁移 / backfill 兼容」类表述，**未上线阶段暂不要求**，仅保留供上线后参考。
+
 本目录按「基线设计 → 迭代 spec → 调研」三类组织。状态以代码与实测为准，文档头部的旧状态若与下表冲突，以下表为准。
 
 ## 基线设计（长期有效，随实现增量修订）
@@ -33,12 +35,19 @@
 | [spec-r24-script-annotate-streaming.md](spec-r24-script-annotate-streaming.md) | 导演标注：按批预算、截断报错、批次续跑、流式与提示词切片 | 已实现；桩验证预算/截断/续跑/进度，未做页面实测 |
 | [spec-r25-dialogue-quotes.md](spec-r25-dialogue-quotes.md) | 正文对白统一使用中文全角双引号 “” | 已实现；桩验证引号规范化、漏引号提示与切分兼容 |
 | [spec-r26-resplit-scene-line.md](spec-r26-resplit-scene-line.md) | 重新切分场景 / 台词：影响清单、人工修改保护、章节页与标注页入口 | 已实现；桩验证保留模式与 CLI impact，未做页面实测 |
-| [spec-r27-character-descriptions.md](spec-r27-character-descriptions.md) | 人物阶段一次产出音色 / 外貌描述（中英文 + 负向）与存量补全 | 已实现；桩验证清洗兼容、补全与重跑，消费端未接入 |
+| [spec-r27-character-descriptions.md](spec-r27-character-descriptions.md) | 人物阶段一次产出音色 / 外貌描述（中英文 + 负向）与存量补全（未上线阶段暂不要求回填旧数据） | 已实现；桩验证清洗兼容、补全与重跑，消费端未接入 |
 | [spec-r28-outline-inline-edit.md](spec-r28-outline-inline-edit.md) | 大纲页就地编辑幕/章标题与概要和节拍文本 | 已实现；桩验证校验与不写章节文件，未做页面实测 |
 | [spec-r29-character-desc-fill-stream.md](spec-r29-character-desc-fill-stream.md) | 补全人物描述流式进度（逐角色、可停止） | 已实现；桩验证事件序列/失败隔离/取消保留，未做页面实测 |
 | [spec-r30-script-warning-noise.md](spec-r30-script-warning-noise.md) | 导演标注告警降噪：说话人归一化、越界夹紧、告警分级与合并 | 已实现；桩验证 + 真实工程重跑 45→0 条告警 |
 | [spec-r31-anchor-orphan-fix.md](spec-r31-anchor-orphan-fix.md) | 标注锚点误判 orphan（游标漂移 / 标点差异）修复 | 已实现；真实工程副本 orphan 148→0 |
 | [spec-r32-warning-locator.md](spec-r32-warning-locator.md) | 标注/配音告警点击定位：台词行 / 镜头 / 告警区三级跳转与降级说明 | 已实现；真实浏览器验证三类目标与降级 |
+
+## 对照与能力清单
+
+| 文档 | 内容 | 状态 |
+| --- | --- | --- |
+| [spec-audimind-parity.md](spec-audimind-parity.md) | 与 audimind 的 90 项功能对照、批次收敛记录、排除项与必然差异 | 已收敛：74 已对齐 / 1 必然差异 / 1 未实现 / 14 排除 |
+| [unique-capabilities.md](unique-capabilities.md) | 本系统独有能力表（视图入口与 CLI 入口）、14 项排除项与 #88 理由、叠加到竞品流程的位置建议 | 按当前代码整理，只列已落地能力 |
 
 ## 调研（只作依据，不改生产代码）
 

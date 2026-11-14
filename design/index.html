@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>设计稿总览 · 小说改编有声剧工作台</title>
+<link rel="stylesheet" href="assets/app.css" />
+</head>
+<body>
+<div class="hub">
+  <div class="hub-head">
+    <div style="flex:1">
+      <div class="eyebrow"><span class="line"></span>DESIGN INDEX · v2 骨架复刻</div>
+      <h1>小说改编有声剧工作台</h1>
+      <p>
+        全部界面按万象有声 studio 的骨架统一重排：<b>56px 图标栏 + 360px 上下文面板 + 主编辑区 + 44px 可收起任务栏</b>，面板间距 8px、圆角 4px、台词行 68px、说话人列 200px。
+        每屏都可点击、可互相跳转；纯静态、零外部依赖，不含会员 / 付费 / 协作 / 评论 / 权限入口。
+      </p>
+      <div class="btn-row" style="margin-top:16px">
+        <a class="btn primary" href="08-voice.html"><span class="ic ic-play"></span>查看复刻样例（配音 / 画本编辑）</a>
+        <a class="btn" href="design-system.html"><span class="ic ic-doc"></span>设计说明与对照表</a>
+      </div>
+    </div>
+    <div style="width:260px;flex:0 0 260px;border:1px solid var(--line);border-radius:8px;background:var(--bg-1);padding:12px">
+      <div class="rail-title" style="margin-bottom:8px">当前进度</div>
+      <div class="state ok" style="margin-bottom:6px"><span class="dot ok"></span>13 屏 + 设计说明全部完成</div>
+      <div class="state ok" style="margin-bottom:6px"><span class="dot ok"></span>1280 / 1440 双档自查通过</div>
+      <div class="state ok" style="margin-bottom:6px"><span class="dot ok"></span>骨架与参考实测一致</div>
+      <div class="prog" style="margin-top:8px"><span style="width:100%"></span></div>
+      <div class="muted" style="margin-top:6px">14 / 14 文件可访问</div>
+    </div>
+  </div>
+
+  <!-- 样例大卡 -->
+  <a class="hub-card" href="08-voice.html" style="display:grid;grid-template-columns:1.25fr 1fr;margin-bottom:14px">
+    <div class="hub-thumb" style="height:260px;padding:12px;gap:6px;border-bottom:0;border-right:1px solid var(--line)">
+      <div class="ht-col" style="width:42px;flex:0 0 42px;display:flex;flex-direction:column;align-items:center;padding:8px 0;gap:8px">
+        <span class="ic ic-project" style="color:#6f7885"></span><span class="ic ic-world" style="color:#6f7885"></span><span class="ic ic-user" style="color:#e8b44c"></span><span class="ic ic-outline" style="color:#6f7885"></span><span class="ic ic-doc" style="color:#6f7885"></span><span class="ic ic-mic" style="color:#6f7885"></span>
+      </div>
+      <div class="ht-col" style="width:130px;flex:0 0 130px;padding:10px 8px">
+        <div class="ht-line a"></div><div class="ht-line b" style="height:6px"></div>
+        <div style="height:10px"></div>
+        <div class="ht-line a" style="width:100%;height:16px"></div>
+        <div style="height:6px"></div>
+        <div class="ht-line c" style="width:90%"></div><div class="ht-line c" style="width:70%"></div><div class="ht-line c" style="width:82%"></div><div class="ht-line c" style="width:64%"></div><div class="ht-line c" style="width:88%"></div><div class="ht-line c" style="width:76%"></div><div class="ht-line c" style="width:92%"></div>
+      </div>
+      <div class="ht-col" style="flex:1;padding:8px 7px;display:flex;flex-direction:column;gap:5px">
+        <div style="display:flex;gap:5px;align-items:center;height:14px"><div class="ht-line a" style="width:40px;margin:0"></div><div class="ht-line b" style="width:56px;margin:0"></div></div>
+        <div class="ht-block" style="height:34px;display:flex;align-items:center;padding:0 8px"><span style="font-size:7px;color:#8b8f96">旁白　雨声先起。街口的灯闪了两下，熄了。</span></div>
+        <div class="ht-block" style="height:34px;display:flex;align-items:center;padding:0 8px"><span style="font-size:7px;color:#8b8f96">沈砚　“卷宗少了一页。”</span></div>
+        <div class="ht-block" style="height:34px;background:#e8b44c;border-color:#e8b44c;display:flex;align-items:center;padding:0 8px"><span style="font-size:7px;color:#191203">林晚　“页码是后补的。有人比我们早到。”</span></div>
+        <div class="ht-block" style="height:34px;display:flex;align-items:center;padding:0 8px"><span style="font-size:7px;color:#8b8f96">老周　“除了我，没人。”</span></div>
+        <div style="margin-top:auto;height:22px;border-top:1px solid #1b212b;display:flex;align-items:center;gap:4px;padding-top:4px">
+          <span class="ic ic-play" style="color:#6f7885;transform:scale(.6)"></span>
+          <div class="ht-line b" style="flex:1;margin:0"></div>
+        </div>
+      </div>
+      <div class="ht-col" style="width:16px;flex:0 0 16px"></div>
+    </div>
+    <div class="hc-body" style="padding:22px">
+      <div style="display:flex;align-items:center;gap:8px"><span class="badge accent">已按新骨架完成</span><span class="badge ok">可点击</span></div>
+      <h3 style="font-size:17px;margin-top:10px">配音 / 画本编辑</h3>
+      <p style="font-size:12px;line-height:1.8;margin-top:8px">
+        56px 图标栏（图标 + 计数 + 9.5px 文案）、章节目录（筛选 / 搜索 / 字数 / 状态圆环）、
+        台词行（说话人 200px + 正文 16px/24px + 播放键在说话人列左缘 + 行内情绪标签 + 4px 角色色条 + 浅灰选中底，行高 68px）。
+        失败段可展开行内编辑；右侧任务栏默认收起为 44px 竖条，展开按参考的 550px。已与参考 studio 并排比对并记录差异。
+      </p>
+      <div class="btn-row" style="margin-top:14px">
+        <span class="hb-link" style="font-size:11.5px;color:var(--accent-hi)">打开这一屏 →</span>
+        <span class="hint" style="margin-left:auto">08-voice.html</span>
+      </div>
+    </div>
+  </a>
+
+  <div class="rail-title" style="margin-bottom:10px">全部界面</div>
+  <div class="hub-grid">
+
+    <a class="hub-card" href="design-system.html">
+      <div class="hub-thumb"><div class="ht-col" style="flex:1;padding:8px"><div class="ht-line a"></div><div class="ht-line b"></div><div style="display:flex;gap:4px;margin-top:6px"><div class="ht-block" style="width:18px;height:18px"></div><div class="ht-block" style="width:18px;height:18px"></div><div class="ht-block" style="width:18px;height:18px"></div><div class="ht-block" style="width:18px;height:18px"></div></div><div class="ht-line c" style="margin-top:8px"></div><div class="ht-line b"></div></div></div>
+      <div class="hc-body"><div class="hc-no">SPEC</div><h3>设计说明</h3><p>实测尺寸、控件清点、逐屏对照、色板与组件</p><span class="hc-link">浏览 →</span></div>
+    </a>
+
+    <a class="hub-card" href="01-projects.html">
+      <div class="hub-thumb"><div class="ht-col" style="width:26px;flex:0 0 26px"></div><div class="ht-col" style="flex:1;padding:7px;display:grid;grid-template-columns:1fr 1fr;gap:5px"><div class="ht-block"></div><div class="ht-block"></div><div class="ht-block"></div><div class="ht-block"></div></div><div class="ht-col" style="width:34px;flex:0 0 34px"></div></div>
+      <div class="hc-body"><div class="hc-no">01 · 新骨架</div><h3>项目列表 / 首页</h3><p>工程卡、指标、右栏消息</p><span class="hc-link">浏览 →</span></div>
+    </a>
+
+    <a class="hub-card" href="02-world.html">
+      <div class="hub-thumb"><div class="ht-col" style="width:26px;flex:0 0 26px"></div><div class="ht-col" style="flex:1;padding:7px"><div class="ht-line a"></div><div class="ht-line b"></div><div class="ht-line c"></div><div class="ht-block" style="height:24px;margin-top:6px"></div></div><div class="ht-col" style="width:34px;flex:0 0 34px"></div></div>
+      <div class="hc-body"><div class="hc-no">02 · 新骨架</div><h3>世界设定</h3><p>条目、硬规则、阵营与地点</p><span class="hc-link">浏览 →</span></div>
+    </a>
+
+    <a class="hub-card" href="03-characters.html">
+      <div class="hub-thumb"><div class="ht-col" style="width:26px;flex:0 0 26px"></div><div class="ht-col" style="width:64px;flex:0 0 64px;padding:6px"><div class="ht-line b"></div><div class="ht-line c"></div><div class="ht-line b"></div><div class="ht-line c"></div></div><div class="ht-col" style="flex:1;padding:6px"><div class="ht-line a"></div><div class="ht-line b"></div><div class="ht-line c"></div></div><div class="ht-col" style="width:24px;flex:0 0 24px"></div></div>
+      <div class="hc-body"><div class="hc-no">03 · 新骨架</div><h3>人物档案</h3><p>角色列表、完整档案、待保存候选</p><span class="hc-link">浏览 →</span></div>
+    </a>
+
+    <a class="hub-card" href="04-voices.html">
+      <div class="hub-thumb"><div class="ht-col" style="width:26px;flex:0 0 26px"></div><div class="ht-col" style="width:50px;flex:0 0 50px;padding:6px"><div class="ht-line b"></div><div class="ht-line c"></div><div class="ht-line b"></div></div><div class="ht-col" style="flex:1;padding:6px"><div class="ht-line a"></div><div class="ht-line b"></div><div class="ht-line c"></div><div class="ht-line b"></div></div><div class="ht-col" style="width:30px;flex:0 0 30px"></div></div>
+      <div class="hc-body"><div class="hc-no">04 · 新骨架</div><h3>音色库 / 编排</h3><p>建议、候选、音色池</p><span class="hc-link">浏览 →</span></div>
+    </a>
+
+    <div class="hub-card">
+      <a href="05-outline.html" style="display:contents">
+      <div class="hub-thumb"><div class="ht-col" style="width:26px;flex:0 0 26px"></div><div class="ht-col" style="flex:1;padding:7px"><div class="ht-line a"></div><div class="ht-line b"></div><div class="ht-line c"></div></div></div>
+      <div class="hc-body"><div class="hc-no">05 · 新骨架</div><h3>大纲</h3><p>幕 / 章 / 节拍、续写、落地</p><span class="hc-link">浏览 →</span></div>
+      </a>
+    </div>
+
+    <div class="hub-card">
+      <a href="06-chapter.html" style="display:contents">
+      <div class="hub-thumb"><div class="ht-col" style="width:26px;flex:0 0 26px"></div><div class="ht-col" style="width:54px;flex:0 0 54px;padding:6px"><div class="ht-line b"></div><div class="ht-line c"></div></div><div class="ht-col" style="flex:1;padding:6px"><div class="ht-line a"></div><div class="ht-line b"></div><div class="ht-line c"></div></div></div>
+      <div class="hc-body"><div class="hc-no">06 · 新骨架</div><h3>章节</h3><p>正文、切分、续写、版本</p><span class="hc-link">浏览 →</span></div>
+      </a>
+    </div>
+
+    <div class="hub-card">
+      <a href="07-script.html" style="display:contents">
+      <div class="hub-thumb"><div class="ht-col" style="width:26px;flex:0 0 26px"></div><div class="ht-col" style="width:40px;flex:0 0 40px;padding:6px"><div class="ht-line b"></div><div class="ht-line c"></div></div><div class="ht-col" style="flex:1;padding:6px"><div class="ht-block" style="height:18px;margin-bottom:5px"></div><div class="ht-block" style="height:18px"></div></div><div class="ht-col" style="width:32px;flex:0 0 32px"></div></div>
+      <div class="hc-body"><div class="hc-no">07 · 新骨架</div><h3>标注</h3><p>镜头、cue、告警定位、批次</p><span class="hc-link">浏览 →</span></div>
+      </a>
+    </div>
+
+    <a class="hub-card" href="08-voice.html" style="border-color:var(--accent-line)">
+      <div class="hub-thumb"><div class="ht-col" style="width:14px;flex:0 0 14px"></div><div class="ht-col" style="width:26px;flex:0 0 26px;padding:5px"><div class="ht-line c"></div><div class="ht-line c"></div></div><div class="ht-col" style="flex:1;padding:5px"><div class="ht-block" style="height:12px;margin-bottom:3px"></div><div class="ht-block" style="height:12px;margin-bottom:3px"></div><div class="ht-block" style="height:12px;background:#e8b44c;border-color:#e8b44c;margin-bottom:3px"></div><div class="ht-block" style="height:12px"></div></div><div class="ht-col" style="width:8px;flex:0 0 8px"></div></div>
+      <div class="hc-body"><div class="hc-no">08 · 新骨架样例</div><h3>配音 / 画本编辑</h3><p>台词行、说话人配色、任务栏</p><span class="hc-link">查看 →</span></div>
+    </a>
+
+    <div class="hub-card">
+      <a href="09-media.html" style="display:contents">
+      <div class="hub-thumb"><div class="ht-col" style="width:26px;flex:0 0 26px"></div><div class="ht-col" style="flex:1;padding:6px"><div style="display:flex;gap:4px"><div class="ht-block" style="flex:1;height:34px"></div><div class="ht-block" style="flex:1;height:34px"></div><div class="ht-block" style="flex:1;height:34px"></div></div></div><div class="ht-col" style="width:30px;flex:0 0 30px"></div></div>
+      <div class="hc-body"><div class="hc-no">09 · 新骨架</div><h3>媒体</h3><p>音效、配图、视频与参考图</p><span class="hc-link">浏览 →</span></div>
+      </a>
+    </div>
+
+    <div class="hub-card">
+      <a href="10-export.html" style="display:contents">
+      <div class="hub-thumb"><div class="ht-col" style="width:26px;flex:0 0 26px"></div><div class="ht-col" style="width:46px;flex:0 0 46px;padding:6px"><div class="ht-line b"></div><div class="ht-line c"></div><div class="ht-line c"></div><div class="ht-line c"></div></div><div class="ht-col" style="flex:1;padding:6px"><div class="ht-line a"></div><div class="ht-line b"></div><div class="ht-line c"></div></div></div>
+      <div class="hc-body"><div class="hc-no">10 · 新骨架</div><h3>导出</h3><p>流水线、产物、剪映草稿</p><span class="hc-link">浏览 →</span></div>
+      </a>
+    </div>
+
+    <div class="hub-card">
+      <a href="11-settings.html" style="display:contents">
+      <div class="hub-thumb"><div class="ht-col" style="width:26px;flex:0 0 26px"></div><div class="ht-col" style="width:44px;flex:0 0 44px;padding:6px"><div class="ht-line c"></div><div class="ht-line b"></div><div class="ht-line c"></div></div><div class="ht-col" style="flex:1;padding:6px"><div class="ht-line a"></div><div class="ht-line b"></div><div class="ht-line c"></div></div><div class="ht-col" style="width:34px;flex:0 0 34px"></div></div>
+      <div class="hc-body"><div class="hc-no">11 · 新骨架</div><h3>设置</h3><p>模型、配音、配乐、画幅</p><span class="hc-link">浏览 →</span></div>
+      </a>
+    </div>
+
+    <div class="hub-card">
+      <a href="12-switcher.html" style="display:contents">
+      <div class="hub-thumb"><div style="flex:1;display:flex;align-items:center;justify-content:center"><div class="ht-block" style="width:120px;height:52px"></div></div></div>
+      <div class="hc-body"><div class="hc-no">12 · 新骨架</div><h3>工程切换器</h3><p>最近工程、路径打开、新建</p><span class="hc-link">浏览 →</span></div>
+      </a>
+    </div>
+
+    <div class="hub-card">
+      <a href="13-dialogs.html" style="display:contents">
+      <div class="hub-thumb"><div style="flex:1;display:flex;align-items:center;justify-content:center"><div class="ht-block" style="width:90px;height:60px"></div></div></div>
+      <div class="hc-body"><div class="hc-no">13 · 新骨架</div><h3>弹窗集合</h3><p>续写、生成进度、影响清单、删除、候选音色</p><span class="hc-link">浏览 →</span></div>
+      </a>
+    </div>
+
+  </div>
+
+  <div class="banner info" style="margin-top:22px">
+    <span class="ic ic-doc b-icon"></span>
+    <div class="b-body">
+      <div class="b-title">查看方式</div>
+      直接双击任意 HTML 即可；所有页面共用 <code>design/assets/app.css</code>，图标为纯 CSS 绘制，无外部字体、CDN 或构建步骤。
+      功能对齐清单见 <a href="feature-parity.md" style="color:var(--accent-hi)">feature-parity.md</a>（84 个功能点），实施规格见仓库 <code>docs/spec-audimind-parity.md</code>。
+    </div>
+  </div>
+</div>
+</body>
+</html>

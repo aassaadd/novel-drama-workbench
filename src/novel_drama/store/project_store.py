@@ -68,6 +68,23 @@ _DEFAULT_SETTINGS = {
         "image_width": 1328,
         "image_height": 1328,
     },
+    "production": {
+        "silences_ms": {
+            "start": 1000,
+            "title_to_body": 800,
+            "narration_to_dialogue": 400,
+            "narration_to_sfx": 400,
+            "narration_to_narration": 300,
+            "dialogue_to_narration": 300,
+            "dialogue_to_sfx": 300,
+            "dialogue_to_dialogue": 250,
+            "sfx_to_dialogue": 300,
+            "sfx_to_narration": 300,
+            "sfx_to_sfx": 200,
+            "end": 1000,
+        },
+        "audio": {"format": "mp3", "sample_rate": 48000, "bitrate_kbps": 192},
+    },
     "gpu": {"lock_path": "/Volumes/other/gpu.lock", "max_concurrent": 1},
 }
 
@@ -221,8 +238,49 @@ class ProjectStore:
         self._write_json(self.project_file, project)
 
     def settings(self) -> dict:
-        """返回工程级设置（缺失时回退到默认值）。"""
-        return self.load_project().get("settings") or json.loads(json.dumps(_DEFAULT_SETTINGS))
+        """返回工程级设置（缺失时回退到默认值）。
+
+        旧工程没有 `production` 时按默认制作要求补齐，保证时间轴与导出行为一致。
+
+        返回:
+            设置 dict（含 production）。
+        """
+        settings = self.load_project().get("settings") or json.loads(json.dumps(_DEFAULT_SETTINGS))
+        settings.setdefault("production", self.production())
+        return settings
+
+    def production(self) -> dict:
+        """读取项目级制作要求（缺失字段逐项回退默认值）。
+
+        返回:
+            `{"silences_ms": {...}, "audio": {...}}`。
+        """
+        merged = json.loads(json.dumps(_DEFAULT_SETTINGS["production"]))
+        current = (self.load_project().get("settings") or {}).get("production") or {}
+        for section in ("silences_ms", "audio"):
+            merged[section].update(current.get(section) or {})
+        return merged
+
+    def save_production(self, payload: dict) -> dict:
+        """保存项目级制作要求，并同步 `output.sample_rate`。
+
+        参数:
+            payload: 允许只带 `silences_ms` 或 `audio` 的部分字段。
+
+        返回:
+            保存后的完整制作要求 dict。
+        """
+        project = self.load_project()
+        settings = project.setdefault("settings", {})
+        merged = self.production()
+        for section in ("silences_ms", "audio"):
+            if isinstance(payload.get(section), dict):
+                merged[section].update(payload[section])
+        settings["production"] = merged
+        # 采样率是全局输出参数：同步到 output，混音与时间轴沿用同一份
+        settings.setdefault("output", {})["sample_rate"] = int(merged["audio"]["sample_rate"])
+        self.save_project(project)
+        return merged
 
     # ---------- 角色 ----------
 

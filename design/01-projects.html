@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>项目列表 · 小说改编有声剧工作台</title>
+<link rel="stylesheet" href="assets/app.css" />
+</head>
+<body>
+<header class="topbar">
+  <div class="tb-left"><a class="btn icon" href="01-projects.html" title="返回工程列表"><span class="ic ic-back"></span></a>
+    <div class="tb-views"><button class="btn icon" title="画本编辑视图"><span class="ic ic-doc"></span></button><button class="btn icon" title="配音视图"><span class="ic ic-mic"></span></button><button class="btn icon" title="后期制作视图"><span class="ic ic-media"></span></button><button class="btn icon" title="更多视图"><span class="ic ic-more"></span></button></div></div>
+  <div class="tb-mid"><button class="btn icon sm" title="上一章"><span class="ic ic-prev"></span></button>
+    <div class="crumbs"><a href="01-projects.html">长夜将明</a><span class="sep">/</span><span class="cur">我的工程</span><span class="ic ic-chev"></span></div>
+    <span class="state ok"><span class="ic ic-check"></span>已自动保存</span>
+    <button class="btn icon sm" title="下一章"><span class="ic ic-next"></span></button></div>
+  <div class="tb-right"><button class="btn icon" title="撤销"><span class="tb-glyph">↶</span></button><button class="btn icon" title="重做"><span class="tb-glyph">↷</span></button>
+    <div class="zoom"><button class="btn icon sm"><span class="ic ic-minus"></span></button><span class="z-val">100%</span><button class="btn icon sm"><span class="ic ic-plus"></span></button></div>
+    <button class="btn icon" title="查找"><span class="ic ic-search"></span></button><button class="btn icon" title="更多"><span class="ic ic-more"></span></button><a class="btn icon" href="11-settings.html" title="设置"><span class="ic ic-sliders"></span></a></div>
+</header>
+
+<div class="studio no-right">
+  <nav class="railbar">
+    <a class="rail-item active" href="01-projects.html" title="项目"><span class="ic ic-project"></span>项目<span class="rail-n">5</span></a>
+    <a class="rail-item" href="02-world.html" title="世界"><span class="ic ic-world"></span>世界<span class="rail-n">4</span></a>
+    <a class="rail-item" href="03-characters.html" title="人物"><span class="ic ic-user"></span>人物<span class="rail-n">9</span></a>
+    <a class="rail-item" href="05-outline.html" title="大纲"><span class="ic ic-outline"></span>大纲<span class="rail-n">3</span></a>
+    <a class="rail-item" href="06-chapter.html" title="章节"><span class="ic ic-doc"></span>章节<span class="rail-n">12</span></a>
+    <a class="rail-item" href="07-script.html" title="标注"><span class="ic ic-clap"></span>标注<span class="rail-n">8</span></a>
+    <a class="rail-item" href="08-voice.html" title="配音"><span class="ic ic-mic"></span>配音<span class="rail-n">78%</span></a>
+    <a class="rail-item" href="09-media.html" title="媒体"><span class="ic ic-media"></span>媒体<span class="rail-n">24</span></a>
+    <a class="rail-item" href="10-export.html" title="导出"><span class="ic ic-export"></span>导出</a>
+    <div class="rail-sep"></div>
+    <a class="rail-item" href="04-voices.html" title="音色库"><span class="ic ic-mic"></span>音色</a>
+    <div class="rail-foot">
+      <a class="rail-item" href="10-export.html" title="运行记录"><span class="ic ic-clock"></span>记录</a>
+      <a class="rail-item" href="11-settings.html" title="设置"><span class="ic ic-sliders"></span>设置</a>
+    </div>
+  </nav>
+
+  <section class="ctx">
+    <div class="ctx-head">
+      <span class="ct">工程列表</span>
+      <span class="badge" style="font-weight:400">5 个</span>
+      <div class="right">
+        <button class="btn icon sm" title="刷新索引"><span class="ic ic-refresh"></span></button>
+        <button class="btn icon sm" title="更多"><span class="ic ic-more"></span></button>
+      </div>
+    </div>
+    <div class="ctx-tools">
+      <div class="search"><span class="ic ic-search"></span><input placeholder="搜索书名 / 作者" /><span class="ic ic-close" style="opacity:.5"></span></div>
+      <div class="toolrow">
+        <select class="select" style="flex:1"><option>最近修改</option><option>书名</option><option>完成度</option><option>占用空间</option></select>
+        <button class="btn icon sm" title="切换视图"><span class="ic ic-outline"></span></button>
+        <button class="btn sm primary" style="flex:1"><span class="ic ic-plus"></span>新建</button>
+      </div>
+    </div>
+    <div class="chap-list">
+      <div class="chap-row on">
+        <span class="dot accent"></span>
+        <span class="cn" style="display:flex;flex-direction:column;gap:1px;line-height:1.35"><span>长夜将明</span><span style="font-size:10px;color:var(--text-4)">12 章 · 配音 86%</span></span>
+        <span class="cw">1.8G</span>
+      </div>
+      <div class="chap-row">
+        <span class="dot"></span>
+        <span class="cn" style="display:flex;flex-direction:column;gap:1px;line-height:1.35"><span>春山旧事</span><span style="font-size:10px;color:var(--text-4)">9 章 · 已交付</span></span>
+        <span class="cw">1.2G</span>
+      </div>
+      <div class="chap-row">
+        <span class="dot"></span>
+        <span class="cn" style="display:flex;flex-direction:column;gap:1px;line-height:1.35"><span>第七次列车</span><span style="font-size:10px;color:var(--text-4)">5 章 · 待配音</span></span>
+        <span class="cw">640M</span>
+      </div>
+      <div class="chap-row">
+        <span class="dot"></span>
+        <span class="cn" style="display:flex;flex-direction:column;gap:1px;line-height:1.35"><span>归墟</span><span style="font-size:10px;color:var(--text-4)">3 章 · 草稿</span></span>
+        <span class="cw">210M</span>
+      </div>
+      <div class="chap-row">
+        <span class="dot"></span>
+        <span class="cn" style="display:flex;flex-direction:column;gap:1px;line-height:1.35"><span>雨落无声</span><span style="font-size:10px;color:var(--text-4)">17 章 · 配音 92%</span></span>
+        <span class="cw">2.4G</span>
+      </div>
+    </div>
+    <div class="col-foot" style="display:grid;gap:5px">
+      <div style="display:flex;align-items:center;justify-content:space-between"><span>本机占用</span><span class="mono" style="color:var(--text-2)">38.6 / 120 GB</span></div>
+      <div class="prog thin"><span style="width:32%"></span></div>
+    </div>
+  </section>
+
+  <section class="editor">
+    <div class="ed-head">
+      <span class="et">工程</span>
+      <span class="em">本机工作区 · 5 个工程</span>
+      <div class="right">
+        <span class="badge ok"><span class="dot ok"></span>索引已同步</span>
+        <button class="btn icon" title="刷新"><span class="ic ic-refresh"></span></button>
+        <button class="btn icon" title="更多"><span class="ic ic-more"></span></button>
+      </div>
+    </div>
+
+    <div class="ed-body" style="padding:18px 20px 24px">
+      <div class="page-head" style="flex-wrap:wrap;align-items:flex-start">
+        <div class="ph-body">
+          <div class="eyebrow"><span class="line"></span>工作台 · 全部工程</div>
+          <h1 class="page-title">我的工程</h1>
+          <p class="page-sub">所有书稿、世界设定、音色与成片都存放在本机。<b>切换工程不会中断</b>正在运行的配音任务，队列由后台统一调度。</p>
+        </div>
+        <div class="ph-actions" style="flex-wrap:wrap">
+          <a class="btn" href="index.html">设计总览</a>
+          <button class="btn"><span class="ic ic-doc"></span>从 txt 导入</button>
+          <button class="btn primary"><span class="ic ic-plus"></span>新建工程</button>
+        </div>
+      </div>
+
+      <div class="kpi-row" style="margin-top:18px">
+        <div class="kpi"><div class="k-label">工程</div><div class="k-value">5<small>个</small></div><div class="k-foot">1 个配音中 · 2 个草稿</div></div>
+        <div class="kpi"><div class="k-label">总章数</div><div class="k-value">46<small>章</small></div><div class="k-foot">已解析 44 章 · 待导入 2 章</div></div>
+        <div class="kpi"><div class="k-label">配音完成</div><div class="k-value">78<small>%</small></div><div class="k-foot">失败 3 行 · 待配 214 行</div></div>
+        <div class="kpi"><div class="k-label">成片</div><div class="k-value">3<small>条</small></div><div class="k-foot">本周新增 1 条 · 总长 2:16</div></div>
+      </div>
+
+      <div class="proj-grid" style="margin-top:18px">
+        <article class="proj-card">
+          <a class="cover pc-cover" href="06-chapter.html">
+            <span class="cv-art ring"></span><span class="cv-art diag"></span>
+            <span class="cv-badge"><span class="badge run"><span class="dot run"></span>配音中 86%</span></span>
+          </a>
+          <div class="pc-actions">
+            <a class="btn sm primary" href="06-chapter.html">打开</a>
+            <button class="btn sm" title="复制工程"><span class="ic ic-doc"></span>复制</button>
+            <button class="btn sm danger" title="删除工程"><span class="ic ic-trash"></span></button>
+          </div>
+          <div class="pc-body">
+            <div class="pc-title"><h3>长夜将明</h3><span class="badge accent">当前</span></div>
+            <div class="pc-stats"><span>12 章</span><span>·</span><span>9 角色</span><span>·</span><span>配音 <b>1,284</b> 行</span><span>·</span><span>成片 <b>3</b></span></div>
+            <div class="pc-progress"><div class="prog run"><span style="width:86%"></span></div><span>86%</span></div>
+            <div class="pc-meta"><span>顾青梧</span><span>·</span><span>12 分钟前修改</span><span>·</span><span class="mono">1.8 GB</span></div>
+          </div>
+        </article>
+
+        <article class="proj-card">
+          <a class="cover pc-cover tone-b" href="06-chapter.html">
+            <span class="cv-art grid"></span><span class="cv-art diag"></span>
+            <span class="cv-badge"><span class="badge ok">已交付</span></span>
+          </a>
+          <div class="pc-actions">
+            <a class="btn sm primary" href="06-chapter.html">打开</a>
+            <button class="btn sm" title="复制工程"><span class="ic ic-doc"></span>复制</button>
+            <button class="btn sm danger" title="删除工程"><span class="ic ic-trash"></span></button>
+          </div>
+          <div class="pc-body">
+            <div class="pc-title"><h3>春山旧事</h3></div>
+            <div class="pc-stats"><span>9 章</span><span>·</span><span>6 角色</span><span>·</span><span>配音 <b>742</b> 行</span><span>·</span><span>成片 <b>1</b></span></div>
+            <div class="pc-progress"><div class="prog ok"><span style="width:100%"></span></div><span>100%</span></div>
+            <div class="pc-meta"><span>沈知白</span><span>·</span><span>3 天前修改</span><span>·</span><span class="mono">1.2 GB</span></div>
+          </div>
+        </article>
+
+        <article class="proj-card">
+          <a class="cover pc-cover tone-c" href="06-chapter.html">
+            <span class="cv-art ring"></span><span class="cv-art diag"></span>
+            <span class="cv-badge"><span class="badge warn">待配音</span></span>
+          </a>
+          <div class="pc-actions">
+            <a class="btn sm primary" href="06-chapter.html">打开</a>
+            <button class="btn sm" title="复制工程"><span class="ic ic-doc"></span>复制</button>
+            <button class="btn sm danger" title="删除工程"><span class="ic ic-trash"></span></button>
+          </div>
+          <div class="pc-body">
+            <div class="pc-title"><h3>第七次列车</h3></div>
+            <div class="pc-stats"><span>5 章</span><span>·</span><span>4 角色</span><span>·</span><span>配音 <b>318</b> 行</span><span>·</span><span>成片 <b>0</b></span></div>
+            <div class="pc-progress"><div class="prog warn"><span style="width:12%"></span></div><span>12%</span></div>
+            <div class="pc-meta"><span>顾青梧</span><span>·</span><span>昨天修改</span><span>·</span><span class="mono">640 MB</span></div>
+          </div>
+        </article>
+
+        <article class="proj-card">
+          <a class="cover pc-cover tone-d" href="06-chapter.html">
+            <span class="cv-art diag"></span>
+            <span class="cv-badge"><span class="badge muted">草稿</span></span>
+          </a>
+          <div class="pc-actions">
+            <a class="btn sm primary" href="06-chapter.html">打开</a>
+            <button class="btn sm" title="复制工程"><span class="ic ic-doc"></span>复制</button>
+            <button class="btn sm danger" title="删除工程"><span class="ic ic-trash"></span></button>
+          </div>
+          <div class="pc-body">
+            <div class="pc-title"><h3>归墟</h3><span class="badge warn">素材缺失</span></div>
+            <div class="pc-stats"><span>3 章</span><span>·</span><span>11 角色</span><span>·</span><span>配音 <b>96</b> 行</span><span>·</span><span>成片 <b>0</b></span></div>
+            <div class="pc-progress"><div class="prog"><span style="width:0%"></span></div><span>0%</span></div>
+            <div class="pc-meta"><span>未署名</span><span>·</span><span>5 天前修改</span><span>·</span><span class="mono">210 MB</span></div>
+          </div>
+        </article>
+
+        <article class="proj-card">
+          <a class="cover pc-cover tone-c" href="06-chapter.html">
+            <span class="cv-art ring"></span><span class="cv-art grid"></span>
+            <span class="cv-badge"><span class="badge run">配音中 92%</span></span>
+          </a>
+          <div class="pc-actions">
+            <a class="btn sm primary" href="06-chapter.html">打开</a>
+            <button class="btn sm" title="复制工程"><span class="ic ic-doc"></span>复制</button>
+            <button class="btn sm danger" title="删除工程"><span class="ic ic-trash"></span></button>
+          </div>
+          <div class="pc-body">
+            <div class="pc-title"><h3>雨落无声</h3></div>
+            <div class="pc-stats"><span>17 章</span><span>·</span><span>12 角色</span><span>·</span><span>配音 <b>2,006</b> 行</span><span>·</span><span>成片 <b>2</b></span></div>
+            <div class="pc-progress"><div class="prog run"><span style="width:92%"></span></div><span>92%</span></div>
+            <div class="pc-meta"><span>周砚</span><span>·</span><span>20 分钟前修改</span><span>·</span><span class="mono">2.4 GB</span></div>
+          </div>
+        </article>
+      </div>
+
+      <div class="empty" style="margin-top:16px">
+        <span class="e-icon"><span class="ic ic-plus"></span></span>
+        <div class="e-title">新建第一个工程</div>
+        <div class="e-text">拖入 txt 书稿即可自动分章、识别角色与台词；也可以从空白工程开始，稍后再导入正文。</div>
+        <button class="btn primary"><span class="ic ic-plus"></span>新建工程</button>
+      </div>
+    </div>
+  </section>
+</div>
+</body>
+</html>

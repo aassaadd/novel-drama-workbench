@@ -1,0 +1,378 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>设置 · 长夜将明</title>
+<link rel="stylesheet" href="assets/app.css" />
+</head>
+<body>
+<header class="topbar">
+  <div class="tb-left"><a class="btn icon" href="01-projects.html" title="返回工程列表"><span class="ic ic-back"></span></a>
+    <div class="tb-views"><button class="btn icon" title="画本编辑视图"><span class="ic ic-doc"></span></button><button class="btn icon" title="配音视图"><span class="ic ic-mic"></span></button><button class="btn icon" title="后期制作视图"><span class="ic ic-media"></span></button><button class="btn icon" title="更多视图"><span class="ic ic-more"></span></button></div></div>
+  <div class="tb-mid"><button class="btn icon sm" title="上一章"><span class="ic ic-prev"></span></button>
+    <div class="crumbs"><a href="01-projects.html">长夜将明</a><span class="sep">/</span><span class="cur">设置</span><span class="ic ic-chev" style="color:var(--text-4)"></span></div>
+    <span class="state ok"><span class="ic ic-check"></span>已自动保存</span>
+    <button class="btn icon sm" title="下一章"><span class="ic ic-next"></span></button></div>
+  <div class="tb-right"><button class="btn icon" title="撤销"><span class="tb-glyph">↶</span></button><button class="btn icon" title="重做"><span class="tb-glyph">↷</span></button>
+    <div class="zoom"><button class="btn icon sm" title="缩小"><span class="ic ic-minus"></span></button><span class="z-val">100%</span><button class="btn icon sm" title="放大"><span class="ic ic-plus"></span></button></div>
+    <button class="btn icon" title="查找"><span class="ic ic-search"></span></button><button class="btn icon" title="更多"><span class="ic ic-more"></span></button><a class="btn icon" href="11-settings.html" title="设置"><span class="ic ic-sliders"></span></a></div>
+</header>
+
+<div class="studio no-right">
+  <!-- 56px 图标栏 -->
+  <nav class="railbar">
+    <a class="rail-item" href="01-projects.html" title="项目"><span class="ic ic-project"></span>项目<span class="rail-n">5</span></a>
+    <a class="rail-item" href="02-world.html" title="世界"><span class="ic ic-world"></span>世界<span class="rail-n">4</span></a>
+    <a class="rail-item" href="03-characters.html" title="人物"><span class="ic ic-user"></span>人物<span class="rail-n">9</span></a>
+    <a class="rail-item" href="05-outline.html" title="大纲"><span class="ic ic-outline"></span>大纲<span class="rail-n">3</span></a>
+    <a class="rail-item" href="06-chapter.html" title="章节"><span class="ic ic-doc"></span>章节<span class="rail-n">12</span></a>
+    <a class="rail-item" href="07-script.html" title="标注"><span class="ic ic-clap"></span>标注<span class="rail-n">8</span></a>
+    <a class="rail-item" href="08-voice.html" title="配音"><span class="ic ic-mic"></span>配音<span class="rail-n">86%</span></a>
+    <a class="rail-item" href="09-media.html" title="媒体"><span class="ic ic-media"></span>媒体<span class="rail-n">24</span></a>
+    <a class="rail-item" href="10-export.html" title="导出"><span class="ic ic-export"></span>导出</a>
+    <div class="rail-sep"></div>
+    <a class="rail-item" href="04-voices.html" title="音色库"><span class="ic ic-mic"></span>音色</a>
+    <div class="rail-foot">
+      <a class="rail-item" href="10-export.html" title="运行记录"><span class="ic ic-clock"></span>记录</a>
+      <a class="rail-item active" href="11-settings.html" title="设置"><span class="ic ic-sliders"></span>设置</a>
+    </div>
+  </nav>
+
+  <!-- 360px 上下文面板：设置分类 -->
+  <section class="ctx">
+    <div class="ctx-head">
+      <span class="ct">设置</span>
+      <span class="badge" style="font-weight:400">本机</span>
+      <div class="right">
+        <button class="btn icon sm" title="导入配置"><span class="ic ic-download"></span></button>
+        <button class="btn icon sm" title="折叠面板"><span class="ic ic-back"></span></button>
+      </div>
+    </div>
+    <div class="ctx-tools">
+      <div class="search"><span class="ic ic-search"></span><input placeholder="搜索配置项" /><span class="ic ic-close" style="opacity:.5"></span></div>
+    </div>
+    <div class="chap-list">
+      <div class="row-list">
+        <div class="row sel">
+          <span class="ic ic-spark" style="color:var(--accent-hi)"></span>
+          <div class="grow">
+            <div class="r-title">模型</div>
+            <div class="r-sub">写作与 TTS 适配器</div>
+          </div>
+          <span class="ic ic-next" style="color:var(--text-4)"></span>
+        </div>
+        <div class="row">
+          <span class="ic ic-mic"></span>
+          <div class="grow">
+            <div class="r-title">配音</div>
+            <div class="r-sub">默认音色 · 情感参数</div>
+          </div>
+          <span class="ic ic-next" style="color:var(--text-4)"></span>
+        </div>
+        <div class="row">
+          <span class="ic ic-media"></span>
+          <div class="grow">
+            <div class="r-title">配乐与音效</div>
+            <div class="r-sub">BGM 库 · 音效映射</div>
+          </div>
+          <span class="ic ic-next" style="color:var(--text-4)"></span>
+        </div>
+        <div class="row">
+          <span class="ic ic-outline"></span>
+          <div class="grow">
+            <div class="r-title">画幅</div>
+            <div class="r-sub">分辨率 · 安全区</div>
+          </div>
+          <span class="ic ic-next" style="color:var(--text-4)"></span>
+        </div>
+        <div class="row">
+          <span class="ic ic-project"></span>
+          <div class="grow">
+            <div class="r-title">存储</div>
+            <div class="r-sub">缓存 · 产物目录</div>
+          </div>
+          <span class="ic ic-next" style="color:var(--text-4)"></span>
+        </div>
+      </div>
+    </div>
+    <div style="padding:10px 12px;border-top:1px solid var(--line);display:grid;gap:7px">
+      <button class="btn" style="width:100%"><span class="ic ic-check"></span>环境自检</button>
+      <div class="muted" style="font-size:10px;text-align:center">上次自检 今天 13:58 · 2 项提醒</div>
+    </div>
+  </section>
+
+  <!-- 主区：本机配置 -->
+  <section class="editor">
+    <div class="ed-head">
+      <span class="et">设置 · 本机配置</span>
+      <span class="em">仅保存在本机 · config.toml</span>
+      <div class="right">
+        <button class="btn sm"><span class="ic ic-refresh"></span>恢复默认</button>
+        <button class="btn primary"><span class="ic ic-check"></span>保存</button>
+      </div>
+    </div>
+
+    <div class="ed-body" style="padding:14px;display:flex;flex-direction:column;gap:14px">
+
+      <!-- 写作适配器 -->
+      <div class="settings-card">
+        <div class="sc-head">
+          <h3>写作适配器</h3>
+          <span class="badge">Writing</span>
+          <div style="margin-left:auto;display:flex;align-items:center;gap:8px">
+            <span class="state ok"><span class="dot ok"></span>连接成功 · 42ms</span>
+            <button class="btn sm"><span class="ic ic-refresh"></span>测试连接</button>
+          </div>
+        </div>
+        <div class="sc-desc">用于大纲、分镜与台词的扩写与改写；也可直接对接本机 CLI。</div>
+
+        <div style="display:grid;grid-template-columns:minmax(0,1fr) 250px;gap:16px;align-items:center;padding:9px 0;border-bottom:1px solid #171b21">
+          <div style="min-width:0">
+            <div style="font-size:12.5px;color:var(--text)">协议</div>
+            <div class="muted" style="margin-top:2px">HTTP 走 OpenAI 兼容接口；CLI 调用本机命令行</div>
+          </div>
+          <div class="seg" style="width:100%"><button class="on" style="flex:1">HTTP</button><button style="flex:1">CLI</button></div>
+        </div>
+
+        <div style="display:grid;grid-template-columns:minmax(0,1fr) 250px;gap:16px;align-items:center;padding:9px 0;border-bottom:1px solid #171b21">
+          <div style="min-width:0">
+            <div style="font-size:12.5px;color:var(--text)">地址</div>
+            <div class="muted" style="margin-top:2px">本机服务地址，需包含 /v1 前缀</div>
+          </div>
+          <input class="input mono" value="http://127.0.0.1:8080/v1" style="font-size:11px" />
+        </div>
+
+        <div style="display:grid;grid-template-columns:minmax(0,1fr) 250px;gap:16px;align-items:center;padding:9px 0;border-bottom:1px solid #171b21">
+          <div style="min-width:0">
+            <div style="font-size:12.5px;color:var(--text)">模型标识</div>
+            <div class="muted" style="margin-top:2px">传给接口的 model 字段，区分大小写</div>
+          </div>
+          <input class="input mono" value="qwen2.5-32b-instruct" style="font-size:11px" />
+        </div>
+
+        <div style="display:grid;grid-template-columns:minmax(0,1fr) 250px;gap:16px;align-items:center;padding:9px 0;border-bottom:1px solid #171b21">
+          <div style="min-width:0">
+            <div style="font-size:12.5px;color:var(--text)">上下文窗口</div>
+            <div class="muted" style="margin-top:2px">超过后自动分段送写，避免截断</div>
+          </div>
+          <div class="input-row"><input class="input mono" value="32768" /><span class="muted">tokens</span></div>
+        </div>
+
+        <div style="display:grid;grid-template-columns:minmax(0,1fr) 250px;gap:16px;align-items:center;padding:9px 0;border-bottom:1px solid #171b21">
+          <div style="min-width:0">
+            <div style="font-size:12.5px;color:var(--text)">温度</div>
+            <div class="muted" style="margin-top:2px">越高越发散；改编建议 0.6–0.8</div>
+          </div>
+          <div class="input-row"><input class="input mono" value="0.72" style="width:62px" /><input class="range" type="range" min="0" max="100" value="72" /></div>
+        </div>
+
+        <div style="display:grid;grid-template-columns:minmax(0,1fr) 250px;gap:16px;align-items:center;padding:9px 0">
+          <div style="min-width:0">
+            <div style="font-size:12.5px;color:var(--text)">密钥</div>
+            <div class="muted" style="margin-top:2px">仅显示掩码；保存在本机密钥环</div>
+          </div>
+          <div class="input-row"><input class="input mono" value="••••••••••••7f3a" readonly style="font-size:11px" /><button class="btn sm">更换</button></div>
+        </div>
+      </div>
+
+      <!-- TTS 适配器 -->
+      <div class="settings-card">
+        <div class="sc-head">
+          <h3>TTS 适配器</h3>
+          <span class="badge">TTS</span>
+          <div style="margin-left:auto;display:flex;align-items:center;gap:8px">
+            <span class="state ok"><span class="dot ok"></span>已就绪 · 86ms</span>
+            <button class="btn sm"><span class="ic ic-refresh"></span>测试连接</button>
+          </div>
+        </div>
+        <div class="sc-desc">负责全章台词的语音合成；单个引擎实例串行出音。</div>
+
+        <div style="display:grid;grid-template-columns:minmax(0,1fr) 250px;gap:16px;align-items:center;padding:9px 0;border-bottom:1px solid #171b21">
+          <div style="min-width:0">
+            <div style="font-size:12.5px;color:var(--text)">引擎</div>
+            <div class="muted" style="margin-top:2px">切换引擎后需重新校验音色参考音</div>
+          </div>
+          <select class="select"><option>GPT-SoVITS v2</option><option>CosyVoice 2</option><option>Edge TTS（备用）</option></select>
+        </div>
+
+        <div style="display:grid;grid-template-columns:minmax(0,1fr) 250px;gap:16px;align-items:center;padding:9px 0;border-bottom:1px solid #171b21">
+          <div style="min-width:0">
+            <div style="font-size:12.5px;color:var(--text)">默认音色</div>
+            <div class="muted" style="margin-top:2px">未单独指定时的兜底音色，旁白固定使用</div>
+          </div>
+          <select class="select"><option>叙述女声（旁白）</option><option>低沉男声（沈砚）</option><option>清冷女声（林晚）</option></select>
+        </div>
+
+        <div style="display:grid;grid-template-columns:minmax(0,1fr) 250px;gap:16px;align-items:center;padding:9px 0">
+          <div style="min-width:0">
+            <div style="font-size:12.5px;color:var(--text)">并发</div>
+            <div class="muted" style="margin-top:2px">单实例引擎，并发固定为 1，不可调整</div>
+          </div>
+          <div class="input-row"><input class="input mono" value="1" disabled /><span class="badge muted">固定</span></div>
+        </div>
+      </div>
+
+      <!-- ComfyUI -->
+      <div class="settings-card">
+        <div class="sc-head">
+          <h3>ComfyUI</h3>
+          <span class="badge">图像 / 视频</span>
+          <div style="margin-left:auto;display:flex;align-items:center;gap:8px">
+            <span class="state bad"><span class="dot bad"></span>未对接</span>
+            <button class="btn sm"><span class="ic ic-refresh"></span>测试连接</button>
+          </div>
+        </div>
+        <div class="sc-desc">用于生成配图与 5 秒视频；需要本机已启动 ComfyUI 服务。</div>
+
+        <div style="display:grid;grid-template-columns:minmax(0,1fr) 250px;gap:16px;align-items:center;padding:9px 0;border-bottom:1px solid #171b21">
+          <div style="min-width:0">
+            <div style="font-size:12.5px;color:var(--text)">地址</div>
+            <div class="muted" style="margin-top:2px">ComfyUI 默认监听 8188 端口</div>
+          </div>
+          <input class="input mono" value="http://127.0.0.1:8188" style="font-size:11px" />
+        </div>
+
+        <div style="display:grid;grid-template-columns:minmax(0,1fr) 250px;gap:16px;align-items:center;padding:9px 0;border-bottom:1px solid #171b21">
+          <div style="min-width:0">
+            <div style="font-size:12.5px;color:var(--text)">超时</div>
+            <div class="muted" style="margin-top:2px">单张图 / 单段视频的最长等待时间</div>
+          </div>
+          <div class="input-row"><input class="input mono" value="600" /><span class="muted">秒</span></div>
+        </div>
+
+        <div style="display:grid;grid-template-columns:minmax(0,1fr) 250px;gap:16px;align-items:center;padding:9px 0">
+          <div style="min-width:0">
+            <div style="font-size:12.5px;color:var(--text)">轮询间隔</div>
+            <div class="muted" style="margin-top:2px">任务队列状态检查频率</div>
+          </div>
+          <div class="input-row"><input class="input mono" value="2" /><span class="muted">秒</span></div>
+        </div>
+
+        <div style="margin-top:12px;padding:10px 12px;border:1px solid var(--line);border-radius:8px;background:var(--bg-1)">
+          <div class="task-title" style="margin-bottom:6px">模板映射校验</div>
+          <div style="display:flex;align-items:center;gap:8px;padding:5px 0;font-size:12px">
+            <span class="ic ic-check" style="color:var(--ok);width:14px;height:14px;flex-basis:14px"></span>
+            <span style="flex:1;color:var(--text-2)">音效模板</span>
+            <span class="mono" style="font-size:10.5px;color:var(--text-3)">sfx_ambient_v2.json</span>
+            <span class="badge ok">已匹配</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:8px;padding:5px 0;font-size:12px">
+            <span class="ic ic-check" style="color:var(--ok);width:14px;height:14px;flex-basis:14px"></span>
+            <span style="flex:1;color:var(--text-2)">配图模板</span>
+            <span class="mono" style="font-size:10.5px;color:var(--text-3)">still_frame_v3.json</span>
+            <span class="badge ok">已匹配</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:8px;padding:5px 0;font-size:12px">
+            <span class="ic ic-warn" style="color:var(--bad);width:14px;height:14px;flex-basis:14px"></span>
+            <span style="flex:1;color:#f3a1a1">视频模板</span>
+            <span class="mono" style="font-size:10.5px;color:var(--text-4)">i2v_5s_720p.json</span>
+            <span class="badge bad">未找到模板</span>
+            <a class="hint" href="#" style="color:var(--accent-hi)">选择 →</a>
+          </div>
+        </div>
+      </div>
+
+      <!-- GPU 与并发 -->
+      <div class="settings-card">
+        <div class="sc-head">
+          <h3>GPU 与并发</h3>
+          <span class="badge">运行环境</span>
+          <div style="margin-left:auto;display:flex;align-items:center;gap:8px">
+            <span class="state ok"><span class="dot ok"></span>Metal · 可用</span>
+            <button class="btn sm"><span class="ic ic-refresh"></span>测试连接</button>
+          </div>
+        </div>
+        <div class="sc-desc">控制各流水线同时占用的本机资源，过高会互相抢占。</div>
+
+        <div style="display:grid;grid-template-columns:minmax(0,1fr) 250px;gap:16px;align-items:center;padding:9px 0;border-bottom:1px solid #171b21">
+          <div style="min-width:0">
+            <div style="font-size:12.5px;color:var(--text)">计算设备</div>
+            <div class="muted" style="margin-top:2px">Apple Silicon 优先使用 Metal，失败时回退 CPU</div>
+          </div>
+          <select class="select"><option>Metal（Apple M2 Pro）</option><option>CPU（仅调试）</option></select>
+        </div>
+
+        <div style="display:grid;grid-template-columns:minmax(0,1fr) 250px;gap:16px;align-items:center;padding:9px 0;border-bottom:1px solid #171b21">
+          <div style="min-width:0">
+            <div style="font-size:12.5px;color:var(--text)">统一内存</div>
+            <div class="muted" style="margin-top:2px">显存与内存共享；预留 2GB 给系统</div>
+          </div>
+          <div class="input-row"><input class="input mono" value="16" /><span class="muted">GB</span></div>
+        </div>
+
+        <div style="display:grid;grid-template-columns:minmax(0,1fr) 250px;gap:16px;align-items:center;padding:9px 0;border-bottom:1px solid #171b21">
+          <div style="min-width:0">
+            <div style="font-size:12.5px;color:var(--text)">写作并发</div>
+            <div class="muted" style="margin-top:2px">同时进行的扩写 / 改写请求数</div>
+          </div>
+          <div class="input-row"><input class="input mono" value="2" /><span class="muted">路</span></div>
+        </div>
+
+        <div style="display:grid;grid-template-columns:minmax(0,1fr) 250px;gap:16px;align-items:center;padding:9px 0">
+          <div style="min-width:0">
+            <div style="font-size:12.5px;color:var(--text)">图像并发</div>
+            <div class="muted" style="margin-top:2px">ComfyUI 同时排队任务数，建议不超过 2</div>
+          </div>
+          <div class="input-row"><input class="input mono" value="1" /><span class="muted">路</span></div>
+        </div>
+      </div>
+
+      <!-- 输出默认规格 -->
+      <div class="settings-card">
+        <div class="sc-head">
+          <h3>输出默认规格</h3>
+          <span class="badge">导出</span>
+          <div style="margin-left:auto;display:flex;align-items:center;gap:8px">
+            <span class="state ok"><span class="dot ok"></span>目录可写</span>
+            <button class="btn sm"><span class="ic ic-refresh"></span>测试连接</button>
+          </div>
+        </div>
+        <div class="sc-desc">新建导出时自动带入；单次任务仍可覆盖。</div>
+
+        <div style="display:grid;grid-template-columns:minmax(0,1fr) 250px;gap:16px;align-items:center;padding:9px 0;border-bottom:1px solid #171b21">
+          <div style="min-width:0">
+            <div style="font-size:12.5px;color:var(--text)">画幅</div>
+            <div class="muted" style="margin-top:2px">视频输出比例，字幕安全区随画幅调整</div>
+          </div>
+          <select class="select"><option>16:9 · 1920×1080</option><option>9:16 · 1080×1920</option><option>1:1 · 1080×1080</option></select>
+        </div>
+
+        <div style="display:grid;grid-template-columns:minmax(0,1fr) 250px;gap:16px;align-items:center;padding:9px 0;border-bottom:1px solid #171b21">
+          <div style="min-width:0">
+            <div style="font-size:12.5px;color:var(--text)">帧率</div>
+            <div class="muted" style="margin-top:2px">动态配图按此帧率渲染，30fps 足够</div>
+          </div>
+          <select class="select"><option>30fps</option><option>25fps</option><option>24fps</option></select>
+        </div>
+
+        <div style="display:grid;grid-template-columns:minmax(0,1fr) 250px;gap:16px;align-items:center;padding:9px 0;border-bottom:1px solid #171b21">
+          <div style="min-width:0">
+            <div style="font-size:12.5px;color:var(--text)">音频规格</div>
+            <div class="muted" style="margin-top:2px">母版建议 48kHz 24bit，MP3 转码另行设置</div>
+          </div>
+          <select class="select"><option>48kHz · 24bit</option><option>44.1kHz · 16bit</option></select>
+        </div>
+
+        <div style="display:grid;grid-template-columns:minmax(0,1fr) 250px;gap:16px;align-items:center;padding:9px 0;border-bottom:1px solid #171b21">
+          <div style="min-width:0">
+            <div style="font-size:12.5px;color:var(--text)">响度</div>
+            <div class="muted" style="margin-top:2px">导出前统一归一化，避免忽大忽小</div>
+          </div>
+          <select class="select"><option>-16 LUFS</option><option>-14 LUFS</option><option>-18 LUFS</option></select>
+        </div>
+
+        <div style="display:grid;grid-template-columns:minmax(0,1fr) 250px;gap:16px;align-items:center;padding:9px 0">
+          <div style="min-width:0">
+            <div style="font-size:12.5px;color:var(--text)">默认输出目录</div>
+            <div class="muted" style="margin-top:2px">每章自动创建子目录，同名文件会备份</div>
+          </div>
+          <div class="input-row"><input class="input mono" value="~/Movies/长夜将明/" style="font-size:11px" /><button class="btn sm">浏览</button></div>
+        </div>
+      </div>
+
+    </div>
+  </section>
+</div>
+</body>
+</html>

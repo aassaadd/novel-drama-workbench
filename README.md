@@ -1,5 +1,10 @@
 # 本地有声剧工作台（novel-drama-workbench）
 
+> **项目状态：未上线（内部开发中）**
+> 未上线阶段，所有改动以**新代码为唯一实现**：不为旧工程、旧数据、旧代码做兜底、兼容分支、迁移脚本或双写逻辑；旧工程数据可直接重建或丢弃，不保证向后兼容。
+> 只有当用户明确声明「**当前项目已上线**」之后，才开始要求兜底与旧数据兼容。
+> 本 README 与 `docs/` 中出现的「兼容旧数据」「零改动兼容」「旧工程平滑升级」「backfill 兼容」等表述，**未上线阶段暂不要求**，仅作上线后参考。
+
 把「本地模型写小说 → 分角色配音 + 音效 → 有声剧 → 关键配图 / 个别 5 秒短视频」串成一套本机工作台。
 
 - 写作 LLM 固定使用本机 `omlx`（OpenAI 兼容 HTTP，已实测）。
@@ -165,7 +170,7 @@ $PY -m novel_drama.cli -p ~/novels/changan voice bind --character 沈砚 --voice
 
 # 3.3 全剧音色编排：校验跨章音色、旁白区间、龙套音色池；页面在人物页「音色编排」入口
 $PY -m novel_drama.cli -p ~/novels/changan cast check
-$PY -m novel_drama.cli -p ~/novels/changan cast backfill --dry-run     # 补缺失音色描述，默认 dry-run
+$PY -m novel_drama.cli -p ~/novels/changan cast backfill --dry-run     # 补缺失音色描述，默认 dry-run（未上线阶段暂不要求：旧数据可直接重建，无需回填兼容）
 
 # 3.4 按人物设定抽音色候选（本地 VoxCPM2，需独立 venv，见 config voice.design）
 $PY -m novel_drama.cli -p ~/novels/changan voice design --character 沈砚 --count 4

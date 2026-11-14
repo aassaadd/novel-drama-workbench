@@ -36,9 +36,12 @@ from .cli_line import (
     cmd_line_diff,
     cmd_line_edit,
     cmd_line_list,
+    cmd_line_merge,
+    cmd_line_merge_narration,
     cmd_line_revert,
     cmd_line_set,
     cmd_line_split,
+    cmd_line_split_at,
     cmd_scene_split,
 )
 from .cli_media import cmd_bgm, cmd_concat, cmd_export, cmd_mux, cmd_timeline, cmd_tts_batch
@@ -1423,6 +1426,21 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--line", required=True)
     q.add_argument("--text", required=True)
     q.set_defaults(func=cmd_line_edit)
+    q = p_sub.add_parser("merge", help="合并同一场景内相邻的台词行")
+    q.add_argument("--chapter", required=True)
+    q.add_argument("--lines", required=True, help="逗号分隔的行 ID（必须同场景且相邻）")
+    q.set_defaults(func=cmd_line_merge)
+    q = p_sub.add_parser("merge-narration", help="按期望字数批量合并相邻旁白")
+    q.add_argument("--chapter", required=True)
+    q.add_argument("--scene", action="append", help="只处理这些场景，可重复")
+    q.add_argument("--max-chars", type=int, default=120, dest="max_chars", help="每组目标字数上限")
+    q.add_argument("--dry-run", action="store_true", dest="dry_run", help="只输出预览，不写盘")
+    q.set_defaults(func=cmd_line_merge_narration)
+    q = p_sub.add_parser("split-at", help="在指定字符位置把一条台词拆成两行")
+    q.add_argument("--chapter", required=True)
+    q.add_argument("--line", required=True)
+    q.add_argument("--offset", type=int, required=True, help="0 基字符位置，必须落在台词中间")
+    q.set_defaults(func=cmd_line_split_at)
 
     p = sub.add_parser("group", help="虚拟分组（按条件批量改行参数，物化写入 .ndw/groups）")
     p_sub = p.add_subparsers(dest="action", required=True)
@@ -1765,8 +1783,8 @@ def main(argv: list[str] | None = None) -> int:
     """
     parser = build_parser()
     args = parser.parse_args(argv)
-    config = load_config(args.config)
     try:
+        config = load_config(args.config)
         return args.func(args, config)
     except AdapterError as exc:
         print(f"[{exc.code.value}] {exc.message}", file=sys.stderr)
