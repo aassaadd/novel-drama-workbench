@@ -45,7 +45,7 @@
 
 - `auto`（默认）：`bind_outline_characters()` → `bind_outline_context()`，按幕轮转绑定世界与 POV；节拍 `character_ids` 只保留真实角色 ID，过滤后为空则回落到本章 POV。
 - `none`：`sanitize_outline_character_ids()`，只过滤非法引用（人名、空串、重复 ID），**不回落到 POV、不改世界绑定**；丢弃数量以 `notice` 事件提示「已忽略 N 个无法识别的角色引用」，并写入返回体的 `ignored_character_refs`。
-- 页面（`/api/ui/outline/hierarchical/stream`、`/api/ui/outline/expand/stream`）不下发 `binding`，服务端按默认 `auto` 处理；只有 CLI `outline generate --binding` 能显式指定。
+- 页面入口：「AI 生成分层大纲」与「AI 扩充 / 续写大纲」弹窗各有「角色绑定」下拉框（默认 `auto`，中文描述两档），请求体带 `binding`；完成摘要显示实际模式、`bound_characters`（去重角色数）、`bound_character_refs`（节拍引用数）与 `ignored_character_refs`。CLI `outline generate --binding` 与之等价。
 
 ## 预算
 

@@ -37,6 +37,7 @@ from .service import (
     _validation_report,
     bind_outline_context,
     build_writing_adapter,
+    outline_binding_stats,
     sanitize_outline_character_ids,
 )
 
@@ -1073,8 +1074,15 @@ def expand_outline(
 
     bible.setdefault("outline", {})["acts"] = acts
     _renumber(bible, store, dry_run=dry_run)
-    # 角色引用：auto 过滤后回落到 POV；none 只清洗（丢弃人名/空串/重复 ID），不回落
-    ignored_character_refs = 0
+    # 角色引用：先清洗非法引用（人名/空串/重复 ID）；auto 再按幕绑定世界并回落到 POV，none 只清洗
+    # 只处理本次新增的章节，旧章节的引用保持原样
+    new_view = (
+        {"outline": {"acts": [{"chapters": built_blocks[0]["chapters"]}]}}
+        if mode == "after_chapter"
+        else {"outline": {"acts": built_blocks}}
+    )
+    stats = sanitize_outline_character_ids(new_view, characters)
+    ignored_character_refs = int(stats["dropped"])
     if binding == "auto":
         # 只给新增章节绑世界/POV，已合格的旧章节保持原绑定不动
         from ..store.world_store import WorldStore
@@ -1085,18 +1093,11 @@ def expand_outline(
             bind_outline_context({"outline": {"acts": [{"chapters": built_blocks[0]["chapters"]}]}}, worlds, characters)
         else:
             bind_outline_context({"outline": {"acts": built_blocks}}, worlds, characters)
-    else:
-        # 只清洗本次新增的章节，旧章节的引用保持原样
-        new_view = (
-            {"outline": {"acts": [{"chapters": built_blocks[0]["chapters"]}]}}
-            if mode == "after_chapter"
-            else {"outline": {"acts": built_blocks}}
-        )
-        stats = sanitize_outline_character_ids(new_view, characters)
-        ignored_character_refs = int(stats["dropped"])
-        if ignored_character_refs:
-            message = f"已忽略 {ignored_character_refs} 个无法识别的角色引用（binding=none 不自动选角）"
-            _progress(on_progress, {"type": "notice", "message": message})
+    if ignored_character_refs:
+        suffix = "已回落到本章 POV" if binding == "auto" else "binding=none 不自动选角"
+        message = f"已忽略 {ignored_character_refs} 个无法识别的角色引用（{suffix}）"
+        _progress(on_progress, {"type": "notice", "message": message})
+    bound_stats = outline_binding_stats(new_view)
     if not dry_run:
         bible = settings_store.save(bible)
 
@@ -1188,6 +1189,9 @@ def expand_outline(
         "total": {"acts": len(acts), "chapters": total_chapters, "beats": total_beats},
         "provider": getattr(adapter, "model", "") or "offline-writing",
         "settings_revision": bible.get("settings_revision"),
+        "binding": binding,
         "ignored_character_refs": ignored_character_refs,
+        "bound_characters": bound_stats["characters"],
+        "bound_character_refs": bound_stats["refs"],
         "dry_run": dry_run,
     }

@@ -34,6 +34,7 @@ from .service import (
     bind_outline_characters,
     build_writing_adapter,
     check_golden_three,
+    outline_binding_stats,
     sanitize_outline_character_ids,
 )
 
@@ -929,17 +930,17 @@ def generate_hierarchical_outline(
         built_acts.append(built)
 
     bible.setdefault("outline", {})["acts"] = built_acts
-    # 角色引用：auto 过滤后回落到 POV；none 只清洗（丢弃人名/空串/重复 ID），不回落
-    ignored_character_refs = 0
+    # 角色引用：先清洗非法引用（人名/空串/重复 ID）；auto 再按幕绑定世界并回落到 POV，none 只清洗
+    stats = sanitize_outline_character_ids(bible, characters)
+    ignored_character_refs = int(stats["dropped"])
     if binding == "auto":
         bind_outline_characters(store, bible)
-    else:
-        stats = sanitize_outline_character_ids(bible, characters)
-        ignored_character_refs = int(stats["dropped"])
-        if ignored_character_refs:
-            message = f"已忽略 {ignored_character_refs} 个无法识别的角色引用（binding=none 不自动选角）"
-            logger.info(message)
-            _progress(on_progress, {"type": "notice", "message": message})
+    if ignored_character_refs:
+        suffix = "已回落到本章 POV" if binding == "auto" else "binding=none 不自动选角"
+        message = f"已忽略 {ignored_character_refs} 个无法识别的角色引用（{suffix}）"
+        logger.info(message)
+        _progress(on_progress, {"type": "notice", "message": message})
+    bound_stats = outline_binding_stats(bible)
     golden = check_golden_three(bible)
     if not dry_run:
         bible = settings_store.save(bible)
@@ -964,6 +965,8 @@ def generate_hierarchical_outline(
         "settings_revision": bible.get("settings_revision"),
         "binding": binding,
         "ignored_character_refs": ignored_character_refs,
+        "bound_characters": bound_stats["characters"],
+        "bound_character_refs": bound_stats["refs"],
         "golden_three": golden,
         "dry_run": dry_run,
         "failures": failures,

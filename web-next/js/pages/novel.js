@@ -1837,6 +1837,37 @@ function renderWorldPreview() {
   });
 }
 
+/**
+ * 生成选项：角色绑定（binding）。默认自动，关掉后只做引用清洗。
+ * @returns {string} 表单 HTML 片段
+ */
+function bindingFieldHTML() {
+  return `<div class="field"><label>角色绑定</label>
+    <select class="select" data-bind-mode>
+      <option value="auto" selected>自动绑定人物（过滤非法引用后回落到 POV）</option>
+      <option value="none">只保留合法角色引用，不自动选角</option>
+    </select>
+    <div class="hint">自动绑定会按幕安排出场角色和视角，关掉后只做引用清洗。</div>
+  </div>`;
+}
+
+/**
+ * 把返回体里的绑定统计拼成完成摘要的一行。
+ * @param {object} result SSE done 事件里的 result
+ * @returns {string} 中文摘要；缺少 binding 字段时返回空串
+ */
+function bindingSummary(result) {
+  if (!result || !result.binding) return '';
+  const mode =
+    result.binding === 'auto'
+      ? '自动绑定人物（按幕安排出场角色和视角）'
+      : '只保留合法角色引用（不自动选角）';
+  const bound = Number(result.bound_characters || 0);
+  const refs = Number(result.bound_character_refs || 0);
+  const ignored = Number(result.ignored_character_refs || 0);
+  return `角色绑定：${mode} · 绑定 ${bound} 个角色（${refs} 处节拍引用）· 忽略 ${ignored} 个非法引用`;
+}
+
 /** AI 生成大纲：参数确认后直接生成并落盘（生成结果整份替换大纲，不动已落章正文） */
 function openOutlineGenerate() {
   const counts = outlineCounts();
@@ -1857,6 +1888,7 @@ function openOutlineGenerate() {
       </div>
       <div class="field"><label>补充要求（可选）</label>
         <textarea class="textarea" id="og-brief" rows="2" placeholder="例：前三章必须完成身份揭示与第一次反转"></textarea></div>
+      ${bindingFieldHTML()}
       <div class="hint" style="margin-top:4px">生成顺序：一次规划全部幕 → 逐幕生成章 → 逐章生成节拍，每层校验通过才继续。</div>`,
     foot: `<div class="right"><button class="btn" data-dlg-close>取消</button>
       <button class="btn primary" data-og-run>${icon('spark', 12)} 开始生成</button></div>`,
@@ -1873,6 +1905,7 @@ function openOutlineGenerate() {
           chapters_per_act: Number(mask.querySelector('#og-chapters').value) || 3,
           beats_per_chapter: Number(mask.querySelector('#og-beats').value) || 4,
           words: Number(mask.querySelector('#og-words').value) || 3000,
+          binding: mask.querySelector('[data-bind-mode]').value || 'auto',
         };
         const brief = mask.querySelector('#og-brief').value.trim();
         if (brief) body.brief = brief;
@@ -1957,16 +1990,19 @@ async function runOutlineGenerate(body, mode = 'regen') {
       actions.push({ label: '稍后手动调整', onClick: (close) => close() });
       panel.finish({
         message: `大纲已生成：${counts.acts} 幕 / ${counts.chapters} 章 / ${counts.beats} 个节拍（有越界）`,
-        detail: summary,
+        detail: [summary, bindingSummary(result)].filter(Boolean).join('；'),
         actions,
       });
       return;
     }
     panel.finish({
       message: `大纲已生成：${counts.acts} 幕 / ${counts.chapters} 章 / ${counts.beats} 个节拍`,
-      detail: result?.failures?.length
-        ? `有 ${result.failures.length} 个批次失败，可在目录里补生成。`
-        : summary,
+      detail: [
+        result?.failures?.length ? `有 ${result.failures.length} 个批次失败，可在目录里补生成。` : summary,
+        bindingSummary(result),
+      ]
+        .filter(Boolean)
+        .join('；'),
       actions: [{ label: '查看大纲', primary: true, onClick: () => paint() }],
     });
     toast('大纲已生成', 'ok');
@@ -2099,7 +2135,8 @@ function openOutlineExpand() {
           <input class="input" id="oe-words" type="number" min="500" step="500" value="${scale.chapterWords}" /></div>
       </div>
       <div class="field"><label>补充要求（可选）</label>
-        <textarea class="textarea" id="oe-brief" rows="2" placeholder="例：插入一段反派视角的支线，交代他为何倒戈"></textarea></div>`,
+        <textarea class="textarea" id="oe-brief" rows="2" placeholder="例：插入一段反派视角的支线，交代他为何倒戈"></textarea></div>
+      ${bindingFieldHTML()}`,
     foot: `<div class="right"><button class="btn" data-dlg-close>取消</button>
       <button class="btn primary" data-oe-run>${icon('spark', 12)} 开始生成</button></div>`,
     onMount: (mask) => {
@@ -2133,6 +2170,7 @@ function openOutlineExpand() {
           chapters_per_act: Number(cpaInput.value) || scale.chaptersPerAct,
           beats_per_chapter: Number(mask.querySelector('#oe-bpc').value) || scale.beatsPerChapter,
           words: Number(mask.querySelector('#oe-words').value) || scale.chapterWords,
+          binding: mask.querySelector('[data-bind-mode]').value || 'auto',
         };
         if (mode === 'after_act') body.anchor_act = Number(mask.querySelector('#oe-anchor-act').value) || counts.acts;
         if (mode === 'after_chapter') {
@@ -2255,7 +2293,12 @@ async function finishWithExpand(result, panel) {
   }
   panel.finish({
     message: `${result.label || '扩充'}完成：新增 ${inserted.length} 章，全书 ${counts.acts} 幕 / ${counts.chapters} 章 / ${counts.beats} 个节拍`,
-    detail: summary + (total.acts ? `（全书现为 ${total.acts} 幕 / ${total.chapters} 章 / ${total.beats} 个节拍）` : ''),
+    detail: [
+      summary + (total.acts ? `（全书现为 ${total.acts} 幕 / ${total.chapters} 章 / ${total.beats} 个节拍）` : ''),
+      bindingSummary(result),
+    ]
+      .filter(Boolean)
+      .join('；'),
     actions: [
       { label: '查看大纲', primary: true, onClick: () => paint() },
       ...(first?.chapter_id

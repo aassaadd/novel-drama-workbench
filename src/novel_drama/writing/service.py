@@ -306,17 +306,17 @@ def generate_outline(
         built_acts.append(act)
 
     bible.setdefault("outline", {})["acts"] = built_acts
-    # 角色引用：auto 过滤后回落到 POV；none 只清洗（丢弃人名/空串/重复 ID），不回落
-    ignored_character_refs = 0
+    # 角色引用：先清洗非法引用（人名/空串/重复 ID）；auto 再按幕绑定世界并回落到 POV，none 只清洗
+    stats = sanitize_outline_character_ids(bible, characters)
+    ignored_character_refs = int(stats["dropped"])
     if binding == "auto":
         bind_outline_characters(store, bible)
-    else:
-        stats = sanitize_outline_character_ids(bible, characters)
-        ignored_character_refs = int(stats["dropped"])
-        if ignored_character_refs:
-            message = f"已忽略 {ignored_character_refs} 个无法识别的角色引用（binding=none 不自动选角）"
-            logger.info(message)
-            _progress(on_progress, {"type": "notice", "message": message})
+    if ignored_character_refs:
+        suffix = "已回落到本章 POV" if binding == "auto" else "binding=none 不自动选角"
+        message = f"已忽略 {ignored_character_refs} 个无法识别的角色引用（{suffix}）"
+        logger.info(message)
+        _progress(on_progress, {"type": "notice", "message": message})
+    bound_characters = outline_binding_stats(bible)["characters"]
     golden = check_golden_three(bible)
     if not dry_run:
         bible = settings_store.save(bible)
@@ -359,6 +359,7 @@ def generate_outline(
         "settings_revision": bible.get("settings_revision"),
         "binding": binding,
         "ignored_character_refs": ignored_character_refs,
+        "bound_characters": bound_characters,
         "golden_three": golden,
         "dry_run": dry_run,
         "expected": {
@@ -3432,6 +3433,33 @@ def sanitize_outline_character_ids(bible: dict, characters: list[dict]) -> dict:
                 kept += len(clean)
                 beat["character_ids"] = clean
     return {"chapters": chapters, "kept": kept, "dropped": dropped}
+
+
+def outline_binding_stats(bible: dict) -> dict:
+    """统计大纲里实际生效的角色绑定情况（供完成摘要展示）。
+
+    参数:
+        bible: 设定库 dict。
+
+    返回:
+        `{"characters": 去重角色数, "refs": 节拍角色引用总数, "chapters": 有角色引用的章节数}`。
+    """
+    character_ids: set[str] = set()
+    refs = 0
+    chapters = 0
+    for act in (bible.get("outline") or {}).get("acts") or []:
+        for chapter in act.get("chapters") or []:
+            touched = False
+            for beat in chapter.get("beats") or []:
+                ids = [str(item) for item in (beat.get("character_ids") or []) if str(item).strip()]
+                if not ids:
+                    continue
+                touched = True
+                refs += len(ids)
+                character_ids.update(ids)
+            if touched:
+                chapters += 1
+    return {"characters": len(character_ids), "refs": refs, "chapters": chapters}
 
 
 def bind_outline_characters(store: ProjectStore, bible: dict) -> dict:
