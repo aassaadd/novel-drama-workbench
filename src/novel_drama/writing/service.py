@@ -26,6 +26,7 @@ from ..store.world_store import WorldStore
 from ..text.context import POV_LABELS, ContextAssembler
 from ..text.dialogue import normalize_dialogue
 from ..text.titles import strip_index_prefix
+from .content_guard import check_chapter_content, strict_retry_instruction
 from .worlds import build_art_prompt as _build_art_prompt
 from .worlds import clean_world_entry, worlds_digest
 
@@ -973,7 +974,7 @@ def generate_chapter(
         beats_done = outcome["beats_done"]
         stop_reason = outcome["stop_reason"]
     else:
-        result = stream_text(context["adapter"], req, on_delta) if on_delta else context["adapter"].generate(req)
+        result = _generate_validated(context["adapter"], req, on_delta, "章节正文")
         content = (result.text or "").strip()
         provider = result.model
         rounds = 1
@@ -1011,6 +1012,16 @@ def generate_chapter(
             "summary_error": None,
             "revision": chapter.get("revision"),
         }
+
+    # 落盘前最后一道校验：确认是小说正文，复述任务/准则清单一律不写盘
+    ok, reason = check_chapter_content(content)
+    if not ok:
+        raise AdapterError(
+            ErrorCode.UPSTREAM_ERROR,
+            f"章节正文落盘前校验未通过（{reason}）：未写入章节，请重试生成",
+            retryable=True,
+            detail={"reason": reason, "head": content[:300]},
+        )
 
     chapter["content"] = content + "\n"
     chapter["word_count"] = words
@@ -1180,6 +1191,55 @@ def _word_deviation(actual: int, target: int) -> dict:
     return {"target": target, "actual": actual, "ratio": ratio, "message": message}
 
 
+def _generate_validated(adapter, request: TextGenRequest, on_delta, label: str) -> TextGenResult:
+    """生成正文并做内容校验；命中无效输出时追加严格约束重试一次。
+
+    校验口径见 `content_guard.check_chapter_content`：复述任务、罗列写作准则、
+    英文思考、列表占比过高等都算无效，绝不允许写进章节正文。
+    重试仍无效时抛出明确错误，由调用方展示，不做静默写入。
+
+    参数:
+        adapter: 写作适配器。
+        request: 本轮统一文本请求。
+        on_delta: 流式增量回调；为 None 时走一次性生成。
+        label: 日志与报错里的轮次说明（如「第 1 轮正文」）。
+
+    返回:
+        TextGenResult；text 为通过校验的正文。
+
+    异常:
+        AdapterError(UPSTREAM_ERROR): 重试一次后仍不是小说正文。
+    """
+
+    def call(req: TextGenRequest) -> TextGenResult:
+        """按是否流式执行一次生成。"""
+        return stream_text(adapter, req, on_delta) if on_delta else adapter.generate(req)
+
+    result = call(request)
+    text = (result.text or "").strip()
+    ok, reason = check_chapter_content(text)
+    if ok or not text:
+        # 空正文交给调用方按原有逻辑报错，这里只负责内容形态校验
+        return result
+
+    logger.warning("%s校验未通过：%s；追加严格约束后重试一次", label, reason)
+    retry_request = replace(
+        request,
+        messages=list(request.messages) + [Message("user", strict_retry_instruction())],
+    )
+    result = call(retry_request)
+    text = (result.text or "").strip()
+    ok, reason = check_chapter_content(text)
+    if not ok:
+        raise AdapterError(
+            ErrorCode.UPSTREAM_ERROR,
+            f"{label}不是小说正文（{reason}）：已重试 1 次仍无效，内容未写入章节，请重试生成",
+            retryable=True,
+            detail={"reason": reason, "head": text[:300]},
+        )
+    return result
+
+
 def _generate_chapter_rounds(
     adapter,
     req: TextGenRequest,
@@ -1228,7 +1288,7 @@ def _generate_chapter_rounds(
                     Message("user", _beats_round_instruction(groups, index, total_beats, chapter_words)),
                 ],
             )
-        result = stream_text(adapter, request, on_delta) if on_delta else adapter.generate(request)
+        result = _generate_validated(adapter, request, on_delta, f"第 {index + 1} 轮正文")
         provider = result.model or provider
         segment = (result.text or "").strip()
         rounds = index + 1

@@ -87,6 +87,41 @@ _CONTEXT_FIELDS = ("max_model_len", "context_length", "context_window", "model_c
 _OUTPUT_FIELDS = ("max_output_tokens", "max_completion_tokens", "max_tokens", "max_new_tokens")
 #: 思考强度合法档位（与设置页下拉一致）
 _THINKING_EFFORTS = ("low", "medium", "high")
+#: 思考内容进日志时的截断长度（完整思考仍由 oplog 的 response.reasoning 单独保存）
+_REASONING_LOG_CHARS = 300
+
+
+def _split_delta(delta: dict) -> tuple[str, str]:
+    """拆分一个流式增量里的正文与思考内容。
+
+    参数:
+        delta: SSE `choices[0].delta`。
+
+    返回:
+        `(content, reasoning)`；两者互不回落，content 为空时就是空串，
+        避免把思考内容当成正文累加。
+    """
+    content = delta.get("content")
+    reasoning = delta.get("reasoning_content")
+    return (str(content) if content else "", str(reasoning) if reasoning else "")
+
+
+def _log_reasoning(task: str, reasoning: str) -> None:
+    """把思考内容单独记到日志（截断），绝不进入正文。
+
+    参数:
+        task: 请求任务名，便于在日志里区分章节 / 大纲等用途。
+        reasoning: 模型返回的完整思考文本。
+
+    返回:
+        无。
+    """
+    if not reasoning:
+        return
+    head = reasoning[:_REASONING_LOG_CHARS].replace("\n", " ")
+    logger.info("模型思考（仅日志，不入正文）task=%s chars=%s head=%s", task, len(reasoning), head)
+
+
 #: 探测上限时额外尝试的非标准端点（没有的会记录 404 / 非 JSON，不抛错）
 _LIMIT_PROBE_PATHS = ("/props", "/v1/internal/model/info", "/v1/model/info", "/health")
 #: 模型列表缓存：`(endpoint, api_key) -> (抓取时间, id 列表)`；只用于调用前轻量校验，短 TTL
@@ -1079,7 +1114,9 @@ class OmlxWritingAdapter:
         if not choices:
             raise AdapterError(ErrorCode.UPSTREAM_ERROR, f"omlx 返回空 choices：{str(data)[:300]}", detail={"path": "/v1/chat/completions"})
         message = choices[0].get("message") or {}
-        text = message.get("content") or message.get("reasoning_content") or ""
+        # 只取 content：reasoning_content 是模型的思考通道，绝不能当成正文返回
+        text = str(message.get("content") or "")
+        _log_reasoning(req.task, str(message.get("reasoning_content") or ""))
         return TextGenResult(
             text=text,
             finish_reason=str(choices[0].get("finish_reason") or "stop"),
@@ -1114,6 +1151,7 @@ class OmlxWritingAdapter:
         """
         payload = self._build_payload(req, stream=True)
         parts: list[str] = []
+        reasoning_parts: list[str] = []
         finish = "stop"
         model = self.model
         usage: Usage | None = None
@@ -1126,13 +1164,17 @@ class OmlxWritingAdapter:
             if not choices:
                 continue
             delta = choices[0].get("delta") or {}
-            text = delta.get("content") or delta.get("reasoning_content") or ""
+            # 思考与正文分开累计：reasoning 只进日志，不拼接、不回调
+            text, reasoning = _split_delta(delta)
+            if reasoning:
+                reasoning_parts.append(reasoning)
             if text:
                 parts.append(text)
                 if on_delta is not None:
                     on_delta(text)
             if choices[0].get("finish_reason"):
                 finish = str(choices[0]["finish_reason"])
+        _log_reasoning(req.task, "".join(reasoning_parts))
         return TextGenResult(text="".join(parts), finish_reason=finish, model=model, usage=usage, raw={"stream": True})
 
     def generate_tool(
@@ -1517,6 +1559,7 @@ class OmlxWritingAdapter:
         self._require_ready()
         self._check_model_available()
         payload = self._build_payload(req, stream=True)
+        reasoning_parts: list[str] = []
         for event in self._iter_sse_with_retry(payload):
             usage = self._parse_usage(event.get("usage")) if event.get("usage") else None
             choices = event.get("choices") or []
@@ -1525,13 +1568,18 @@ class OmlxWritingAdapter:
                     yield TextGenChunk(delta="", done=False, usage=usage)
                 continue
             delta = choices[0].get("delta") or {}
-            text = delta.get("content") or delta.get("reasoning_content") or ""
+            # 只把 content 交给调用方；reasoning 单独累计，结束后只写日志
+            text, reasoning = _split_delta(delta)
+            if reasoning:
+                reasoning_parts.append(reasoning)
             finish = choices[0].get("finish_reason")
             if text:
                 yield TextGenChunk(delta=text, done=False, usage=usage)
             if finish:
+                _log_reasoning(req.task, "".join(reasoning_parts))
                 yield TextGenChunk(delta="", done=True, usage=usage)
                 return
+        _log_reasoning(req.task, "".join(reasoning_parts))
         yield TextGenChunk(delta="", done=True)
 
     @staticmethod
