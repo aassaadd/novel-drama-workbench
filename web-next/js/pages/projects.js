@@ -4,7 +4,7 @@
  */
 import { esc, icon, toast, openDialog, closeDialog, fmtBytes } from '../dom.js';
 import { getJSON, postJSON } from '../api.js';
-import { state, lastProject, rememberProject } from '../store.js';
+import { state, lastProject, rememberProject, forgetProject } from '../store.js';
 import { goChapter } from '../shell.js';
 
 /** 标题前两个字，作为无封面工程的视觉标识 */
@@ -74,7 +74,7 @@ function openNewProject() {
     title: '新建工程',
     body,
     foot: `<div class="right"><button class="btn" data-dlg-close>取消</button>
-      <button class="btn primary" id="np-submit">创建并打开</button></div>`,
+      <button class="btn primary" id="np-submit">创建</button></div>`,
   });
   mask.querySelector('#np-pick').addEventListener('click', async () => {
     try {
@@ -95,18 +95,23 @@ function openNewProject() {
     button.textContent = '创建中…';
     try {
       const result = await postJSON('/api/ui/project/init', { dir, title, author });
+      const root = result.root || dir;
       closeDialog();
-      rememberProject(result.root || dir);
-      toast('工程已创建', 'ok');
+      toast(`工程已创建：${title}`, 'ok', 3200);
+      // 新建后清掉筛选条件，保证新工程一定能出现在列表里
+      resetFilters();
       await loadProjects();
-      // 新工程还没有章节：打开后会看到空目录，引导去原有界面导入
-      const chapters = await getJSON('/api/project/chapters', { path: result.root || dir }).catch(() => []);
-      if (chapters && chapters.length) goChapter(result.root || dir, chapters[0].id);
-      else window.location.hash = '#/projects';
+      paintList();
+      // 新工程还没有章节：留在列表页，卡片已就地刷新；有章节时才进入第一章
+      const chapters = await getJSON('/api/project/chapters', { path: root }).catch(() => []);
+      if (chapters && chapters.length) {
+        rememberProject(root);
+        goChapter(root, chapters[0].id);
+      }
     } catch (error) {
-      toast(error.message, 'bad');
+      toast(`创建失败：${error.message}`, 'bad', 4600);
       button.disabled = false;
-      button.textContent = '创建并打开';
+      button.textContent = '创建';
     }
   });
 }
@@ -125,10 +130,13 @@ function confirmDelete(item) {
     try {
       await postJSON('/api/project/delete', { path: item.path, confirm: true });
       closeDialog();
-      toast('已移入废纸篓', 'ok');
+      // 删的是「上次打开」的工程时同时清掉记录，避免徽标继续指向已删除路径
+      forgetProject(item.path);
+      toast(`已移入废纸篓：${item.title || '未命名工程'}`, 'ok', 3200);
       await loadProjects();
+      paintList();
     } catch (error) {
-      toast(error.message, 'bad');
+      toast(`删除失败：${error.message}`, 'bad', 4600);
       event.currentTarget.disabled = false;
     }
   });
@@ -180,15 +188,14 @@ function openImport(item) {
       const created = result?.created ?? result?.imported ?? result?.chapters?.length ?? 0;
       toast(created ? `已导入 ${created} 章` : '导入完成', 'ok');
       await loadProjects();
+      paintList();
       const chapters = await getJSON('/api/project/chapters', { path: item.path }).catch(() => []);
       if (chapters?.length) {
         rememberProject(item.path);
         goChapter(item.path, chapters[0].id);
-      } else {
-        renderProjects(document.getElementById('app'));
       }
     } catch (error) {
-      toast(error.message, 'bad');
+      toast(`导入失败：${error.message}`, 'bad');
       event.currentTarget.disabled = false;
       event.currentTarget.textContent = '开始导入';
     }
@@ -216,23 +223,44 @@ function openDuplicate(item) {
       closeDialog();
       toast(`已复制到 ${result.path}`, 'ok');
       await loadProjects();
-      renderProjects(document.getElementById('app'));
+      paintList();
     } catch (error) {
-      toast(error.message, 'bad');
+      toast(`复制失败：${error.message}`, 'bad');
       event.currentTarget.disabled = false;
     }
   });
 }
 
-/** 拉取工程列表（含章节/字数/占用） */
+/** 拉取工程列表（含章节/字数/占用）；后发请求覆盖先发，避免旧响应盖掉新数据 */
+let projectsSeq = 0;
 async function loadProjects() {
+  const seq = ++projectsSeq;
   const list = await getJSON('/api/ui/projects/overview');
+  // 已有更新的请求在途/已返回：丢弃这次的旧响应
+  if (seq !== projectsSeq) return false;
   state.projects = list || [];
   state.projectInfos = {};
+  return true;
 }
 
 /** 首页筛选：状态（按配音完成度）/ 编辑时间 / 关键词，均为本地真实数据 */
 const filters = { status: 'all', time: 'all', text: '', sort: 'recent' };
+
+/** 当前列表页是主页还是「项目」入口 */
+let pageScope = 'home';
+
+/** 复位筛选条件（新建工程后确保卡片一定可见） */
+function resetFilters() {
+  filters.status = 'all';
+  filters.time = 'all';
+  filters.text = '';
+  const status = document.getElementById('f-status');
+  if (status) status.value = 'all';
+  const time = document.getElementById('f-time');
+  if (time) time.value = 'all';
+  const text = document.getElementById('f-text');
+  if (text) text.value = '';
+}
 
 /** 工程状态：无台词行=未开始，全部已配=已完成，其余制作中 */
 function statusOf(item) {
@@ -280,17 +308,41 @@ function filteredProjects() {
   return list.sort(sorters[filters.sort] || sorters.recent);
 }
 
-/** 只重画卡片区（筛选后不整页重建） */
+/** 只重画卡片区（筛选后不整页重建，滚动位置保持不变） */
 function paintCards() {
   const grid = document.getElementById('proj-cards');
   if (!grid) return;
   const list = filteredProjects();
+  const hasAny = state.projects.length > 0;
   grid.innerHTML = list.length
     ? `${list.map(card).join('')}
        <button class="new-card" data-act="new">${icon('plus', 20)}<span>新建项目</span></button>`
-    : `<div class="empty" style="grid-column:1/-1">${icon('search', 20)}
-         <b>没有匹配的工程</b><span>换个筛选条件或关键词</span>
-         <button class="btn" data-act="clear-filter">清除筛选</button></div>`;
+    : `<div class="empty" style="grid-column:1/-1">${icon(hasAny ? 'search' : 'folder', 20)}
+         <b>${hasAny ? '没有匹配的工程' : '还没有本机工程'}</b>
+         <span>${hasAny ? '换个筛选条件或关键词' : '新建一个工程开始，或把已有目录导入进来'}</span>
+         ${
+           hasAny
+             ? '<button class="btn" data-act="clear-filter">清除筛选</button>'
+             : '<button class="btn primary" data-act="new">新建项目</button>'
+         }
+       </div>`;
+}
+
+/** 只重画工程数量与占用统计（增删工程后同步，不整页重建） */
+function paintCounts() {
+  const sub = document.getElementById('proj-sub');
+  if (!sub) return;
+  const totalSize = fmtBytes(state.projects.reduce((sum, item) => sum + Number(item.size_bytes || 0), 0));
+  sub.innerHTML =
+    pageScope === 'all'
+      ? `本机全部 <b>${state.projects.length}</b> 个工程，占用 <b>${totalSize}</b>。`
+      : `本机共 <b>${state.projects.length}</b> 个工程，占用 <b>${totalSize}</b>。打开后进入画本编辑，左侧目录可直接切章。`;
+}
+
+/** 重画列表与统计（新增/删除/导入/刷新索引后统一走这里） */
+function paintList() {
+  paintCounts();
+  paintCards();
 }
 
 /** 渲染工程列表页 */
@@ -353,6 +405,7 @@ function homeNavHTML(scope) {
 /** 工程列表页：按 scope 渲染主页 / 项目两个入口 */
 export async function renderProjects(root, target = {}) {
   const scope = target.scope === 'all' ? 'all' : 'home';
+  pageScope = scope;
   root.innerHTML = `
     <div class="home-layout">
       ${homeNavHTML(scope)}
@@ -363,24 +416,21 @@ export async function renderProjects(root, target = {}) {
         </main>
       </div>
     </div>`;
+  let fresh = true;
   try {
-    await loadProjects();
+    fresh = await loadProjects();
   } catch (error) {
     toast(error.message, 'bad');
   }
   const main = root.querySelector('#projects-main');
-  if (!main) return;
-  const totalSize = fmtBytes(state.projects.reduce((sum, item) => sum + Number(item.size_bytes || 0), 0));
+  // 期间又触发了新的列表渲染：这次结果作废，避免旧数据盖掉新页面
+  if (!main || !fresh) return;
   const title = scope === 'all' ? '项目' : '最近项目';
-  const sub =
-    scope === 'all'
-      ? `本机全部 <b>${state.projects.length}</b> 个工程，占用 <b>${totalSize}</b>。`
-      : `本机共 <b>${state.projects.length}</b> 个工程，占用 <b>${totalSize}</b>。打开后进入画本编辑，左侧目录可直接切章。`;
   main.innerHTML = `
     <div class="page-head">
       <div class="ph">
         <h1 class="page-title">${title}</h1>
-        <div class="page-sub">${sub}</div>
+        <div class="page-sub" id="proj-sub"></div>
       </div>
       <div class="ph-actions">
         <button class="btn" data-act="refresh" title="重新扫描默认工程目录并重建本机索引">${icon('refresh')} 刷新索引</button>
@@ -415,7 +465,7 @@ export async function renderProjects(root, target = {}) {
     </div>
     <div class="cards" id="proj-cards"></div>`;
 
-  paintCards();
+  paintList();
   main.querySelector('#f-status').value = filters.status;
   main.querySelector('#f-time').value = filters.time;
   main.querySelector('#f-sort').value = filters.sort;
@@ -478,12 +528,7 @@ export async function renderProjects(root, target = {}) {
     if (!button) return;
     if (button.dataset.act === 'new') openNewProject();
     if (button.dataset.act === 'clear-filter') {
-      filters.status = 'all';
-      filters.time = 'all';
-      filters.text = '';
-      document.getElementById('f-status').value = 'all';
-      document.getElementById('f-time').value = 'all';
-      document.getElementById('f-text').value = '';
+      resetFilters();
       paintCards();
     }
     if (button.dataset.act === 'refresh') {
@@ -491,7 +536,7 @@ export async function renderProjects(root, target = {}) {
       postJSON('/api/ui/projects/reindex', {})
         .then(async (result) => {
           await loadProjects();
-          paintCards();
+          paintList();
           toast(`索引已刷新：${Number(result?.count || state.projects.length)} 个工程`, 'ok');
         })
         .catch((error) => toast(`刷新索引失败：${error.message}`, 'bad'))

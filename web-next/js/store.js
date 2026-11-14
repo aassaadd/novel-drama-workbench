@@ -59,6 +59,18 @@ export function rememberProject(path) {
 }
 
 /**
+ * 删除工程后清掉「上次打开」记录，避免徽标与导航继续指向已删除的路径。
+ * @param {string} path 被删除的工程路径
+ */
+export function forgetProject(path) {
+  try {
+    if (!path || localStorage.getItem(LAST_KEY) === path) localStorage.removeItem(LAST_KEY);
+  } catch {
+    // localStorage 不可用时无需处理
+  }
+}
+
+/**
  * 读取全局界面偏好并写回 state。
  * 偏好与工程无关，启动时调用一次即可；读取失败时保持默认值。
  */
