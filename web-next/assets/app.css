@@ -904,6 +904,12 @@ table.files .mono { font-size: 11px; color: var(--text-4); }
 .conn-list-msg { min-height: 15px; }
 .conn-list-msg.bad { color: var(--bad, #e8837a); }
 .input:disabled, .select:disabled { opacity: 0.45; cursor: not-allowed; }
+/* 模型清单：未下全的具体原因，行内单行省略，悬停看全文 */
+.model-reason {
+  display: block; font-size: 11px; color: var(--warn);
+  margin-top: 2px; max-width: 620px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
 @media (max-width: 1180px) { .conn-grid { grid-template-columns: minmax(0, 1fr); } }
 
 

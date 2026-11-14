@@ -190,6 +190,19 @@ def _comfy_rows(config) -> tuple[str | None, list[dict], str | None]:
         repo = resolved.get("repo") or item.get("repo")
         hf_filename = resolved.get("hf_filename") or item.get("hf_filename")
         url = resolved.get("url")
+        expected = int(item.get("expected_bytes") or 0)
+        actual = int(item.get("bytes") or 0)
+        present = bool(item.get("present"))
+        # 完整 = 文件存在且（没有登记期望体积 或 实际体积与期望一致）
+        complete = present and (not expected or actual == expected)
+        reasons: list[str] = []
+        if present and not complete:
+            if actual <= 0:
+                reasons.append("文件为空")
+            elif actual < expected:
+                reasons.append(f"文件未下全：已下 {_human_bytes(actual)} / 期望 {_human_bytes(expected)}")
+            else:
+                reasons.append(f"文件大小不符：已下 {_human_bytes(actual)} / 期望 {_human_bytes(expected)}")
         rows.append(
             {
                 "key": key,
@@ -197,7 +210,10 @@ def _comfy_rows(config) -> tuple[str | None, list[dict], str | None]:
                 "target_path": str(root / key),
                 "bytes": int(item.get("bytes") or 0),
                 "expected_bytes": int(item.get("expected_bytes") or 0),
-                "present": bool(item.get("present")),
+                "present": present,
+                "complete": complete,
+                "reasons": reasons,
+                "missing_files": [],
                 "templates": list(item.get("templates") or []),
                 "license": item.get("license"),
                 "license_gate": item.get("license_gate") or "none",
@@ -246,6 +262,9 @@ def _audio_rows(config) -> tuple[str, list[dict], str | None]:
                 "downloadable": gate != "retired",
                 "resolved": bool(catalog.get("hf_repo")),
                 "error": None,
+                # 音频的 missing 里既有缺失文件名，也可能带「大小不符：a/b」说明，原样交给页面展示
+                "missing_files": list(item.get("missing") or []),
+                "reasons": [],
             }
         )
     return str(root), rows, None

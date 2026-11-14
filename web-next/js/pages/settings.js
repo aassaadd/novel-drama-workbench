@@ -40,27 +40,59 @@ function environmentHTML() {
     </div>`;
 }
 
+/**
+ * 拼出「未下全」的具体原因：已下多少 / 期望多少 / 还差多少 / 缺哪个文件 / 校验不符。
+ * 行内与悬停提示共用这一份文案，保证两处说法一致。
+ * @param {object} item 模型行
+ * @returns {string} 中文原因
+ */
+function incompleteReason(item) {
+  const reasons = [];
+  const expected = Number(item.expected_bytes) || 0;
+  const actual = Number(item.bytes) || 0;
+  // 服务端已经给了更精确的原因（ComfyUI 文件为空 / 大小不符）时不再重复拼体积
+  const serverReasons = (Array.isArray(item.reasons) ? item.reasons : []).map(String);
+  if (!serverReasons.length) {
+    if (expected) {
+      const gap = expected - actual;
+      reasons.push(
+        `已下 ${fmtBytes(actual)} / 期望 ${fmtBytes(expected)}` + (gap > 0 ? `，还差 ${fmtBytes(gap)}` : '')
+      );
+    } else if (actual) {
+      reasons.push(`已下 ${fmtBytes(actual)}`);
+    }
+  }
+  serverReasons.forEach((text) => reasons.push(text));
+  // 音频模型缺的具体文件名（可能带「大小不符：实际/期望」）
+  const missing = Array.isArray(item.missing_files) ? item.missing_files : [];
+  if (missing.length) reasons.push(`缺少或校验不符：${missing.join('、')}`);
+  return reasons.length ? reasons.join('；') : '文件没下全：可能下载中断或校验未通过，建议重新下载';
+}
+
 /** 模型行：就绪状态、体积与下载 / 补录入口 */
 function modelRowHTML(group, item) {
   const ready = item.present && item.complete;
+  const incomplete = item.present && !item.complete;
   const gate = item.license_gate && !['none', ''].includes(item.license_gate);
   const size = item.bytes
     ? fmtBytes(item.bytes)
     : item.expected_bytes
       ? `预计 ${fmtBytes(item.expected_bytes)}`
       : '';
+  const reason = incomplete ? incompleteReason(item) : '';
+  const badgeTitle = ready ? '文件已下全，可以直接使用' : incomplete ? reason : '还没有下载这个模型';
   return `
     <div class="summary-line" style="align-items:flex-start">
       <span style="min-width:0">
         <span style="color:var(--text)">${esc(item.display_name || item.key)}</span>
-        <span class="badge ${ready ? 'ok' : item.present ? 'warn' : 'mute'}" style="margin-left:6px">${
-          ready ? '就绪' : item.present ? '不完整' : '未下载'
-        }</span>
+        <span class="badge ${ready ? 'ok' : incomplete ? 'warn' : 'mute'}" style="margin-left:6px"
+          title="${esc(badgeTitle)}">${ready ? '就绪' : incomplete ? '未下全' : '未下载'}</span>
         <span style="display:block;color:var(--text-4);font-size:11px;margin-top:2px">
           ${esc(item.key)}${size ? ` · ${esc(size)}` : ''}${
             item.license ? ` · ${esc(item.license)}${item.commercial_use === false ? '（不可商用）' : ''}` : ''
           }
         </span>
+        ${incomplete ? `<span class="model-reason" title="${esc(reason)}">${esc(reason)}</span>` : ''}
         ${item.note ? `<span style="display:block;color:var(--text-4);font-size:11px">${esc(item.note)}</span>` : ''}
       </span>
       <span class="right" style="display:flex;gap:6px;align-items:center">
@@ -70,12 +102,16 @@ function modelRowHTML(group, item) {
             : item.downloadable
               ? `<button class="btn sm" data-act="model-install" data-group="${esc(group)}"
                    data-key="${esc(item.key)}" data-gate="${esc(item.license_gate || '')}"
-                   title="${gate ? '需要先确认许可限制' : '开始下载并落地到模型目录'}">下载</button>`
+                   title="${gate ? '需要先确认许可限制' : '开始下载并落地到模型目录'}">${
+                     incomplete ? '补下' : '下载'
+                   }</button>`
               : group !== 'audio'
                 ? `<button class="btn sm" data-act="model-manual" data-group="${esc(group)}"
-                     data-key="${esc(item.key)}" title="手工补录 HuggingFace 仓库或下载地址">补录来源</button>
+                     data-key="${esc(item.key)}"
+                     title="不知道这个模型从哪下载时，在这里填 HuggingFace 仓库或直链地址">补录来源</button>
                    <button class="btn sm" data-act="model-resolve" data-group="${esc(group)}"
-                     data-key="${esc(item.key)}" title="重新联网解析下载地址">解析</button>`
+                     data-key="${esc(item.key)}"
+                     title="从工作流反推出来的条目不知道出处；点它按补录的仓库 / 文件名 / 直链到线上反查来源">查来源</button>`
                 : ''
         }
       </span>
@@ -122,12 +158,20 @@ function paintEnvironment() {
     <div style="margin-top:14px">
       ${MODEL_GROUPS.map(([group, label]) => {
         const rows = models[group]?.models || [];
+        // 未下全且可下载的条目：给出分组级批量补下入口，避免逐条点
+        const pending = rows.filter((item) => item.present && !item.complete && item.downloadable);
         return `
           <div style="margin-top:8px">
             <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
               <b style="font-size:12px;color:var(--text)">${label}</b>
               <span class="badge mute">${rows.length} 个</span>
               <span class="hint" style="font-size:11px">${esc(models[group]?.root || '')}</span>
+              ${
+                pending.length
+                  ? `<button class="btn sm" data-act="model-install-incomplete" data-group="${esc(group)}"
+                       title="把这一组里未下全的 ${pending.length} 个模型排队补下；需要确认许可的会先弹一次确认">全部补下</button>`
+                  : ''
+              }
             </div>
             ${rows.map((item) => modelRowHTML(group, item)).join('') || '<div class="hint">没有登记模型</div>'}
           </div>`;
@@ -230,13 +274,19 @@ function paintInstallJob(job, label) {
     </div>`;
 }
 
-/** 轮询下载任务直到结束 */
-async function pollInstall(jobId, label) {
+/**
+ * 轮询下载任务直到结束。
+ * @param {string} jobId 任务 ID
+ * @param {string} label 展示名称
+ * @param {{reload?: boolean}} options reload=false 时由调用方统一提示与刷新（批量补下用）
+ * @returns {Promise<boolean>} 是否下载成功
+ */
+async function pollInstall(jobId, label, { reload = true } = {}) {
   if (envTimer) {
     window.clearInterval(envTimer);
     envTimer = null;
   }
-  await new Promise((resolve) => {
+  return await new Promise((resolve) => {
     envTimer = window.setInterval(async () => {
       try {
         const job = await getJSON(`/api/ui/models/install/${encodeURIComponent(jobId)}`);
@@ -245,17 +295,20 @@ async function pollInstall(jobId, label) {
         window.clearInterval(envTimer);
         envTimer = null;
         if (job.status === 'done') {
-          toast(`${label} 下载完成`, 'ok');
-          await loadEnvironment();
+          if (reload) {
+            toast(`${label} 下载完成`, 'ok');
+            await loadEnvironment();
+          }
+          resolve(true);
         } else {
           toast(`${label} 下载失败：${job.result?.error || job.status}`, 'bad', 5200);
+          resolve(false);
         }
-        resolve();
       } catch (error) {
         window.clearInterval(envTimer);
         envTimer = null;
         toast(error.message, 'bad', 4600);
-        resolve();
+        resolve(false);
       }
     }, 1500);
   });
@@ -300,6 +353,73 @@ async function startInstall(group, key, gate) {
   } catch (error) {
     toast(error.message, 'bad', 4600);
   }
+}
+
+/**
+ * 批量补下：把某个分组里「未下全且可下载」的模型依次排队下载。
+ * 有需要确认许可的条目时先弹一次确认框；全部结束后统一提示并刷新清单。
+ * @param {string} group 分组（audio / image / video / music）
+ * @param {HTMLButtonElement} button 触发按钮
+ */
+async function installIncomplete(group, button) {
+  const rows = (env.models?.[group]?.models || []).filter(
+    (item) => item.present && !item.complete && item.downloadable
+  );
+  if (!rows.length) {
+    toast('这一组没有需要补下的模型', 'warn', 2600);
+    return;
+  }
+  const gated = rows.filter((item) => item.license_gate && !['none', ''].includes(item.license_gate));
+  const run = async () => {
+    button.disabled = true;
+    let ok = 0;
+    let bad = 0;
+    for (let index = 0; index < rows.length; index += 1) {
+      const item = rows[index];
+      button.textContent = `补下中 ${index + 1}/${rows.length}`;
+      toast(`正在补下 ${index + 1}/${rows.length}：${item.display_name || item.key}`, 'ok', 2600);
+      try {
+        const { job_id: jobId } = await postJSON('/api/ui/models/install', {
+          group,
+          key: item.key,
+          accept_license: true,
+          yes: true,
+        });
+        const done = await pollInstall(jobId, item.display_name || item.key, { reload: false });
+        if (done) ok += 1;
+        else bad += 1;
+      } catch (error) {
+        bad += 1;
+        toast(`${item.key} 补下失败：${error.message}`, 'bad', 4200);
+      }
+    }
+    button.textContent = '全部补下';
+    button.disabled = false;
+    toast(`补下完成：成功 ${ok} 个${bad ? `，失败 ${bad} 个` : ''}`, bad ? 'warn' : 'ok', 4600);
+    await loadEnvironment();
+  };
+  if (!gated.length) {
+    await run();
+    return;
+  }
+  // 许可只需确认一次；确认后这一批统一带上 accept_license
+  const names = gated.map((item) => item.display_name || item.key).join('、');
+  const mask = openDialog({
+    title: '确认模型许可',
+    body: `<div class="dlg-note warn">这一批里有 ${gated.length} 个模型需要确认许可后才能补下：${esc(names)}。
+      请确认已理解其商用与分发限制。</div>
+      <label style="display:flex;gap:8px;align-items:center;margin-top:10px;font-size:12px">
+        <input type="checkbox" id="mi-accept" /> 我已理解并接受这些模型的许可</label>`,
+    foot: `<div class="right"><button class="btn" data-dlg-close>取消</button>
+      <button class="btn primary" id="mi-go" disabled>开始补下 ${rows.length} 个</button></div>`,
+  });
+  const box = mask.querySelector('#mi-accept');
+  const go = mask.querySelector('#mi-go');
+  box.addEventListener('change', () => (go.disabled = !box.checked));
+  go.addEventListener('click', async () => {
+    closeDialog();
+    await run();
+  });
 }
 
 /** 补录图像 / 视频 / 音乐模型的下载来源 */
@@ -1030,6 +1150,9 @@ function onRootClick(event) {
   if (button.dataset.act === 'model-install') {
     return void startInstall(button.dataset.group, button.dataset.key, button.dataset.gate);
   }
+  if (button.dataset.act === 'model-install-incomplete') {
+    return void installIncomplete(button.dataset.group, button);
+  }
   if (button.dataset.act === 'model-manual') {
     return openManualModel(button.dataset.group, button.dataset.key);
   }
@@ -1037,10 +1160,18 @@ function onRootClick(event) {
     button.disabled = true;
     void postJSON('/api/ui/models/resolve', { group: button.dataset.group, key: button.dataset.key })
       .then((result) => {
-        toast(result.repo ? `已解析：${result.repo}` : result.message || '已解析', 'ok', 4200);
+        // 直白表达：反查到就写「来源：owner/repo（或直链）」，没反查到明确写「来源未知」
+        const source = result.repo || result.url || '';
+        toast(
+          source
+            ? `来源：${source}`
+            : '来源未知：没有反查到仓库或直链，可在「补录来源」里手动填写',
+          source ? 'ok' : 'warn',
+          4400
+        );
         return loadEnvironment();
       })
-      .catch((error) => toast(error.message, 'bad', 4800))
+      .catch((error) => toast(`查来源失败：${error.message.replace(/^解析失败：/, '')}`, 'bad', 4800))
       .finally(() => {
         button.disabled = false;
       });
