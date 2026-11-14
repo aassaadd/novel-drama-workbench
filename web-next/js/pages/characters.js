@@ -1179,6 +1179,9 @@ async function runCharacterGenerate(count, brief, resultHost, mode = 'fill') {
           detail: '在弹窗里勾选后点「追加选中角色」才会写入 characters.json。',
         });
         toast(`已生成 ${rows.length} 个角色预览`, 'ok');
+      } else if (event === 'canceled') {
+        settled = true;
+        panel.fail({ message: '已停止生成', detail: '任务已在任务队列中取消，已接收的内容不会写入角色表。' });
       } else if (event === 'error') {
         settled = true;
         panel.fail({

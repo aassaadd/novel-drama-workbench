@@ -24,6 +24,7 @@ from fastapi import HTTPException
 from fastapi.responses import StreamingResponse
 
 from ..adapters.base import AdapterError
+from ..cancel import GenerationCanceled
 from ..config import load_config
 from ..store import ProjectStore
 from .job_tracker import UiJob
@@ -47,8 +48,8 @@ _SSE_HEADERS = {
 }
 
 
-class _Cancelled(Exception):
-    """客户端断开后用于中断生成流程。"""
+class _Cancelled(GenerationCanceled):
+    """客户端断开或用户停止后用于中断生成流程。"""
 
 
 def _sse(event: str, data: dict) -> str:
@@ -131,8 +132,8 @@ def _stream_response(task, job=None) -> StreamingResponse:
     received = {"chars": 0}
 
     def on_delta(text: str) -> None:
-        """接收模型增量；客户端已断开时抛异常中断生成。"""
-        if stop.is_set():
+        """接收模型增量；客户端断开或用户点停止时抛异常中断生成。"""
+        if stop.is_set() or (job is not None and job.cancel_requested()):
             raise _Cancelled()
         received["chars"] += len(str(text))
         if job:
@@ -150,7 +151,9 @@ def _stream_response(task, job=None) -> StreamingResponse:
             events.put(("done", {"result": result}))
         except _Cancelled:
             if job:
-                job.cancel()
+                # 用户主动停止优先记为「用户已停止生成」；断线仍用默认文案
+                job.cancel("用户已停止生成" if job.cancel_requested() else None)
+            events.put(("canceled", {"message": "任务已停止，已接收的内容保留"}))
         except AdapterError as exc:
             if job:
                 job.fail(f"生成失败：{exc.message}")
@@ -203,8 +206,8 @@ def _progress_response(task, job=None) -> StreamingResponse:
     throttle = {"chars": 0, "at": 0.0}
 
     def on_progress(event: dict) -> None:
-        """接收进度事件；chars 做轻量合并，避免刷屏。"""
-        if stop.is_set():
+        """接收进度事件；用户点停止 / 客户端断开时抛异常中断生成。"""
+        if stop.is_set() or (job is not None and job.cancel_requested()):
             raise _Cancelled()
         if not isinstance(event, dict):
             return
@@ -236,7 +239,9 @@ def _progress_response(task, job=None) -> StreamingResponse:
             events.put(("done", {"result": result}))
         except _Cancelled:
             if job:
-                job.cancel()
+                # 用户主动停止优先记为「用户已停止生成」；断线仍用默认文案
+                job.cancel("用户已停止生成" if job.cancel_requested() else None)
+            events.put(("canceled", {"message": "任务已停止，已接收的内容保留"}))
         except AdapterError as exc:
             if job:
                 job.fail(f"生成失败：{exc.message}")

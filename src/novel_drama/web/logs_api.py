@@ -132,6 +132,7 @@ _ACTIONS: dict[str, tuple[str, str]] = {
     "/api/ui/generate": ("generate.start", "启动生成任务"),
     "/api/ui/stop": ("generate.stop", "停止生成任务"),
     "/api/ui/jobs/clear": ("job.clear", "清理任务记录"),
+    "/api/ui/jobs/cancel": ("job.cancel", "停止任务"),
     "/api/ui/gpu/lock/release": ("gpu.release", "释放 GPU 锁"),
     "/api/ui/models/install": ("model.install", "下载模型"),
     "/api/ui/models/manual": ("model.manual", "补录模型来源"),

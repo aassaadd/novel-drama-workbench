@@ -1633,6 +1633,9 @@ async function runWorldGenerate(brief, count, mode = 'fill') {
             ],
           });
           renderWorldPreview();
+        } else if (event === 'canceled') {
+          settled = true;
+          panel.fail({ message: '已停止生成', detail: '任务已在任务队列中取消，已接收的内容不会写入世界库。' });
         } else if (event === 'error') {
           settled = true;
           panel.fail({ message: data?.message || '世界生成失败', retry: () => runWorldGenerate(brief, count, mode) });
@@ -1849,6 +1852,9 @@ async function runOutlineGenerate(body, mode = 'regen') {
             retry: () => runOutlineGenerate(body, mode),
           })
         );
+      } else if (event === 'canceled') {
+        settled = true;
+        panel.fail({ message: '已停止生成', detail: '任务已在任务队列中取消，已接收的内容不会写入大纲。' });
       } else if (event === 'error') {
         settled = true;
         panel.fail({ message: data.message || '大纲生成失败', retry: () => runOutlineGenerate(body, mode) });
@@ -2289,6 +2295,9 @@ async function runGenerate(body, hadBody = false) {
             },
           ],
         });
+      } else if (event === 'canceled') {
+        settled = true;
+        panel.fail({ message: '已停止生成', detail: '任务已在任务队列中取消，已接收的内容不会写入正文。' });
       } else if (event === 'error') {
         settled = true;
         panel.fail({ message: data?.message || '生成失败', retry: () => runGenerate(body) });

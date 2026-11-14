@@ -16,6 +16,11 @@ import json
 import threading
 import time
 
+from ..cancel import is_active as _cancel_active
+from ..cancel import is_requested as _cancel_requested
+from ..cancel import register as _cancel_register
+from ..cancel import release as _cancel_release
+from ..cancel import request as _cancel_request
 from ..models.ids import new_id, now_iso
 from ..store.project_store import ProjectStore
 
@@ -43,6 +48,42 @@ def active_jobs(kind: str = "") -> list[str]:
     """
     with _ACTIVE_LOCK:
         return [job_id for job_id, item_kind in _ACTIVE.items() if not kind or item_kind == kind]
+
+
+def running_in_process(job_id: str) -> bool:
+    """本进程是否仍有该任务的生成线程。
+
+    参数:
+        job_id: 任务 ID。
+
+    返回:
+        True 表示能找到取消登记（任务在本进程内运行）。
+    """
+    return _cancel_active(job_id)
+
+
+def request_cancel(job_id: str) -> bool:
+    """请求停止运行中的生成任务。
+
+    参数:
+        job_id: 任务 ID。
+
+    返回:
+        True 表示确实通知到了本进程内的生成线程；False 表示查无进程（僵尸任务）。
+    """
+    return _cancel_request(job_id)
+
+
+def cancel_requested(job_id: str) -> bool:
+    """任务是否已被请求停止。
+
+    参数:
+        job_id: 任务 ID。
+
+    返回:
+        True 表示用户已点过停止。
+    """
+    return _cancel_requested(job_id)
 
 
 def _file(store: ProjectStore):
@@ -166,13 +207,21 @@ class UiJob:
         self._done = False
 
     def _save(self, **patch) -> None:
-        """把字段补丁写回任务文件。"""
+        """把字段补丁写回任务文件。
+
+        若文件里已被外部（任务队列「停止」）落成终态，则以文件为准，
+        避免运行线程用旧快照把「已取消」覆盖回「运行中」。
+        """
         with _LOCK:
             if not self.job:
                 return
             jobs = _read(self.store)
             for index, item in enumerate(jobs):
                 if item.get("id") == self.job.get("id"):
+                    if item.get("status") in TERMINAL_STATUSES and self.job.get("status") not in TERMINAL_STATUSES:
+                        self.job = item
+                        self._done = True
+                        return
                     jobs[index] = self.job
                     break
             else:
@@ -206,7 +255,18 @@ class UiJob:
         self._save()
         with _ACTIVE_LOCK:
             _ACTIVE[self.job["id"]] = self.kind
+        _cancel_register(self.job["id"])
         return self
+
+    def cancel_requested(self) -> bool:
+        """任务是否已被任务队列「停止」请求取消。
+
+        返回:
+            True 表示用户已点过停止，后续进度与产物写入都应跳过。
+        """
+        if not self.job:
+            return False
+        return _cancel_requested(str(self.job.get("id") or ""))
 
     def progress(self, current: str | None = None, percent: float | None = None, force: bool = False) -> None:
         """更新进度（默认最多每秒写一次，避免高频写盘）。
@@ -216,7 +276,7 @@ class UiJob:
             percent: 百分比；None 表示不确定。
             force: True 时忽略节流立即写入。
         """
-        if not self.job or self._done:
+        if not self.job or self._done or self.cancel_requested():
             return
         now = time.monotonic()
         if not force and now - self._last_write < 1.0:
@@ -234,7 +294,7 @@ class UiJob:
         参数:
             items: 产物路径列表。
         """
-        if not self.job or self._done:
+        if not self.job or self._done or self.cancel_requested():
             return
         rows = [str(item) for item in items][-200:]
         if rows == self.job.get("artifacts"):
@@ -250,6 +310,8 @@ class UiJob:
             data: 事件负载。
         """
         data = data or {}
+        if self.cancel_requested():
+            return
         if kind == "batch":
             index = _num(data.get("index"))
             total = _num(data.get("total")) or 1
@@ -278,19 +340,27 @@ class UiJob:
                 self.progress(f"已规划 {int(total)} 个角色", 0, force=True)
 
     def _retire(self) -> None:
-        """任务进入终态后，从本进程运行中集合移除。"""
+        """任务进入终态后，从本进程运行中集合与取消登记里移除。"""
         if not self.job:
             return
+        job_id = str(self.job.get("id") or "")
         with _ACTIVE_LOCK:
-            _ACTIVE.pop(self.job.get("id"), None)
+            _ACTIVE.pop(job_id, None)
+        _cancel_release(job_id)
 
     def close(self) -> None:
         """结束跟踪但不改任务状态（外部已把任务写成终态时使用）。"""
         self._retire()
 
     def finish(self, message: str = "生成完成") -> None:
-        """标记成功并保留结果摘要。"""
+        """标记成功并保留结果摘要。
+
+        若用户已点停止，则落「已取消」而不是「成功」，避免停止后仍显示完成。
+        """
         if not self.job or self._done:
+            return
+        if self.cancel_requested():
+            self.cancel("用户已停止生成")
             return
         self._done = True
         self._retire()
@@ -300,8 +370,11 @@ class UiJob:
         self._save()
 
     def fail(self, message: str) -> None:
-        """标记失败并保留中文原因。"""
+        """标记失败并保留中文原因（已被停止时保持「已取消」）。"""
         if not self.job or self._done:
+            return
+        if self.cancel_requested():
+            self.cancel("用户已停止生成")
             return
         self._done = True
         self._retire()
@@ -310,14 +383,19 @@ class UiJob:
         self.job["timings"]["finished_at"] = now_iso()
         self._save()
 
-    def cancel(self, message: str = "页面连接已断开，生成已取消") -> None:
-        """标记取消（页面断开、主动停止）。"""
+    def cancel(self, message: str | None = None) -> None:
+        """标记取消（页面断开、主动停止）。
+
+        参数:
+            message: 取消原因；省略时按是否用户主动停止给出默认文案。
+        """
         if not self.job or self._done:
             return
+        requested = self.cancel_requested()
         self._done = True
         self._retire()
         self.job["status"] = "canceled"
-        self.job["error"] = message
+        self.job["error"] = str(message or ("用户已停止生成" if requested else "页面连接已断开，生成已取消"))
         self.job["timings"]["finished_at"] = now_iso()
         self._save()
 

@@ -426,8 +426,10 @@ function queueHTML() {
               rows.length
                 ? rows
                     .slice(0, 200)
-                    .map(
-                      (item) => `<tr>
+                    .map((item) => {
+                      // 只有界面发起、后端能停的任务才给停止按钮（GPU 队列任务不在本进程）
+                      const stoppable = Boolean(item.ui) && ['running', 'queued'].includes(item.status);
+                      return `<tr>
                         <td>${esc(QUEUE_LABEL[item.kind] || item.kind || '')}</td>
                         <td title="${esc(targetText(item))}">${esc(targetText(item))}</td>
                         <td><span class="badge ${badgeClass(item.status)}">${esc(
@@ -439,13 +441,13 @@ function queueHTML() {
                         <td style="color:var(--bad);white-space:pre-line;max-width:340px"
                           title="${esc(errorText(item.error))}">${esc(errorSummary(item.error))}</td>
                         <td>${
-                          item.kind === 'produce' && ['running', 'queued'].includes(item.status)
-                            ? `<button class="btn sm danger" data-act="produce-stop" data-job="${esc(item.id)}"
-                                 title="杀掉编排子进程，并把任务标记为已取消">终止</button>`
+                          stoppable
+                            ? `<button class="btn sm danger" data-act="job-stop" data-job="${esc(item.id)}"
+                                 title="停止这条运行中的任务，并把状态落为已取消">停止</button>`
                             : ''
                         }</td>
-                      </tr>`
-                    )
+                      </tr>`;
+                    })
                     .join('')
                 : `<tr><td colspan="8" style="color:var(--text-4);padding:16px 12px">${esc(emptyText)}</td></tr>`
             }
@@ -550,32 +552,59 @@ async function stopAll() {
   }
 }
 
-/** 终止一条正在运行的编排任务（真正杀掉子进程） */
-async function stopProduceJob(jobId, button) {
+/**
+ * 停止一条运行中的任务。
+ * 生成线程会协作取消（不再写进度/产物）；编排任务直接杀子进程；
+ * 后端已无对应进程的僵尸任务可以强制标记为已取消。
+ * @param {string} jobId 任务 ID
+ * @param {HTMLButtonElement} [button] 触发的按钮
+ */
+async function stopJob(jobId, button) {
   const item = queue.find((row) => row.id === jobId) || {};
+  const kind = QUEUE_LABEL[item.kind] || item.kind || '任务';
+  const info = item.progress || {};
+  const progressLabel = `${typeof info.percent === 'number' ? `${Math.round(info.percent)}% · ` : ''}${
+    info.current || '—'
+  }`;
   const mask = openDialog({
-    title: '终止编排',
+    title: '停止任务',
     body: `
-      <div class="summary-line"><span>任务</span><span class="right mono">${esc(jobId)}</span></div>
+      <div class="summary-line"><span>任务</span>
+        <span class="right">${esc(kind)} · <span class="mono">${esc(jobId)}</span></span></div>
       <div class="summary-line"><span>当前进度</span>
-        <span class="right">${esc((item.progress && item.progress.current) || '—')}</span></div>
-      <div class="dlg-note">会直接杀掉后台编排子进程，并把这条件务标记为「已取消」；已完成阶段的产物会保留，下次可以按「只补缺失」续跑。</div>`,
-    foot: `<div class="right"><button class="btn" data-dlg-close>取消</button>
-      <button class="btn danger" id="produce-stop-ok">确认终止</button></div>`,
+        <span class="right">${esc(progressLabel)}</span></div>
+      <div class="dlg-note">停止后会中断后台生成（编排类任务会杀掉子进程），任务落「已取消」；
+        已接收的字数、已完成批次与产物都会保留，停止后不会再写入或覆盖已有结果。
+        如果后端已经没有对应进程（僵尸任务），请用「强制标记为已取消」。</div>`,
+    foot: `<div class="right"><button class="btn" data-dlg-close>返回</button>
+      <button class="btn" id="job-stop-force">强制标记为已取消</button>
+      <button class="btn danger" id="job-stop-ok">确认停止</button></div>`,
   });
-  mask.querySelector('#produce-stop-ok').addEventListener('click', async (event) => {
-    event.currentTarget.disabled = true;
+  /**
+   * 提交停止请求并给出进行中 / 结果反馈。
+   * @param {boolean} force true=不等生成线程，直接落取消
+   * @param {HTMLButtonElement} target 当前点击的按钮
+   */
+  const submit = async (force, target) => {
+    const buttons = [...mask.querySelectorAll('button')];
+    const label = target.textContent;
+    buttons.forEach((node) => (node.disabled = true));
+    target.textContent = force ? '正在强制取消…' : '正在停止…';
     try {
-      const result = await postJSON('/api/ui/produce/cancel', { path: state.path, id: jobId });
+      const result = await postJSON('/api/ui/jobs/cancel', { path: state.path, id: jobId, force });
       closeDialog();
-      toast(result.message || '已终止编排', 'ok');
+      toast(result.message || (force ? '已强制标记为已取消' : '已停止任务'), result.canceled === false ? 'info' : 'ok', 4800);
     } catch (error) {
-      closeDialog();
-      toast(error.message, 'bad', 5200);
+      // 失败保留弹窗，恢复按钮，让用户可以重试或改用强制取消
+      buttons.forEach((node) => (node.disabled = false));
+      target.textContent = label;
+      toast(error.message, 'bad', 5600);
     }
     if (button) button.disabled = false;
     await refresh({ silent: true });
-  });
+  };
+  mask.querySelector('#job-stop-ok').addEventListener('click', (event) => submit(false, event.currentTarget));
+  mask.querySelector('#job-stop-force').addEventListener('click', (event) => submit(true, event.currentTarget));
 }
 
 /** 清理已结束的队列行（不动正文/音频产物） */
@@ -715,7 +744,7 @@ async function onRootClick(event) {
   }
   if (act === 'refresh') return refresh({ silent: false });
   if (act === 'gpu-release') return releaseGpuLock(button);
-  if (act === 'produce-stop') return stopProduceJob(button.dataset.job, button);
+  if (act === 'job-stop') return stopJob(button.dataset.job, button);
   if (act === 'queue-clear') return clearQueue(button);
   if (act === 'stop') return stopAll();
   if (act === 'pause') return togglePause();

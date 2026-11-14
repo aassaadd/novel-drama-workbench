@@ -45,7 +45,14 @@ from .outline_edit_api import register_outline_edit_routes
 from .stream_api import register_stream_routes
 from .bgm_api import register_bgm_routes
 from .sfx_api import register_sfx_routes
-from .job_tracker import UiJob, active_jobs, clear_finished, load_ui_jobs, update_job
+from .job_tracker import (
+    UiJob,
+    active_jobs,
+    clear_finished,
+    load_ui_jobs,
+    request_cancel,
+    update_job,
+)
 from .logs_api import register_logs_routes
 
 #: 唯一前端目录（仓库根 web-next/）；直接挂到根路径，旧 static 界面已废弃
@@ -103,6 +110,74 @@ def _reconcile_produce_jobs(store: ProjectStore) -> None:
             status="interrupted",
             error="编排进程已不存在（服务重启或后台线程异常），任务已标记为中断",
         )
+
+
+def _cancel_produce_job(store: ProjectStore, job_id: str) -> dict:
+    """终止编排子进程，并把任务与编排记录落成「已取消」。
+
+    参数:
+        store: 工程。
+        job_id: 任务 ID。
+
+    返回:
+        `{canceled, message, status?, exit_code?}`。
+
+    异常:
+        HTTPException 404: 任务不存在。
+    """
+    from ..orchestration import produce as produce_mod
+
+    current = next((item for item in load_ui_jobs(store) if item.get("id") == job_id), None)
+    if current is None:
+        raise HTTPException(status_code=404, detail={"code": 4, "message": "任务不存在，可能已被清理"})
+    if current.get("status") in ("succeeded", "failed", "canceled", "interrupted"):
+        return {
+            "canceled": False,
+            "message": f"任务已结束（{current.get('status')}），无需终止",
+            "status": current.get("status"),
+        }
+
+    with _PRODUCE_PROCS_LOCK:
+        entry = _PRODUCE_PROCS.get(job_id)
+        if entry:
+            entry["canceled"] = True
+    if entry is None:
+        # 服务重启等导致拿不到进程句柄：只要任务还是运行中，就落「已取消」避免永远挂起
+        update_job(store, job_id, status="canceled", error="编排进程不在本进程内，已标记取消")
+        return {"canceled": True, "message": "编排进程已不在本进程，任务已标记为已取消", "status": "canceled"}
+
+    process = entry["process"]
+    code = process.poll()
+    if code is None:
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            try:
+                os.killpg(os.getpgid(process.pid), sig)
+            except (ProcessLookupError, PermissionError):
+                pass
+            try:
+                code = process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                continue
+            break
+
+    # 编排记录若还停在运行中，写成 canceled，避免下次续跑误读
+    try:
+        run = produce_mod.latest_run(store) or {}
+        if str(run.get("status") or "") in ("running", "queued", "pending", "") and str(
+            run.get("run_id") or ""
+        ) != "":
+            run["status"] = "canceled"
+            run["finished_at"] = now_iso()
+            for stage in run.get("stages") or []:
+                if stage.get("status") == "running":
+                    stage["status"] = "canceled"
+                    stage["finished_at"] = now_iso()
+                    stage["note"] = "用户终止"
+            produce_mod.save_run(store, run)
+    except Exception:  # noqa: BLE001 - 记录收尾失败不影响任务终态
+        pass
+    update_job(store, job_id, status="canceled", error=f"已手动终止编排（退出码 {code}）")
+    return {"canceled": True, "message": "已终止编排进程，任务标记为已取消", "status": "canceled", "exit_code": code}
 
 
 def _log_tail(path: Path, lines: int = 8, limit: int = 1200) -> str:
@@ -2044,7 +2119,9 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         jobs = payload if isinstance(payload, list) else []
         store = _store(path)
         _reconcile_produce_jobs(store)
-        merged = [*load_ui_jobs(store), *jobs]
+        # 打上 ui 标记：只有界面发起、能在这里停的生成任务才在「操作」列给停止按钮
+        ui_jobs = [{**item, "ui": True} for item in load_ui_jobs(store)]
+        merged = [*ui_jobs, *jobs]
         merged.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
         return merged
 
@@ -3190,8 +3267,26 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
             HTTPException 400: 缺工程路径或任务 ID。
             HTTPException 404: 任务不存在。
         """
-        from ..orchestration import produce as produce_mod
+        path = str(body.get("path") or "").strip()
+        job_id = str(body.get("id") or "").strip()
+        if not path or not job_id:
+            raise HTTPException(status_code=400, detail={"code": 2, "message": "缺少工程路径或任务 ID"})
+        return _cancel_produce_job(ProjectStore(path), job_id)
 
+    @app.post("/api/ui/jobs/cancel")
+    def ui_jobs_cancel(body: dict) -> dict:
+        """停止一条界面任务：生成线程协作取消 / 编排杀子进程 / 僵尸任务强制取消。
+
+        参数:
+            body: `{path, id, force?}`；force=True 时不等待生成线程退出，直接落「已取消」。
+
+        返回:
+            `{canceled, message, status, forced}`。
+
+        异常:
+            HTTPException 400: 缺工程路径或任务 ID。
+            HTTPException 404: 任务不存在。
+        """
         path = str(body.get("path") or "").strip()
         job_id = str(body.get("id") or "").strip()
         if not path or not job_id:
@@ -3200,54 +3295,53 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         current = next((item for item in load_ui_jobs(store) if item.get("id") == job_id), None)
         if current is None:
             raise HTTPException(status_code=404, detail={"code": 4, "message": "任务不存在，可能已被清理"})
-        if current.get("status") in ("succeeded", "failed", "canceled", "interrupted"):
+        status = str(current.get("status") or "")
+        if status in ("succeeded", "failed", "canceled", "interrupted"):
             return {
                 "canceled": False,
-                "message": f"任务已结束（{current.get('status')}），无需终止",
-                "status": current.get("status"),
+                "status": status,
+                "forced": False,
+                "message": f"任务已结束（{status}），无需停止",
             }
+        # 编排类任务要杀子进程，交给编排取消逻辑
+        if current.get("kind") == "produce":
+            result = _cancel_produce_job(store, job_id)
+            result.setdefault("forced", False)
+            return result
 
-        with _PRODUCE_PROCS_LOCK:
-            entry = _PRODUCE_PROCS.get(job_id)
-            if entry:
-                entry["canceled"] = True
-        if entry is None:
-            # 服务重启等导致拿不到进程句柄：只要任务还是运行中，就落「已取消」避免永远挂起
-            update_job(store, job_id, status="canceled", error="编排进程不在本进程内，已标记取消")
-            return {"canceled": True, "message": "编排进程已不在本进程，任务已标记为已取消"}
+        force = bool(body.get("force"))
+        # 能找到取消登记说明本进程确有生成线程；找不到就是僵尸任务
+        running = request_cancel(job_id)
+        if running and not force:
+            # 等生成线程在下一次模型输出 / 落盘前自行退出（最多 5 秒）
+            for _ in range(50):
+                latest = next((item for item in load_ui_jobs(store) if item.get("id") == job_id), {})
+                if latest.get("status") in ("succeeded", "failed", "canceled", "interrupted"):
+                    return {
+                        "canceled": True,
+                        "status": latest.get("status"),
+                        "forced": False,
+                        "message": "已停止生成，任务标记为已取消；已接收内容与已完成产物保留",
+                    }
+                time.sleep(0.1)
 
-        process = entry["process"]
-        code = process.poll()
-        if code is None:
-            for sig in (signal.SIGTERM, signal.SIGKILL):
-                try:
-                    os.killpg(os.getpgid(process.pid), sig)
-                except (ProcessLookupError, PermissionError):
-                    pass
-                try:
-                    code = process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    continue
-                break
-
-        # 编排记录若还停在运行中，写成 canceled，避免下次续跑误读
-        try:
-            run = produce_mod.latest_run(store) or {}
-            if str(run.get("status") or "") in ("running", "queued", "pending", "") and str(
-                run.get("run_id") or ""
-            ) != "":
-                run["status"] = "canceled"
-                run["finished_at"] = now_iso()
-                for stage in run.get("stages") or []:
-                    if stage.get("status") == "running":
-                        stage["status"] = "canceled"
-                        stage["finished_at"] = now_iso()
-                        stage["note"] = "用户终止"
-                produce_mod.save_run(store, run)
-        except Exception:  # noqa: BLE001 - 记录收尾失败不影响任务终态
-            pass
-        update_job(store, job_id, status="canceled", error=f"已手动终止编排（退出码 {code}）")
-        return {"canceled": True, "message": "已终止编排进程，任务标记为已取消", "exit_code": code}
+        latest = next((item for item in load_ui_jobs(store) if item.get("id") == job_id), {})
+        latest_status = str(latest.get("status") or "")
+        if latest_status in ("succeeded", "failed", "canceled", "interrupted"):
+            return {
+                "canceled": True,
+                "status": latest_status,
+                "forced": not running,
+                "message": "任务已结束，无需再停止",
+            }
+        if running:
+            reason = "停止请求已发出，生成线程会在下一次模型输出时退出；已先标记为已取消"
+            message = "已发出停止请求，任务标记为已取消；后台生成会在当前模型输出结束后退出"
+        else:
+            reason = "后端已无对应生成进程（僵尸任务），已强制标记为已取消；已接收进度与已有产物保留"
+            message = "后端已无对应生成进程，已强制标记为已取消"
+        update_job(store, job_id, status="canceled", error=reason)
+        return {"canceled": True, "status": "canceled", "forced": not running, "message": message}
 
     @app.get("/api/ui/produce/latest")
     def ui_produce_latest(path: str = Query(...), run_id: str | None = Query(default=None)) -> dict:
