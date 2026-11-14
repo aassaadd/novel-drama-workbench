@@ -40,9 +40,15 @@ function parseRoute() {
   if (parts[0] === 'p' && parts[1]) {
     const path = decodePath(parts[1]);
     if (parts[2] === 'c' && parts[3]) {
-      return { view: 'editor', path, chapterId: decodePath(parts[3]), lineId: query.get('line') || '' };
+      return {
+        view: 'editor',
+        path,
+        chapterId: decodePath(parts[3]),
+        lineId: query.get('line') || '',
+        act: query.get('act') || '',
+      };
     }
-    if (parts[2] === 'characters') return { view: 'characters', path };
+    if (parts[2] === 'characters') return { view: 'characters', path, character: query.get('character') || '' };
     if (parts[2] === 'novel') return { view: 'novel', path };
     if (parts[2] === 'voices') return { view: 'voices', path };
     if (parts[2] === 'media') return { view: 'media', path };

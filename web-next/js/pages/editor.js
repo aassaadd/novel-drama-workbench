@@ -1960,11 +1960,21 @@ async function openBatchDialog(scope = 'chapter') {
         chapter: all ? undefined : state.chapterId,
       });
       const blockers = plan.blockers || [];
+      const hardBlockers = blockers.filter((item) => !item.skippable);
       const reuse = plan.reuse || {};
       const reusedTotal = Number(reuse.keep || 0) + Number(reuse.reuse || 0);
       planBody.innerHTML = `
         ${plan.ready ? '' : `<div class="dlg-note bad">${esc(plan.ready_reason || '配音模型未就绪')}</div>`}
-        ${blockers.length ? `<div class="dlg-note bad">阻断项：<br />${blockers.map((item) => `· ${esc(item)}`).join('<br />')}</div>` : ''}
+        ${
+          blockers.length
+            ? `<div class="dlg-note bad">需要先处理：<br />${blockers
+                .map(
+                  (item) =>
+                    `· ${esc(item.title || item.message || '需要处理')}${item.skippable ? '（可跳过）' : ''}`
+                )
+                .join('<br />')}</div>`
+            : ''
+        }
         <div class="summary-line"><span>本次处理</span><span class="right">${plan.total} 行</span></div>
         ${
           reuse.regenerate !== undefined
@@ -1987,7 +1997,7 @@ async function openBatchDialog(scope = 'chapter') {
             : ''
         }
         <div class="dlg-note">只补齐未生成 / 过期 / 失败的行；文本、说话人、音色与合成参数都没变的台词直接复用已有音频，不重复合成。</div>`;
-      startBtn.disabled = !plan.ready || Boolean(blockers.length) || Number(plan.total) <= 0;
+      startBtn.disabled = !plan.ready || Boolean(hardBlockers.length) || Number(plan.total) <= 0;
     } catch (error) {
       planBody.innerHTML = `<div class="dlg-note bad">${esc(error.message)}</div>`;
     }
@@ -3002,6 +3012,8 @@ export async function renderEditor(root, { path, chapterId, lineId = '' }) {
     });
     // 全局搜索直达台词行：数据就绪后再定位，避免命中空列表
     if (lineId) focusLine(lineId);
+    // 从阻断项「去切分场景与台词」直达：数据就绪后直接打开拆场景预览，确认后才覆盖
+    if (act === 'split') void openSceneSplitPreview();
   } catch (error) {
     root.innerHTML = `
       ${topbar({ left: `<button class="btn icon" data-act="back" title="返回工作区">${icon('back')}</button>`, crumbs: '<span class="cur">加载失败</span>', right: '' })}

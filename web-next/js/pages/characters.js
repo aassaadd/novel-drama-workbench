@@ -1448,9 +1448,11 @@ function openConsistencyMatrix() {
 }
 
 /** 进入角色视图 */
-export async function renderCharacters(root, { path }) {
+export async function renderCharacters(root, { path, character = '' }) {
   stopAudio();
   if (state.path !== path) resetProject(path);
+  // 从阻断项直达：地址里带角色 ID 时优先选中该角色，不存在时由 loadAll 回落
+  if (character) selectedId = character;
   if (!bound) {
     root.addEventListener('click', onRootClick);
     root.addEventListener('input', onRootInput);

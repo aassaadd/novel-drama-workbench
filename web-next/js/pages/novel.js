@@ -1075,6 +1075,67 @@ function chapterHTML() {
     </div>`;
 }
 
+/**
+ * 阻断项里「下一步」的站内地址：能直达就直接打开对应界面或位置。
+ * @param {object} action 后端给出的 `{kind, label, chapter_id?, line_id?, character_id?, act?}`
+ * @returns {string} 站内链接；无法定位时返回空串
+ */
+function blockerHref(action) {
+  if (!action) return '';
+  const base = `#/p/${safePath()}`;
+  if (action.kind === 'character' && action.character_id) {
+    return `${base}/characters?character=${encodeURIComponent(action.character_id)}`;
+  }
+  if (action.kind === 'characters') return `${base}/characters`;
+  if (action.kind === 'models') return '#/settings?section=env';
+  if (action.kind === 'novel') return `${base}/novel`;
+  if (action.kind === 'chapter' && action.chapter_id) {
+    const query = action.line_id
+      ? `?line=${encodeURIComponent(action.line_id)}`
+      : action.act === 'split'
+        ? '?act=split'
+        : '';
+    return `${base}/c/${encodeURIComponent(action.chapter_id)}${query}`;
+  }
+  return '';
+}
+
+/**
+ * 阻断项清单：每条给名称、涉及章节或数量、原因和下一步。
+ * @param {Array<object>} blockers 后端返回的阻断项
+ * @returns {string} HTML
+ */
+function blockerIssuesHTML(blockers) {
+  const hard = blockers.filter((item) => !item.skippable).length;
+  const head = hard
+    ? `补齐配音前先处理这 ${hard} 项${blockers.length > hard ? `（另有 ${blockers.length - hard} 项可选择跳过）` : ''}`
+    : `补齐配音前建议先处理这 ${blockers.length} 项（也可以选择跳过）`;
+  const rows = blockers
+    .map((item) => {
+      const meta = [
+        (item.chapters || []).join('、'),
+        Number(item.count) > 1 ? `${Number(item.count)} ${item.unit || '处'}` : '',
+      ]
+        .filter(Boolean)
+        .join(' · ');
+      const href = blockerHref(item.action);
+      return `<div class="banner-issue">
+        <span class="bi-head"><b>${esc(item.title || '需要处理')}</b>${
+          meta ? `<span class="bi-problem"> · ${esc(meta)}</span>` : ''
+        }</span>
+        ${item.detail ? `<span class="bi-why">${esc(item.detail)}</span>` : ''}
+        ${href && item.action?.label ? `<a class="bi-jump" href="${href}">${esc(item.action.label)} ›</a>` : ''}
+      </div>`;
+    })
+    .join('');
+  return `<div class="banner warn" style="margin-top:8px">
+    <div style="min-width:0;flex:1">
+      <div>${icon('warn', 13)} ${esc(head)}</div>
+      <div class="banner-issues">${rows}</div>
+    </div>
+  </div>`;
+}
+
 /** 流程衔接卡：正文 → 台词切分 → 配音，三步状态与动作 */
 function linkCardHTML(chapter, landed) {
   if (!landed) {
@@ -1117,9 +1178,7 @@ function linkCardHTML(chapter, landed) {
         ${
           plan
             ? blockers.length
-              ? `<div class="banner warn" style="margin-top:8px">${icon('warn', 13)} ${esc(
-                  blockers[0]?.message || '有阻断项，先修好再补齐配音'
-                )}</div>`
+              ? blockerIssuesHTML(blockers)
               : `<div class="hint" style="margin-top:6px">预检通过：本次重新合成 ${regenerate} 行，其余 ${reused} 行沿用已有音频或命中缓存。</div>`
             : '<div class="hint" style="margin-top:6px">正在读取配音预检…</div>'
         }
@@ -1157,6 +1216,9 @@ function openBatchDialog() {
   const plan = cache.planChapter === hit.chapter.id ? cache.plan : null;
   if (!plan) return toast('预检还没完成，稍等再点', 'warn');
   const blockers = plan.blockers || [];
+  const hard = blockers.filter((item) => !item.skippable);
+  const skippable = blockers.filter((item) => item.skippable);
+  const skipCount = skippable.reduce((sum, item) => sum + Number(item.count || 0), 0);
   const reuse = plan.reuse || {};
   const reused = Number(reuse.keep || 0) + Number(reuse.reuse || 0);
   openDialog({
@@ -1174,18 +1236,31 @@ function openBatchDialog() {
       ${reuse.saved_ms_estimate ? `<div class="summary-line"><span>预计节省</span><span class="right mono" style="color:var(--ok)">约 ${fmtClock(reuse.saved_ms_estimate)}</span></div>` : ''}
       ${
         blockers.length
-          ? `<div class="banner warn" style="margin-top:8px">${icon('warn', 13)} ${esc(
-              blockers.map((item) => item.message || item.code).join('；')
-            )}</div>`
-          : '<div class="hint" style="margin-top:8px">只重配合词文本、说话人、音色或合成参数变过的行；任务在后台执行，可去「任务」页看进度，随时暂停/继续。</div>'
+          ? blockerIssuesHTML(blockers)
+          : '<div class="hint" style="margin-top:8px">只重配合词文本、说话人、音色或合成参数变过的行；任务在后台执行，进度与暂停/继续在章节右栏「本章任务」和录音 / 后期视图里。</div>'
+      }
+      ${
+        skipCount
+          ? `<label class="checkline"><input type="checkbox" id="novel-skip-unknown" />
+               <span>跳过这 ${skipCount} 行没指定说话人的台词，先配其余行</span></label>`
+          : ''
       }
       ${reuseListHTML(plan)}`,
     foot: `<div class="right"><button class="btn" data-dlg-close>取消</button>
-      <button class="btn primary" data-batch-run ${blockers.length || !Number(plan.total) ? 'disabled' : ''}>
+      <button class="btn primary" data-batch-run ${
+        hard.length || !Number(plan.total) ? 'disabled' : ''
+      }>
         ${icon('mic', 12)} 开始补齐</button></div>`,
     onMount: (mask) => {
-      mask.querySelector('[data-batch-run]').addEventListener('click', async () => {
-        const button = mask.querySelector('[data-batch-run]');
+      const button = mask.querySelector('[data-batch-run]');
+      const skipBox = mask.querySelector('#novel-skip-unknown');
+      // 只有「没指定说话人」这类可跳过项时，勾选后才能开始
+      const refreshButton = () => {
+        button.disabled = Boolean(hard.length || !Number(plan.total) || (skipCount > 0 && !skipBox?.checked));
+      };
+      skipBox?.addEventListener('change', refreshButton);
+      refreshButton();
+      button.addEventListener('click', async () => {
         button.disabled = true;
         button.textContent = '启动中…';
         try {
@@ -1193,13 +1268,15 @@ function openBatchDialog() {
             path: cache.path,
             scope: 'chapter',
             chapter: hit.chapter.id,
+            skip_unknown: Boolean(skipBox?.checked),
           });
           closeDialog();
-          toast(`已开始补齐 ${Number(result?.total || 0)} 行，进度见浮层或「任务」页`, 'ok', 3200);
+          toast(`已开始补齐 ${Number(result?.total || 0)} 行，进度见浮层或章节右栏「本章任务」`, 'ok', 3200);
           watchProgress({
             path: cache.path,
             title: '正在补齐本章配音…',
             hint: `本次 ${Number(result?.total || 0)} 行 · 已有音频自动跳过`,
+            chapter: hit.chapter.id,
           });
           cache.plan = null;
           cache.planChapter = '';
