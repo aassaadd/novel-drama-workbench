@@ -1035,6 +1035,10 @@ table.files .mono { font-size: 11px; color: var(--text-4); }
 /* ---------- 小说工作台 ---------- */
 .ctx-group { display: flex; align-items: center; gap: 6px; padding: 10px 12px 4px; font-size: 11px; color: var(--text-4); }
 .ctx-group .n { color: var(--text-3); }
+/* 上下文面板底部状态：只放统计，不放导航（导航统一在左侧图标栏） */
+.ctx-foot { flex: 0 0 auto; display: flex; align-items: center; gap: 6px;
+  padding: 8px 12px; border-top: 1px solid var(--line); min-width: 0; }
+.ctx-foot span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .novel-act { padding-bottom: 2px; }
 .novel-act-head { display: flex; align-items: center; gap: 8px; padding: 8px 12px 3px; font-size: 11px; color: var(--text-3); }
 .novel-act-head .mono { color: var(--accent); }

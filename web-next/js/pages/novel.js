@@ -544,9 +544,8 @@ function ctxHTML() {
         </div>
         ${boot.state.outline === 'ok' ? acts || '<div class="hint" style="padding:6px 12px">还没有大纲，先让 AI 生成一版</div>' : ctxBlockHTML('outline')}
       </div>
-      <div class="ctx-foot hint">
-        <span>${counts.beats} 个节拍</span>
-        <a class="link" href="#/p/${esc(safePath())}/characters">角色库</a>
+      <div class="ctx-foot hint" title="全书大纲统计，与当前选中项无关">
+        <span>${counts.acts ? `全书大纲 · ${counts.beats} 个节拍` : '全书大纲尚未生成'}</span>
       </div>
     </section>`;
 }
