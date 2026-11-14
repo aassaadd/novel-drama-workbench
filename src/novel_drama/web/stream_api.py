@@ -369,7 +369,7 @@ def register_stream_routes(app, config_path: str | None = None) -> None:
         """章节正文生成（流式）：边生成边把增量推给页面。
 
         参数:
-            body: `{path, chapter, regen?, dry_run?, multi_turn?, segment_words?, max_rounds?}`。
+            body: `{path, chapter, regen?, dry_run?, multi_turn?, beats_per_round?, max_rounds?}`。
 
         返回:
             SSE：start → delta* → done(result) / error(message)。
@@ -389,7 +389,7 @@ def register_stream_routes(app, config_path: str | None = None) -> None:
                 regen=bool(body.get("regen")),
                 dry_run=bool(body.get("dry_run")),
                 multi_turn=body.get("multi_turn"),
-                segment_words=body.get("segment_words"),
+                beats_per_round=body.get("beats_per_round"),
                 max_rounds=body.get("max_rounds"),
                 on_delta=on_delta,
             )

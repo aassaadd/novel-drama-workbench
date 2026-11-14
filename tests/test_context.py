@@ -167,6 +167,14 @@ class ContextAssemblerTest(unittest.TestCase):
         self.assertEqual(req.task, "chapter")
         self.assertEqual(req.context_budget_tokens, 32768)
 
+    def test_book_digest_precedes_recent_summaries(self) -> None:
+        """全书滚动摘要应出现在最近章摘要之前，供长书保留前部信息。"""
+        assembler = make_assembler(book_digest="全书摘要标记：旧案已经重启。")
+        user = assembler.build("chapter", INSTRUCTION).messages[0].content
+        self.assertIn("全书前情摘要：", user)
+        self.assertIn("全书摘要标记：旧案已经重启。", user)
+        self.assertLess(user.index("全书前情摘要："), user.index("前情摘要："))
+
     def test_speaker_ids_filter_and_narrator_excluded(self) -> None:
         """给定 speaker_ids 时只输出这些角色，且始终排除旁白。"""
         req = make_assembler().build("chapter", INSTRUCTION, speaker_ids=["chr_shen", NARRATOR_ID])

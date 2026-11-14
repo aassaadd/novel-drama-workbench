@@ -18,7 +18,7 @@ import json
 from typing import Any
 
 # 指纹算法版本：字段增删或归一规则变化时必须 +1，否则新旧指纹会被误判为只差参数
-FP_VERSION = 2
+FP_VERSION = 3
 
 # 参与指纹的参数白名单（顺序即文档顺序，实际哈希前会排序）
 # 不含 revision / latency_ms / routing / created_at：它们不是用户意图
@@ -28,6 +28,7 @@ FP_FIELDS: tuple[str, ...] = (
     "emotion_intensity",
     "speed",
     "delivery_note",
+    "target_duration_ms",
     "voice_id",
     "variant_id",
     "instruct",

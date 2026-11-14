@@ -1018,10 +1018,10 @@ def build_parser() -> argparse.ArgumentParser:
         dest="multi_turn",
         action=argparse.BooleanOptionalAction,
         default=None,
-        help="强制开启/关闭多轮续写；缺省按 writing.multi_turn.enabled 与目标字数自动判断",
+        help="强制开启/关闭按节拍分轮；缺省按 writing.multi_turn.enabled 自动判断",
     )
-    q.add_argument("--segment-words", dest="segment_words", type=int, help="每段目标字数（默认取配置 segment_words）")
-    q.add_argument("--max-rounds", dest="max_rounds", type=int, help="最大续写轮数（默认取配置 max_rounds）")
+    q.add_argument("--beats-per-round", dest="beats_per_round", type=int, help="每轮写几个节拍（默认按节拍数与最大轮数自动分配）")
+    q.add_argument("--max-rounds", dest="max_rounds", type=int, help="最大续写轮数（保险上限，默认取配置 max_rounds）")
     q.set_defaults(func=cmd_chapter_generate)
     q = p_sub.add_parser("save", help="用手写正文覆盖章节正文（UTF-8）")
     q.add_argument("--chapter", required=True)

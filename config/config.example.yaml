@@ -206,6 +206,13 @@ ffmpeg:
 
 # 续写（chapter continue / outline continue）
 writing:
+  multi_turn:                    # 章节正文（chapter generate）：按本章节拍分轮
+    enabled: true
+    beats_per_round: 0           # 0=自动（按节拍总数与最大轮数分配）
+    max_rounds: 8                # 保险上限
+    round_max_tokens: 2048       # 单轮输出预算
+  context:
+    recent_summaries: 6          # 注入最近多少章的本章摘要（另加全书滚动摘要）
   continue:
     segment_words: 800           # 正文每轮目标字数（页面按 500/800/1200 档位传值）
     max_rounds: 3                # 单次最多轮数（内部参数，页面不暴露）

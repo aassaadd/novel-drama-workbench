@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from ..orchestration.pipeline import is_line_stale
-from . import alignment, cache, line_state, sidecar
+from . import alignment, cache, line_state, reuse, sidecar
 from .errors import TtsError
 from .fingerprint import line_fingerprint
 from .service import split_text
@@ -47,6 +47,7 @@ def plan_batch(
     live_ids: set[str] | None = None,
     line_ids: set[str] | None = None,
     skip_line_ids: set[str] | None = None,
+    changed_checker=None,
 ) -> list[dict]:
     """规划本章需要合成的行。
 
@@ -62,9 +63,12 @@ def plan_batch(
         live_ids: 当前队列里活跃的行 ID；用于僵尸态降级。
         line_ids: 只保留这些行（范围选择器的结果）；为空表示整章。
         skip_line_ids: 不参与本次合成的行（说话人未识别且用户选择跳过）；为空表示不跳过。
+        changed_checker: 可选的 `checker(line, snapshot) -> bool`；返回 True 表示音色
+            （变体 / 参考音频）或引擎（provider / 模型版本）已变，即使行状态是 ready
+            也要重新纳入本次合成。
 
     返回:
-        [{scene_id, scene_index, line}]，保持章内顺序。
+        `[{scene_id, scene_index, line, voice_changed}]`，保持章内顺序。
     """
     index = {item["id"]: item for item in characters}
     snapshot_index = snapshots or {}
@@ -77,47 +81,20 @@ def plan_batch(
                 continue
             if skip_line_ids and line.get("id") in skip_line_ids:
                 continue
+            voice_changed = False
             if not include_ready and not is_line_stale(
                 line, index, snapshot_index.get(line.get("id")), root=root, live_ids=live_ids, engine=engine
             ):
-                continue
+                # 行状态没变，但音色变体、参考音频或引擎可能换了：缓存键会失效，必须重跑这一行
+                if changed_checker is None or not changed_checker(line, snapshot_index.get(line.get("id"))):
+                    continue
+                voice_changed = True
             if not (line.get("text") or "").strip():
                 continue
-            rows.append({"scene_id": scene["id"], "scene_index": scene.get("index"), "line": line})
+            rows.append({"scene_id": scene["id"], "scene_index": scene.get("index"), "line": line, "voice_changed": voice_changed})
             if limit and len(rows) >= limit:
                 return rows
     return rows
-
-
-def _line_voice(store, characters_table: dict, line: dict, service, chapter: dict | None = None) -> dict:
-    """解析一行该用的音色参考。
-
-    参数:
-        store: ProjectStore。
-        characters_table: 角色表。
-        line: 台词行。
-        service: TtsService（提供 default_voice 兜底）。
-        chapter: 所在章节（R18 章节覆盖与旁白切换点需要）；缺省时按无覆盖处理。
-
-    返回:
-        {"voice_id", "variant_id", "ref_audio", "ref_text", "source"}。
-    """
-    from ..store.voice_cast import resolve_cast_voice
-
-    resolved = resolve_cast_voice(store, characters_table, chapter or {}, line)
-    if resolved.get("ref_audio"):
-        return resolved
-    if resolved.get("voice_id"):
-        # 角色已绑定音色但没有可用参考音频：保持原样，让这一行报 VOICE_MISSING
-        return resolved
-    default = service.default_voice
-    return {
-        "voice_id": None,
-        "variant_id": default.variant_id,
-        "ref_audio": default.ref_audio,
-        "ref_text": default.ref_text,
-        "source": default.source,
-    }
 
 
 def line_group_key(line: dict, chapter: dict, characters_table: dict, service, store) -> tuple:
@@ -138,7 +115,7 @@ def line_group_key(line: dict, chapter: dict, characters_table: dict, service, s
     """
     from .types import Requirement
 
-    voice_info = _line_voice(store, characters_table, line, service, chapter)
+    voice_info = reuse.line_voice(store, characters_table, line, service, chapter)
     character = next(
         (item for item in characters_table.get("characters") or [] if item.get("id") == line.get("speaker_id")),
         {},
@@ -246,53 +223,6 @@ def _next_provider(service, current: str | None) -> str | None:
     return None
 
 
-def _cache_key(service, text: str, voice_info: dict, instruct: str | None, emotion: str | None, provider_id: str | None, model_version: str | None) -> str:
-    """计算一条台词的缓存键（含接缝裁切参数，保证产物与配置一致）。"""
-    return cache.compute_key(
-        text=text,
-        variant_id=voice_info.get("variant_id"),
-        ref_audio=voice_info.get("ref_audio"),
-        provider_id=provider_id,
-        model_version=model_version,
-        instruct=instruct,
-        emotion=emotion,
-        chunk_limit=service.chunk_limit,
-        chunk_silence_ms=service.chunk_silence_ms,
-        sample_rate=24000,
-        edge_trim_ms=service.edge_trim_ms,
-        edge_trim_max_ms=service.edge_trim_max_ms,
-        keep_min_ms=service.keep_min_ms,
-        silence_threshold_dbfs=service.silence_threshold_dbfs,
-        hard_split_ratio=service.hard_split_ratio,
-    )
-
-
-def _line_params(line: dict, requirement, voice, instruct: str | None, voice_id: str | None) -> dict:
-    """组装写进侧车并参与指纹的行级参数。
-
-    参数:
-        line: 台词行（读取文本、情绪、强度、交付说明、语速）。
-        requirement: 需求向量；行上没有情绪时用它的值兜底。
-        voice: 音色参考（提供变体 id）。
-        instruct: 风格指令。
-        voice_id: 音色库条目 id，由调用方解析后传入。
-
-    返回:
-        参数字典；缺失字段留空，指纹计算时统一按 None 处理。
-    """
-    return {
-        "text": line.get("text"),
-        "speaker_id": line.get("speaker_id"),
-        "emotion": line.get("emotion") or requirement.emotion,
-        "emotion_intensity": line.get("emotion_intensity"),
-        "delivery_note": line.get("delivery_note"),
-        "speed": line.get("speed"),
-        "voice_id": voice_id,
-        "variant_id": voice.variant_id,
-        "instruct": instruct,
-    }
-
-
 def _synthesize_with_alignment(
     service,
     out_path: Path,
@@ -303,7 +233,7 @@ def _synthesize_with_alignment(
     line_provider: str | None,
     character_provider: str | None,
     cfg: dict,
-    voice_id: str | None = None,
+    params_extra: dict | None = None,
 ) -> dict:
     """合成一句，并按配置做时长对齐（微变速 / 重生成 / 换 provider）。
 
@@ -317,7 +247,7 @@ def _synthesize_with_alignment(
         line_provider: 行级 provider 锁定。
         character_provider: 角色级 provider 锁定。
         cfg: 对齐配置。
-        voice_id: 音色库条目 id，写入侧车快照。
+        params_extra: 写进侧车的行级参数（不含 provider/model，避免覆盖实际回落结果）。
 
     返回:
         service.synthesize 的 payload，额外带 `alignment` 字段。
@@ -335,7 +265,7 @@ def _synthesize_with_alignment(
             instruct=instruct,
             line_provider_id=switch_to or line_provider,
             character_provider_id=character_provider,
-            params_extra=_line_params(line, requirement, voice, instruct, voice_id),
+            params_extra=params_extra,
         )
         plan = alignment.evaluate(int(payload.get("duration_ms") or 0), target_ms, cfg, attempt)
         if plan["action"] == "tempo":
@@ -402,6 +332,7 @@ def run_batch(
     write_report: bool = True,
     batch_id: str | None = None,
     use_cache: bool = True,
+    avg_ms_per_line: int | None = None,
 ) -> dict:
     """逐行合成并回写章节。
 
@@ -416,21 +347,51 @@ def run_batch(
         write_report: 是否单独写一份章节批次报告（多章节汇总时置 False）。
         batch_id: 批次 ID；缺省自动生成。
         use_cache: 是否复用产物缓存（只影响读取；新产物仍会写回缓存）。
+        avg_ms_per_line: 历史单行平均合成耗时；本次没有真实合成时用它估算节省时间。
 
     返回:
         批次报告 dict（write_report 为真时同时写入 `.ndw/tts_batches/<batch_id>.json`）。
     """
     characters_table = store.load_characters()
+    voices = store.load_voices()
     batch_id = batch_id or "btch_" + datetime.now(timezone.utc).strftime("%y%m%d%H%M%S")
     started = time.perf_counter()
     results: list[dict] = []
-    stats = {"requested": len(rows), "succeeded": 0, "failed": 0, "skipped": 0, "cache_hits": 0, "audio_ms": 0}
+    stats = {
+        "requested": len(rows),
+        "succeeded": 0,
+        "failed": 0,
+        "skipped": 0,
+        "cache_hits": 0,
+        "reused": 0,
+        "regenerated": 0,
+        "audio_ms": 0,
+        "reused_audio_ms": 0,
+        "synth_ms": 0,
+        "saved_ms_estimate": 0,
+    }
     # 本次批次的待写缓存条目，循环结束后一次性落盘，避免逐行全量读写缓存文件
     pending_cache: dict[str, dict] = {}
     # 章开始时整表读一次，章内所有行复用同一份，避免逐行读盘（读放大）
     cache_table = cache.load(store.root)
     batch_size = max(1, int(batch_size or 1))
     align_cfg = alignment.resolve_config(getattr(service, "alignment_cfg", None))
+    # 写进侧车的行级参数：不含 provider/model 与引擎参数，避免覆盖实际回落结果
+    extra_keys = (
+        "text",
+        "speaker_id",
+        "emotion",
+        "emotion_intensity",
+        "delivery_note",
+        "speed",
+        "target_duration_ms",
+        "voice_id",
+        "variant_id",
+        "instruct",
+        "ref_sha256",
+        "ref_text",
+        "language",
+    )
 
     for offset in range(0, len(rows), batch_size):
         batch_rows = rows[offset : offset + batch_size]
@@ -438,10 +399,10 @@ def run_batch(
         for row in batch_rows:
             wait_while_paused(store)
             line = row["line"]
-            voice_info = _line_voice(store, characters_table, line, service, chapter)
             rel_path = f"assets/voice/lines/{line['id']}_r{line['revision']}.wav"
             out_path = store.root / rel_path
-            instruct = _instruct_for(line)
+            context = reuse.prepare_line(service, store, characters_table, chapter, line, voices=voices)
+            voice_info = context["voice_info"]
             entry = {
                 "line_id": line.get("id"),
                 "scene_id": row["scene_id"],
@@ -450,6 +411,7 @@ def run_batch(
                 "voice_id": voice_info.get("voice_id"),
                 "variant_id": voice_info.get("variant_id"),
                 "voice_source": voice_info.get("source"),
+                "voice_changed": bool(row.get("voice_changed")),
                 "audio_path": rel_path,
                 "status": "pending",
             }
@@ -458,58 +420,17 @@ def run_batch(
                 batch_results.append(entry)
                 stats["skipped"] += 1
                 continue
-            if not voice_info.get("ref_audio"):
-                _mark_failed(
-                    store,
-                    chapter,
-                    line,
-                    entry,
-                    batch_results,
-                    stats,
-                    {"code": "VOICE_MISSING", "message": "未解析到参考音频"},
-                )
+            if context.get("error"):
+                _mark_failed(store, chapter, line, entry, batch_results, stats, context["error"])
                 continue
 
-            from ..tts.types import Requirement, VoiceRef
-
-            character = next(
-                (item for item in characters_table.get("characters") or [] if item.get("id") == line.get("speaker_id")),
-                None,
-            )
-            binding = (character or {}).get("voice_binding") or {}
-            adapter = binding.get("adapter")
-            character_provider = adapter if adapter and adapter != "placeholder" else None
-            requirement = Requirement(
-                text=line["text"],
-                emotion=line.get("emotion"),
-                emotion_intensity=max(0, min(3, round(float(line.get("emotion_intensity") or 0) * 3))),
-                clone_required=True,
-                target_duration_ms=line.get("target_duration_ms"),
-                character_id=line.get("speaker_id"),
-                line_id=line.get("id"),
-            )
-            voice = VoiceRef(
-                variant_id=voice_info.get("variant_id"),
-                ref_audio=voice_info.get("ref_audio"),
-                ref_text=voice_info.get("ref_text"),
-                source=voice_info.get("source") or "preset",
-            )
-            line_provider = (line.get("voice") or {}).get("provider_id")
+            requirement = context["requirement"]
+            voice = context["voice"]
+            instruct = context["params"].get("instruct")
+            params_extra = {key: context["params"].get(key) for key in extra_keys}
 
             # ---- 缓存命中：直接复用，不调用模型 ----
-            decision = service.decide(requirement, line_provider, character_provider)
-            expected_pid = decision["selected"]["provider_id"]
-            expected_spec = service.providers.get(expected_pid)
-            key = _cache_key(
-                service,
-                line["text"],
-                voice_info,
-                instruct,
-                line.get("emotion"),
-                expected_pid,
-                expected_spec.spec.model_version if expected_spec else None,
-            )
-            hit = cache.lookup(store.root, key, table=cache_table) if use_cache else None
+            hit = cache.lookup(store.root, context["key"], table=cache_table) if use_cache else None
             if hit:
                 try:
                     src_path = Path(hit["asset_id"])
@@ -538,7 +459,7 @@ def run_batch(
                     "variant_id": voice_info.get("variant_id"),
                     "provider_id": payload["provider_id"],
                     "model_version": payload.get("model_version"),
-                    "routing": decision,
+                    "routing": context["routing"],
                     "chunks": [
                         {
                             "index": 0,
@@ -556,18 +477,12 @@ def run_batch(
                     "updated_at": _now(),
                 }
                 store.save_chapter(chapter)
-                hit_params = _line_params(line, requirement, voice, instruct, voice_info.get("voice_id"))
+                hit_params = dict(params_extra)
+                hit_params.update(reuse.engine_params(service))
                 hit_params.update(
                     {
                         "provider_id": payload["provider_id"],
                         "model_version": payload.get("model_version"),
-                        "chunk_limit": service.chunk_limit,
-                        "chunk_silence_ms": service.chunk_silence_ms,
-                        "edge_trim_ms": service.edge_trim_ms,
-                        "edge_trim_max_ms": service.edge_trim_max_ms,
-                        "keep_min_ms": service.keep_min_ms,
-                        "silence_threshold_dbfs": service.silence_threshold_dbfs,
-                        "hard_split_ratio": service.hard_split_ratio,
                     }
                 )
                 sidecar.dump(
@@ -589,7 +504,9 @@ def run_batch(
                 entry.update(
                     {
                         "status": "ready",
+                        "decision": "reuse",
                         "cache_hit": True,
+                        "reuse_reason": "matched",
                         "provider_id": payload["provider_id"],
                         "model_version": payload.get("model_version"),
                         "duration_ms": payload["duration_ms"],
@@ -599,11 +516,16 @@ def run_batch(
                 store.save_chapter(chapter)
                 stats["succeeded"] += 1
                 stats["cache_hits"] += 1
+                stats["reused"] += 1
                 stats["audio_ms"] += int(payload["duration_ms"] or 0)
+                stats["reused_audio_ms"] += int(payload["duration_ms"] or 0)
                 batch_results.append(entry)
                 continue
 
             # ---- 未命中：真实合成 + 对齐 ----
+            previous = cache.entry_for_line(cache_table, line.get("id"))
+            changes = cache.describe_changes(previous.get("signature") if previous else None, context["signature"])
+            synth_started = time.perf_counter()
             try:
                 payload = _synthesize_with_alignment(
                     service,
@@ -612,14 +534,15 @@ def run_batch(
                     requirement,
                     voice,
                     instruct,
-                    line_provider,
-                    character_provider,
+                    context["line_provider"],
+                    context["character_provider"],
                     align_cfg,
-                    voice_id=voice_info.get("voice_id"),
+                    params_extra=params_extra,
                 )
             except TtsError as exc:
                 _mark_failed(store, chapter, line, entry, batch_results, stats, exc.to_dict())
                 continue
+            stats["synth_ms"] += int((time.perf_counter() - synth_started) * 1000)
 
             speed = 1.0
             align_info = payload.get("alignment") or {}
@@ -646,29 +569,32 @@ def run_batch(
             }
             store.save_chapter(chapter)
 
-            actual_spec = service.providers.get(payload["provider_id"])
-            actual_key = _cache_key(
-                service,
-                line["text"],
-                voice_info,
-                instruct,
-                line.get("emotion"),
-                payload["provider_id"],
-                payload.get("model_version") or (actual_spec.spec.model_version if actual_spec else None),
+            actual_signature = cache.with_provider(
+                context["signature"], payload["provider_id"], payload.get("model_version") or context["model_version"]
             )
-            pending_cache[actual_key] = {
+            actual_key = cache.signature_key(actual_signature)
+            record = {
+                "line_id": line.get("id"),
+                "chapter_id": chapter.get("id"),
+                "signature": actual_signature,
                 "asset_id": rel_path,
                 "duration_ms": payload["duration_ms"],
                 "provider_id": payload["provider_id"],
                 "model_version": payload.get("model_version"),
+                "voice_id": voice_info.get("voice_id"),
                 "variant_id": voice_info.get("variant_id"),
+                "created_at": _now(),
             }
+            pending_cache[actual_key] = record
             # 同步到章内的缓存表：同一章里重复的台词（相同参数）能立刻命中，不必等落盘
-            cache_table.setdefault("entries", {})[actual_key] = pending_cache[actual_key]
+            cache.update_line_index(cache_table, actual_key, record)
 
             entry.update(
                 {
                     "status": "ready",
+                    "decision": "synth",
+                    "reuse_reason": "params_changed" if changes else ("first" if not previous else "cache_cleared"),
+                    "changes": changes,
                     "provider_id": payload["provider_id"],
                     "model_version": payload.get("model_version"),
                     "duration_ms": payload["duration_ms"],
@@ -680,6 +606,7 @@ def run_batch(
                 }
             )
             stats["succeeded"] += 1
+            stats["regenerated"] += 1
             stats["audio_ms"] += int(payload["duration_ms"] or 0)
             batch_results.append(entry)
 
@@ -692,6 +619,17 @@ def run_batch(
     if pending_cache:
         cache.put_many(store.root, pending_cache)
 
+    # 复用节省 = 复用行数 × 单行平均合成耗时；优先用本次真实合成的均速，
+    # 本次全是缓存命中时退回历史均速，避免给出无法解释的数字
+    if stats["reused"]:
+        if stats["regenerated"]:
+            average = stats["synth_ms"] / stats["regenerated"]
+        elif avg_ms_per_line:
+            average = float(avg_ms_per_line)
+        else:
+            average = 0.0
+        stats["saved_ms_estimate"] = int(round(stats["reused"] * average))
+
     elapsed_ms = int((time.perf_counter() - started) * 1000)
     report = {
         "batch_id": batch_id,
@@ -703,6 +641,12 @@ def run_batch(
         "elapsed_ms": elapsed_ms,
         "peak_rss_mb": peak_rss_mb(),
         "stats": stats,
+        "reuse": {
+            "reused": stats["reused"],
+            "regenerated": stats["regenerated"],
+            "reused_audio_ms": stats["reused_audio_ms"],
+            "saved_ms_estimate": stats["saved_ms_estimate"],
+        },
         "rows": results,
     }
     if write_report:
@@ -726,6 +670,8 @@ def run_chapters(
     limit: int | None = None,
     line_ids: set[str] | None = None,
     skip_line_ids: set[str] | None = None,
+    avg_ms_per_line: int | None = None,
+    check_voice_changes: bool = True,
 ) -> dict:
     """跨章节批量合成：逐章调用 `run_batch`，最后汇总成一份报告。
 
@@ -741,6 +687,8 @@ def run_chapters(
         limit: 每章最多多少行。
         line_ids: 只处理这些行（范围选择器的结果）；为空表示按场景/整章。
         skip_line_ids: 不参与本次合成的行（说话人未识别且用户选择跳过）。
+        avg_ms_per_line: 历史单行平均合成耗时；本次没有真实合成时用它估算节省时间。
+        check_voice_changes: 是否把「音色变体/参考音频已变但行状态仍 ready」的行重新纳入。
 
     返回:
         汇总报告（写入 `.ndw/tts_batches/<batch_id>.json`）。
@@ -754,15 +702,26 @@ def run_chapters(
         "failed": 0,
         "skipped": 0,
         "cache_hits": 0,
+        "reused": 0,
+        "regenerated": 0,
         "audio_ms": 0,
+        "reused_audio_ms": 0,
+        "synth_ms": 0,
+        "saved_ms_estimate": 0,
     }
     per_chapter: list[dict] = []
     all_rows: list[dict] = []
 
     for index, chapter in enumerate(chapters, start=1):
         characters = store.load_characters()["characters"]
+        voices = store.load_voices()
         snapshots = line_state.load_snapshots(store.root, chapter)
         engine = line_state.engine_params(service.config)
+        checker = (
+            reuse.changed_checker(service, store, {"characters": characters}, chapter, voices=voices)
+            if check_voice_changes
+            else None
+        )
         rows = plan_batch(
             chapter,
             characters,
@@ -774,6 +733,7 @@ def run_chapters(
             engine=engine,
             line_ids=line_ids,
             skip_line_ids=skip_line_ids,
+            changed_checker=checker,
         )
         if not rows:
             per_chapter.append({"chapter_id": chapter.get("id"), "title": chapter.get("title"), "rows": 0, "stats": None})
@@ -796,9 +756,22 @@ def run_chapters(
             reporter=_cb,
             write_report=False,
             batch_id=batch_id,
+            avg_ms_per_line=avg_ms_per_line,
         )
         sub_stats = sub["stats"]
-        for key in ("requested", "succeeded", "failed", "skipped", "cache_hits", "audio_ms"):
+        for key in (
+            "requested",
+            "succeeded",
+            "failed",
+            "skipped",
+            "cache_hits",
+            "reused",
+            "regenerated",
+            "audio_ms",
+            "reused_audio_ms",
+            "synth_ms",
+            "saved_ms_estimate",
+        ):
             totals[key] += int(sub_stats.get(key) or 0)
         all_rows.extend([{**row, "chapter_id": chapter.get("id")} for row in sub["rows"]])
         per_chapter.append(
@@ -820,6 +793,12 @@ def run_chapters(
         "elapsed_ms": elapsed_ms,
         "peak_rss_mb": peak_rss_mb(),
         "stats": totals,
+        "reuse": {
+            "reused": totals["reused"],
+            "regenerated": totals["regenerated"],
+            "reused_audio_ms": totals["reused_audio_ms"],
+            "saved_ms_estimate": totals["saved_ms_estimate"],
+        },
         "chapters": per_chapter,
         "rows": all_rows,
     }
@@ -829,3 +808,33 @@ def run_chapters(
     report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     report["report_path"] = str(report_path)
     return report
+
+
+def history_avg_ms_per_line(root) -> int | None:
+    """从最近的批次报告估算「单行平均合成耗时」。
+
+    参数:
+        root: 工程根目录。
+
+    返回:
+        毫秒/行；没有可用历史时返回 None。只统计成功行，避免失败行把均速拉低。
+    """
+    folder = Path(root) / ".ndw" / "tts_batches"
+    if not folder.is_dir():
+        return None
+    reports = sorted(
+        (item for item in folder.glob("*.json") if item.is_file()),
+        key=lambda item: item.stat().st_mtime,
+        reverse=True,
+    )
+    for item in reports[:5]:
+        try:
+            data = json.loads(item.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        stats = data.get("stats") or {}
+        elapsed = int(data.get("elapsed_ms") or 0)
+        denom = int(stats.get("succeeded") or 0) or int(stats.get("requested") or 0)
+        if elapsed > 0 and denom > 0:
+            return max(1, round(elapsed / denom))
+    return None

@@ -445,23 +445,9 @@ def _avg_ms_per_line(store: ProjectStore) -> int | None:
     返回:
         毫秒/行；没有可用历史时返回 None。
     """
-    folder = store.root / ".ndw" / "tts_batches"
-    if not folder.is_dir():
-        return None
-    reports = sorted(
-        (item for item in folder.glob("*.json") if item.is_file()),
-        key=lambda item: item.stat().st_mtime,
-        reverse=True,
-    )
-    for item in reports[:5]:
-        data = _read_json(item) or {}
-        stats = data.get("stats") or {}
-        elapsed = int(data.get("elapsed_ms") or 0)
-        # 失败行也会耗时，分母优先用成功数，避免均速被失败的快速冒烟拉低
-        denom = int(stats.get("succeeded") or 0) or int(stats.get("requested") or 0)
-        if elapsed > 0 and denom > 0:
-            return max(1, round(elapsed / denom))
-    return None
+    from ..tts.batch import history_avg_ms_per_line
+
+    return history_avg_ms_per_line(store.root)
 
 
 def register_voice_tools_routes(app, config_path: str | None = None) -> None:
@@ -1046,7 +1032,8 @@ def register_voice_tools_routes(app, config_path: str | None = None) -> None:
 
         返回:
             `{scope, chapter, total, skipped, lines_total, eta_ms, avg_ms_per_line,
-              chapters, per_chapter, blockers, unknown_total, unknown_rows, ready, ready_reason}`。
+              chapters, per_chapter, blockers, unknown_total, unknown_rows, ready, ready_reason,
+              reuse}`；`reuse` 给出沿用/缓存命中/重新合成的行数与预计节省时间。
         """
         store = _store(path)
         if scope == "all":
@@ -1108,13 +1095,16 @@ def register_voice_tools_routes(app, config_path: str | None = None) -> None:
                 if item.get("level") == "error" and item.get("line_id") not in unknown_ids
             )
         )
+        reuse = plan.get("reuse") or {}
+        # 缓存命中的行不会真正调用模型，预计耗时只按需重合成的行数算，避免把 ETA 抬高一倍
+        need_synth = int(reuse.get("regenerate") or total)
         return {
             "scope": scope,
             "chapter": chapter,
             "total": total,
             "skipped": int(plan.get("skipped") or 0),
             "lines_total": int(plan.get("lines_total") or 0),
-            "eta_ms": total * avg if avg and total else 0,
+            "eta_ms": need_synth * avg if avg and need_synth else 0,
             "avg_ms_per_line": avg,
             "chapters": plan.get("chapters") or [],
             "per_chapter": plan.get("per_chapter") or [],
@@ -1124,6 +1114,7 @@ def register_voice_tools_routes(app, config_path: str | None = None) -> None:
             "items": plan.get("items") or [],
             "items_truncated": bool(plan.get("items_truncated")),
             "assets": int(plan.get("assets") or 0),
+            "reuse": reuse,
             "ready": ready,
             "ready_reason": ready_reason,
         }
@@ -1230,8 +1221,8 @@ def register_voice_tools_routes(app, config_path: str | None = None) -> None:
             path: 工程根目录。
 
         返回:
-            `{running, done, total, failed, skipped, skipped_rows, finished, rows, chapter,
-              elapsed_ms, eta_ms, log_tail, report_path}`。
+            `{running, done, total, failed, skipped, reused, saved_ms, skipped_rows, finished, rows,
+              chapter, elapsed_ms, eta_ms, log_tail, report_path}`。
         """
         store = _store(path)
         folder = store.root / ".ndw"
@@ -1264,6 +1255,9 @@ def register_voice_tools_routes(app, config_path: str | None = None) -> None:
             "total": total,
             "failed": failed,
             "skipped": int(progress.get("skipped") or 0),
+            "reused": int(progress.get("reused") or 0),
+            "saved_ms": int(progress.get("saved_ms") or 0),
+            "reused_audio_ms": int(progress.get("reused_audio_ms") or 0),
             "skipped_rows": progress.get("skipped_rows") or [],
             "finished": finished,
             "interrupted": interrupted,

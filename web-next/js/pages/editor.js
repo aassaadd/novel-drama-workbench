@@ -3,7 +3,7 @@
  * 结构对齐参考：顶栏 + 56px 图标栏 + 360px 章节目录 + 台词行 + 任务右栏 + 底部播控。
  * 所有写操作都转调现有 /api/ui/*，前端不复制业务规则。
  */
-import { esc, icon, toast, openDialog, closeDialog, openMenu, fmtDuration, fmtClock, fmtBytes, impactListHTML } from '../dom.js';
+import { esc, icon, toast, openDialog, closeDialog, openMenu, fmtDuration, fmtClock, fmtBytes, impactListHTML, reuseListHTML } from '../dom.js';
 import { getJSON, postJSON, streamJSON, fileUrl } from '../api.js';
 import { ENUMS, selectHTML } from '../enums.js';
 import { openProgress, watchProgress } from '../progress.js';
@@ -1960,21 +1960,33 @@ async function openBatchDialog(scope = 'chapter') {
         chapter: all ? undefined : state.chapterId,
       });
       const blockers = plan.blockers || [];
+      const reuse = plan.reuse || {};
+      const reusedTotal = Number(reuse.keep || 0) + Number(reuse.reuse || 0);
       planBody.innerHTML = `
         ${plan.ready ? '' : `<div class="dlg-note bad">${esc(plan.ready_reason || '配音模型未就绪')}</div>`}
         ${blockers.length ? `<div class="dlg-note bad">阻断项：<br />${blockers.map((item) => `· ${esc(item)}`).join('<br />')}</div>` : ''}
-        <div class="summary-line"><span>本次预计生成</span><span class="right">${plan.total} 行</span></div>
+        <div class="summary-line"><span>本次处理</span><span class="right">${plan.total} 行</span></div>
+        ${
+          reuse.regenerate !== undefined
+            ? `<div class="summary-line"><span>复用 / 重新合成</span><span class="right">
+                 <span style="color:var(--ok)">复用 ${reusedTotal} 行</span>
+                 <span class="hint">（沿用已有 ${Number(reuse.keep || 0)} · 缓存命中 ${Number(reuse.reuse || 0)}）</span>
+                 · 重新合成 ${Number(reuse.regenerate || 0)} 行</span></div>`
+            : ''
+        }
         <div class="summary-line"><span>可跳过（已有音频）</span><span class="right">${plan.skipped} 行</span></div>
         ${plan.unknown_total ? `<div class="summary-line"><span>说话人未识别</span><span class="right" style="color:var(--warn)">${plan.unknown_total} 行</span></div>` : ''}
         ${plan.eta_ms ? `<div class="summary-line"><span>预计耗时</span><span class="right">${fmtClock(plan.eta_ms)}</span></div>` : ''}
+        ${reuse.saved_ms_estimate ? `<div class="summary-line"><span>预计节省</span><span class="right" style="color:var(--ok)">约 ${fmtClock(reuse.saved_ms_estimate)}</span></div>` : ''}
         ${impactListHTML(plan, state.characters)}
+        ${reuseListHTML(plan, state.characters)}
         ${
           plan.unknown_total
             ? `<label class="checkline"><input type="checkbox" id="batch-skip-unknown" />
                  <span>跳过这 ${plan.unknown_total} 行未识别说话人的台词，先配其余行</span></label>`
             : ''
         }
-        <div class="dlg-note">只补齐未生成 / 过期 / 失败的行；停止后可从这里继续。</div>`;
+        <div class="dlg-note">只补齐未生成 / 过期 / 失败的行；文本、说话人、音色与合成参数都没变的台词直接复用已有音频，不重复合成。</div>`;
       startBtn.disabled = !plan.ready || Boolean(blockers.length) || Number(plan.total) <= 0;
     } catch (error) {
       planBody.innerHTML = `<div class="dlg-note bad">${esc(error.message)}</div>`;
@@ -2000,7 +2012,7 @@ async function openBatchDialog(scope = 'chapter') {
       watchProgress({
         path: state.path,
         title: '正在补齐缺失配音…',
-        hint: `本次 ${Number(plan.total || 0)} 行 · 跳过 ${Number(plan.skipped || 0)} 行`,
+        hint: `本次处理 ${Number(plan.total || 0)} 行 · 复用 ${Number((plan.reuse || {}).keep || 0) + Number((plan.reuse || {}).reuse || 0)} 行 · 重新合成 ${Number((plan.reuse || {}).regenerate || 0)} 行`,
       });
       await refreshTask();
       startPolling();

@@ -1,9 +1,9 @@
 """跨章上下文装配。
 
 固定顺序（system 与 user 合计）：
-    故事圣经 → 世界设定 → 角色卡 → 前情摘要 → 本章大纲与节拍 → 前文摘录 → 任务指令。
+    故事圣经 → 世界设定 → 角色卡 → 全书前情摘要 → 最近章摘要 → 本章大纲与节拍 → 前文摘录 → 任务指令。
 预算不足时按以下顺序裁剪：
-    前文摘录 → 前情摘要（先删最旧）→ 世界细节（先地点/术语，再硬规则/势力）
+    前文摘录 → 最近章摘要（先删最旧）→ 全书前情摘要 → 世界细节（先地点/术语，再硬规则/势力）
     → 角色卡细节（先删背景，再删性格/说话方式）。
 故事圣经与本次任务指令永不被裁剪；角色设定只从 characters.json 取。
 """
@@ -66,6 +66,7 @@ class ContextAssembler:
         budget_tokens: int = 32768,
         excerpt_chars: int = EXCERPT_CHARS,
         story_digest: str = "",
+        book_digest: str = "",
     ):
         """绑定上下文素材。
 
@@ -81,6 +82,7 @@ class ContextAssembler:
             budget_tokens: 上下文预算（中文按 1 字 ≈ 1 token 粗算）。
             excerpt_chars: 每段前文摘录最多保留的字数（续写时调大，默认沿用 800）。
             story_digest: 全剧梗概文本（续写专用，与故事圣经一样固定保留，不参与裁剪）。
+            book_digest: 全书滚动摘要文本（生成正文时注入，预算不足时可整段裁剪）。
         """
         self.work = work or {}
         self.bible = bible or {}
@@ -93,6 +95,7 @@ class ContextAssembler:
         self.budget_tokens = int(budget_tokens or 32768)
         self.excerpt_chars = max(1, int(excerpt_chars or EXCERPT_CHARS))
         self.story_digest = story_digest or ""
+        self.book_digest = book_digest or ""
         #: 本次装配产生的告警（已被重置为最新一次 build 的结果）
         self.warnings: list[str] = []
 
@@ -375,7 +378,7 @@ class ContextAssembler:
 
     @staticmethod
     def _render_previous(summaries: list[str]) -> str:
-        """把前情摘要列表拼成文本。
+        """把最近章摘要列表拼成文本。
 
         参数:
             summaries: 每条前情文本（从旧到新）。
@@ -384,6 +387,19 @@ class ContextAssembler:
             前情摘要文本；为空时返回空串。
         """
         return "\n".join(summaries)
+
+    @staticmethod
+    def _render_book_digest(text: str) -> str:
+        """把全书滚动摘要渲染成独立段落。
+
+        参数:
+            text: 全书摘要文本。
+
+        返回:
+            「全书前情摘要」段落；为空时返回空串。
+        """
+        value = _text(text)
+        return f"全书前情摘要：\n{value}" if value else ""
 
     @staticmethod
     def _render_excerpt(blocks: list[dict]) -> str:
@@ -406,7 +422,8 @@ class ContextAssembler:
             speaker_ids: 本场出场角色 ID 列表；为 None 时使用全部非旁白角色。
 
         返回:
-            TextGenRequest；超预算时按「前文摘录 → 前情摘要 → 世界细节 → 角色卡细节」裁剪（全剧梗概不裁剪）。
+            TextGenRequest；超预算时按「前文摘录 → 最近章摘要 → 全书前情摘要 → 世界细节 → 角色卡细节」裁剪
+            （全剧梗概不裁剪）。
         """
         self.warnings = []
         instruction = instruction or ""
@@ -417,6 +434,7 @@ class ContextAssembler:
         excerpts = self._excerpt_blocks()
         outline = self.chapter_outline()
         digest = _text(self.story_digest)
+        book_digest = _text(self.book_digest)
 
         def compose() -> tuple[str, str]:
             """按固定顺序拼出 system 与 user 文本。"""
@@ -440,6 +458,9 @@ class ContextAssembler:
             user_parts: list[str] = []
             if digest:
                 user_parts.append("全剧梗概：\n" + digest)
+            book_text = self._render_book_digest(book_digest)
+            if book_text:
+                user_parts.append(book_text)
             previous_text = self._render_previous(summaries)
             if previous_text:
                 user_parts.append("前情摘要：\n" + previous_text)
@@ -466,12 +487,17 @@ class ContextAssembler:
                         changed = True
                         break
 
-            # 2. 前情摘要：删最旧的一条
+            # 2. 最近章摘要：删最旧的一条
             if not changed and summaries:
                 summaries.pop(0)
                 changed = True
 
-            # 3. 世界细节：先删地点/术语，再删硬规则/势力
+            # 3. 全书前情摘要：整段移除
+            if not changed and book_digest:
+                book_digest = ""
+                changed = True
+
+            # 4. 世界细节：先删地点/术语，再删硬规则/势力
             if not changed and world_sections:
                 for kinds in (("locations", "glossary"), ("rules", "factions")):
                     position = next((i for i, section in enumerate(world_sections) if section["kind"] in kinds), None)
@@ -480,7 +506,7 @@ class ContextAssembler:
                         changed = True
                         break
 
-            # 4. 角色卡细节：先删背景，再删性格/说话方式
+            # 5. 角色卡细节：先删背景，再删性格/说话方式
             if not changed and cards:
                 target = next((card for card in cards if card["show_background"]), None)
                 if target is not None:

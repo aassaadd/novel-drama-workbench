@@ -381,20 +381,27 @@ export function watchProgress({
       const total = Number(data?.total || 0);
       const done = Number(data?.done || 0);
       const failed = Number(data?.failed || 0);
+      const reused = Number(data?.reused || 0);
       if (data?.running) {
         panel.update({
-          stage: `正在生成 ${done}/${total}${failed ? ` · 失败 ${failed}` : ''}`,
+          stage: `正在生成 ${done}/${total}${reused ? ` · 复用 ${reused}` : ''}${failed ? ` · 失败 ${failed}` : ''}`,
           percent: total ? Math.round((done / total) * 100) : null,
           current: data?.eta_ms ? `预计剩余 ${Math.max(1, Math.round(Number(data.eta_ms) / 1000))} 秒` : '',
         });
       } else {
         stopped = true;
         if (timer) window.clearTimeout(timer);
+        const savedMs = Number(data?.saved_ms || 0);
+        const details = [];
+        if (reused) {
+          details.push(`复用 ${reused} 行${savedMs ? `，约省 ${Math.max(1, Math.round(savedMs / 1000))} 秒` : ''}`);
+        }
+        if (failed) details.push('失败行可在任务页逐条重试。');
         panel.finish({
           message: total
-            ? `本轮完成：${done}/${total}${failed ? ` · 失败 ${failed}` : ''}`
+            ? `本轮完成：${done}/${total}${failed ? ` · 失败 ${failed}` : ''}${reused ? ` · 复用 ${reused}` : ''}`
             : '任务已结束（没有可生成的条目）',
-          detail: failed ? '失败行可在任务页逐条重试。' : '',
+          detail: details.join(' '),
           actions: [
             {
               label: '去任务页看明细',

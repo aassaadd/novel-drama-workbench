@@ -114,10 +114,10 @@ def cmd_outline(args, config: AppConfig) -> int:
 
 
 def cmd_chapter_generate(args, config: AppConfig) -> int:
-    """按大纲生成章节正文。
+    """按大纲节拍生成章节正文。
 
     参数:
-        args: 参数（chapter/regen/dry-run/multi_turn/segment_words/max_rounds）。
+        args: 参数（chapter/regen/dry-run/multi_turn/beats_per_round/max_rounds）。
         config: 本机配置。
 
     返回:
@@ -138,14 +138,20 @@ def cmd_chapter_generate(args, config: AppConfig) -> int:
         regen=args.regen,
         dry_run=args.dry_run,
         multi_turn=getattr(args, "multi_turn", None),
-        segment_words=getattr(args, "segment_words", None),
+        beats_per_round=getattr(args, "beats_per_round", None),
         max_rounds=getattr(args, "max_rounds", None),
     )
     head = "[dry-run] " if args.dry_run else ""
+    deviation = (result.get("word_deviation") or {}).get("message") or ""
     text = (
         f"{head}章节 {result['chapter_id']} 正文生成完成：{result['words']} 字"
-        f"（{result.get('rounds') or 1} 轮，provider={result['provider']}）"
+        f"（{result.get('rounds') or 1} 轮，节拍 {result.get('beats_done')}/{result.get('beats_total')}，"
+        f"停止原因={result.get('stop_reason')}，provider={result['provider']}）"
     )
+    if deviation:
+        text += f"\n字数偏差：{deviation}"
+    if result.get("summary_error"):
+        text += f"\n摘要更新失败：{result['summary_error']}"
     if args.dry_run and result.get("content"):
         preview = result["content"][:400]
         text += f"\n--- 预览（前 400 字）---\n{preview}"

@@ -691,7 +691,7 @@ def build_chapter_context(store: ProjectStore, config: AppConfig, chapter: dict)
 
     返回:
         {bible, work, characters, beats, chapter_words, entry, world_ids, world_context,
-         character_payload, speaker_ids, previous_chapters, style, adapter, metadata}。
+         character_payload, speaker_ids, previous_chapters, book_digest, style, adapter, metadata}。
         metadata 字段与 `generate_chapter` 原有约定完全一致，离线适配器行为不变。
     """
     settings_store = SettingsStore(store.root)
@@ -728,22 +728,35 @@ def build_chapter_context(store: ProjectStore, config: AppConfig, chapter: dict)
         if focus:
             speaker_ids = sorted(focus)
 
-    # 前序章节：index 小于当前章节，按 index 倒序最多取 3 章，再转成从旧到新
+    # 前序章节：index 小于当前章节，取最近 N 章（默认 6），再转成从旧到新
     previous_index = int(chapter.get("index") or 0)
+    try:
+        recent_limit = max(1, int(config.get("writing.context.recent_summaries") or 6))
+    except (TypeError, ValueError):
+        recent_limit = 6
     previous_meta = [item for item in store.list_chapters() if int(item.get("index") or 0) < previous_index]
     previous_meta.sort(key=lambda item: int(item.get("index") or 0), reverse=True)
+    selected = sorted(previous_meta[:recent_limit], key=lambda item: int(item.get("index") or 0))
     previous_chapters: list[dict] = []
-    for meta in previous_meta[:3]:
-        full = store.load_chapter(meta["id"])
+    for position, meta in enumerate(selected):
+        # 只有最后一章需要正文末尾做「上一章结尾」摘录，其余章只带摘要，避免逐章读全文
+        content = ""
+        synopsis = meta.get("synopsis") or ""
+        if position == len(selected) - 1:
+            full = store.load_chapter(meta["id"])
+            content = full.get("content") or ""
+            synopsis = synopsis or full.get("synopsis") or ""
         previous_chapters.append(
             {
-                "index": full.get("index"),
-                "title": full.get("title"),
-                "synopsis": full.get("synopsis") or "",
-                "content": full.get("content") or "",
+                "index": meta.get("index"),
+                "title": meta.get("title"),
+                "synopsis": synopsis,
+                "content": content,
             }
         )
-    previous_chapters.reverse()
+
+    # 全书（或前半部）滚动摘要：与最近章摘要一起注入，长书不会退化成只看最近几章
+    book_digest = str(store.load_rolling_summary().get("book_summary") or "")
 
     metadata = {
         "title": chapter.get("title"),
@@ -769,6 +782,7 @@ def build_chapter_context(store: ProjectStore, config: AppConfig, chapter: dict)
         "character_payload": character_payload,
         "speaker_ids": speaker_ids,
         "previous_chapters": previous_chapters,
+        "book_digest": book_digest,
         "style": bible.get("style") or {},
         "adapter": adapter,
         "metadata": metadata,
@@ -821,11 +835,14 @@ def generate_chapter(
     regen: bool = False,
     dry_run: bool = False,
     multi_turn: bool | None = None,
-    segment_words: int | None = None,
+    beats_per_round: int | None = None,
     max_rounds: int | None = None,
     on_delta=None,
 ) -> dict:
-    """生成章节正文并落盘；长章节按目标字数拆成多轮续写。
+    """生成章节正文并落盘；按本章节拍逐段推进，节拍写完即收尾。
+
+    停止条件只看节拍：一轮写一个或一组节拍，写完后推进指针；全部节拍写完就结束。
+    字数只作提示与偏差说明，不作为硬性截断依据；`max_rounds` 仅作保险上限。
 
     参数:
         store: 工程。
@@ -833,18 +850,20 @@ def generate_chapter(
         chapter_id: 章节 ID。
         regen: 已有正文时是否覆盖重写。
         dry_run: 只生成不落盘。
-        multi_turn: 显式多轮开关；None 时按目标字数与 `writing.multi_turn.enabled` 自动判断。
-        segment_words: 每段目标字数；None 时取 `writing.multi_turn.segment_words`（默认 800）。
-        max_rounds: 最大轮数；None 时取 `writing.multi_turn.max_rounds`（默认 8）。
+        multi_turn: 显式分轮开关；None 时按 `writing.multi_turn.enabled` 自动判断。
+        beats_per_round: 每轮写几个节拍；None 时按「节拍总数 / max_rounds」自动分配。
+        max_rounds: 最大轮数（保险）；None 时取 `writing.multi_turn.max_rounds`（默认 8）。
         on_delta: 流式增量回调 `(text) -> None`；传入时改为流式生成，仅用于页面实时预览。
 
     返回:
-        {"chapter_id", "status", "words", "provider", "content",
-         "rounds", "segments", "multi_turn", "stop_reason"}；content 在 dry_run 时为全文预览。
+        {"chapter_id", "status", "words", "word_count", "provider", "content",
+         "rounds", "beats_total", "beats_done", "beats_remaining", "multi_turn",
+         "stop_reason", "word_deviation", "dialogue_warnings", "summary", "summary_error"}；
+        content 在 dry_run 时为全文预览。
 
     异常:
         ValueError: 已有正文且未指定 regen。
-        AdapterError: 模型返回空正文。
+        AdapterError: 模型返回空正文或调用失败（明确报错，不做降级）。
     """
     chapter = store.load_chapter(chapter_id)
     if (chapter.get("content") or "").strip() and not regen and not dry_run:
@@ -852,16 +871,40 @@ def generate_chapter(
 
     context = build_chapter_context(store, config, chapter)
     bible = context["bible"]
-    beats = context["beats"]
+    beats = context["beats"] or []
     chapter_words = context["chapter_words"]
     entry = context["entry"]
     style = context["style"]
+    total_beats = len(beats)
+
+    # 多轮参数：显式参数优先，其次读配置，最后用默认值兜底
+    mt = config.get("writing.multi_turn") or {}
+    enabled = bool(mt.get("enabled", True))
+    rounds_cap = max(1, int(max_rounds or mt.get("max_rounds") or 8))
+    round_max_tokens = max(1, int(mt.get("round_max_tokens") or 2048))
+    # 设置页的「最大输出」是硬上限：每轮预算不超过它
+    configured_tokens = 0
+    try:
+        configured_tokens = int(config.get("omlx.max_tokens") or 0)
+    except (AttributeError, TypeError, ValueError):
+        configured_tokens = 0
+    if configured_tokens > 0:
+        round_max_tokens = min(round_max_tokens, configured_tokens)
+    target_words = int(context["metadata"].get("target_words") or chapter_words or 0)
+
+    # 每轮节拍数：显式指定优先；否则按节拍总数与保险轮数自动分配
+    if beats_per_round is not None and int(beats_per_round) > 0:
+        per_round = min(total_beats, max(1, int(beats_per_round)))
+    else:
+        per_round = max(1, math.ceil(total_beats / rounds_cap)) if total_beats else 1
+    groups = [beats[start : start + per_round] for start in range(0, total_beats, per_round)] or [[]]
+    use_multi = (enabled if multi_turn is None else bool(multi_turn)) and len(groups) > 1
 
     summary_text = (entry or {}).get("summary") or chapter.get("outline") or ""
     pov_label = POV_LABELS.get((style.get("pov") or "").strip(), style.get("pov") or "第三人称有限视角")
     tone_label = style.get("tone") or "沿用既有基调"
     instruction_lines = [
-        f"写《{chapter.get('title')}》本章正文，目标字数约 {chapter_words} 字。",
+        f"写《{chapter.get('title')}》本章正文，篇幅参考约 {chapter_words} 字。",
         f"本章摘要：{summary_text or '按设定推进主线'}",
         "按以下节拍顺序推进：",
     ]
@@ -882,6 +925,21 @@ def generate_chapter(
         "硬性排版规则：人物对白一律用中文全角双引号“”包裹；禁止使用「」『』【】、英文双引号\"\"与单引号，"
         "禁止不加引号直接成段写对白；旁白、心理描写不加引号，与对白区分清楚。"
     )
+    if use_multi:
+        first_end = len(groups[0])
+        instruction_lines.append(
+            f"本轮只写第 1–{first_end} 个节拍（全章共 {total_beats} 个）：写到第 {first_end} 个节拍结束就停，"
+            "不要提前写后续节拍。"
+        )
+        instruction_lines.append(
+            f"篇幅只作参考：全章约 {chapter_words} 字，本轮约 "
+            f"{_group_words(groups[0], total_beats, chapter_words)} 字；节拍写完即收尾，不要为凑字数续写。"
+        )
+    else:
+        instruction_lines.append(
+            f"一次写完全部 {total_beats} 个节拍，写完最后一个节拍即收尾。"
+            f"篇幅参考约 {chapter_words} 字，只作提示，不因字数提前结束。"
+        )
     instruction = "\n".join(instruction_lines)
 
     assembler = ContextAssembler(
@@ -894,35 +952,11 @@ def generate_chapter(
         previous_chapters=context["previous_chapters"],
         current_content=chapter.get("content") or "",
         budget_tokens=int(config.get("writing.context_budget_tokens") or 32768),
+        book_digest=context["book_digest"],
     )
     req = assembler.build("chapter", instruction, context["speaker_ids"])
     # metadata 保持原有字段不变：离线适配器依赖它，且产物需要确定性一致
     req.metadata = context["metadata"]
-
-    # 多轮参数：显式参数优先，其次读配置，最后用默认值兜底
-    mt = config.get("writing.multi_turn") or {}
-    enabled = mt.get("enabled", True)
-    threshold_words = int(mt.get("threshold_words") or 1200)
-    seg_words = max(1, int(segment_words or mt.get("segment_words") or 800))
-    rounds_cap = max(1, int(max_rounds or mt.get("max_rounds") or 8))
-    round_max_tokens = max(1, int(mt.get("round_max_tokens") or 2048))
-    # 设置页的「最大输出」是硬上限：每段预算不超过它，也不再把设置值当下限
-    configured_tokens = 0
-    try:
-        configured_tokens = int(config.get("omlx.max_tokens") or 0)
-    except (AttributeError, TypeError, ValueError):
-        configured_tokens = 0
-    if configured_tokens > 0:
-        round_max_tokens = min(round_max_tokens, configured_tokens)
-    target_words = int(context["metadata"].get("target_words") or chapter_words or 0)
-
-    if multi_turn is not None:
-        use_multi = bool(multi_turn)
-    else:
-        use_multi = bool(enabled) and target_words > threshold_words
-    if target_words <= 0:
-        use_multi = False
-    segments = (target_words + seg_words - 1) // seg_words if use_multi else 1
 
     if use_multi:
         # 首轮复用装配结果，仅收紧单轮输出预算；前缀缓存键固定为 工程 id + 章节 id
@@ -931,17 +965,19 @@ def generate_chapter(
         if work_id:
             req.prompt_cache_key = f"{work_id}:{chapter_id}"
         outcome = _generate_chapter_rounds(
-            context["adapter"], req, target_words, seg_words, rounds_cap, on_delta=on_delta
+            context["adapter"], req, groups, total_beats, chapter_words, rounds_cap, on_delta=on_delta
         )
         content = outcome["content"].strip()
         provider = outcome["provider"]
         rounds = outcome["rounds"]
+        beats_done = outcome["beats_done"]
         stop_reason = outcome["stop_reason"]
     else:
         result = stream_text(context["adapter"], req, on_delta) if on_delta else context["adapter"].generate(req)
         content = (result.text or "").strip()
         provider = result.model
         rounds = 1
+        beats_done = total_beats
         stop_reason = "single_round"
     if not content:
         raise AdapterError(ErrorCode.UPSTREAM_ERROR, "写作适配器返回了空正文", retryable=True)
@@ -952,18 +988,28 @@ def generate_chapter(
     )
 
     words = _count_words(content)
+    word_deviation = _word_deviation(words, target_words)
+    beats_remaining = max(0, total_beats - beats_done)
+
     if dry_run:
         return {
             "chapter_id": chapter_id,
             "status": chapter.get("status"),
             "words": words,
+            "word_count": words,
             "provider": provider,
             "content": content,
             "rounds": rounds,
-            "segments": segments,
+            "beats_total": total_beats,
+            "beats_done": beats_done,
+            "beats_remaining": beats_remaining,
             "multi_turn": use_multi,
             "stop_reason": stop_reason,
+            "word_deviation": word_deviation,
             "dialogue_warnings": dialogue_warnings,
+            "summary": None,
+            "summary_error": None,
+            "revision": chapter.get("revision"),
         }
 
     chapter["content"] = content + "\n"
@@ -972,17 +1018,39 @@ def generate_chapter(
     chapter["revision"] = int(chapter.get("revision") or 1) + 1
     chapter["updated_at"] = now_iso()
     store.save_chapter(chapter)
+
+    # 章成即产出本章摘要，并滚动更新全书摘要；失败明确回报，不静默降级
+    summary_info = None
+    summary_error = None
+    try:
+        from .recap import update_rolling_summary
+
+        summary_info = update_rolling_summary(store, config, chapter, adapter=context["adapter"])
+    except AdapterError as exc:
+        logger.warning("章节摘要更新失败：%s", exc.message)
+        summary_error = exc.message
+    except Exception as exc:  # noqa: BLE001 - 摘要失败不影响正文，但必须明确告知
+        logger.warning("章节摘要更新失败：%s", exc)
+        summary_error = str(exc)
+
     return {
         "chapter_id": chapter_id,
         "status": chapter["status"],
         "words": words,
+        "word_count": words,
         "provider": provider,
         "content": None,
         "rounds": rounds,
-        "segments": segments,
+        "beats_total": total_beats,
+        "beats_done": beats_done,
+        "beats_remaining": beats_remaining,
         "multi_turn": use_multi,
         "stop_reason": stop_reason,
+        "word_deviation": word_deviation,
         "dialogue_warnings": dialogue_warnings,
+        "summary": summary_info,
+        "summary_error": summary_error,
+        "revision": chapter["revision"],
     }
 
 
@@ -1029,7 +1097,7 @@ def _append_segment(text: str, segment: str, max_overlap: int = 200) -> str:
 
 
 def _continue_instruction(segment_words: int) -> str:
-    """构造续写轮的用户短指令（固定句式，只有本段字数是可变量）。
+    """构造正文续写轮的用户短指令（供 `continuation.py` 使用）。
 
     参数:
         segment_words: 本段目标字数。
@@ -1040,54 +1108,150 @@ def _continue_instruction(segment_words: int) -> str:
     return f"继续写下一段，紧接上文，不要重复已写内容，保持人物人设与文风。本段目标约 {segment_words} 字，只输出新增正文。"
 
 
+def _group_words(group: list[dict], total_beats: int, chapter_words: int) -> int:
+    """估算一组节拍的参考字数。
+
+    参数:
+        group: 本轮要写的节拍列表。
+        total_beats: 本章节拍总数。
+        chapter_words: 全章参考字数。
+
+    返回:
+        参考字数：优先用节拍目标字数之和，缺失时按节拍占比分摊全章字数。
+    """
+    total = 0
+    for beat in group:
+        try:
+            total += int(beat.get("target_words") or 0)
+        except (TypeError, ValueError):
+            continue
+    if total > 0:
+        return total
+    if total_beats <= 0:
+        return max(1, chapter_words)
+    return max(100, round(chapter_words * len(group) / total_beats))
+
+
+def _beats_round_instruction(groups: list[list[dict]], index: int, total_beats: int, chapter_words: int) -> str:
+    """构造第 index 轮（0 起）的续写指令。
+
+    参数:
+        groups: 按轮切分好的节拍分组。
+        index: 当前轮下标（0 起；首轮不走本函数）。
+        total_beats: 本章节拍总数。
+        chapter_words: 全章参考字数。
+
+    返回:
+        一句话续写指令，写明本轮节拍范围与篇幅参考。
+    """
+    start = sum(len(group) for group in groups[:index])
+    group = groups[index]
+    end = start + len(group)
+    beat_lines = "；".join(
+        f"第 {start + offset + 1} 个：{beat.get('summary') or ''}" for offset, beat in enumerate(group)
+    )
+    next_note = f"不要写第 {end + 1} 个及之后的节拍。" if end < total_beats else "本章节拍到此结束。"
+    return (
+        f"继续写第 {start + 1}–{end} 个节拍（全章共 {total_beats} 个），紧接上文，不要重复已写内容。"
+        f"本轮节拍：{beat_lines}。写完停在第 {end} 个节拍边界，{next_note}"
+        f"本轮参考约 {_group_words(group, total_beats, chapter_words)} 字，只作篇幅参考。只输出新增正文。"
+    )
+
+
+def _word_deviation(actual: int, target: int) -> dict:
+    """计算实际字数与目标字数的偏差，并生成中文说明。
+
+    参数:
+        actual: 实际字数。
+        target: 目标字数（节拍目标之和）。
+
+    返回:
+        {"target", "actual", "ratio", "message"}；目标未知时 ratio 为 None。
+    """
+    if target <= 0:
+        return {"target": 0, "actual": actual, "ratio": None, "message": ""}
+    ratio = round(actual / target, 2)
+    if ratio < 0.8:
+        message = f"实际 {actual} 字，比目标 {target} 字少 {int(round((1 - ratio) * 100))}%；节拍已写完，可按需续写补足"
+    elif ratio > 1.3:
+        message = f"实际 {actual} 字，比目标 {target} 字多 {int(round((ratio - 1) * 100))}%；节拍已写完，可考虑精简"
+    else:
+        message = f"实际 {actual} 字，与目标 {target} 字基本一致"
+    return {"target": target, "actual": actual, "ratio": ratio, "message": message}
+
+
 def _generate_chapter_rounds(
-    adapter, req: TextGenRequest, target_words: int, segment_words: int, max_rounds: int, on_delta=None
+    adapter,
+    req: TextGenRequest,
+    groups: list[list[dict]],
+    total_beats: int,
+    chapter_words: int,
+    max_rounds: int,
+    on_delta=None,
 ) -> dict:
-    """按轮续写章节正文。
+    """按节拍分组串行写作，写完整组即推进节拍指针。
 
     前缀（system、首条 user、temperature、stop）全程不变，仅在末尾追加
-    「assistant 已生成正文」与一句短 user 续写指令，保证前缀缓存可复用。
+    「assistant 已生成正文」与一句本轮节拍指令，保证前缀缓存可复用。
+    停止只由节拍决定：全部写完为 `beats_done`，轮数用尽为 `max_rounds`。
+    某轮返回空正文视为模型异常，直接抛错（不降级、不静默收尾）。
 
     参数:
         adapter: 写作适配器（需实现 generate）。
         req: 首轮请求。
-        target_words: 目标字数。
-        segment_words: 每段目标字数。
-        max_rounds: 最大轮数。
+        groups: 按轮切分好的节拍分组。
+        total_beats: 本章节拍总数。
+        chapter_words: 全章参考字数。
+        max_rounds: 最大轮数（保险上限）。
         on_delta: 流式增量回调；传入时每轮改为流式生成。
 
     返回:
-        {"content", "rounds", "stop_reason", "provider"}；stop_reason 取
-        single_round/target_reached/max_rounds/empty_output/short_output。
+        {"content", "rounds", "beats_done", "stop_reason", "provider"}。
     """
     content = ""
     rounds = 0
-    stop_reason = "max_rounds"
+    beats_done = 0
     provider = ""
-    for index in range(1, max(1, max_rounds) + 1):
-        if index == 1:
+    stop_reason = "beats_done"
+    for index, group in enumerate(groups):
+        if index >= max_rounds:
+            stop_reason = "max_rounds"
+            break
+        if index == 0:
             request = req
         else:
             request = replace(
                 req,
-                messages=list(req.messages) + [Message("assistant", content), Message("user", _continue_instruction(segment_words))],
+                messages=list(req.messages)
+                + [
+                    Message("assistant", content),
+                    Message("user", _beats_round_instruction(groups, index, total_beats, chapter_words)),
+                ],
             )
         result = stream_text(adapter, request, on_delta) if on_delta else adapter.generate(request)
         provider = result.model or provider
         segment = (result.text or "").strip()
-        rounds = index
+        rounds = index + 1
+        start_beat = sum(len(item) for item in groups[:index])
+        end_beat = start_beat + len(group)
         if not segment:
-            stop_reason = "empty_output"
-            break
-        before = _count_words(content)
+            raise AdapterError(
+                ErrorCode.UPSTREAM_ERROR,
+                f"第 {rounds} 轮（节拍 {start_beat + 1}–{end_beat}）返回空正文：生成已停止，"
+                "请检查模型服务或调大输出预算后重试",
+                retryable=True,
+            )
         content = _append_segment(content, segment)
-        if _count_words(content) - before < 50:
-            stop_reason = "short_output"
-            break
-        if _count_words(content) >= target_words * 1.1:
-            stop_reason = "target_reached"
-            break
-    return {"content": content, "rounds": rounds, "stop_reason": stop_reason, "provider": provider}
+        beats_done = end_beat
+    if rounds == 0:
+        raise AdapterError(ErrorCode.UPSTREAM_ERROR, "生成轮数为 0：请检查 max_rounds 配置", retryable=False)
+    return {
+        "content": content,
+        "rounds": rounds,
+        "beats_done": beats_done,
+        "stop_reason": stop_reason,
+        "provider": provider,
+    }
 
 
 #: 标注单批输出预算上限（token）

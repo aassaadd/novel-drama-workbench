@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -33,7 +34,11 @@ _SUBDIRS = (
     "exports",
     ".ndw/logs",
     ".ndw/locks",
+    ".ndw/versions",
 )
+
+#: 版本文件名只允许这些字符，避免路径穿越
+_VERSION_ID_PATTERN = re.compile(r"^[0-9A-Za-z_-]+$")
 
 # 新建工程时的默认全局设置（不含任何模型路径）
 # endpoint / model 留 None 表示「继承本机 config.yaml」，工程不需要重复记录模型信息
@@ -162,6 +167,22 @@ class ProjectStore:
             timelines/<chapterId>.timeline.json 路径。
         """
         return self.root / "timelines" / f"{chapter_id}.timeline.json"
+
+    def chapter_versions_dir(self, chapter_id: str) -> Path:
+        """章节历史版本目录。
+
+        参数:
+            chapter_id: 章节 ID。
+
+        返回:
+            .ndw/versions/<chapterId> 路径（目录可能还不存在）。
+        """
+        return self.root / ".ndw" / "versions" / chapter_id
+
+    @property
+    def rolling_summary_file(self) -> Path:
+        """全书滚动摘要文件路径（.ndw/rolling_summary.json）。"""
+        return self.root / ".ndw" / "rolling_summary.json"
 
     # ---------- 通用 IO ----------
 
@@ -365,6 +386,7 @@ class ProjectStore:
                     "word_count": data.get("word_count"),
                     "scene_count": len(data.get("scenes") or []),
                     "revision": data.get("revision"),
+                    "synopsis": data.get("synopsis"),
                 }
             )
         return sorted(chapters, key=lambda item: (item.get("index") or 0))
@@ -391,12 +413,125 @@ class ProjectStore:
     def save_chapter(self, chapter: dict) -> None:
         """保存章节（先校验，再原子写入）。
 
+        正文发生变化时，先把当前磁盘上的旧版本完整存档到
+        `.ndw/versions/<章节ID>/<旧 revision>.json`（同 revision 冲突时追加 `-2`、`-3`）。
+        只改标题/摘要等不影响正文的字段时不产生新版本，避免版本列表被无关写入刷屏。
+
         参数:
             chapter: 章节 dict。
         """
         chapter["updated_at"] = now_iso()
         validate(chapter, "chapter.schema.json")
-        self._write_json(self.chapter_path(chapter["id"]), chapter)
+        path = self.chapter_path(chapter["id"])
+        if path.exists():
+            try:
+                current = self._read_json(path)
+            except (OSError, ValueError):
+                current = {}
+            # 旧版没有正文时不存档（新建章节的首次生成不产生无意义的 0 字版本）
+            if current and str(current.get("content") or "").strip() and current.get("content") != chapter.get("content"):
+                self._archive_chapter(chapter["id"], current)
+        self._write_json(path, chapter)
+
+    def _archive_chapter(self, chapter_id: str, chapter: dict) -> None:
+        """把一份完整章节快照写入历史版本目录。
+
+        参数:
+            chapter_id: 章节 ID。
+            chapter: 待存档的旧章节（原样保存，不修改字段）。
+
+        返回:
+            无。
+        """
+        directory = self.chapter_versions_dir(chapter_id)
+        directory.mkdir(parents=True, exist_ok=True)
+        revision = str(int(chapter.get("revision") or 1))
+        target = directory / f"{revision}.json"
+        suffix = 2
+        while target.exists():
+            target = directory / f"{revision}-{suffix}.json"
+            suffix += 1
+        self._write_json(target, chapter)
+
+    def list_chapter_versions(self, chapter_id: str) -> list[dict]:
+        """列出章节的历史版本（新版本在前，只返回展示所需字段）。
+
+        参数:
+            chapter_id: 章节 ID。
+
+        返回:
+            [{version_id, revision, title, word_count, updated_at, content_chars}]；
+            没有历史版本时返回空列表。
+        """
+        directory = self.chapter_versions_dir(chapter_id)
+        if not directory.exists():
+            return []
+        versions: list[dict] = []
+        for path in directory.glob("*.json"):
+            try:
+                data = self._read_json(path)
+            except (OSError, ValueError):
+                continue
+            content = str(data.get("content") or "")
+            versions.append(
+                {
+                    "version_id": path.stem,
+                    "revision": data.get("revision"),
+                    "title": data.get("title"),
+                    "word_count": data.get("word_count"),
+                    "updated_at": data.get("updated_at"),
+                    "content_chars": len(content),
+                }
+            )
+        versions.sort(key=lambda item: (int(item.get("revision") or 0), str(item.get("updated_at") or "")), reverse=True)
+        return versions
+
+    def load_chapter_version(self, chapter_id: str, version_id: str) -> dict:
+        """读取某个历史版本的完整章节快照。
+
+        参数:
+            chapter_id: 章节 ID。
+            version_id: 版本文件名（不含 .json，如 `3` 或 `3-2`）。
+
+        返回:
+            旧章节完整 dict。
+
+        异常:
+            ValueError: version_id 非法。
+            FileNotFoundError: 版本不存在。
+        """
+        if not _VERSION_ID_PATTERN.match(str(version_id or "")):
+            raise ValueError(f"非法的版本号: {version_id}")
+        path = self.chapter_versions_dir(chapter_id) / f"{version_id}.json"
+        if not path.exists():
+            raise FileNotFoundError(f"章节版本不存在: {chapter_id}/{version_id}")
+        return self._read_json(path)
+
+    # ---------- 滚动摘要 ----------
+
+    def load_rolling_summary(self) -> dict:
+        """读取全书滚动摘要。
+
+        返回:
+            {book_summary, through_index, through_chapter_id, updated_at}；
+            文件不存在或损坏时返回空 dict。
+        """
+        path = self.rolling_summary_file
+        if not path.exists():
+            return {}
+        try:
+            data = self._read_json(path)
+        except (OSError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def save_rolling_summary(self, data: dict) -> None:
+        """原子写入全书滚动摘要。
+
+        参数:
+            data: {book_summary, through_index, through_chapter_id, updated_at}。
+        """
+        self._write_json(self.rolling_summary_file, data)
 
     def create_chapter(self, title: str, content: str = "", outline: str = "", index: int | None = None) -> dict:
         """新建章节并落盘。

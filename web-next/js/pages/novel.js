@@ -6,7 +6,7 @@
  * 前端只做展示与参数拼装，不复制写作规则。
  * 视觉与交互沿用 web-next 既有规范（卡片、chip、ed-head、vw-body、弹窗）。
  */
-import { esc, icon, toast, openDialog, closeDialog } from '../dom.js';
+import { esc, fmtClock, icon, toast, openDialog, closeDialog, reuseListHTML } from '../dom.js';
 import { getJSON, postJSON, streamJSON } from '../api.js';
 import { ENUMS, selectHTML } from '../enums.js';
 import { openProgress, watchProgress } from '../progress.js';
@@ -1084,8 +1084,11 @@ function linkCardHTML(chapter, landed) {
   const statusLabel = { draft: '草稿', written: '已写正文', split: '已切分', stale: '台词过期' }[status] || status;
   const statusClass = status === 'split' ? 'ok' : status === 'stale' ? 'warn' : 'mute';
   const blockers = plan?.blockers || [];
+  const reuse = plan?.reuse || {};
   const missing = Number(plan?.total || 0);
   const lines = Number(plan?.lines_total || 0);
+  const reused = Number(reuse.keep || 0) + Number(reuse.reuse || 0);
+  const regenerate = Number(reuse.regenerate || 0);
   return `
     <div class="card" id="novel-link-card">
       <div class="card-head">
@@ -1104,6 +1107,7 @@ function linkCardHTML(chapter, landed) {
           <span>场景 <b class="mono">${Number(landed.scene_count || 0)}</b></span>
           <span>台词 <b class="mono">${plan ? lines : '—'}</b> 行</span>
           <span>待补配音 <b class="mono" style="color:var(--warn)">${plan ? missing : '—'}</b> 行</span>
+          ${plan && reuse.regenerate !== undefined ? `<span>可复用 <b class="mono" style="color:var(--ok)">${reused}</b> 行</span>` : ''}
         </div>
         ${
           plan
@@ -1111,7 +1115,7 @@ function linkCardHTML(chapter, landed) {
               ? `<div class="banner warn" style="margin-top:8px">${icon('warn', 13)} ${esc(
                   blockers[0]?.message || '有阻断项，先修好再补齐配音'
                 )}</div>`
-              : `<div class="hint" style="margin-top:6px">预检通过，补齐只跑缺失/失败/过期行，已有音频自动跳过。</div>`
+              : `<div class="hint" style="margin-top:6px">预检通过：本次重新合成 ${regenerate} 行，其余 ${reused} 行沿用已有音频或命中缓存。</div>`
             : '<div class="hint" style="margin-top:6px">正在读取配音预检…</div>'
         }
       </div>
@@ -1148,19 +1152,29 @@ function openBatchDialog() {
   const plan = cache.planChapter === hit.chapter.id ? cache.plan : null;
   if (!plan) return toast('预检还没完成，稍等再点', 'warn');
   const blockers = plan.blockers || [];
+  const reuse = plan.reuse || {};
+  const reused = Number(reuse.keep || 0) + Number(reuse.reuse || 0);
   openDialog({
     title: '补齐本章配音',
     body: `
       <div class="summary-line"><span>本章台词</span><span class="right mono">${Number(plan.lines_total || 0)} 行</span></div>
       <div class="summary-line"><span>需要补</span><span class="right mono">${Number(plan.total || 0)} 行</span></div>
+      ${
+        reuse.regenerate !== undefined
+          ? `<div class="summary-line"><span>复用 / 重新合成</span><span class="right mono">
+               <span style="color:var(--ok)">复用 ${reused} 行</span> · 重新合成 ${Number(reuse.regenerate || 0)} 行</span></div>`
+          : ''
+      }
       <div class="summary-line"><span>已有音频跳过</span><span class="right mono">${Number(plan.skipped || 0)} 行</span></div>
+      ${reuse.saved_ms_estimate ? `<div class="summary-line"><span>预计节省</span><span class="right mono" style="color:var(--ok)">约 ${fmtClock(reuse.saved_ms_estimate)}</span></div>` : ''}
       ${
         blockers.length
           ? `<div class="banner warn" style="margin-top:8px">${icon('warn', 13)} ${esc(
               blockers.map((item) => item.message || item.code).join('；')
             )}</div>`
-          : '<div class="hint" style="margin-top:8px">任务在后台执行，可去「任务」页看进度，随时暂停/继续。</div>'
-      }`,
+          : '<div class="hint" style="margin-top:8px">只重配合词文本、说话人、音色或合成参数变过的行；任务在后台执行，可去「任务」页看进度，随时暂停/继续。</div>'
+      }
+      ${reuseListHTML(plan)}`,
     foot: `<div class="right"><button class="btn" data-dlg-close>取消</button>
       <button class="btn primary" data-batch-run ${blockers.length || !Number(plan.total) ? 'disabled' : ''}>
         ${icon('mic', 12)} 开始补齐</button></div>`,
@@ -1218,6 +1232,7 @@ function bodyCardHTML(chapter, landed) {
         <span class="ct">章节正文</span>
         <span class="badge mute" id="novel-body-words">${words} 字</span>
         <div class="right">
+          <button class="btn sm" data-act="novel-body-versions">版本记录</button>
           <button class="btn sm" data-act="novel-body-save">保存正文</button>
           <button class="btn sm" data-act="novel-body-generate">${icon('spark', 12)} ${hasBody ? '重新生成' : '生成正文'}</button>
           <button class="btn sm primary" data-act="novel-body-continue" ${hasBody ? '' : 'disabled'}>续写</button>
@@ -1239,7 +1254,7 @@ function bodyCardHTML(chapter, landed) {
           placeholder="${loading ? '正在读取正文…' : hasBody ? '正文…' : '还没有正文，点右上「生成正文」让 AI 起草'}">${esc(
             content
           )}</textarea>
-        <div class="hint">保存正文会重建台词切分并标记过期；生成/续写会先出预览，确认后再写入。</div>
+        <div class="hint">保存正文会重建台词切分并标记过期；生成按节拍流式输出、完成后直接写入正文；续写先存草稿，确认后写入。覆盖前会自动存档旧版本。</div>
       </div>
     </div>`;
 }
@@ -2635,14 +2650,15 @@ function openGenerateDialog(hasBody) {
     title: hasBody ? '重新生成本章正文' : 'AI 生成本章正文',
     body: `
       ${modeSwitchHTML(modeKey, { fallback: hasBody ? 'regen' : 'fill' })}
-      ${hasBody ? '<div class="banner warn" style="margin-bottom:8px">选「重新生成」会覆盖当前正文，旧版本仍可从章节版本记录找回；选「只补缺失」则保留现有正文不调用模型。</div>' : ''}
-      <div class="hint" style="margin-bottom:8px">按大纲节拍写作，读取写作设定与本章节拍作为提示词。</div>
+      ${hasBody ? '<div class="banner warn" style="margin-bottom:8px">选「重新生成」会覆盖当前正文；覆盖前会自动存档旧版本，可在「版本记录」里查看并一键恢复。选「只补缺失」则保留现有正文不调用模型。</div>' : ''}
+      <div class="hint" style="margin-bottom:8px">按本章节拍逐轮写作：写完一组节拍即推进，全部节拍写完就收尾；篇幅只作参考。</div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
-        <div class="field"><label>每段字数</label><input class="input" id="gen-seg" type="number" min="200" step="100" value="1200" /></div>
-        <div class="field"><label>最大段数</label><input class="input" id="gen-rounds" type="number" min="1" max="8" value="3" /></div>
+        <div class="field"><label>每轮节拍数</label><input class="input" id="gen-beats" type="number" min="0" step="1" value="0" />
+          <div class="hint">0 = 按节拍总数自动分配</div></div>
+        <div class="field"><label>最大轮数（保险）</label><input class="input" id="gen-rounds" type="number" min="1" max="20" value="8" /></div>
       </div>
       <label class="hint" style="display:flex;gap:6px;align-items:center;margin-top:4px">
-        <input type="checkbox" id="gen-multi" checked /> 分段多轮续写（更稳，耗时更长）
+        <input type="checkbox" id="gen-multi" checked /> 按节拍分轮（更稳，耗时更长）
       </label>`,
     foot: `<div class="right"><button class="btn" data-dlg-close>取消</button>
       <button class="btn primary" data-gen-run>${icon('spark', 12)} 开始生成</button></div>`,
@@ -2659,8 +2675,8 @@ function openGenerateDialog(hasBody) {
           chapter: hit.chapter.id,
           regen: mode === 'regen',
           multi_turn: mask.querySelector('#gen-multi').checked,
-          segment_words: Number(mask.querySelector('#gen-seg').value) || 1200,
-          max_rounds: Number(mask.querySelector('#gen-rounds').value) || 3,
+          beats_per_round: Number(mask.querySelector('#gen-beats').value) || null,
+          max_rounds: Number(mask.querySelector('#gen-rounds').value) || null,
         };
         closeDialog();
         runGenerate(body, hasBody);
@@ -2702,9 +2718,9 @@ async function runGenerate(body, hadBody = false) {
   }
   const panel = openProgress({
     title: body.regen ? '正在重新生成本章正文…' : '正在生成本章正文…',
-    hint: `每段 ${Number(body.segment_words || 0)} 字 · 最多 ${Number(body.max_rounds || 0)} 段${
-      body.regen ? ' · 覆盖现有正文' : ''
-    }`,
+    hint: `${body.beats_per_round ? `每轮 ${Number(body.beats_per_round)} 个节拍` : '每轮节拍数自动分配'} · 最多 ${Number(
+      body.max_rounds || 8
+    )} 轮${body.regen ? ' · 覆盖现有正文' : ''}`,
     stage: '已提交生成请求，等待模型返回…',
     stream: true,
   });
@@ -2719,10 +2735,15 @@ async function runGenerate(body, hadBody = false) {
       } else if (event === 'done') {
         settled = true;
         const result = data?.result || {};
-        const words = Number(result.word_count || 0);
+        const words = Number(result.word_count || result.words || 0);
+        const beats = `${Number(result.beats_done || 0)}/${Number(result.beats_total || 0)}`;
+        const deviation = result.word_deviation?.message || '';
+        const summaryError = result.summary_error ? `摘要未更新：${result.summary_error}` : '';
         panel.finish({
-          message: `正文生成完成：${words} 字${result.status ? ` · ${result.status}` : ''}`,
-          detail: '结果已写入本章正文，可点「刷新正文」查看。',
+          message: `正文生成完成：${words} 字 · 节拍 ${beats}${result.status ? ` · ${result.status}` : ''}`,
+          detail: [deviation, summaryError, '结果已写入本章正文，可点「刷新正文」查看；如需回退可在「版本记录」恢复旧版本。']
+            .filter(Boolean)
+            .join('；'),
           actions: [
             {
               label: '刷新正文',
@@ -2879,6 +2900,88 @@ async function applyDraft(chapterId) {
   );
   await reloadAfterBodyChange(chapterId);
   toast(`续写已写入（+${Number(result?.added_words || 0)} 字）`, 'ok');
+}
+
+/**
+ * 格式化版本时间（本地时区，24 小时制）。
+ * @param {string} value ISO 时间字符串
+ * @returns {string} 可读时间；解析失败时原样返回
+ */
+function formatVersionTime(value) {
+  if (!value) return '—';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  return date.toLocaleString('zh-CN', { hour12: false });
+}
+
+/**
+ * 打开章节版本记录：列出每次覆盖正文前自动存档的旧版本，可一键恢复。
+ * @param {string} chapterId 章节 ID
+ */
+async function openVersionsDialog(chapterId) {
+  let versions = [];
+  try {
+    const data = await getJSON('/api/ui/chapter/versions', { path: cache.path, chapter: chapterId });
+    versions = data?.versions || [];
+  } catch (error) {
+    toast(`读取版本记录失败：${error.message}`, 'bad', 3600);
+    return;
+  }
+  const rows = versions.length
+    ? versions
+        .map(
+          (item) => `<tr style="border-top:1px solid var(--line,#2a2f3a)">
+            <td style="padding:8px 6px">r${esc(String(item.revision ?? ''))}</td>
+            <td style="padding:8px 6px">${esc(formatVersionTime(item.updated_at))}</td>
+            <td style="padding:8px 6px">${Number(item.word_count || 0)} 字</td>
+            <td style="padding:8px 6px;text-align:right">
+              <button class="btn sm" data-ver-restore="${esc(item.version_id)}">恢复</button>
+            </td>
+          </tr>`
+        )
+        .join('')
+    : '<tr><td colspan="4" class="hint" style="padding:12px 6px">还没有历史版本：覆盖正文或重新生成后会自动存档。</td></tr>';
+  openDialog({
+    title: '章节版本记录',
+    wide: true,
+    body: `
+      <div class="hint" style="margin-bottom:8px">每次覆盖正文前会把旧版本完整存档；恢复后版本号继续递增，已有切分或导演脚本会标记为过期。</div>
+      <table style="width:100%;border-collapse:collapse;font-size:13px">
+        <thead><tr class="hint" style="text-align:left">
+          <th style="padding:6px">版本</th>
+          <th style="padding:6px">时间</th>
+          <th style="padding:6px">字数</th>
+          <th style="padding:6px"></th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>`,
+    foot: `<div class="right"><button class="btn" data-dlg-close>关闭</button></div>`,
+    onMount: (mask) => {
+      mask.querySelectorAll('[data-ver-restore]').forEach((button) => {
+        button.addEventListener('click', async () => {
+          const versionId = button.getAttribute('data-ver-restore');
+          const revision = versions.find((item) => String(item.version_id) === String(versionId))?.revision;
+          button.disabled = true;
+          try {
+            const result = await postJSON('/api/ui/chapter/restore', {
+              path: cache.path,
+              chapter: chapterId,
+              version_id: versionId,
+            });
+            closeDialog();
+            await reloadAfterBodyChange(chapterId);
+            toast(
+              `已恢复到版本 r${result?.restored_from ?? revision ?? versionId}（${Number(result?.word_count || 0)} 字）`,
+              'ok'
+            );
+          } catch (error) {
+            button.disabled = false;
+            toast(`恢复失败：${error.message}`, 'bad', 4200);
+          }
+        });
+      });
+    },
+  });
 }
 
 /** 正文变化后同步章节字数与正文缓存，再重画 */
@@ -3219,6 +3322,7 @@ async function onClick(event) {
   if (act === 'novel-beat-delete') return deleteBeat(Number(el.dataset.index));
   if (act === 'novel-chapter-delete') return deleteChapter();
   if (act === 'novel-body-save') return saveBody();
+  if (act === 'novel-body-versions') return openVersionsDialog(ui.sel.id);
   if (act === 'novel-body-generate') return openGenerateDialog(currentBodyWords() > 0);
   if (act === 'novel-body-continue') return openContinueDialog(false);
   if (act === 'novel-draft-apply') return applyDraft(ui.sel.id);

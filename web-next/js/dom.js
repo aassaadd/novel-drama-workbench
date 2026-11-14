@@ -32,6 +32,7 @@ export function fmtClock(ms) {
 
 /**
  * 生成影响清单：按「章节 · 场景」分组列出本次会生成/替换的台词行。
+ * 每行按 decision 标注「复用缓存 / 重新合成 / 沿用已有」，并带上失效原因。
  * @param {object} plan `/api/ui/tts/batch-all/plan` 返回值（需含 items）
  * @param {Array<{id:string,name:string}>} [characters] 角色表，用于把 speaker_id 显示成名字
  * @returns {string} HTML 片段；没有清单时返回空串
@@ -40,6 +41,14 @@ export function impactListHTML(plan, characters = []) {
   const items = plan?.items || [];
   if (!items.length) return '';
   const shown = items.slice(0, 60);
+  const badgeOf = (item) => {
+    if (item.decision === 'reuse') return { cls: 'ok', label: '复用缓存' };
+    if (item.decision === 'synth') return { cls: 'warn', label: '重新合成' };
+    if (item.decision === 'keep') return { cls: 'mute', label: '沿用已有' };
+    if (item.decision === 'blocked') return { cls: 'bad', label: '缺音色' };
+    if (item.decision === 'skip') return { cls: 'mute', label: '跳过' };
+    return item.has_audio ? { cls: 'warn', label: '重新合成' } : { cls: 'mute', label: '待生成' };
+  };
   const groups = [];
   for (const item of shown) {
     const key = `${item.chapter_id || ''}|${item.scene_index || 0}`;
@@ -52,25 +61,32 @@ export function impactListHTML(plan, characters = []) {
   }
   const nameOf = (id) =>
     characters.find((item) => item.id === id)?.name || (id === 'chr_narrator' ? '旁白' : id || '未识别');
+  const reuse = plan.reuse || {};
+  const reuseNote = reuse.regenerate !== undefined
+    ? ` · 复用 ${Number(reuse.keep || 0) + Number(reuse.reuse || 0)} 行 · 重新合成 ${Number(reuse.regenerate || 0)} 行`
+    : '';
   return `
     <details class="impact-block" open style="margin-top:10px">
       <summary>影响清单（${Number(plan.total || items.length)} 行${
         plan.assets ? ` · ${plan.assets} 条已有音频会被替换` : ''
-      }）</summary>
+      }${reuseNote}）</summary>
       <div class="impact" style="margin-top:8px">
         ${groups
           .map(
             (group) => `
           <div class="hint" style="margin:6px 0 2px">${esc(group.title)}（${group.rows.length} 行）</div>
           ${group.rows
-            .map(
-              (item) => `<div class="imp-row">
+            .map((item) => {
+              const badge = badgeOf(item);
+              const reason = (item.changes || []).map((change) => change.text).join('；');
+              return `<div class="imp-row">
                 <span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
                   ${esc(nameOf(item.speaker_id))} · ${esc((item.text || '').slice(0, 42))}
+                  ${reason ? `<span class="hint">（${esc(reason)}）</span>` : ''}
                 </span>
-                <span class="badge ${item.has_audio ? 'warn' : 'mute'}">${item.has_audio ? '替换音频' : '待生成'}</span>
-              </div>`
-            )
+                <span class="badge ${badge.cls}">${badge.label}</span>
+              </div>`;
+            })
             .join('')}`
           )
           .join('')}
@@ -79,6 +95,43 @@ export function impactListHTML(plan, characters = []) {
             ? '<div class="hint">清单过长，只展示前 60 行。</div>'
             : ''
         }
+      </div>
+    </details>`;
+}
+
+/**
+ * 生成「复用的台词」清单：区分沿用已有音频与缓存命中。
+ * @param {object} plan `/api/ui/tts/batch-all/plan` 返回值（读取 reuse.items）
+ * @param {Array<{id:string,name:string}>} [characters] 角色表
+ * @returns {string} HTML 片段；没有复用行时返回空串
+ */
+export function reuseListHTML(plan, characters = []) {
+  const all = (plan?.reuse?.items || []).filter(
+    (item) => item.decision === 'keep' || item.decision === 'reuse'
+  );
+  if (!all.length) return '';
+  const shown = all.slice(0, 60);
+  const kept = all.filter((item) => item.decision === 'keep').length;
+  const cached = all.length - kept;
+  const nameOf = (id) =>
+    characters.find((item) => item.id === id)?.name || (id === 'chr_narrator' ? '旁白' : id || '未识别');
+  return `
+    <details class="impact-block" style="margin-top:8px">
+      <summary>复用的台词（${all.length} 行：沿用 ${kept} · 缓存命中 ${cached}）</summary>
+      <div class="impact" style="margin-top:8px">
+        ${shown
+          .map(
+            (item) => `<div class="imp-row">
+              <span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
+                ${esc(item.speaker_name || nameOf(item.speaker_id))} · ${esc((item.text || '').slice(0, 42))}
+              </span>
+              <span class="badge ${item.decision === 'reuse' ? 'ok' : 'mute'}">${
+                item.decision === 'reuse' ? '缓存命中' : '沿用已有'
+              }</span>
+            </div>`
+          )
+          .join('')}
+        ${all.length > 60 ? '<div class="hint">清单过长，只展示前 60 行。</div>' : ''}
       </div>
     </details>`;
 }

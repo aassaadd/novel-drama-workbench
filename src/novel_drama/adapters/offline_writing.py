@@ -156,6 +156,8 @@ class OfflineWritingAdapter:
             text = self._chapter(meta, req)
         elif task == "summarize":
             text = self._summarize(meta)
+        elif task == "recap":
+            text = self._recap(meta)
         elif task == "script":
             text = self._script(meta)
         elif task == "image_prompt":
@@ -170,7 +172,7 @@ class OfflineWritingAdapter:
             text = self._freeform(req)
         else:
             raise ValueError(
-                f"离线写作不支持的 task={task!r}（可选 outline/chapter/summarize/script/image_prompt/setting/character/polish/freeform）"
+                f"离线写作不支持的 task={task!r}（可选 outline/chapter/summarize/recap/script/image_prompt/setting/character/polish/freeform）"
             )
         return TextGenResult(
             text=text,
@@ -510,6 +512,31 @@ class OfflineWritingAdapter:
         outline = "\n".join(f"{index}. {beat['summary']}" for index, beat in enumerate(beats, start=1))
         return json.dumps(
             {"title": title, "synopsis": synopsis, "outline": outline, "beats": beats},
+            ensure_ascii=False,
+            indent=2,
+        )
+
+    def _recap(self, meta: dict) -> str:
+        """生成本章摘要与滚动全书摘要（离线确定性实现）。
+
+        参数:
+            meta: {index, title, content, book_summary}。
+
+        返回:
+            JSON 字符串（`{"chapter_summary", "book_summary"}`）。
+        """
+        content = str(meta.get("content") or "").strip()
+        paragraphs = [item.strip() for item in content.split("\n\n") if item.strip()]
+        synopsis = self._summarize_synopsis(paragraphs) if paragraphs else "（正文为空）"
+        index = meta.get("index") or ""
+        title = str(meta.get("title") or "未命名")
+        chapter_summary = f"第 {index} 章《{title}》：{synopsis}"
+        previous = str(meta.get("book_summary") or "").strip()
+        book_summary = (previous + "\n" + chapter_summary).strip()
+        if len(book_summary) > 4000:
+            book_summary = book_summary[-4000:]
+        return json.dumps(
+            {"chapter_summary": chapter_summary[:4000], "book_summary": book_summary},
             ensure_ascii=False,
             indent=2,
         )

@@ -33,7 +33,7 @@ from ..models.ids import now_iso
 from ..store import ProjectStore, list_workspaces
 from ..store.project_store import WORKSPACE_INDEX
 from ..store.queue_store import QueueStore
-from ..writing.editing import edit_chapter, save_chapter_content
+from ..writing.editing import edit_chapter, restore_chapter_version, save_chapter_content
 from ..writing.summarize import apply_summary, summarize_chapter
 from .actions import fail_body, run
 from .models_api import register_models_routes, resolve_llm_settings
@@ -2574,10 +2574,10 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
 
         参数:
             body: {path 工程目录, chapter 章节 ID, regen, dry_run,
-                   multi_turn 是否多轮续写, segment_words 每段字数, max_rounds 最大轮数}。
+                   multi_turn 是否按节拍分轮, beats_per_round 每轮节拍数, max_rounds 最大轮数}。
 
         返回:
-            CLI 的 JSON 负载（含 words / rounds / segments / multi_turn）。
+            CLI 的 JSON 负载（含 words / rounds / beats_total / beats_done / stop_reason）。
         """
         argv = ["--project", body["path"], "--json", "chapter", "generate", "--chapter", body["chapter"]]
         if body.get("regen"):
@@ -2587,8 +2587,8 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         # 显式开关才带参数；缺省交给配置里的 writing.multi_turn 判断
         if body.get("multi_turn") is not None:
             argv.append("--multi-turn" if body["multi_turn"] else "--no-multi-turn")
-        if body.get("segment_words") is not None:
-            argv += ["--segment-words", str(body["segment_words"])]
+        if body.get("beats_per_round") is not None:
+            argv += ["--beats-per-round", str(body["beats_per_round"])]
         if body.get("max_rounds") is not None:
             argv += ["--max-rounds", str(body["max_rounds"])]
         return _respond(_cli(*argv))
@@ -2613,6 +2613,41 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         store = _store(body.get("path"))
         try:
             return save_chapter_content(store, body["chapter"], body.get("content") or "")
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/api/ui/chapter/versions")
+    def ui_chapter_versions(path: str = Query(...), chapter: str = Query(...)) -> dict:
+        """章节历史版本列表（新版本在前）。
+
+        参数:
+            path: 工程根目录。
+            chapter: 章节 ID。
+
+        返回:
+            {chapter_id, versions: [{version_id, revision, title, word_count, updated_at, content_chars}]}。
+        """
+        store = _store(path)
+        return {"chapter_id": chapter, "versions": store.list_chapter_versions(chapter)}
+
+    @app.post("/api/ui/chapter/restore")
+    def ui_chapter_restore(body: dict) -> dict:
+        """把指定历史版本恢复为当前正文（revision 递增，必要时标记 stale）。
+
+        参数:
+            body: {path 工程目录, chapter 章节 ID, version_id 版本号}。
+
+        返回:
+            {chapter_id, version_id, revision, status, word_count, restored_from, warnings}。
+
+        异常:
+            HTTPException: 参数错误/该版本无正文 400，章节或版本不存在 404。
+        """
+        store = _store(body.get("path"))
+        try:
+            return restore_chapter_version(store, body.get("chapter") or "", body.get("version_id") or "")
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except FileNotFoundError as exc:

@@ -35,7 +35,7 @@ PENDING_STATES: tuple[str, ...] = ("pending", "stale", "failed")
 SCOPES: tuple[str, ...] = ("selected", "pending", "scene", "chapter")
 
 # 能从行上重建的参数：其余字段（provider_id/model_version/variant_id/切分参数）沿用快照
-_LINE_FIELDS: tuple[str, ...] = ("text", "emotion", "emotion_intensity", "speed", "delivery_note")
+_LINE_FIELDS: tuple[str, ...] = ("text", "emotion", "emotion_intensity", "speed", "delivery_note", "target_duration_ms")
 
 # 撤回时回滚的字段；text 是创作成果，明确不回滚
 REVERT_FIELDS: tuple[str, ...] = ("emotion", "emotion_intensity", "speed", "delivery_note")

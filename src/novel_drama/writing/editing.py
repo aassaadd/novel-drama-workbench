@@ -497,3 +497,54 @@ def save_chapter_content(store: ProjectStore, chapter_id: str, content: str) -> 
         "status": chapter["status"],
         "warnings": warnings,
     }
+
+
+def restore_chapter_version(store: ProjectStore, chapter_id: str, version_id: str) -> dict:
+    """把某个历史版本恢复为当前正文。
+
+    处理规则：
+    - 恢复文本字段（title/outline/synopsis/content）与字数，不恢复场景、脚本等下游产物；
+    - `revision` 在当前值上继续 +1（不回退），当前正文会先被存档；
+    - 已有 `scenes` 或 `script_path` 时 `status` 置为 `stale`，正常触发重新切分判定。
+
+    参数:
+        store: 工程。
+        chapter_id: 章节 ID。
+        version_id: 历史版本文件名（不含 .json，见 `list_chapter_versions`）。
+
+    返回:
+        {"chapter_id", "version_id", "revision", "status", "word_count", "restored_from", "warnings"}。
+
+    异常:
+        ValueError: 版本号非法或该版本没有正文。
+        FileNotFoundError: 章节或版本不存在。
+    """
+    chapter = store.load_chapter(chapter_id)
+    snapshot = store.load_chapter_version(chapter_id, version_id)
+    text = str(snapshot.get("content") or "").strip()
+    if not text:
+        raise ValueError(f"版本 {version_id} 没有正文，无法恢复")
+
+    for key in ("title", "outline", "synopsis"):
+        if key in snapshot:
+            chapter[key] = snapshot.get(key)
+    chapter["content"] = text + "\n"
+    chapter["word_count"] = sum(1 for char in text if not char.isspace())
+
+    warnings: list[str] = []
+    has_downstream = bool(chapter.get("scenes") or chapter.get("script_path"))
+    if has_downstream:
+        warnings.append(STALE_WARNING)
+    chapter["status"] = "stale" if has_downstream else "written"
+    chapter["revision"] = int(chapter.get("revision") or 1) + 1
+    store.save_chapter(chapter)
+
+    return {
+        "chapter_id": chapter_id,
+        "version_id": version_id,
+        "revision": chapter["revision"],
+        "status": chapter["status"],
+        "word_count": chapter["word_count"],
+        "restored_from": snapshot.get("revision"),
+        "warnings": warnings,
+    }
