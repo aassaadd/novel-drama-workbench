@@ -942,12 +942,92 @@ async function openVersions(row) {
   }
 }
 
+/**
+ * 配音批量进度（章节侧入口）：批次状态、完成 / 失败 / 跳过行数与预计剩余。
+ * 任务页只承载工程级队列，按章处理的配音进度与失败行回到这里。
+ * 批次进度是工程范围的；失败行只列当前章节，其他章节的行给出数量提示，
+ * 避免在 A 章点「重录」却重跑 B 章的行。
+ * @param {{failedLimit?: number}} [options] 最多列出的失败行数
+ * @returns {string} 右栏区块 HTML
+ */
+function batchProgressHTML({ failedLimit = 4 } = {}) {
+  const task = state.task || {};
+  const total = Number(task.total || 0);
+  const done = Number(task.done || 0);
+  const failed = Number(task.failed || 0);
+  const skipped = Number(task.skipped || 0);
+  const running = Boolean(task.running);
+  const ratio = total ? Math.min(100, Math.round((done / total) * 100)) : 0;
+  const allRows = task.rows || [];
+  const mine = allRows.filter((row) => !row.chapter_id || row.chapter_id === state.chapterId);
+  const otherCount = allRows.length - mine.length;
+  const failedRows = mine.slice(0, failedLimit);
+  const stateText = running
+    ? `生成中 ${done}/${total}`
+    : total
+      ? task.finished
+        ? '本轮已完成'
+        : '未在运行'
+      : '还没有批量任务';
+  return `
+    <div class="sr-sec">
+      <h4>配音批量进度
+        <span class="badge ${running ? 'run' : total ? 'ok' : 'mute'}" style="margin-left:6px">${stateText}</span>
+      </h4>
+      <div class="bar"><span style="width:${ratio}%"></span></div>
+      <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--text-3);margin-top:6px">
+        <span>完成 ${done} / ${total}${failed ? ` · 失败 ${failed}` : ''}${
+          skipped ? ` · 跳过 ${skipped}` : ''
+        }</span>
+        <span class="mono">${ratio}%${
+          running && task.eta_ms ? ` · 预计剩余 ${fmtClock(task.eta_ms)}` : ''
+        }</span>
+      </div>
+      ${
+        total
+          ? ''
+          : '<div class="hint" style="margin-top:6px">还没有批量配音任务。点下方「补齐缺失配音…」会先列出影响清单，再开始生成。</div>'
+      }
+      ${
+        running
+          ? `<div class="sr-actions" style="margin-top:9px">
+               <button class="btn danger" data-act="stop">${icon('stop')} 停止生成</button>
+               <button class="btn" data-act="pause">${
+                 state.paused ? `${icon('play')} 继续生成` : `${icon('pause')} 暂停`
+               }</button>
+             </div>`
+          : ''
+      }
+      ${
+        failedRows.length
+          ? `<div style="margin-top:8px">
+               <div class="hint" style="margin-bottom:4px">本章失败行（可逐条重录）</div>
+               ${failedRows
+                 .map(
+                   (row) => `<div class="fail-row">
+                     <span class="t" title="${esc(row.message || row.code || '')}">${esc(
+                       row.line_id || row.speaker || ''
+                     )} ${esc(row.message || row.code || '生成失败')}</span>
+                     <button class="btn sm" data-retry-line="${esc(row.line_id || '')}">重录</button>
+                   </div>`
+                 )
+                 .join('')}
+             </div>`
+          : ''
+      }
+      ${
+        otherCount
+          ? `<div class="hint" style="margin-top:6px">另有 ${otherCount} 行失败属于其他章节，请到对应章节处理。</div>`
+          : ''
+      }
+    </div>`;
+}
+
 /** 录音右栏：配音任务 / 角色档案（参考右栏两个页签） */
 function recordPanelHTML() {
   const c = recordCounts();
   const task = state.task || {};
   const ratio = c.total ? Math.round((c.ready / c.total) * 100) : 0;
-  const failedRows = (task.rows || []).slice(0, 5);
   const tab = ui.record.panelTab || 'tasks';
   const characterRows = state.characters
     .map((item) => {
@@ -1001,31 +1081,15 @@ function recordPanelHTML() {
           <div class="stat"><div class="k">总行数</div><div class="v">${c.total}</div></div>
         </div>
       </div>
+      ${batchProgressHTML()}
       <div class="sr-sec">
         <h4>录音操作</h4>
         <div class="sr-actions">
           <button class="btn primary" data-act="batch-plan">${icon('mic')} 补齐缺失配音…</button>
           <button class="btn" data-act="regenerate-chapter">重新生成本章</button>
-          ${task.running ? `<button class="btn danger" data-act="stop">${icon('stop')} 停止录音</button>` : ''}
         </div>
         <div class="hint" style="margin-top:9px">重录只影响该行；批量补齐会跳过已有音频的行。</div>
       </div>
-      ${
-        failedRows.length
-          ? `<div class="sr-sec"><h4>失败行（最近 ${failedRows.length}）</h4>
-              <div class="fail-list">${failedRows
-                .map(
-                  (row) => `<div class="fail-row">
-                    <span class="t" title="${esc(row.message || row.code || '')}">${esc(
-                    row.message || row.code || row.line_id || ''
-                  )}</span>
-                    <button class="btn sm" data-retry-line="${esc(row.line_id || '')}">重录</button>
-                  </div>`
-                )
-                .join('')}</div>
-            </div>`
-          : ''
-      }
       <div class="sr-sec">
         <h4>音色</h4>
         <div class="hint">录音使用角色当前绑定的音色；缺音色会导致该行生成失败。</div>
@@ -1688,7 +1752,10 @@ function postPanelHTML() {
       <div class="sr-head"><span class="ct">混音信息</span>
         <div class="right"><button class="btn icon sm" data-act="toggle-task" title="收起">${icon('next')}</button></div>
       </div>
-      <div class="sr-body"><div class="empty">${icon('refresh', 18)}<span>正在读取时间轴…</span></div></div>`;
+      <div class="sr-body">
+        <div class="empty">${icon('refresh', 18)}<span>正在读取时间轴…</span></div>
+        ${batchProgressHTML({ failedLimit: 3 })}
+      </div>`;
   }
   const tracks = postTracks(data);
   const warnings = warningGroups(data);
@@ -1752,6 +1819,7 @@ function postPanelHTML() {
           <a class="btn" href="#/p/${encodeURIComponent(state.path)}/media">${icon('image')} 素材库</a>
         </div>
       </div>
+      ${batchProgressHTML({ failedLimit: 3 })}
     </div>`;
 }
 

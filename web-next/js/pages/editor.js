@@ -2013,6 +2013,7 @@ async function openBatchDialog(scope = 'chapter') {
         path: state.path,
         title: '正在补齐缺失配音…',
         hint: `本次处理 ${Number(plan.total || 0)} 行 · 复用 ${Number((plan.reuse || {}).keep || 0) + Number((plan.reuse || {}).reuse || 0)} 行 · 重新合成 ${Number((plan.reuse || {}).regenerate || 0)} 行`,
+        chapter: state.chapterId,
       });
       await refreshTask();
       startPolling();

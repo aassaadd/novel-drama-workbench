@@ -1,13 +1,18 @@
 /**
- * 任务视图（V6）：本章配音进度、失败行重试、任务队列。
- * 数据来自批量进度文件与队列接口；运行中每 3 秒刷新一次，离开页面即停轮询。
+ * 任务视图（工程级）：任务队列、全链路编排、GPU 与并发、写作模型。
+ *
+ * 本页不绑定任何章节：不显示章节标题、不渲染章节目录、不出现「本章配音进度」这类按章统计；
+ * 章节内的配音进度与失败行重试放在工作室的章节侧视图（画本右栏「本章任务」、录音 / 后期视图）。
+ *
+ * 数据来自队列与编排接口；运行中每 3 秒刷新一次，只替换内容有变化的卡片，
+ * 不整页重绘，避免任务列表闪动和丢失滚动位置。离开页面即停轮询。
  */
-import { esc, icon, toast, openDialog, closeDialog, fmtDuration, impactListHTML } from '../dom.js';
+import { esc, icon, toast, openDialog, closeDialog } from '../dom.js';
 import { getJSON, postJSON } from '../api.js';
-import { openProgress, watchProgress } from '../progress.js';
+import { openProgress } from '../progress.js';
 import { modeSwitchHTML, bindModeSwitch, getGenMode } from '../gen-mode.js';
 import { state, resetProject } from '../store.js';
-import { railbar, topbar, chapterCtx, goChapter, goProjects, emptyProjectHTML, checkConsistency, resplitBannerHTML, onResplit } from '../shell.js';
+import { railbar, topbar, emptyProjectHTML, goProjects } from '../shell.js';
 
 const QUEUE_LABEL = {
   tts: '配音',
@@ -85,23 +90,20 @@ function stageRange(from, to) {
   return end < start ? [] : order.slice(start, end + 1);
 }
 
-let progress = null;
 let queue = [];
 let readiness = null;
 /** 最近一次全链路编排记录（`run show`） */
 let produceRun = null;
 /** GPU 锁与并发明细（锁文件持有人、队列计数） */
 let gpu = null;
-/** 配音批次是否已暂停 */
-let paused = false;
-/** 当前章节正文与切分是否一致 */
-let consistency = null;
 let queueFilter = 'all';
 let timer = null;
 let bound = false;
 /** 写作模型自查状态（进入任务页加载一次；点「检测连接」重新探测，不参与 3 秒轮询） */
 let llmStatus = null;
 let llmChecking = false;
+/** 各卡片上次渲染的 HTML：内容没变就不动 DOM，避免轮询时列表闪动 */
+const lastRegion = {};
 
 /** 状态徽标语义色 */
 function badgeClass(name) {
@@ -145,86 +147,6 @@ function visibleQueue() {
   return queue.filter((item) => item.status === queueFilter);
 }
 
-/** 失败行文案 */
-function failedRowHTML(row) {
-  const lineId = row.line_id || row.line || '';
-  const label = row.text || row.speaker || lineId.slice(-6) || '未命名行';
-  return `
-    <div class="summary-line">
-      <span style="min-width:0">${esc(label)}
-        <span style="color:var(--text-4);font-size:11px"> · ${esc(errorText(row.error) || '生成失败')}</span></span>
-      <span class="right"><button class="btn sm" data-act="retry" data-line="${esc(lineId)}"
-        title="只重新生成这一行的配音，旧版本保留">重试</button></span>
-    </div>`;
-}
-
-/** 进度卡 */
-function progressHTML() {
-  const data = progress || {};
-  const total = Number(data.total || 0);
-  const done = Number(data.done || 0);
-  const failed = Number(data.failed || 0);
-  const ratio = total ? Math.round((done / total) * 100) : 0;
-  const running = Boolean(data.running);
-  const failedRows = (data.rows || []).slice(0, 20);
-  return `
-    <div class="card" style="margin:14px 18px 0">
-      <div class="card-head"><span class="ct">本章配音进度</span>
-        <div class="right">
-          <span class="badge ${running ? 'run' : total ? 'ok' : 'mute'}">${
-            running ? `生成中 ${done}/${total}` : total ? (data.finished ? '本轮已完成' : '未在运行') : '还没有批量任务'
-          }</span>
-        </div>
-      </div>
-      <div class="card-body">
-        <div class="bar"><span style="width:${ratio}%"></span></div>
-        <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--text-3);margin-top:6px">
-          <span>完成 ${done} / ${total}${failed ? ` · 失败 ${failed}` : ''}${
-            data.skipped ? ` · 跳过 ${data.skipped}` : ''
-          }</span>
-          <span class="mono">${ratio}%${
-            running && data.eta_ms ? ` · 预计剩余 ${fmtDuration(data.eta_ms)}` : ''
-          }</span>
-        </div>
-        <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
-          <button class="btn primary" data-act="batch-plan"
-            ${state.chapterId ? '' : 'disabled'}
-            title="${
-              state.chapterId
-                ? '先看影响清单：本次生成多少行、跳过多少行、预计耗时'
-                : '工程还没有章节，先在小说视图落地章节或导入正文'
-            }">${icon('mic')} 补齐缺失配音…</button>
-          ${
-            running
-              ? `<button class="btn danger" data-act="stop" title="停止当前批量配音任务">${icon('stop')} 停止生成</button>
-                 <button class="btn" data-act="pause" title="暂停后当前行会跑完，继续后从下一行接着配">${
-                   paused ? `${icon('play')} 继续生成` : `${icon('pause')} 暂停`
-                 }</button>`
-              : ''
-          }
-          <button class="btn" data-act="refresh" title="立即刷新进度与队列">${icon('refresh')} 刷新</button>
-        </div>
-        ${
-          total
-            ? ''
-            : `<div class="hint" style="margin-top:8px">${
-                state.chapterId
-                  ? '本章还没有批量配音任务。点击「补齐缺失配音…」会先列出影响清单，再开始生成。'
-                  : '工程还没有章节，配音任务暂不可用；可先在上方「从写小说开始」或「导入已有正文」。'
-              }</div>`
-        }
-        ${
-          failedRows.length
-            ? `<div style="margin-top:12px">
-                 <div class="hint" style="margin-bottom:6px">失败行（可逐条重试）</div>
-                 ${failedRows.map(failedRowHTML).join('')}
-               </div>`
-            : ''
-        }
-      </div>
-    </div>`;
-}
-
 /** 全链路编排卡：阶段区间 + 最近一次运行明细 */
 function produceHTML() {
   const run = produceRun;
@@ -258,24 +180,24 @@ function produceHTML() {
           run
             ? `<span class="badge ${run.status === 'succeeded' ? 'ok' : run.status === 'failed' ? 'bad' : 'run'}">
                  ${esc(PRODUCE_STATUS[run.status] || '未识别')} · ${doneCount}/${stages.length}${
-                   run.scope === 'book' ? ` · 全书 ${(run.chapters || []).length} 章` : run.scope === 'chapter' ? ' · 当前章' : ' · 工程级'
+                   run.scope === 'book'
+                     ? ` · 全书 ${(run.chapters || []).length} 章`
+                     : run.scope === 'chapter'
+                       ? ' · 指定章节'
+                       : ' · 工程级'
                  }${run.run_id ? ` · ${esc(String(run.run_id).slice(-6))}` : ''}
                </span>`
             : '<span class="badge mute">还没有编排记录</span>'
         }</div>
       </div>
       <div class="card-body">
-        <div style="display:grid;grid-template-columns:1fr 1fr auto auto auto;gap:10px;align-items:end">
+        <div style="display:grid;grid-template-columns:1fr 1fr auto auto;gap:10px;align-items:end">
           <div class="field"><label>从</label>
-            <select class="select" id="prod-from" data-enum="produce_stage" title="起始阶段，只能从列表选择">${options('setting')}</select></div>
+            <select class="select" id="prod-from" data-keep="prod-from" data-enum="produce_stage"
+              title="起始阶段，只能从列表选择">${options('setting')}</select></div>
           <div class="field"><label>到</label>
-            <select class="select" id="prod-to" data-enum="produce_stage" title="结束阶段，只能从列表选择">${options('export')}</select></div>
-          <div class="field"><label>范围</label>
-            <select class="select" id="prod-scope"
-              title="全书：工程级阶段跑一次，章节级阶段逐章执行；仅当前章：章节级阶段只跑当前章节">
-              <option value="book">全书</option>
-              <option value="chapter" ${state.chapterId ? '' : 'disabled'}>仅当前章</option>
-            </select></div>
+            <select class="select" id="prod-to" data-keep="prod-to" data-enum="produce_stage"
+              title="结束阶段，只能从列表选择">${options('export')}</select></div>
           ${modeSwitchHTML('produce', { fallback: 'fill' })}
           <button class="btn primary" data-act="produce-start"
             title="后台启动 ndw produce，按记录续跑已完成的阶段">启动编排</button>
@@ -284,7 +206,7 @@ function produceHTML() {
           ${
             state.chapters.length
               ? '只补缺失：已完成的阶段会跳过；重新生成：忽略已有产物并强制重跑全部阶段。'
-              : '工程还没有章节：设定库 / 大纲可直接跑；正文及之后的阶段需要章节。'
+              : '工程还没有章节：设定库 / 大纲可以直接跑；正文及之后的阶段需要先在小说视图落地章节。'
           }运行期间本卡片随任务轮询一起刷新。
         </div>
         ${
@@ -293,15 +215,26 @@ function produceHTML() {
                  <thead><tr><th>阶段</th><th>状态</th><th>产物</th><th>说明</th></tr></thead>
                  <tbody>${rows}</tbody>
                </table>`
-            : ''
+            : '<div class="empty" style="padding:18px 12px"><b>还没有编排记录</b><span>选择阶段区间后点「启动编排」，这里会逐阶段显示状态与产物数量。</span></div>'
         }
       </div>
     </div>`;
 }
 
-/** GPU 锁与并发卡：锁持有人 + 队列计数 */
+/** GPU 锁与并发卡：锁持有人 + 队列计数；读不到状态时也给可读空态，不整块隐藏 */
 function gpuHTML() {
-  if (!gpu) return '';
+  if (!gpu) {
+    return `
+      <div class="card" style="margin:14px 18px 0">
+        <div class="card-head"><span class="ct">GPU 与并发</span>
+          <div class="right"><span class="badge mute">读取中</span></div>
+        </div>
+        <div class="card-body">
+          <div class="empty" style="padding:18px 12px"><b>暂时读不到 GPU 状态</b>
+            <span>接口不可用或工程还没初始化；恢复后本卡片会随轮询自动刷新。</span></div>
+        </div>
+      </div>`;
+  }
   const lock = gpu.lock || {};
   const counts = gpu.queue || {};
   const held = Boolean(lock.exists && lock.alive);
@@ -356,7 +289,7 @@ function gpuHTML() {
     </div>`;
 }
 
-/** 队列卡 */
+/** 队列卡：工程内所有任务的运行中 / 排队 / 完成 / 失败状态与产物 */
 function queueHTML() {
   const rows = visibleQueue();
   const countOf = (key) => {
@@ -399,7 +332,7 @@ function queueHTML() {
     ['succeeded', 'failed', 'canceled', 'interrupted'].includes(item.status)
   ).length;
   return `
-    <div class="card" style="margin:14px 18px 18px">
+    <div class="card" style="margin:14px 18px 0">
       <div class="card-head"><span class="ct">任务队列</span>
         <div class="right" style="display:flex;gap:4px;align-items:center">
           ${[
@@ -488,7 +421,7 @@ function llmHTML() {
     : '';
   const lastSnippet = last && (last.snippet || last.error) ? (last.snippet || last.error) : '';
   return `
-    <div class="card" style="margin:14px 18px 0" id="llm-card">
+    <div class="card" style="margin:14px 18px 18px">
       <div class="card-head"><span class="ct">写作模型</span>
         <div class="right" style="display:flex;gap:8px;align-items:center">
           ${badge}
@@ -517,12 +450,6 @@ function llmHTML() {
     </div>`;
 }
 
-/** 只重画写作模型卡，避免整页重绘打断其它卡片状态 */
-function repaintLlm() {
-  const card = document.getElementById('llm-card');
-  if (card) card.outerHTML = llmHTML();
-}
-
 /**
  * 探测写作模型（POST /api/ui/llm/status）。
  * @returns {Promise<void>}
@@ -530,7 +457,7 @@ function repaintLlm() {
 async function refreshLlm() {
   if (llmChecking) return;
   llmChecking = true;
-  repaintLlm();
+  paintRegions(['llm']);
   try {
     llmStatus = await postJSON('/api/ui/llm/status', {});
   } catch (error) {
@@ -538,38 +465,63 @@ async function refreshLlm() {
   } finally {
     llmChecking = false;
   }
-  repaintLlm();
+  paintRegions(['llm']);
 }
 
-/** 主区 */
+/** 主区：工程级标题 + 四块卡片容器 */
 function mainHTML() {
-  const chapter = state.chapters.find((item) => item.id === state.chapterId);
   const ready = readiness?.ready;
   return `
-    ${state.chapterId ? '' : emptyProjectHTML(state.path, { compact: true })}
-    ${resplitBannerHTML(consistency)}
-    <div class="page-head">
+    ${state.chapters.length ? '' : emptyProjectHTML(state.path, { compact: true })}
+    <div class="page-head" style="margin:14px 18px 0">
       <div class="ph">
-        <div class="eyebrow"><span class="ln"></span>任务</div>
-        <h1 class="page-title">${esc(chapter?.title || '任务')}</h1>
-        <div class="page-sub">批量进度、失败重试与队列状态。运行中每 3 秒自动刷新。</div>
+        <div class="eyebrow"><span class="ln"></span>工程任务</div>
+        <h1 class="page-title">任务中心</h1>
+        <div class="page-sub">任务队列、全链路编排、GPU 与并发、写作模型。运行中每 3 秒自动刷新，只更新变化的卡片。</div>
       </div>
       <div class="ph-actions">
-        <span class="badge ${ready ? 'ok' : 'bad'}">${ready ? '配音引擎就绪' : esc(readiness?.reason || '引擎不可用')}</span>
+        <span class="badge ${ready ? 'ok' : readiness ? 'bad' : 'mute'}">${
+          readiness ? (ready ? '配音引擎就绪' : esc(readiness.reason || '引擎不可用')) : '正在读取配音引擎状态…'
+        }</span>
       </div>
     </div>
-    ${progressHTML()}
-    ${llmHTML()}
-    ${produceHTML()}
-    ${gpuHTML()}
-    ${queueHTML()}`;
+    <div id="task-queue">${queueHTML()}</div>
+    <div id="task-produce">${produceHTML()}</div>
+    <div id="task-gpu">${gpuHTML()}</div>
+    <div id="task-llm">${llmHTML()}</div>`;
 }
 
-/** 重画 */
-function repaint() {
-  const main = document.getElementById('task-main');
-  if (main) main.innerHTML = mainHTML();
-  bindProduceMode();
+/** 卡片构建器：key → HTML 生成函数 */
+const REGION_BUILDERS = {
+  queue: queueHTML,
+  produce: produceHTML,
+  gpu: gpuHTML,
+  llm: llmHTML,
+};
+
+/**
+ * 只重画内容有变化的卡片。
+ * 内容一致的卡片保持原 DOM，轮询刷新时不会整页重绘，任务列表不闪、滚动位置不丢。
+ * 编排卡里的阶段下拉是用户选择，重画后要恢复，避免被默认值覆盖。
+ * @param {string[]} [force] 强制重画的卡片 key
+ */
+function paintRegions(force = []) {
+  for (const [key, build] of Object.entries(REGION_BUILDERS)) {
+    const node = document.getElementById(`task-${key}`);
+    if (!node) continue;
+    const html = build();
+    if (!force.includes(key) && lastRegion[key] === html) continue;
+    const keep = {};
+    node.querySelectorAll('select[data-keep]').forEach((sel) => {
+      keep[sel.dataset.keep] = sel.value;
+    });
+    node.innerHTML = html;
+    node.querySelectorAll('select[data-keep]').forEach((sel) => {
+      if (keep[sel.dataset.keep] !== undefined) sel.value = keep[sel.dataset.keep];
+    });
+    lastRegion[key] = html;
+    if (key === 'produce') bindProduceMode();
+  }
 }
 
 /**
@@ -586,54 +538,34 @@ function bindProduceMode() {
   });
 }
 
-/** 检查本章正文与切分是否一致（只读，不阻塞任务刷新） */
-async function refreshConsistency() {
-  // 没有章节时不做章节一致性检查，避免空 chapter 请求把整页带崩
-  if (!state.chapterId) {
-    consistency = null;
-    return;
-  }
-  consistency = await checkConsistency(state.path, state.chapterId);
+/** 队列里是否还有运行中 / 排队中的任务（决定刷新频率） */
+function hasActiveJobs() {
+  return queue.some((item) => ['queued', 'running'].includes(item.status)) || produceRun?.status === 'running';
 }
 
 /** 拉取数据 */
 async function refresh({ silent = true } = {}) {
+  // 已离开任务页（或请求在离开后才返回）时不再轮询，避免后台持续打接口
+  if (!document.getElementById('task-main')) return;
   try {
-    const [progressData, queueData, pauseData, gpuData, produceData] = await Promise.all([
-      getJSON('/api/ui/tts/batch-all/progress', { path: state.path }),
+    const [queueData, gpuData, produceData] = await Promise.all([
       getJSON('/api/ui/queue', { path: state.path }),
-      getJSON('/api/ui/tts/pause', { path: state.path }),
       getJSON('/api/ui/gpu/status', { path: state.path }).catch(() => null),
       getJSON('/api/ui/produce/latest', { path: state.path }).catch(() => null),
     ]);
-    progress = progressData;
     queue = Array.isArray(queueData) ? queueData : queueData?.jobs || [];
-    paused = Boolean(pauseData?.paused);
     gpu = gpuData;
     produceRun = produceData?.run || null;
-    repaint();
-    // 运行中加快刷新，停止后回到 8 秒
+    paintRegions();
+    // 运行中加快刷新，空闲时放慢
     window.clearTimeout(timer);
-    timer = window.setTimeout(
-      () => refresh({ silent: true }),
-      progress?.running ? 3000 : 8000
-    );
+    timer = window.setTimeout(() => refresh({ silent: true }), hasActiveJobs() ? 3000 : 8000);
     if (!silent) toast('已刷新', 'ok');
   } catch (error) {
     if (!silent) toast(error.message, 'bad');
+    paintRegions();
     window.clearTimeout(timer);
     timer = window.setTimeout(() => refresh({ silent: true }), 8000);
-  }
-}
-
-/** 停止生成 */
-async function stopAll() {
-  try {
-    const result = await postJSON('/api/ui/stop', { path: state.path });
-    toast(result?.stopped ? '已停止生成' : '当前没有在跑的任务', result?.stopped ? 'ok' : 'info');
-    await refresh();
-  } catch (error) {
-    toast(error.message, 'bad');
   }
 }
 
@@ -741,141 +673,28 @@ async function releaseGpuLock(button) {
   });
 }
 
-/** 暂停 / 继续生成 */
-async function togglePause() {
-  try {
-    await postJSON('/api/ui/tts/pause', { path: state.path, paused: !paused });
-    paused = !paused;
-    toast(paused ? '已暂停：当前行完成后续跑' : '已继续生成', 'ok');
-    await refresh();
-  } catch (error) {
-    toast(error.message, 'bad');
-  }
-}
-
-/** 生成参数 / 影响清单弹窗 */
-function openPlanDialog(plan) {
-  const total = Number(plan?.total || 0);
-  const unknownRows = plan?.unknown_rows || [];
-  const blockers = plan?.blockers || [];
-  const mask = openDialog({
-    title: '补齐缺失配音',
-    body: `
-      <div class="summary-line"><span>本次生成</span><span class="right">${total} 行</span></div>
-      <div class="summary-line"><span>跳过（已配 / 未识别）</span><span class="right">${Number(plan?.skipped || 0)} 行</span></div>
-      <div class="summary-line"><span>预计耗时</span><span class="right">${plan?.eta_ms ? fmtDuration(plan.eta_ms) : '未知'}</span></div>
-      ${impactListHTML(plan, state.characters)}
-      ${
-        unknownRows.length
-          ? `<div class="dlg-note warn">未识别角色 ${unknownRows.length} 行，会被跳过：<br />${unknownRows
-              .slice(0, 5)
-              .map((row) => `· ${esc(row.chapter_title || '')} ${esc((row.line_id || '').slice(-6))}`)
-              .join('<br />')}${unknownRows.length > 5 ? '<br />…' : ''}</div>`
-          : ''
-      }
-      ${blockers.length ? `<div class="dlg-note bad">阻塞：${blockers.map((item) => esc(item.message || item)).join('；')}</div>` : ''}`,
-    foot: `<div class="right"><button class="btn" data-dlg-close>取消</button>
-      <button class="btn primary" id="plan-ok" ${total ? '' : 'disabled'}>开始生成 ${total} 行</button></div>`,
-  });
-  mask.querySelector('#plan-ok').addEventListener('click', async (event) => {
-    event.currentTarget.disabled = true;
-    try {
-      await postJSON('/api/ui/tts/batch-all', { path: state.path, scope: 'chapter', chapter: state.chapterId });
-      closeDialog();
-      toast(`已开始补齐 ${total} 行`, 'ok');
-      watchProgress({
-        path: state.path,
-        title: '正在补齐缺失配音…',
-        hint: `本次 ${total} 行 · 已配好的行会自动跳过`,
-      });
-      await refresh();
-    } catch (error) {
-      toast(error.message, 'bad');
-      event.currentTarget.disabled = false;
-    }
-  });
-}
-
 /** 点击 */
 async function onRootClick(event) {
   // 监听绑在共享根节点上：离开任务页后不再处理，避免抢走其它页面的同名操作
   if (!document.getElementById('task-main')) return;
-  const chapterRow = event.target.closest('[data-chapter]');
-  if (chapterRow) {
-    state.chapterId = chapterRow.dataset.chapter;
-    const ctx = document.querySelector('.ctx');
-    if (ctx) ctx.outerHTML = chapterCtx({ search: state.chapterSearch });
-    await refreshConsistency();
-    await refresh();
-    return;
-  }
   const filterButton = event.target.closest('[data-qfilter]');
   if (filterButton) {
     queueFilter = filterButton.dataset.qfilter;
-    repaint();
+    paintRegions(['queue']);
     return;
   }
   const button = event.target.closest('[data-act]');
   if (!button) return;
   const act = button.dataset.act;
   if (act === 'back') return goProjects();
-  if (act === 'to-editor') {
-    // 无章节时「回画本」没有目标，统一回小说视图继续写
-    if (!state.chapterId) {
-      location.hash = `#/p/${encodeURIComponent(state.path)}/novel`;
-      return;
-    }
-    return goChapter(state.path, state.chapterId);
-  }
   if (act === 'refresh') return refresh({ silent: false });
   if (act === 'llm-check') return refreshLlm();
   if (act === 'gpu-release') return releaseGpuLock(button);
   if (act === 'job-stop') return stopJob(button.dataset.job, button);
   if (act === 'queue-clear') return clearQueue(button);
-  if (act === 'stop') return stopAll();
-  if (act === 'pause') return togglePause();
-  if (act === 'batch-plan') {
-    if (!state.chapterId) {
-      toast('工程还没有章节，先在小说视图落地章节或导入正文', 'info');
-      return;
-    }
-    button.disabled = true;
-    try {
-      const plan = await getJSON('/api/ui/tts/batch-all/plan', {
-        path: state.path,
-        scope: 'chapter',
-        chapter: state.chapterId,
-      });
-      openPlanDialog(plan);
-    } catch (error) {
-      toast(error.message, 'bad');
-    } finally {
-      button.disabled = false;
-    }
-    return;
-  }
-  if (act === 'retry') {
-    const lineId = button.dataset.line;
-    if (!lineId) return toast('这一行缺少 ID，无法重试', 'bad');
-    button.disabled = true;
-    try {
-      await postJSON(
-        '/api/ui/line/rerun',
-        { path: state.path, chapter: state.chapterId, line: lineId },
-        { timeout: 0 }
-      );
-      toast('这一行已重新生成', 'ok');
-      await refresh();
-    } catch (error) {
-      toast(error.message, 'bad');
-      button.disabled = false;
-    }
-    return;
-  }
   if (act === 'produce-start') {
     const from = document.getElementById('prod-from')?.value || 'setting';
     const to = document.getElementById('prod-to')?.value || 'export';
-    const scope = document.getElementById('prod-scope')?.value || 'book';
     // 只有章节级阶段需要章节；工程级阶段（设定库 / 大纲）空工程也能跑
     const needChapterStages = stageRange(from, to).filter((key) => !PROJECT_STAGES.has(key));
     if (needChapterStages.length && !state.chapters.length) {
@@ -885,9 +704,6 @@ async function onRootClick(event) {
         'warn',
         5600
       );
-    }
-    if (scope === 'chapter' && !state.chapterId) {
-      return toast('当前没有选中章节：可把范围改为「全书」', 'warn', 4200);
     }
     // 生成方式：只补缺失阶段（续跑）或强制重跑全部阶段
     const mode = getGenMode('produce', 'fill');
@@ -902,7 +718,7 @@ async function onRootClick(event) {
     try {
       const result = await postJSON('/api/ui/produce', {
         path: state.path,
-        chapter: scope === 'chapter' ? state.chapterId : '',
+        chapter: '',
         from,
         to,
         force,
@@ -966,7 +782,7 @@ function watchProduceProgress(from, to, mode = 'fill') {
             if (timer) window.clearTimeout(timer);
             panel.fail({
               message: '编排没有启动成功',
-              detail: errorText(mine.error) || '可到任务页「任务队列」查看这条任务。',
+              detail: errorText(mine.error) || '可到本页「任务队列」查看这条任务。',
               retry: () => watchProduceProgress(from, to, mode),
             });
             void refresh({ silent: true });
@@ -977,7 +793,7 @@ function watchProduceProgress(from, to, mode = 'fill') {
           stopped = true;
           panel.fail({
             message: '没有找到编排记录，可能启动失败',
-            detail: '可到任务页查看日志。',
+            detail: '可到本页「任务队列」或日志页查看。',
             retry: () => watchProduceProgress(from, to, mode),
           });
           return;
@@ -1002,7 +818,7 @@ function watchProduceProgress(from, to, mode = 'fill') {
             const bad = stages.find((item) => item.status === 'failed');
             panel.fail({
               message: `编排结束：${failed} 个阶段失败`,
-              detail: errorText(bad?.error) || '失败原因可在任务页「全链路编排」里逐阶段查看。',
+              detail: errorText(bad?.error) || '失败原因可在本页「全链路编排」里逐阶段查看。',
               retry: () => watchProduceProgress(from, to, mode),
             });
           } else {
@@ -1036,35 +852,17 @@ function watchProduceProgress(from, to, mode = 'fill') {
   void tick();
 }
 
-/** 输入（章节目录搜索） */
-function onRootInput(event) {
-  // 同上：离开任务页后不再处理共享根节点上的输入
-  if (!document.getElementById('task-main')) return;
-  if (event.target.id === 'chapter-search') {
-    state.chapterSearch = event.target.value;
-    const ctx = document.querySelector('.ctx');
-    if (ctx) ctx.outerHTML = chapterCtx({ search: state.chapterSearch });
-    const input = document.getElementById('chapter-search');
-    if (input) {
-      input.focus();
-      input.setSelectionRange(input.value.length, input.value.length);
-    }
-  }
-}
-
 /** 离开任务页时停掉轮询 */
 export function leaveTasks() {
   window.clearTimeout(timer);
   timer = null;
-  onResplit(null);
 }
 
-/** 进入任务视图 */
+/** 进入任务视图（工程级，不读取也不选中任何章节） */
 export async function renderTasks(root, { path }) {
   if (state.path !== path) resetProject(path);
   if (!bound) {
     root.addEventListener('click', onRootClick);
-    root.addEventListener('input', onRootInput);
     bound = true;
   }
   root.innerHTML = `${topbar({ left: '', crumbs: '<span class="cur">正在加载任务…</span>', right: '' })}`;
@@ -1075,40 +873,31 @@ export async function renderTasks(root, { path }) {
       getJSON('/api/ui/readiness', { path }).catch(() => null),
     ]);
     state.info = info;
+    // 章节只用于图标栏计数与「空工程」提示，本页不选中、不展示任何章节上下文
     state.chapters = chapters || [];
     readiness = ready;
-    if (!state.chapters.some((item) => item.id === state.chapterId)) {
-      state.chapterId = state.chapters[0]?.id || '';
-    }
   } catch (error) {
     root.innerHTML = `<div class="page"><div class="empty">${icon('warn', 22)}<b>任务加载失败</b>
       <span>${esc(error.message)}</span><a class="btn" href="#/projects" style="margin-top:10px">回工作区</a></div></div>`;
     return;
   }
+  Object.keys(lastRegion).forEach((key) => delete lastRegion[key]);
   root.innerHTML = `
     ${topbar({
       left: `<button class="btn icon" data-act="back" title="回工作区">${icon('back')}</button>
              <div class="brand"><span class="brand-mark"></span><span style="font-size:12.5px">任务<small>本地版</small></span></div>`,
       crumbs: `<a href="#/projects">${esc(state.info?.work?.title || '工程')}</a>
                <span class="sep">/</span><span class="cur">任务</span>`,
-      right: `<button class="btn" data-act="to-editor">${icon('chapter')} 回画本</button>`,
+      right: `<button class="btn" data-act="refresh">${icon('refresh')} 刷新</button>`,
     })}
-    <div class="studio" id="studio">
+    <div class="studio no-ctx" id="studio">
       ${railbar('tasks', { chapters: state.chapters.length })}
-      ${chapterCtx({ search: state.chapterSearch })}
       <section class="editor">
         <div id="task-main" style="display:flex;flex-direction:column;min-height:0;flex:1;overflow:auto">${mainHTML()}</div>
       </section>
-      <aside class="studio-right"></aside>
     </div>`;
   bindProduceMode();
-  await refreshConsistency();
   await refresh();
   // 写作模型自查：进入页面探测一次，点「检测连接」可随时复测（不参与 3 秒轮询）
   void refreshLlm();
-  // 顶部「重新切分本章」：完成后复核一致性并刷新进度
-  onResplit(async () => {
-    await refreshConsistency();
-    await refresh();
-  });
 }

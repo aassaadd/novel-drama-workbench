@@ -209,6 +209,8 @@ svg { display: block; }
   min-width: 1080px;
 }
 .studio.no-right { grid-template-columns: var(--rail-w) var(--ctx-w) minmax(0, 1fr); }
+/* 工程级页面（任务）：没有章节目录，只保留图标栏与主区 */
+.studio.no-ctx { grid-template-columns: var(--rail-w) minmax(0, 1fr); }
 .studio.right-open { grid-template-columns: var(--rail-w) var(--ctx-w) minmax(0, 1fr) 550px; min-width: 1440px; }
 .studio.right-open > .studio-right { display: flex; }
 .studio.right-open .task-rail { display: none; }

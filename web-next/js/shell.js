@@ -573,7 +573,7 @@ function openChapterMenu(chapterId, anchor) {
       { key: 'batch', label: '批量操作' },
       { key: 'mix', label: '混音合成' },
       { key: 'download', label: '下载音频…' },
-      { key: 'jobs', label: '查看工单' },
+      { key: 'jobs', label: '查看任务队列' },
       { key: 'info', label: '章节信息' },
       { key: 'rename', label: '重命名' },
       { key: 'delete', label: '删除章节', danger: true },

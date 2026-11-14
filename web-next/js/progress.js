@@ -367,7 +367,7 @@ export function openProgress({ title, hint = '', stage = '准备中…', stream 
 
 /**
  * 轮询后台批量任务进度并用浮层展示（配音补齐等由后端队列执行的任务）。
- * 任务结束后保留结果与「去任务页看明细」入口。
+ * 配音批次结束后给出「回章节处理失败行」入口；其它任务可去工程任务页看队列明细。
  *
  * @param {object} options 配置
  * @param {string} options.path 工程目录
@@ -375,6 +375,7 @@ export function openProgress({ title, hint = '', stage = '准备中…', stream 
  * @param {string} [options.hint] 说明
  * @param {string} [options.endpoint] 进度接口，默认配音批量进度
  * @param {number} [options.interval] 轮询间隔毫秒
+ * @param {string} [options.chapter] 配音批次的章节 ID（用于失败行回章节处理）
  * @param {(data: object) => void} [options.onRefresh] 每次拿到进度后的回调
  * @returns {{stop: () => void}} 控制器
  */
@@ -384,9 +385,11 @@ export function watchProgress({
   hint = '',
   endpoint = '/api/ui/tts/batch-all/progress',
   interval = 2000,
+  chapter = '',
   onRefresh,
 }) {
-  const options = { path, title, hint, endpoint, interval, onRefresh };
+  const options = { path, title, hint, endpoint, interval, chapter, onRefresh };
+  const isTts = endpoint === '/api/ui/tts/batch-all/progress';
   const panel = openProgress({ title, hint, stage: '后台任务已启动，正在读取进度…' });
   panel.update({ percent: 0 });
   let stopped = false;
@@ -418,21 +421,37 @@ export function watchProgress({
         if (reused) {
           details.push(`复用 ${reused} 行${savedMs ? `，约省 ${Math.max(1, Math.round(savedMs / 1000))} 秒` : ''}`);
         }
-        if (failed) details.push('失败行可在任务页逐条重试。');
+        if (failed) {
+          details.push(
+            isTts ? '失败行可在章节右栏「本章任务」或录音 / 后期视图里逐条重录。' : '失败行可在任务页逐条重试。'
+          );
+        }
         panel.finish({
           message: total
             ? `本轮完成：${done}/${total}${failed ? ` · 失败 ${failed}` : ''}${reused ? ` · 复用 ${reused}` : ''}`
             : '任务已结束（没有可生成的条目）',
           detail: details.join(' '),
-          actions: [
-            {
-              label: '去任务页看明细',
-              primary: true,
-              onClick: () => {
-                window.location.hash = `#/p/${encodeURIComponent(path)}/tasks`;
-              },
-            },
-          ],
+          actions: isTts
+            ? chapter
+              ? [
+                  {
+                    label: '回章节处理失败行',
+                    primary: true,
+                    onClick: () => {
+                      window.location.hash = `#/p/${encodeURIComponent(path)}/c/${encodeURIComponent(chapter)}`;
+                    },
+                  },
+                ]
+              : []
+            : [
+                {
+                  label: '去任务页看明细',
+                  primary: true,
+                  onClick: () => {
+                    window.location.hash = `#/p/${encodeURIComponent(path)}/tasks`;
+                  },
+                },
+              ],
         });
         return;
       }
