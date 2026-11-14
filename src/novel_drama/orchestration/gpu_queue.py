@@ -11,9 +11,11 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import time
 from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
 from typing import Iterator
 
@@ -31,6 +33,69 @@ def _warn(message: str) -> None:
         message: 说明文本。
     """
     print(f"[gpu.lock] {message}", file=sys.stderr, flush=True)
+
+
+def _parse_iso_epoch(value: str) -> float | None:
+    """把锁内的 ISO 时间转成 epoch 秒。
+
+    参数:
+        value: 形如 2026-11-13T05:26:28Z 的时间。
+
+    返回:
+        epoch 秒；无法解析时返回 None。
+    """
+    text = (value or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def _process_start_epoch(pid: int) -> float | None:
+    """读取进程启动时间（用于识别 pid 被复用）。
+
+    参数:
+        pid: 进程号。
+
+    返回:
+        启动时间的 epoch 秒；进程不存在或无法解析时返回 None。
+    """
+    try:
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "lstart="],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            env={**os.environ, "LC_ALL": "C", "LANG": "C"},
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    text = " ".join((result.stdout or "").split())
+    if not text:
+        return None
+    try:
+        return datetime.strptime(text, "%a %b %d %H:%M:%S %Y").timestamp()
+    except ValueError:
+        return None
+
+
+def _pid_reused(pid: int, lock_started_at: str) -> bool:
+    """判断锁里的 pid 是否已被别的进程复用。
+
+    参数:
+        pid: 锁内记录的进程号。
+        lock_started_at: 锁创建时间（ISO）。
+
+    返回:
+        True 表示当前 pid 的启动时间明显晚于锁创建时间，属于复用。
+    """
+    lock_epoch = _parse_iso_epoch(lock_started_at)
+    start_epoch = _process_start_epoch(pid)
+    if lock_epoch is None or start_epoch is None:
+        return False
+    return start_epoch > lock_epoch + 5
 
 
 class GpuLock:
@@ -101,12 +166,19 @@ class GpuLock:
             return False
         try:
             os.kill(pid, 0)
-            return True
         except ProcessLookupError:
             _warn(f"锁的持锁进程 {pid} 已不存在，按僵死锁处理并接管：{self.path}")
             return False
         except PermissionError:
+            # 其他用户的进程：可能是共用同一把锁的 ComfyUI，也可能只是 pid 被复用
+            if _pid_reused(pid, str(data.get("started_at") or "")):
+                _warn(f"锁内 pid {pid} 已被其他用户进程复用（启动时间晚于锁创建），按僵死锁处理并接管：{self.path}")
+                return False
             return True
+        if _pid_reused(pid, str(data.get("started_at") or "")):
+            _warn(f"锁内 pid {pid} 已被其他进程复用（启动时间晚于锁创建），按僵死锁处理并接管：{self.path}")
+            return False
+        return True
 
     def _just_created(self, window_s: float = 2.0) -> bool:
         """判断锁文件是否刚刚创建（写入内容的窗口期）。
@@ -158,8 +230,9 @@ class GpuLock:
         """查看锁当前状态（只读，不做接管或清理）。
 
         返回:
-            `{path, exists, alive, holder}`；`holder` 为
+            `{path, exists, alive, stale, holder, note}`；`holder` 为
             `{pid, job_id, started_at}`，锁内容不可解析时为 None。
+            `alive=False` 且 `exists=True` 即为僵死锁（下次任务会自动接管）。
         """
         exists = self.path.exists()
         holder = None
@@ -173,12 +246,54 @@ class GpuLock:
                 }
             except (OSError, json.JSONDecodeError, ValueError):
                 holder = None
+        alive = self._holder_alive() if exists else False
+        stale = bool(exists and not alive)
+        if not exists:
+            note = "锁文件不存在，GPU 空闲"
+        elif alive:
+            pid = (holder or {}).get("pid") or "?"
+            note = f"锁的持锁进程 pid {pid} 仍在运行，GPU 任务会等它结束后自动接管"
+        elif holder is None:
+            note = "锁内容不可解析（没有可用 pid），下次 GPU 任务会自动接管"
+        else:
+            pid = int((holder or {}).get("pid") or 0)
+            if pid and _pid_reused(pid, str(holder.get("started_at") or "")):
+                note = (
+                    f"僵死锁：锁内 pid {pid} 已被其他进程复用（不是真正的持锁进程），"
+                    "下次 GPU 任务会自动接管；也可以现在手动释放"
+                )
+            else:
+                note = (
+                    f"僵死锁：持锁进程 pid {pid or '?'} 已不存在，"
+                    "下次 GPU 任务会自动接管；也可以现在手动释放"
+                )
         return {
             "path": str(self.path),
             "exists": exists,
-            "alive": self._holder_alive() if exists else False,
+            "alive": alive,
+            "stale": stale,
             "holder": holder,
+            "note": note,
         }
+
+    def break_stale(self) -> bool:
+        """释放僵死/无效锁（活锁不动）。
+
+        返回:
+            True 表示锁已删除或本来就不存在；False 表示锁仍被存活进程持有。
+
+        异常:
+            OSError: 删除锁文件失败（权限、只读卷等）。
+        """
+        if not self.path.exists():
+            return True
+        if self._holder_alive():
+            return False
+        try:
+            self.path.unlink()
+        except FileNotFoundError:
+            return True
+        return True
 
     @contextmanager
     def hold(self, job_id: str = "") -> Iterator[None]:

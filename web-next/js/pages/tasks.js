@@ -15,6 +15,17 @@ const QUEUE_LABEL = {
   image: '配图',
   video: '视频',
   render: '渲染',
+  chapter: '章节正文',
+  'chapter.continue': '正文续写',
+  world: '世界观',
+  outline: '大纲',
+  setting: '写作设定',
+  character: '角色',
+  'character.desc': '角色描述',
+  script: '导演标注',
+  voice: '音色',
+  'voice.fill': '补齐音色',
+  produce: '全链路编排',
 };
 
 const STATUS_LABEL = {
@@ -23,6 +34,7 @@ const STATUS_LABEL = {
   succeeded: '成功',
   failed: '失败',
   canceled: '已取消',
+  interrupted: '已中断',
   pending: '待生成',
   ready: '就绪',
 };
@@ -54,6 +66,24 @@ const PRODUCE_STATUS = {
   skipped: '跳过',
 };
 
+/** 工程级阶段：不需要章节，整本工程只跑一次（与后端 PROJECT_STAGES 一致） */
+const PROJECT_STAGES = new Set(['setting', 'outline']);
+/** 阶段中文名 */
+const PRODUCE_LABEL = Object.fromEntries(PRODUCE_STAGES);
+
+/**
+ * 阶段区间（含两端）内的阶段 key 列表。
+ * @param {string} from 起始阶段
+ * @param {string} to 结束阶段
+ * @returns {string[]} 阶段 key
+ */
+function stageRange(from, to) {
+  const order = PRODUCE_STAGES.map(([key]) => key);
+  const start = Math.max(0, order.indexOf(from));
+  const end = order.indexOf(to);
+  return end < start ? [] : order.slice(start, end + 1);
+}
+
 let progress = null;
 let queue = [];
 let readiness = null;
@@ -74,7 +104,7 @@ function badgeClass(name) {
   if (name === 'succeeded' || name === 'ready') return 'ok';
   if (name === 'failed') return 'bad';
   if (name === 'running') return 'run';
-  if (name === 'queued' || name === 'pending') return 'mute';
+  if (name === 'queued' || name === 'pending' || name === 'interrupted' || name === 'canceled') return 'mute';
   return '';
 }
 
@@ -91,6 +121,17 @@ function errorText(value) {
       JSON.stringify(value);
   }
   return String(value);
+}
+
+/**
+ * 队列错误列的简短文本：多行错误（退出码 + 日志尾部）只留前两行。
+ * @param {any} value 错误值
+ * @returns {string} 两行以内的错误摘要
+ */
+function errorSummary(value) {
+  const text = errorText(value);
+  const rows = text.split('\n').map((row) => row.trim()).filter(Boolean);
+  return rows.slice(0, 2).join(' / ');
 }
 
 /** 过滤队列 */
@@ -143,7 +184,12 @@ function progressHTML() {
         </div>
         <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
           <button class="btn primary" data-act="batch-plan"
-            title="先看影响清单：本次生成多少行、跳过多少行、预计耗时">${icon('mic')} 补齐缺失配音…</button>
+            ${state.chapterId ? '' : 'disabled'}
+            title="${
+              state.chapterId
+                ? '先看影响清单：本次生成多少行、跳过多少行、预计耗时'
+                : '工程还没有章节，先在小说视图落地章节或导入正文'
+            }">${icon('mic')} 补齐缺失配音…</button>
           ${
             running
               ? `<button class="btn danger" data-act="stop" title="停止当前批量配音任务">${icon('stop')} 停止生成</button>
@@ -157,7 +203,11 @@ function progressHTML() {
         ${
           total
             ? ''
-            : `<div class="hint" style="margin-top:8px">本章还没有批量配音任务。点击「补齐缺失配音…」会先列出影响清单，再开始生成。</div>`
+            : `<div class="hint" style="margin-top:8px">${
+                state.chapterId
+                  ? '本章还没有批量配音任务。点击「补齐缺失配音…」会先列出影响清单，再开始生成。'
+                  : '工程还没有章节，配音任务暂不可用；可先在上方「从写小说开始」或「导入已有正文」。'
+              }</div>`
         }
         ${
           failedRows.length
@@ -203,23 +253,35 @@ function produceHTML() {
         <div class="right">${
           run
             ? `<span class="badge ${run.status === 'succeeded' ? 'ok' : run.status === 'failed' ? 'bad' : 'run'}">
-                 ${esc(PRODUCE_STATUS[run.status] || '未识别')} · ${doneCount}/${stages.length}${run.run_id ? ` · ${esc(String(run.run_id).slice(-6))}` : ''}
+                 ${esc(PRODUCE_STATUS[run.status] || '未识别')} · ${doneCount}/${stages.length}${
+                   run.scope === 'book' ? ` · 全书 ${(run.chapters || []).length} 章` : run.scope === 'chapter' ? ' · 当前章' : ' · 工程级'
+                 }${run.run_id ? ` · ${esc(String(run.run_id).slice(-6))}` : ''}
                </span>`
             : '<span class="badge mute">还没有编排记录</span>'
         }</div>
       </div>
       <div class="card-body">
-        <div style="display:grid;grid-template-columns:1fr 1fr auto auto;gap:10px;align-items:end">
+        <div style="display:grid;grid-template-columns:1fr 1fr auto auto auto;gap:10px;align-items:end">
           <div class="field"><label>从</label>
             <select class="select" id="prod-from" data-enum="produce_stage" title="起始阶段，只能从列表选择">${options('setting')}</select></div>
           <div class="field"><label>到</label>
             <select class="select" id="prod-to" data-enum="produce_stage" title="结束阶段，只能从列表选择">${options('export')}</select></div>
+          <div class="field"><label>范围</label>
+            <select class="select" id="prod-scope"
+              title="全书：工程级阶段跑一次，章节级阶段逐章执行；仅当前章：章节级阶段只跑当前章节">
+              <option value="book">全书</option>
+              <option value="chapter" ${state.chapterId ? '' : 'disabled'}>仅当前章</option>
+            </select></div>
           ${modeSwitchHTML('produce', { fallback: 'fill' })}
           <button class="btn primary" data-act="produce-start"
             title="后台启动 ndw produce，按记录续跑已完成的阶段">启动编排</button>
         </div>
         <div class="hint" style="margin-top:6px">
-          只补缺失：已完成的阶段会跳过；重新生成：忽略已有产物并强制重跑全部阶段。运行期间本卡片随任务轮询一起刷新。
+          ${
+            state.chapters.length
+              ? '只补缺失：已完成的阶段会跳过；重新生成：忽略已有产物并强制重跑全部阶段。'
+              : '工程还没有章节：设定库 / 大纲可直接跑；正文及之后的阶段需要章节。'
+          }运行期间本卡片随任务轮询一起刷新。
         </div>
         ${
           stages.length
@@ -271,10 +333,21 @@ function gpuHTML() {
             · 失败 <b class="mono" style="color:var(--bad)">${Number(counts.failed || 0)}</b>
             · 成功 <b class="mono">${Number(counts.succeeded || 0)}</b></span></div>
         <div class="hint" style="margin-top:6px">
+          ${esc(lock.note || '与 ComfyUI 共用同一把锁。')}
+        </div>
+        <div class="hint" style="margin-top:4px">
           同时最多跑 ${Number(gpu.max_concurrent || 1)} 个 GPU 任务，抢锁轮询 ${Number(
             gpu.poll_interval_s || 0
           )} 秒；与 ComfyUI 共用同一把锁。
         </div>
+        ${
+          stale
+            ? `<div style="margin-top:10px">
+                 <button class="btn danger" data-act="gpu-release"
+                   title="只会删除持锁进程已不存在的锁；活锁会被拒绝">确认僵死并释放锁</button>
+               </div>`
+            : ''
+        }
       </div>
     </div>`;
 }
@@ -288,15 +361,43 @@ function queueHTML() {
     return queue.filter((item) => item.status === key).length;
   };
   const emptyText = {
-    all: '任务队列是空的：配音、音效、配图任务开始后会出现在这里。',
+    all: '任务队列是空的：大纲、正文、世界、角色、标注、素材、配音等任务开始后会出现在这里。',
     active: '没有排队或运行中的任务。',
     failed: '没有失败的任务。',
     succeeded: '还没有成功的任务记录。',
   }[queueFilter];
+
+  /**
+   * 队列目标：优先显示章节标题 / 自定义标签，其次才是行、场景 ID。
+   * @param {object} item 队列任务
+   */
+  const targetText = (item) => {
+    const target = item.target || {};
+    if (target.chapter_title) return target.chapter_title;
+    if (target.label) return String(target.label);
+    const id = target.line_id || target.scene_id || target.chapter_id || '';
+    return id ? id.slice(-8) : '—';
+  };
+
+  /**
+   * 进度列：有百分比显示百分比 + 当前项，没有则显示当前阶段。
+   * @param {object} item 队列任务
+   */
+  const progressText = (item) => {
+    const info = item.progress || {};
+    const percent = info.percent;
+    if (typeof percent === 'number') {
+      return `${Math.round(percent)}%${info.current ? ` · ${info.current}` : ''}`;
+    }
+    return info.current || '—';
+  };
+  const terminalCount = queue.filter((item) =>
+    ['succeeded', 'failed', 'canceled', 'interrupted'].includes(item.status)
+  ).length;
   return `
     <div class="card" style="margin:14px 18px 18px">
       <div class="card-head"><span class="ct">任务队列</span>
-        <div class="right" style="display:flex;gap:4px">
+        <div class="right" style="display:flex;gap:4px;align-items:center">
           ${[
             ['all', '全部'],
             ['active', '进行中'],
@@ -309,11 +410,17 @@ function queueHTML() {
                   title="按任务状态筛选队列">${label}<span class="n">${countOf(key)}</span></button>`
             )
             .join('')}
+          ${
+            terminalCount
+              ? `<button class="btn sm" data-act="queue-clear"
+                   title="只删除已结束的任务记录，不会删除正文、音频等产物">清理已结束（${terminalCount}）</button>`
+              : ''
+          }
         </div>
       </div>
       <div class="card-body" style="padding:0">
         <table class="files">
-          <thead><tr><th>类型</th><th>目标</th><th>状态</th><th>尝试</th><th>产物</th><th>错误</th></tr></thead>
+          <thead><tr><th>类型</th><th>目标</th><th>状态</th><th>进度</th><th>尝试</th><th>产物</th><th>错误</th><th>操作</th></tr></thead>
           <tbody>
             ${
               rows.length
@@ -322,17 +429,25 @@ function queueHTML() {
                     .map(
                       (item) => `<tr>
                         <td>${esc(QUEUE_LABEL[item.kind] || item.kind || '')}</td>
-                        <td class="mono">${esc((item.target?.line_id || item.target?.scene_id || '').slice(-8) || '—')}</td>
+                        <td title="${esc(targetText(item))}">${esc(targetText(item))}</td>
                         <td><span class="badge ${badgeClass(item.status)}">${esc(
                           STATUS_LABEL[item.status] || item.status
                         )}</span></td>
+                        <td style="font-size:11.5px;color:var(--text-3)">${esc(progressText(item))}</td>
                         <td class="mono">${Number(item.attempts || 0)}</td>
                         <td class="mono">${(item.artifacts || []).length}</td>
-                        <td style="color:var(--bad)">${esc(errorText(item.error))}</td>
+                        <td style="color:var(--bad);white-space:pre-line;max-width:340px"
+                          title="${esc(errorText(item.error))}">${esc(errorSummary(item.error))}</td>
+                        <td>${
+                          item.kind === 'produce' && ['running', 'queued'].includes(item.status)
+                            ? `<button class="btn sm danger" data-act="produce-stop" data-job="${esc(item.id)}"
+                                 title="杀掉编排子进程，并把任务标记为已取消">终止</button>`
+                            : ''
+                        }</td>
                       </tr>`
                     )
                     .join('')
-                : `<tr><td colspan="6" style="color:var(--text-4);padding:16px 12px">${esc(emptyText)}</td></tr>`
+                : `<tr><td colspan="8" style="color:var(--text-4);padding:16px 12px">${esc(emptyText)}</td></tr>`
             }
           </tbody>
         </table>
@@ -345,11 +460,12 @@ function mainHTML() {
   const chapter = state.chapters.find((item) => item.id === state.chapterId);
   const ready = readiness?.ready;
   return `
+    ${state.chapterId ? '' : emptyProjectHTML(state.path, { compact: true })}
     ${resplitBannerHTML(consistency)}
     <div class="page-head">
       <div class="ph">
         <div class="eyebrow"><span class="ln"></span>任务</div>
-        <h1 class="page-title">${esc(chapter?.title || '本章任务')}</h1>
+        <h1 class="page-title">${esc(chapter?.title || '任务')}</h1>
         <div class="page-sub">批量进度、失败重试与队列状态。运行中每 3 秒自动刷新。</div>
       </div>
       <div class="ph-actions">
@@ -385,6 +501,11 @@ function bindProduceMode() {
 
 /** 检查本章正文与切分是否一致（只读，不阻塞任务刷新） */
 async function refreshConsistency() {
+  // 没有章节时不做章节一致性检查，避免空 chapter 请求把整页带崩
+  if (!state.chapterId) {
+    consistency = null;
+    return;
+  }
   consistency = await checkConsistency(state.path, state.chapterId);
 }
 
@@ -427,6 +548,83 @@ async function stopAll() {
   } catch (error) {
     toast(error.message, 'bad');
   }
+}
+
+/** 终止一条正在运行的编排任务（真正杀掉子进程） */
+async function stopProduceJob(jobId, button) {
+  const item = queue.find((row) => row.id === jobId) || {};
+  const mask = openDialog({
+    title: '终止编排',
+    body: `
+      <div class="summary-line"><span>任务</span><span class="right mono">${esc(jobId)}</span></div>
+      <div class="summary-line"><span>当前进度</span>
+        <span class="right">${esc((item.progress && item.progress.current) || '—')}</span></div>
+      <div class="dlg-note">会直接杀掉后台编排子进程，并把这条件务标记为「已取消」；已完成阶段的产物会保留，下次可以按「只补缺失」续跑。</div>`,
+    foot: `<div class="right"><button class="btn" data-dlg-close>取消</button>
+      <button class="btn danger" id="produce-stop-ok">确认终止</button></div>`,
+  });
+  mask.querySelector('#produce-stop-ok').addEventListener('click', async (event) => {
+    event.currentTarget.disabled = true;
+    try {
+      const result = await postJSON('/api/ui/produce/cancel', { path: state.path, id: jobId });
+      closeDialog();
+      toast(result.message || '已终止编排', 'ok');
+    } catch (error) {
+      closeDialog();
+      toast(error.message, 'bad', 5200);
+    }
+    if (button) button.disabled = false;
+    await refresh({ silent: true });
+  });
+}
+
+/** 清理已结束的队列行（不动正文/音频产物） */
+async function clearQueue(button) {
+  button.disabled = true;
+  try {
+    const result = await postJSON('/api/ui/jobs/clear', { path: state.path });
+    toast(result.message || '已清理', 'ok');
+  } catch (error) {
+    toast(error.message, 'bad', 5200);
+  }
+  button.disabled = false;
+  await refresh({ silent: true });
+}
+
+/** 释放僵死的 GPU 锁（持锁进程仍存活时后端会拒绝） */
+async function releaseGpuLock(button) {
+  const lock = gpu?.lock || {};
+  const holder = lock.holder || {};
+  const mask = openDialog({
+    title: '释放僵死的 GPU 锁',
+    body: `
+      <div class="summary-line"><span>锁文件</span>
+        <span class="right mono" style="max-width:70%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
+          title="${esc(lock.path || '')}">${esc(lock.path || '未配置')}</span></div>
+      <div class="summary-line"><span>锁内记录</span>
+        <span class="right mono">pid ${esc(String(holder.pid || '?'))}${
+          holder.job_id ? ` · 任务 ${esc(String(holder.job_id).slice(-8))}` : ''
+        }${holder.started_at ? ` · ${esc(holder.started_at)}` : ''}</span></div>
+      <div class="dlg-note">只有确认持锁进程已经退出时才需要手动释放；如果它还在运行，后端会拒绝并说明原因。正常情况下一次 GPU 任务开始时会自动接管僵死锁。</div>`,
+    foot: `<div class="right"><button class="btn" data-dlg-close>取消</button>
+      <button class="btn danger" id="gpu-release-ok">确认释放</button></div>`,
+  });
+  mask.querySelector('#gpu-release-ok').addEventListener('click', async (event) => {
+    event.currentTarget.disabled = true;
+    try {
+      const result = await postJSON(
+        `/api/ui/gpu/lock/release?path=${encodeURIComponent(state.path)}`,
+        {}
+      );
+      closeDialog();
+      toast(result.message || '已释放僵死锁', 'ok');
+      await refresh({ silent: true });
+    } catch (error) {
+      closeDialog();
+      toast(error.message, 'bad', 5200);
+      button.disabled = false;
+    }
+  });
 }
 
 /** 暂停 / 继续生成 */
@@ -507,11 +705,25 @@ async function onRootClick(event) {
   if (!button) return;
   const act = button.dataset.act;
   if (act === 'back') return goProjects();
-  if (act === 'to-editor') return goChapter(state.path, state.chapterId);
+  if (act === 'to-editor') {
+    // 无章节时「回画本」没有目标，统一回小说视图继续写
+    if (!state.chapterId) {
+      location.hash = `#/p/${encodeURIComponent(state.path)}/novel`;
+      return;
+    }
+    return goChapter(state.path, state.chapterId);
+  }
   if (act === 'refresh') return refresh({ silent: false });
+  if (act === 'gpu-release') return releaseGpuLock(button);
+  if (act === 'produce-stop') return stopProduceJob(button.dataset.job, button);
+  if (act === 'queue-clear') return clearQueue(button);
   if (act === 'stop') return stopAll();
   if (act === 'pause') return togglePause();
   if (act === 'batch-plan') {
+    if (!state.chapterId) {
+      toast('工程还没有章节，先在小说视图落地章节或导入正文', 'info');
+      return;
+    }
     button.disabled = true;
     try {
       const plan = await getJSON('/api/ui/tts/batch-all/plan', {
@@ -548,6 +760,20 @@ async function onRootClick(event) {
   if (act === 'produce-start') {
     const from = document.getElementById('prod-from')?.value || 'setting';
     const to = document.getElementById('prod-to')?.value || 'export';
+    const scope = document.getElementById('prod-scope')?.value || 'book';
+    // 只有章节级阶段需要章节；工程级阶段（设定库 / 大纲）空工程也能跑
+    const needChapterStages = stageRange(from, to).filter((key) => !PROJECT_STAGES.has(key));
+    if (needChapterStages.length && !state.chapters.length) {
+      return toast(
+        `所选区间包含需要章节的阶段：${needChapterStages.map((key) => PRODUCE_LABEL[key] || key).join('、')}。` +
+          '工程还没有章节：请先落地章节或导入正文，或只选「设定库 → 大纲」等工程级阶段',
+        'warn',
+        5600
+      );
+    }
+    if (scope === 'chapter' && !state.chapterId) {
+      return toast('当前没有选中章节：可把范围改为「全书」', 'warn', 4200);
+    }
     // 生成方式：只补缺失阶段（续跑）或强制重跑全部阶段
     const mode = getGenMode('produce', 'fill');
     const regen = mode === 'regen';
@@ -561,7 +787,7 @@ async function onRootClick(event) {
     try {
       const result = await postJSON('/api/ui/produce', {
         path: state.path,
-        chapter: state.chapterId,
+        chapter: scope === 'chapter' ? state.chapterId : '',
         from,
         to,
         force,
@@ -594,6 +820,7 @@ function watchProduceProgress(from, to, mode = 'fill') {
     stage: '后台进程已启动，正在读取编排记录…',
   });
   panel.update({ percent: 0 });
+  const startedMs = Date.now();
   let stopped = false;
   let timer = null;
   let errors = 0;
@@ -608,6 +835,29 @@ function watchProduceProgress(from, to, mode = 'fill') {
       errors = 0;
       const run = data?.run;
       if (!run) {
+        // 进程可能已快速失败：从任务队列取本次启动的 produce 任务，展示退出码与日志尾部
+        if (ticks >= 2) {
+          const jobs = await getJSON('/api/ui/queue', { path: state.path }).catch(() => null);
+          const mine = (jobs || [])
+            .filter(
+              (item) =>
+                item.kind === 'produce' &&
+                item.created_at &&
+                Date.parse(item.created_at) >= startedMs - 3000
+            )
+            .sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at))[0];
+          if (mine && ['failed', 'canceled', 'interrupted'].includes(mine.status)) {
+            stopped = true;
+            if (timer) window.clearTimeout(timer);
+            panel.fail({
+              message: '编排没有启动成功',
+              detail: errorText(mine.error) || '可到任务页「任务队列」查看这条任务。',
+              retry: () => watchProduceProgress(from, to, mode),
+            });
+            void refresh({ silent: true });
+            return;
+          }
+        }
         if (ticks > 6) {
           stopped = true;
           panel.fail({
@@ -634,9 +884,10 @@ function watchProduceProgress(from, to, mode = 'fill') {
           stopped = true;
           if (timer) window.clearTimeout(timer);
           if (run.status === 'failed' || failed) {
+            const bad = stages.find((item) => item.status === 'failed');
             panel.fail({
               message: `编排结束：${failed} 个阶段失败`,
-              detail: '失败原因可在任务页「最近一次编排」里逐阶段查看。',
+              detail: errorText(bad?.error) || '失败原因可在任务页「全链路编排」里逐阶段查看。',
               retry: () => watchProduceProgress(from, to, mode),
             });
           } else {
@@ -713,24 +964,6 @@ export async function renderTasks(root, { path }) {
     readiness = ready;
     if (!state.chapters.some((item) => item.id === state.chapterId)) {
       state.chapterId = state.chapters[0]?.id || '';
-    }
-    if (!state.chapterId) {
-      // 空工程：任务页给出「去写小说 / 导入正文」两条入口，不报错
-      root.innerHTML = `
-        ${topbar({
-          left: `<button class="btn icon" data-act="back" title="回工作区">${icon('back')}</button>
-                 <div class="brand"><span class="brand-mark"></span><span style="font-size:12.5px">任务<small>本地版</small></span></div>`,
-          crumbs: `<a href="#/projects">${esc(state.info?.work?.title || '工程')}</a>
-                   <span class="sep">/</span><span class="cur">任务</span>`,
-          right: '',
-        })}
-        <div class="studio" id="studio">
-          ${railbar('tasks', { chapters: 0 })}
-          ${chapterCtx({ search: state.chapterSearch })}
-          <section class="editor"><div class="page" style="overflow:auto">${emptyProjectHTML(path)}</div></section>
-          <aside class="studio-right"></aside>
-        </div>`;
-      return;
     }
   } catch (error) {
     root.innerHTML = `<div class="page"><div class="empty">${icon('warn', 22)}<b>任务加载失败</b>

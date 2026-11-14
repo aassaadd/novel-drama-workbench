@@ -13,6 +13,7 @@ from fastapi.responses import StreamingResponse
 from ..config import load_config
 from ..store import ProjectStore
 from ..writing.character_plan import fill_character_descriptions
+from .job_tracker import UiJob
 from .stream_api import _progress_response
 
 
@@ -108,4 +109,12 @@ def register_character_desc_routes(app, config_path: str | None = None) -> None:
                 overwrite=overwrite,
             )
 
-        return _progress_response(task)
+        return _progress_response(
+            task,
+            UiJob(
+                store,
+                "character.desc",
+                {"label": f"{len(names)} 个角色" if names else "全部角色"},
+                "重新生成角色描述" if overwrite else "补全角色描述",
+            ),
+        )

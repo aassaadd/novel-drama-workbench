@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -1751,7 +1752,10 @@ def build_parser() -> argparse.ArgumentParser:
     q.set_defaults(func=cmd_models_import)
 
     p = sub.add_parser("produce", help="全链路编排：设定 → 大纲 → 正文 → 标注 → 配音 → 音效/配图/视频 → 混流 → 导出")
-    p.add_argument("--chapter", required=True)
+    p.add_argument(
+        "--chapter",
+        help="目标章节；缺省时工程级阶段跑一次、章节级阶段按全书逐章执行",
+    )
     p.add_argument("--from", dest="from_stage", choices=list(PRODUCE_STAGES))
     p.add_argument("--to", dest="to_stage", choices=list(PRODUCE_STAGES))
     p.add_argument("--no-resume", dest="no_resume", action="store_true", help="不跳过上次已成功的阶段")
@@ -1774,6 +1778,36 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _init_oplog(config, args) -> None:
+    """初始化操作日志并给 LLM 适配器装采集钩子。
+
+    子进程（页面触发的长命令 / 编排）也必须初始化，否则模型调用只会在
+    Web 主进程里被记录，子进程里的调用全部丢失。
+
+    参数:
+        config: 本机配置。
+        args: argparse 解析结果（取 project 与子命令名）。
+
+    返回:
+        无。
+    """
+    try:
+        from . import oplog
+
+        oplog.configure(config)
+        oplog.install_llm_hooks()
+        if not os.environ.get("NDW_LOG_TRACE"):
+            os.environ["NDW_LOG_TRACE"] = oplog.new_trace_id()
+        project = str(getattr(args, "project", "") or "")
+        if project and not os.environ.get("NDW_LOG_PROJECT"):
+            os.environ["NDW_LOG_PROJECT"] = project
+        if not os.environ.get("NDW_LOG_ACTION"):
+            func_name = getattr(getattr(args, "func", None), "__name__", "cli")
+            os.environ["NDW_LOG_ACTION"] = f"CLI {func_name}"
+    except Exception:  # noqa: BLE001 - 日志初始化失败不影响命令执行
+        pass
+
+
 def main(argv: list[str] | None = None) -> int:
     """命令行主入口。
 
@@ -1787,6 +1821,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         config = load_config(args.config)
+        _init_oplog(config, args)
         return args.func(args, config)
     except AdapterError as exc:
         print(f"[{exc.code.value}] {exc.message}", file=sys.stderr)

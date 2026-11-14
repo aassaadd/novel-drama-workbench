@@ -139,8 +139,11 @@ def _merge_section(bible: dict, section: str, fields: dict) -> list[str]:
             locations = []
             for index, item in enumerate(normalize_locations(raw_rows)):
                 old = rows[index] if index < len(rows) and isinstance(rows[index], dict) else {}
+                # 保留编辑器不认识的字段（例如后续 schema 新增的键），只覆盖已知字段
+                extra = {key: value for key, value in old.items() if key not in ("id", "name", "description", "atmosphere")}
                 locations.append(
                     {
+                        **extra,
                         "id": str(old.get("id") or new_id("loc")),
                         "name": item["name"],
                         "description": item.get("description") or "",
@@ -150,7 +153,17 @@ def _merge_section(bible: dict, section: str, fields: dict) -> list[str]:
             target["locations"] = locations
             changed.append("locations")
         if "glossary" in fields:
-            target["glossary"] = normalize_glossary(fields.get("glossary"))
+            raw_rows = fields.get("glossary")
+            rows = raw_rows if isinstance(raw_rows, list) else []
+            glossary = []
+            for index, item in enumerate(normalize_glossary(raw_rows)):
+                old = rows[index] if index < len(rows) and isinstance(rows[index], dict) else {}
+                extra = {key: value for key, value in old.items() if key not in ("term", "meaning", "aliases", "id")}
+                entry = {**extra, **item}
+                if old.get("id"):
+                    entry["id"] = old["id"]
+                glossary.append(entry)
+            target["glossary"] = glossary
             changed.append("glossary")
     else:
         for key in SECTION_FIELDS[section]:

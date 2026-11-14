@@ -16,6 +16,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -44,9 +45,132 @@ from .outline_edit_api import register_outline_edit_routes
 from .stream_api import register_stream_routes
 from .bgm_api import register_bgm_routes
 from .sfx_api import register_sfx_routes
+from .job_tracker import UiJob, active_jobs, clear_finished, load_ui_jobs, update_job
+from .logs_api import register_logs_routes
 
 #: 唯一前端目录（仓库根 web-next/）；直接挂到根路径，旧 static 界面已废弃
 WEB_NEXT_DIR = Path(__file__).resolve().parents[3] / "web-next"
+
+#: 写作设定分区中文名（任务队列展示用）
+SECTION_LABEL = {
+    "premise": "故事内核",
+    "style": "文风",
+    "world": "世界观",
+    "character": "人物设定",
+}
+
+
+#: 同一工程只允许一个编排在跑：启动前在该锁内二次确认
+_PRODUCE_GUARD = threading.Lock()
+#: 本进程启动的编排子进程：任务 ID → {process, store, log_path, canceled}
+_PRODUCE_PROCS: dict[str, dict] = {}
+_PRODUCE_PROCS_LOCK = threading.Lock()
+
+
+def _reconcile_produce_jobs(store: ProjectStore) -> None:
+    """兜底：运行中但本进程已无进程句柄的编排任务，标记为已中断。
+
+    参数:
+        store: 工程。
+
+    返回:
+        无。
+    """
+    from datetime import datetime, timezone
+
+    running = [
+        item
+        for item in load_ui_jobs(store)
+        if item.get("kind") == "produce" and item.get("status") in ("queued", "running")
+    ]
+    if not running:
+        return
+    with _PRODUCE_PROCS_LOCK:
+        known = set(_PRODUCE_PROCS)
+    now = datetime.now(timezone.utc)
+    for item in running:
+        if item.get("id") in known:
+            continue
+        try:
+            created = datetime.fromisoformat(str(item.get("created_at") or "").replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        # 给启动流程 90 秒注册缓冲，避免刚点启动就被判死
+        if (now - created).total_seconds() < 90:
+            continue
+        update_job(
+            store,
+            str(item.get("id")),
+            status="interrupted",
+            error="编排进程已不存在（服务重启或后台线程异常），任务已标记为中断",
+        )
+
+
+def _log_tail(path: Path, lines: int = 8, limit: int = 1200) -> str:
+    """读取日志文件末尾若干行，用于把子进程失败原因暴露到界面。
+
+    参数:
+        path: 日志文件路径。
+        lines: 保留的最后行数。
+        limit: 最多保留的字符数（避免任务队列里塞进整篇 traceback）。
+
+    返回:
+        末尾文本（无内容或读取失败时返回空串）。
+    """
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return ""
+    text = data[-16384:].decode("utf-8", "replace")
+    rows = [row.rstrip() for row in text.splitlines() if row.strip()]
+    return "\n".join(rows[-lines:])[-limit:]
+
+
+def _watch_background_job(store, kind: str, title: str, reader) -> None:
+    """把后台音色/编排任务的进度同步到任务队列（轮询任务文件）。
+
+    参数:
+        store: 工程。
+        kind: 任务类型（voice / voice.fill / produce）。
+        title: 任务标题。
+        reader: `reader() -> dict`，返回后台任务快照（含 status / progress / stats）。
+
+    返回:
+        无（后台线程随 Web 进程退出）。
+    """
+    ui = UiJob(store, kind, {"label": title}, title)
+    ui.start("已提交生成请求")
+
+    def watch() -> None:
+        """每 2 秒同步一次，结束后写成功 / 失败。"""
+        deadline = time.time() + 6 * 3600
+        while time.time() < deadline:
+            time.sleep(2)
+            try:
+                latest = reader() or {}
+            except Exception:  # noqa: BLE001 - 读取失败继续等下一轮
+                continue
+            status = str(latest.get("status") or "")
+            if status in ("running", "queued", "pending"):
+                progress = latest.get("progress") or {}
+                index = int(progress.get("index") or 0)
+                total = int(progress.get("total") or 0)
+                stage = str(latest.get("stage") or "生成中")
+                if total:
+                    ui.progress(f"{stage} · {index}/{total}", index / total * 100)
+                else:
+                    ui.progress(stage)
+                continue
+            if status in ("ready", "succeeded", "finished", "done"):
+                ui.finish(str(latest.get("note") or "生成完成"))
+            elif status:
+                ui.fail(str(latest.get("note") or latest.get("error") or "生成未完成"))
+            else:
+                continue
+            return
+        ui.fail("任务超时未完成")
+
+    threading.Thread(target=watch, name=f"ndw-job-{kind}", daemon=True).start()
 
 #: 「设置」页允许改写的配置键（点号路径）；其余键一律拒绝，避免页面改坏配置
 #: 设置页「全部配置」分组：分组名 → (键, 中文标签, 类型, 选项, 最小值, 最大值)
@@ -1402,13 +1526,13 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
 
     @app.post("/api/ui/chapter/delete")
     def ui_chapter_delete(body: dict) -> dict:
-        """删除章节文件与其时间轴/脚本（保留已生成的音频资产）。
+        """删除章节文件与其时间轴/脚本，并同步移除大纲里的对应条目。
 
         参数:
             body: `{path, chapter}`。
 
         返回:
-            `{ok, chapter_id}`。
+            `{ok, chapter_id, outline_removed, warnings}`。
 
         异常:
             HTTPException 400: 只剩一个章节；404: 章节不存在。
@@ -1420,10 +1544,27 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         path = store.chapter_path(chapter_id)
         if not path.exists():
             raise HTTPException(status_code=404, detail="章节不存在")
-        path.unlink()
+        result = {"ok": True, "chapter_id": chapter_id, "outline_removed": False, "warnings": []}
+        # 已落章通常也在大纲里：一并删除，避免章节列表删掉后大纲还留着悬空引用
+        try:
+            from ..store.settings_store import SettingsStore
+            from ..writing.outline_edit import delete_outline_chapter
+
+            settings_store = SettingsStore(store.root)
+            if settings_store.exists():
+                bible = settings_store.load()
+                if settings_store.find_outline_chapter(bible, chapter_id) is not None:
+                    deleted = delete_outline_chapter(store, chapter_id)
+                    result["outline_removed"] = True
+                    result["warnings"] = deleted.get("warnings") or []
+                    return result
+        except (OSError, ValueError):
+            # 大纲缺失或校验失败时降级为只删章节文件，不把删除请求卡死
+            pass
+        path.unlink(missing_ok=True)
         store.timeline_path(chapter_id).unlink(missing_ok=True)
         store.script_path(chapter_id).unlink(missing_ok=True)
-        return {"ok": True, "chapter_id": chapter_id}
+        return result
 
     @app.post("/api/ui/chapter/mix")
     def ui_chapter_mix(body: dict) -> dict:
@@ -1893,8 +2034,21 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
 
     @app.get("/api/ui/queue")
     def ui_queue(path: str = Query(...)):
-        """队列快照（`queue list --json`）：轮询只打这个接口。"""
-        return _respond(_cli("--project", path, "--json", "queue", "list"))
+        """队列快照：GPU 队列 + 界面 AI 生成任务，按创建时间倒序。
+
+        参数:
+            path: 工程根目录。
+
+        返回:
+            任务数组（字段与 `queue list --json` 一致，界面任务额外带 progress）。
+        """
+        payload = _respond(_cli("--project", path, "--json", "queue", "list"))
+        jobs = payload if isinstance(payload, list) else []
+        store = _store(path)
+        _reconcile_produce_jobs(store)
+        merged = [*load_ui_jobs(store), *jobs]
+        merged.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
+        return merged
 
     @app.get("/api/ui/gpu/status")
     def ui_gpu_status(path: str = Query(...)) -> dict:
@@ -1929,6 +2083,60 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
             "paused": QueueStore(store).paused(),
             "max_concurrent": int(cfg.get("gpu.max_concurrent") or 1),
             "poll_interval_s": float(cfg.get("gpu.poll_interval_s") or 2),
+        }
+
+    @app.post("/api/ui/gpu/lock/release")
+    def ui_gpu_lock_release(path: str = Query(...)) -> dict:
+        """手动释放僵死的 GPU 锁（持锁进程仍存活时拒绝）。
+
+        参数:
+            path: 工程根目录（用于解析配置与提示文案）。
+
+        返回:
+            `{released, message, lock}`。
+
+        异常:
+            HTTPException 400: 未配置 gpu.lock_path。
+            HTTPException 409: 持锁进程仍存活，不能强制释放。
+            HTTPException 500: 锁文件删除失败（权限或只读卷）。
+        """
+        from ..orchestration.gpu_queue import GpuLock
+
+        cfg = load_config(config_path) if config_path else load_config()
+        lock_path = str(cfg.get("gpu.lock_path") or "").strip()
+        if not lock_path:
+            raise HTTPException(status_code=400, detail={"code": 2, "message": "没有配置 gpu.lock_path，无需释放"})
+        lock = GpuLock(lock_path)
+        info = lock.inspect()
+        if not info["exists"]:
+            return {"released": False, "message": "锁文件不存在，GPU 本来就空闲", "lock": info}
+        if info["alive"]:
+            holder = info.get("holder") or {}
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": 6,
+                    "message": (
+                        f"锁的持锁进程仍在运行（pid {holder.get('pid') or '?'}），不能强制释放；"
+                        "等它结束或退出后会自动释放"
+                    ),
+                },
+            )
+        try:
+            removed = lock.break_stale()
+        except OSError as exc:
+            raise HTTPException(
+                status_code=500, detail={"code": 3, "message": f"删除锁文件失败：{exc}"}
+            ) from exc
+        if not removed:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": 6, "message": "锁刚被别的进程接管，已停止释放；请刷新后再看"},
+            )
+        return {
+            "released": True,
+            "message": "已释放僵死锁，下一次 GPU 任务可以直接抢锁",
+            "lock": lock.inspect(),
         }
 
     @app.get("/api/ui/readiness")
@@ -2705,16 +2913,78 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
 
     @app.post("/api/ui/produce")
     def ui_produce(body: dict) -> dict:
-        """启动全链路编排（后台进程，进度靠 `run show` 反映）。"""
-        path, chapter = body["path"], body["chapter"]
+        """启动全链路编排（后台进程，进度靠 `run show` 反映）。
+
+        工程级阶段（设定库、大纲）不需要章节；章节级阶段在未指定 chapter 时
+        按全书逐章执行，指定 chapter 时只跑该章。
+
+        参数:
+            body: path / chapter / from / to / force / keep_going / no_resume。
+
+        返回:
+            {started, pid, log}。
+
+        异常:
+            HTTPException 400: 缺工程路径、阶段非法、顺序不成立、区间需要章节但工程没有章节。
+            HTTPException 404: 指定章节不存在。
+        """
+        from ..orchestration.produce import STAGE_LABELS, STAGES, stages_needing_chapter
+
+        path = str(body.get("path") or "").strip()
+        chapter = str(body.get("chapter") or "").strip()
+        from_stage = str(body.get("from") or "setting").strip()
+        to_stage = str(body.get("to") or "export").strip()
+        if not path:
+            raise HTTPException(status_code=400, detail={"code": 2, "message": "缺少工程路径"})
+        stage_text = "、".join(f"{key}（{STAGE_LABELS.get(key, key)}）" for key in STAGES)
+        if from_stage not in STAGES:
+            raise HTTPException(
+                status_code=400,
+                detail={"code": 2, "message": f"未知的起始阶段「{from_stage}」，可选：{stage_text}"},
+            )
+        if to_stage not in STAGES:
+            raise HTTPException(
+                status_code=400,
+                detail={"code": 2, "message": f"未知的结束阶段「{to_stage}」，可选：{stage_text}"},
+            )
+        if STAGES.index(from_stage) > STAGES.index(to_stage):
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": 2,
+                    "message": (
+                        f"阶段区间不成立：「从」{STAGE_LABELS.get(from_stage, from_stage)}"
+                        f" 必须排在「到」{STAGE_LABELS.get(to_stage, to_stage)} 之前"
+                    ),
+                },
+            )
+        store = ProjectStore(path)
+        need_chapters = stages_needing_chapter(from_stage, to_stage)
+        if need_chapters and chapter:
+            try:
+                store.load_chapter(chapter)
+            except FileNotFoundError as exc:
+                raise HTTPException(status_code=404, detail={"code": 4, "message": str(exc)}) from exc
+        elif need_chapters and not store.list_chapters():
+            labels = "、".join(STAGE_LABELS.get(stage, stage) for stage in need_chapters)
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": 2,
+                    "message": (
+                        f"所选区间包含需要章节的阶段：{labels}。工程还没有章节："
+                        "请先落地章节或导入正文，或只选择工程级阶段（设定库 / 大纲）"
+                    ),
+                },
+            )
+
         argv = ["--project", path]
         if config_path:
             argv += ["--config", config_path]
-        argv += ["produce", "--chapter", chapter]
-        if body.get("from"):
-            argv += ["--from", body["from"]]
-        if body.get("to"):
-            argv += ["--to", body["to"]]
+        argv += ["produce"]
+        if chapter and need_chapters:
+            argv += ["--chapter", chapter]
+        argv += ["--from", from_stage, "--to", to_stage]
         if body.get("force"):
             argv.append("--force")
         if body.get("keep_going"):
@@ -2722,23 +2992,280 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         if body.get("no_resume"):
             argv.append("--no-resume")
 
-        log_dir = ProjectStore(path).root / ".ndw" / "logs"
+        log_dir = store.root / ".ndw" / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
-        log_path = log_dir / f"web-produce-{now_iso().replace(':', '').replace('-', '')}.log"
         src_dir = Path(__file__).resolve().parents[2]
         env = dict(os.environ)
         env["PYTHONPATH"] = str(src_dir) + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
-        with log_path.open("wb") as log:
-            process = subprocess.Popen(
-                [sys.executable, "-u", "-m", "novel_drama.cli", *argv],
-                cwd=str(src_dir),
-                stdin=subprocess.DEVNULL,
-                stdout=log,
-                stderr=subprocess.STDOUT,
-                env=env,
-                start_new_session=True,
-            )
-        return {"started": True, "pid": process.pid, "log": str(log_path)}
+
+        from ..orchestration import produce as produce_mod
+
+        previous_run = str((produce_mod.latest_run(store) or {}).get("run_id") or "")
+        target = {"chapter_id": chapter} if chapter and need_chapters else {"label": "全书" if need_chapters else "工程级"}
+        scope_text = "全书" if need_chapters and not chapter else ("当前章" if chapter else "工程级")
+        with _PRODUCE_GUARD:
+            if active_jobs("produce"):
+                raise HTTPException(
+                    status_code=409,
+                    detail={"code": 6, "message": "已有编排在运行：等它结束，或到任务队列里确认状态后再启动"},
+                )
+            job = UiJob(store, "produce", target, "全链路编排")
+            job.start(f"已提交编排请求（{from_stage} → {to_stage} · {scope_text}）")
+
+        # 用临时文件占位，避免同一秒内多次启动互相覆盖日志
+        log_fd, log_name = tempfile.mkstemp(prefix="web-produce-", suffix=".log", dir=log_dir)
+        os.close(log_fd)
+        log_path = Path(log_name)
+        try:
+            with log_path.open("wb") as log:
+                process = subprocess.Popen(
+                    [sys.executable, "-u", "-m", "novel_drama.cli", *argv],
+                    cwd=str(src_dir),
+                    stdin=subprocess.DEVNULL,
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    env=env,
+                    start_new_session=True,
+                )
+        except OSError as exc:
+            job.fail(f"编排进程启动失败：{exc}")
+            raise HTTPException(
+                status_code=500, detail={"code": 3, "message": f"编排进程启动失败：{exc}"}
+            ) from exc
+
+        job_id = job.job["id"]
+        with _PRODUCE_PROCS_LOCK:
+            _PRODUCE_PROCS[job_id] = {"process": process, "store": store, "log_path": log_path, "canceled": False}
+
+        def _fail_with_log(hint: str = "") -> None:
+            """退出码 + 日志末尾写进任务队列（不允许只报「未产生编排记录」）。"""
+            code = process.poll()
+            if code is None:
+                head = "编排进程异常"
+            elif code < 0:
+                head = f"编排进程被信号 {-code} 终止（退出码 {code}）"
+            else:
+                head = f"编排进程退出（退出码 {code}）"
+            if hint:
+                head += f"：{hint}"
+            tail = _log_tail(log_path)
+            job.fail(f"{head}\n{tail}" if tail else head)
+
+        def _run_artifacts(run: dict) -> list[str]:
+            """汇总各阶段产物路径，写入任务「产物」列。
+
+            参数:
+                run: 编排记录。
+
+            返回:
+                产物路径列表（忽略空值）。
+            """
+            rows: list[str] = []
+            for stage in run.get("stages") or []:
+                for item in stage.get("artifacts") or []:
+                    rows.append(str(item.get("path") or "") if isinstance(item, dict) else str(item))
+            return [row for row in rows if row]
+
+        def _canceled() -> bool:
+            """是否已被用户终止（终止接口先置标记再杀进程）。"""
+            with _PRODUCE_PROCS_LOCK:
+                return bool((_PRODUCE_PROCS.get(job_id) or {}).get("canceled"))
+
+        def watch_produce() -> None:
+            """轮询编排记录，把阶段进度与终态写回任务队列（异常不退出线程）。"""
+            deadline = time.time() + 8 * 3600
+            waiting = 0
+            last_sig = None
+            last_change = time.time()
+            try:
+                while time.time() < deadline:
+                    time.sleep(2)
+                    if _canceled():
+                        return
+                    try:
+                        run = produce_mod.latest_run(store) or {}
+                    except Exception:  # noqa: BLE001 - 记录短暂不可读时等下一轮，不能让 watcher 退出
+                        continue
+                    stages = run.get("stages") or []
+                    total = len(stages)
+                    done = sum(1 for item in stages if item.get("status") in ("succeeded", "skipped"))
+                    status = str(run.get("status") or "")
+                    mine = str(run.get("run_id") or "") not in ("", previous_run)
+                    if mine:
+                        sig = (str(run.get("run_id") or ""), status, total, done)
+                        if sig != last_sig:
+                            last_sig, last_change = sig, time.time()
+                    quiet = time.time() - last_change
+
+                    if not mine:
+                        # 进程已退出且没产生新记录：说明编排根本没启动成功，带日志结尾报错
+                        if process.poll() is not None:
+                            waiting += 1
+                            if waiting >= 2:
+                                _fail_with_log("没有写出编排记录，请按下方输出排查")
+                                return
+                        elif quiet > 600:
+                            job.progress("疑似卡住：仍未写出编排记录，可点「终止」", None, force=True)
+                        continue
+
+                    job.set_artifacts(_run_artifacts(run))
+                    if status in ("running", "queued", "pending", ""):
+                        if process.poll() is not None:
+                            # 兜底：记录没写终态但进程已退出，按阶段结果判定，不允许停在运行中
+                            waiting += 1
+                            if waiting < 2:
+                                continue
+                            failed = next((item for item in stages if item.get("status") == "failed"), None)
+                            if failed:
+                                detail = failed.get("error") or "编排失败"
+                                code = process.poll()
+                                if code not in (None, 0):
+                                    detail = f"{detail}（进程退出码 {code}）"
+                                tail = _log_tail(log_path)
+                                job.fail(f"{detail}\n{tail}" if tail else detail)
+                            elif total and done == total:
+                                job.progress("编排完成", 100, force=True)
+                                job.finish(f"进程已退出，按阶段结果判定成功 · {done}/{total} 个阶段")
+                            else:
+                                _fail_with_log("编排记录停在运行中且未写完所有阶段")
+                            return
+                        waiting = 0
+                        last = next(
+                            (item for item in reversed(stages) if item.get("status") not in ("pending", "skipped")),
+                            None,
+                        )
+                        label = (last or {}).get("label") or "准备阶段"
+                        # 100% 只留给终态：阶段跑满但任务还在收尾时最多显示 99%
+                        percent = min(99, done / total * 100) if total else None
+                        if quiet > 600:
+                            job.progress(
+                                f"{label} · {done}/{total} · 疑似卡住（已 {int(quiet // 60)} 分钟无新记录，可终止）",
+                                percent,
+                                force=True,
+                            )
+                        else:
+                            job.progress(f"{label} · {done}/{total}", percent)
+                        continue
+
+                    waiting = 0
+                    if _canceled():
+                        return
+                    if status == "canceled":
+                        job.cancel("编排已取消")
+                    elif status in ("succeeded", "success", "done"):
+                        job.progress("编排完成", 100, force=True)
+                        job.finish(f"编排完成 · {done}/{total} 个阶段")
+                    else:
+                        failed = next((item for item in stages if item.get("status") == "failed"), None)
+                        detail = (failed or {}).get("error") or "编排失败"
+                        code = process.poll()
+                        if code not in (None, 0):
+                            detail = f"{detail}（进程退出码 {code}）"
+                        job.fail(detail)
+                    return
+                job.fail("编排超时未完成")
+            finally:
+                job.close()
+                with _PRODUCE_PROCS_LOCK:
+                    _PRODUCE_PROCS.pop(job_id, None)
+
+        threading.Thread(target=watch_produce, name="ndw-job-produce", daemon=True).start()
+        return {"started": True, "pid": process.pid, "job_id": job_id, "log": str(log_path)}
+
+    @app.post("/api/ui/jobs/clear")
+    def ui_jobs_clear(body: dict) -> dict:
+        """清理已结束的 UI 任务行（不删除正文、音频等产物）。
+
+        参数:
+            body: {path}。
+
+        返回:
+            {removed, message}。
+
+        异常:
+            HTTPException 400: 缺工程路径。
+        """
+        path = str(body.get("path") or "").strip()
+        if not path:
+            raise HTTPException(status_code=400, detail={"code": 2, "message": "缺少工程路径"})
+        removed = clear_finished(ProjectStore(path))
+        return {
+            "removed": removed,
+            "message": f"已清理 {removed} 条已结束任务" if removed else "没有可清理的已结束任务",
+        }
+
+    @app.post("/api/ui/produce/cancel")
+    def ui_produce_cancel(body: dict) -> dict:
+        """终止编排子进程，并把任务与编排记录落成「已取消」。
+
+        参数:
+            body: {path, id}。
+
+        返回:
+            {canceled, message, exit_code}。
+
+        异常:
+            HTTPException 400: 缺工程路径或任务 ID。
+            HTTPException 404: 任务不存在。
+        """
+        from ..orchestration import produce as produce_mod
+
+        path = str(body.get("path") or "").strip()
+        job_id = str(body.get("id") or "").strip()
+        if not path or not job_id:
+            raise HTTPException(status_code=400, detail={"code": 2, "message": "缺少工程路径或任务 ID"})
+        store = ProjectStore(path)
+        current = next((item for item in load_ui_jobs(store) if item.get("id") == job_id), None)
+        if current is None:
+            raise HTTPException(status_code=404, detail={"code": 4, "message": "任务不存在，可能已被清理"})
+        if current.get("status") in ("succeeded", "failed", "canceled", "interrupted"):
+            return {
+                "canceled": False,
+                "message": f"任务已结束（{current.get('status')}），无需终止",
+                "status": current.get("status"),
+            }
+
+        with _PRODUCE_PROCS_LOCK:
+            entry = _PRODUCE_PROCS.get(job_id)
+            if entry:
+                entry["canceled"] = True
+        if entry is None:
+            # 服务重启等导致拿不到进程句柄：只要任务还是运行中，就落「已取消」避免永远挂起
+            update_job(store, job_id, status="canceled", error="编排进程不在本进程内，已标记取消")
+            return {"canceled": True, "message": "编排进程已不在本进程，任务已标记为已取消"}
+
+        process = entry["process"]
+        code = process.poll()
+        if code is None:
+            for sig in (signal.SIGTERM, signal.SIGKILL):
+                try:
+                    os.killpg(os.getpgid(process.pid), sig)
+                except (ProcessLookupError, PermissionError):
+                    pass
+                try:
+                    code = process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    continue
+                break
+
+        # 编排记录若还停在运行中，写成 canceled，避免下次续跑误读
+        try:
+            run = produce_mod.latest_run(store) or {}
+            if str(run.get("status") or "") in ("running", "queued", "pending", "") and str(
+                run.get("run_id") or ""
+            ) != "":
+                run["status"] = "canceled"
+                run["finished_at"] = now_iso()
+                for stage in run.get("stages") or []:
+                    if stage.get("status") == "running":
+                        stage["status"] = "canceled"
+                        stage["finished_at"] = now_iso()
+                        stage["note"] = "用户终止"
+                produce_mod.save_run(store, run)
+        except Exception:  # noqa: BLE001 - 记录收尾失败不影响任务终态
+            pass
+        update_job(store, job_id, status="canceled", error=f"已手动终止编排（退出码 {code}）")
+        return {"canceled": True, "message": "已终止编排进程，任务标记为已取消", "exit_code": code}
 
     @app.get("/api/ui/produce/latest")
     def ui_produce_latest(path: str = Query(...), run_id: str | None = Query(default=None)) -> dict:
@@ -3071,7 +3598,7 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
             HTTPException 400: section / step 缺失或非法。
         """
         path = body.get("path")
-        _store(path)
+        store = _store(path)
         section = str(body.get("section") or "").strip()
         if section:
             if section not in ("premise", "style", "world", "character"):
@@ -3093,14 +3620,30 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
                     argv += ["--seed", str(int(body["seed"]))]
                 except (TypeError, ValueError):
                     raise HTTPException(status_code=400, detail={"code": 2, "message": "seed 必须是整数"})
-            return _respond_business(_cli(*argv))
+            job = UiJob(store, "setting", {"label": SECTION_LABEL.get(section, section)}, f"生成{SECTION_LABEL.get(section, section)}")
+            job.start("已提交生成请求")
+            try:
+                payload = _respond_business(_cli(*argv))
+            except Exception as exc:  # noqa: BLE001 - 失败原因写进任务队列后再抛出
+                job.fail(str(getattr(exc, "detail", exc)))
+                raise
+            job.finish("生成完成")
+            return payload
         step = str(body.get("step") or "").strip()
         if step not in ("world", "premise", "style"):
             raise HTTPException(status_code=400, detail={"code": 2, "message": "step 必须是 world / premise / style"})
         argv = ["--project", path, "--json", "setting", "generate", "--step", step, "--dry-run"]
         if body.get("overwrite"):
             argv.append("--overwrite")
-        return _respond(_cli(*argv))
+        job = UiJob(store, "setting", {"label": SECTION_LABEL.get(step, step)}, f"生成{SECTION_LABEL.get(step, step)}")
+        job.start("已提交生成请求")
+        try:
+            payload = _respond(_cli(*argv))
+        except Exception as exc:  # noqa: BLE001
+            job.fail(str(getattr(exc, "detail", exc)))
+            raise
+        job.finish("生成完成")
+        return payload
 
     @app.post("/api/ui/setting/apply")
     def ui_setting_apply(body: dict) -> dict:
@@ -3399,15 +3942,22 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         """
         from ..tts import voice_fill
 
+        store = _store(body.get("path"))
         try:
             job = voice_fill.start_job(
-                _store(body.get("path")),
+                store,
                 _tts_config(),
                 body.get("count"),
                 overwrite=bool(body.get("overwrite")),
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail={"code": 2, "message": str(exc)}) from exc
+        _watch_background_job(
+            store,
+            "voice.fill",
+            "一键补齐音色",
+            lambda: voice_fill.read_job(store),
+        )
         return {"job": job}
 
     @app.post("/api/ui/cast/fill/resume")
@@ -3422,15 +3972,22 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         """
         from ..tts import voice_fill
 
+        store = _store(body.get("path"))
         try:
             job = voice_fill.resume_job(
-                _store(body.get("path")),
+                store,
                 _tts_config(),
                 body.get("character_ids"),
                 body.get("pool_slots"),
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail={"code": 2, "message": str(exc)}) from exc
+        _watch_background_job(
+            store,
+            "voice.fill",
+            "继续补齐音色",
+            lambda: voice_fill.read_job(store),
+        )
         return {"job": job}
 
     @app.post("/api/ui/cast/fill/stop")
@@ -4157,7 +4714,27 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         if not prompt:
             raise HTTPException(status_code=400, detail={"code": 2, "message": "缺少音色描述"})
         count = int(body.get("count") or design.get("candidates", 4))
-        return voice_design.create_batch(store, cfg, character, prompt, count, body.get("profile"))
+        batch = voice_design.create_batch(store, cfg, character, prompt, count, body.get("profile"))
+
+        def read_batch() -> dict:
+            """读取抽卡批次并换算候选进度。"""
+            meta = voice_design.read_batch(store, batch["batch_id"])
+            candidates = meta.get("candidates") or []
+            finished = sum(1 for item in candidates if item.get("status") in ("ready", "failed", "done"))
+            return {
+                "status": meta.get("status"),
+                "stage": f"抽卡 · {character.get('name') or '角色'}",
+                "progress": {"index": finished, "total": len(candidates) or count},
+                "note": meta.get("note"),
+            }
+
+        _watch_background_job(
+            store,
+            "voice",
+            f"音色抽卡 · {character.get('name') or '角色'}",
+            read_batch,
+        )
+        return batch
 
     @app.get("/api/ui/voices/design/batches/{batch_id}")
     def ui_voices_design_status(batch_id: str, path: str = Query(...)) -> dict:
@@ -4239,16 +4816,31 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         from ..tts import voice_batch
 
         store = _store(body.get("path"))
+        scope = str(body.get("scope") or "unbound")
         try:
-            return voice_batch.start_job(
+            job = voice_batch.start_job(
                 store,
                 _tts_config(),
-                str(body.get("scope") or "unbound"),
+                scope,
                 body.get("chapter_id"),
                 body.get("count"),
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail={"code": 2, "message": str(exc)}) from exc
+
+        def read_batch() -> dict:
+            """读取批量任务并按条目数换算进度。"""
+            latest = voice_batch.read_job(store, job["job_id"])
+            items = latest.get("items") or []
+            return {
+                "status": latest.get("status"),
+                "stage": latest.get("current") or "批量生成音色",
+                "progress": {"index": latest.get("done") or 0, "total": len(items)},
+                "note": latest.get("note"),
+            }
+
+        _watch_background_job(store, "voice", "批量抽取音色", read_batch)
+        return job
 
     @app.get("/api/ui/voices/design/batch/latest")
     def ui_voices_batch_latest(path: str | None = None) -> dict:
@@ -4622,6 +5214,8 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
     register_bgm_routes(app, config_path)
     # 媒体页音效生成：Stable Audio 3 provider + 进度轮询（独立模块）
     register_sfx_routes(app, config_path)
+    # 全平台操作日志 / LLM 调用日志：查询、详情、统计、清空 + 操作记录中间件（独立模块）
+    register_logs_routes(app, config_path)
 
     from fastapi.staticfiles import StaticFiles
 

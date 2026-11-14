@@ -154,57 +154,280 @@ function joinLines(list) {
 }
 
 /**
- * 地点转一行文本（地点在 schema 里是对象，用 `|` 分隔名称/描述/氛围）。
+ * 尝试把字符串解析成 JSON 值；普通文本返回 null。
+ * 用于兼容「数组被写成 JSON 字符串」的历史数据，避免把原始 JSON 直接显示给用户。
+ * @param {any} value 原始值
+ * @returns {any|null} 解析结果或 null
+ */
+function parseJSONish(value) {
+  if (typeof value !== 'string') return null;
+  const text = value.trim();
+  if (!text || !/^[[{]/.test(text)) return null;
+  try {
+    const parsed = JSON.parse(text);
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 任意值转中文可读文本：对象按键值拼接、数组用顿号连接，绝不输出 JSON 括号与引号。
+ * @param {any} value 原始值
+ * @returns {string} 可读文本
+ */
+function readableText(value) {
+  if (value === null || value === undefined) return '';
+  if (typeof value === 'string') {
+    const parsed = parseJSONish(value);
+    return parsed === null ? value.trim() : readableText(parsed);
+  }
+  if (Array.isArray(value)) return value.map(readableText).filter(Boolean).join('；');
+  if (typeof value === 'object') {
+    // 只取字段值拼接，避免把英文键名暴露到只读展示里
+    return Object.values(value).map(readableText).filter(Boolean).join('；');
+  }
+  return String(value);
+}
+
+/**
+ * 归一化字符串数组（世界规则 / 阵营 / 禁止项）。
+ * 兼容数组、JSON 字符串、普通多行字符串与对象项，保证界面上不出现 JSON。
+ * @param {any} value 原始值
+ * @returns {string[]} 文本数组
+ */
+function asStringList(value) {
+  if (value === null || value === undefined || value === '') return [];
+  if (typeof value === 'string') {
+    const parsed = parseJSONish(value);
+    if (parsed !== null) return asStringList(parsed);
+    return splitLines(value);
+  }
+  if (Array.isArray(value)) {
+    return value.map(readableText).map((text) => text.trim()).filter(Boolean);
+  }
+  return [readableText(value)].filter(Boolean);
+}
+
+/**
+ * 归一化地点数组：兼容对象数组、JSON 字符串、单对象、名称映射与 `名称 | 描述 | 氛围` 文本。
+ * @param {any} value 原始值
+ * @returns {Array<object>} 地点条目（保留未知字段）
+ */
+function asLocationList(value) {
+  let rows = value;
+  if (typeof rows === 'string') {
+    const parsed = parseJSONish(rows);
+    if (parsed !== null) rows = parsed;
+    else return splitLines(rows).map((line) => {
+      const [name = '', description = '', atmosphere = ''] = line.split('|').map((part) => part.trim());
+      return { name, description, atmosphere };
+    });
+  }
+  if (rows && !Array.isArray(rows) && typeof rows === 'object') {
+    if ('name' in rows || '名称' in rows || 'title' in rows) rows = [rows];
+    else rows = Object.entries(rows).map(([name, description]) => ({ name, description: readableText(description) }));
+  }
+  const list = [];
+  for (const item of Array.isArray(rows) ? rows : []) {
+    if (item && typeof item === 'object' && !Array.isArray(item)) {
+      list.push({
+        ...item,
+        name: readableText(item.name ?? item.名称 ?? item.title ?? ''),
+        description: readableText(item.description ?? item.desc ?? item.描述 ?? ''),
+        atmosphere: readableText(item.atmosphere ?? item.氛围 ?? ''),
+      });
+      continue;
+    }
+    const parsed = parseJSONish(item);
+    if (parsed !== null) {
+      list.push(...asLocationList(parsed));
+      continue;
+    }
+    const [name = '', description = '', atmosphere = ''] = String(item ?? '').split('|').map((part) => part.trim());
+    if (name || description || atmosphere) list.push({ name, description, atmosphere });
+  }
+  return list;
+}
+
+/**
+ * 归一化名词表：兼容对象数组、JSON 字符串、单对象、`词条→释义` 映射与文本行。
+ * @param {any} value 原始值
+ * @returns {Array<object>} 词条（保留未知字段）
+ */
+function asGlossaryList(value) {
+  let rows = value;
+  if (typeof rows === 'string') {
+    const parsed = parseJSONish(rows);
+    if (parsed !== null) rows = parsed;
+    else return splitLines(rows).map((line) => {
+      const [term = '', meaning = '', aliasText = ''] = line.split('|').map((part) => part.trim());
+      return { term, meaning, ...(aliasText ? { aliases: splitAliases(aliasText) } : {}) };
+    });
+  }
+  if (rows && !Array.isArray(rows) && typeof rows === 'object') {
+    if ('term' in rows || '词条' in rows || 'name' in rows) rows = [rows];
+    else rows = Object.entries(rows).map(([term, meaning]) => ({ term, meaning: readableText(meaning) }));
+  }
+  const list = [];
+  for (const item of Array.isArray(rows) ? rows : []) {
+    if (item && typeof item === 'object' && !Array.isArray(item)) {
+      list.push({
+        ...item,
+        term: readableText(item.term ?? item.词条 ?? item.name ?? ''),
+        meaning: readableText(item.meaning ?? item.definition ?? item.释义 ?? ''),
+        aliases: splitAliases(item.aliases),
+      });
+      continue;
+    }
+    const parsed = parseJSONish(item);
+    if (parsed !== null) {
+      list.push(...asGlossaryList(parsed));
+      continue;
+    }
+    const [term = '', meaning = '', aliasText = ''] = String(item ?? '').split('|').map((part) => part.trim());
+    if (term || meaning) list.push({ term, meaning, aliases: splitAliases(aliasText) });
+  }
+  return list;
+}
+
+/**
+ * 别名归一化：数组直接展开，字符串按顿号/逗号/分号拆分。
+ * @param {any} value 原始别名
+ * @returns {string[]} 别名数组
+ */
+function splitAliases(value) {
+  if (Array.isArray(value)) return value.map(readableText).flatMap(splitAliases).filter(Boolean);
+  const text = readableText(value);
+  return text
+    .split(/[、,，;；]/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+}
+
+/**
+ * 地点转一行中文文本（只读展示用，例如世界生成预览）。
  * @param {object|string} item 地点对象或历史字符串
  */
 function locationLine(item) {
-  if (typeof item === 'string') return item;
-  return [item.name, item.description, item.atmosphere].filter(Boolean).join(' | ');
-}
-
-/** 名词表转一行文本：`词条 | 释义 | 别名1、别名2` */
-function glossaryLine(item) {
-  if (typeof item === 'string') return item;
-  const aliases = Array.isArray(item.aliases) && item.aliases.length ? ` | ${item.aliases.join('、')}` : '';
-  return `${item.term || ''} | ${item.meaning || ''}${aliases}`;
-}
-
-/** 生成地点 ID（schema 要求 `loc_` + 6~32 位字母数字） */
-function newLocationId() {
-  const bytes = crypto.getRandomValues(new Uint8Array(13));
-  return `loc_${Array.from(bytes, (byte) => (byte % 36).toString(36)).join('').toUpperCase()}`;
+  if (typeof item === 'string') {
+    const parsed = parseJSONish(item);
+    if (parsed === null) return item;
+  }
+  const row = asLocationList([item])[0] || {};
+  return [row.name, row.description, row.atmosphere].filter(Boolean).join(' | ');
 }
 
 /**
- * 文本行 → 地点对象数组；按行号沿用旧对象的 id，新行生成 id。
- * @param {string} text 多行文本
- * @param {Array<object>} originals 原地点数组
+ * 单条地点/词条的编辑行。
+ * @param {'locations'|'glossary'} kind 条目类型
+ * @param {object} item 条目数据
+ * @param {number} orig 原始下标（-1 表示新增）
+ * @returns {string} HTML
  */
-function parseLocations(text, originals = []) {
-  return splitLines(text).map((line, index) => {
-    const [name = '', description = '', atmosphere = ''] = line.split('|').map((part) => part.trim());
-    const base = originals[index] && typeof originals[index] === 'object' ? originals[index] : {};
-    return { ...base, id: base.id || newLocationId(), name, description, atmosphere };
-  });
+function itemRowHTML(kind, item = {}, orig = -1) {
+  const ops = `
+    <div class="novel-item-ops">
+      <button class="btn icon sm" data-act="novel-item-move" data-dir="-1" title="上移">↑</button>
+      <button class="btn icon sm" data-act="novel-item-move" data-dir="1" title="下移">↓</button>
+      <button class="btn icon sm" data-act="novel-item-del" title="删除这条">${icon('trash', 12)}</button>
+    </div>`;
+  if (kind === 'glossary') {
+    return `
+      <div class="novel-item" data-row data-orig="${orig}">
+        <div class="novel-item-grid">
+          <input class="input" data-f="term" placeholder="词条" value="${esc(item.term || '')}" />
+          <input class="input" data-f="aliases" placeholder="别名（逗号分隔，可留空）"
+            value="${esc((item.aliases || []).join('，'))}" />
+          <textarea class="textarea" data-f="meaning" rows="2" placeholder="释义"
+            style="grid-column:1/-1">${esc(item.meaning || '')}</textarea>
+        </div>
+        ${ops}
+      </div>`;
+  }
+  return `
+    <div class="novel-item" data-row data-orig="${orig}">
+      <div class="novel-item-grid">
+        <input class="input" data-f="name" placeholder="名称" value="${esc(item.name || '')}" />
+        <input class="input" data-f="atmosphere" placeholder="氛围" value="${esc(item.atmosphere || '')}" />
+        <textarea class="textarea" data-f="description" rows="2" placeholder="描述"
+          style="grid-column:1/-1">${esc(item.description || '')}</textarea>
+      </div>
+      ${ops}
+    </div>`;
 }
 
 /**
- * 文本行 → 名词条目数组；按行号沿用旧条目的别名。
- * @param {string} text 多行文本
- * @param {Array<object>} originals 原名词表
+ * 地点 / 名词表的条目编辑器（增删、上下移动都在原地完成，不重绘整页）。
+ * @param {'locations'|'glossary'} kind 条目类型
+ * @param {Array<object>} list 条目数组
+ * @returns {string} HTML
  */
-function parseGlossary(text, originals = []) {
-  return splitLines(text).map((line, index) => {
-    const [term = '', meaning = '', aliasText = ''] = line.split('|').map((part) => part.trim());
-    const base = originals[index] && typeof originals[index] === 'object' ? originals[index] : {};
-    const aliases = aliasText
-      ? aliasText
-          .split(/[、,，]/)
-          .map((part) => part.trim())
-          .filter(Boolean)
-      : base.aliases || [];
-    return { ...base, term, meaning, ...(aliases.length ? { aliases } : {}) };
-  });
+function itemsEditorHTML(kind, list) {
+  const label = kind === 'locations' ? '关键地点' : '名词表';
+  const addLabel = kind === 'locations' ? '新增地点' : '新增词条';
+  const rows = list.map((item, index) => itemRowHTML(kind, item, index)).join('');
+  return `
+    <div class="field novel-items" data-rows="${kind}">
+      <div class="novel-items-head">
+        <label>${label}（<span data-count>${list.length}</span>）</label>
+        <button class="btn sm" data-act="novel-item-add" data-kind="${kind}">${addLabel}</button>
+      </div>
+      <div class="novel-items-body" data-rows-body>${rows}</div>
+      <div class="hint" data-empty-hint ${list.length ? 'hidden' : ''}>还没有条目，点「${addLabel}」添加一条</div>
+    </div>`;
+}
+
+/**
+ * 同步条目编辑器的计数与空态提示。
+ * @param {HTMLElement} container 编辑器容器（`[data-rows]`）
+ */
+function syncItemsHead(container) {
+  if (!container) return;
+  const count = container.querySelectorAll('[data-row]').length;
+  const counter = container.querySelector('[data-count]');
+  if (counter) counter.textContent = String(count);
+  const hint = container.querySelector('[data-empty-hint]');
+  if (hint) hint.hidden = count > 0;
+}
+
+/**
+ * 从编辑器里收集条目数组；按 `data-orig` 找回原对象，保留未知字段。
+ * @param {HTMLElement|Document} scope 查找范围（整页或弹窗）
+ * @param {'locations'|'glossary'} kind 条目类型
+ * @param {Array<object>} originals 原始数组
+ * @returns {Array<object>} 新数组
+ */
+function collectItems(scope, kind, originals = []) {
+  const container = scope.querySelector(`[data-rows="${kind}"]`);
+  const body = container?.querySelector('[data-rows-body]');
+  if (!body) return [];
+  const list = [];
+  for (const row of body.querySelectorAll('[data-row]')) {
+    const orig = Number(row.dataset.orig);
+    const base =
+      Number.isInteger(orig) && orig >= 0 && originals[orig] && typeof originals[orig] === 'object'
+        ? originals[orig]
+        : {};
+    const field = (name) => row.querySelector(`[data-f="${name}"]`)?.value.trim() || '';
+    if (kind === 'glossary') {
+      const term = field('term');
+      const meaning = field('meaning');
+      if (!term && !meaning) continue;
+      const aliases = splitAliases(field('aliases'));
+      const item = { ...base, term, meaning };
+      if (aliases.length) item.aliases = aliases;
+      else delete item.aliases;
+      list.push(item);
+      continue;
+    }
+    const name = field('name');
+    const description = field('description');
+    const atmosphere = field('atmosphere');
+    if (!name && !description && !atmosphere) continue;
+    list.push({ ...base, name, description, atmosphere });
+  }
+  return list;
 }
 
 /** 当前选中对象的标题（用于顶栏/空状态） */
@@ -398,10 +621,10 @@ function settingHTML() {
         </div>
         <div class="card-body" style="display:grid;gap:10px">
           ${text('ns-era', '时代与舞台', world.era, 2)}
-          ${text('ns-rules', '世界规则（每行一条）', joinLines(world.rules), 4)}
-          ${text('ns-locations', '关键地点（每行：名称 | 描述 | 氛围）', joinLines((world.locations || []).map(locationLine)), 3)}
-          ${text('ns-factions', '阵营势力（每行一条）', joinLines(world.factions), 3)}
-          ${text('ns-glossary', '名词表（每行：词条 | 释义 | 别名）', joinLines((world.glossary || []).map(glossaryLine)), 3)}
+          ${text('ns-rules', '世界规则（每行一条）', joinLines(asStringList(world.rules)), 4)}
+          ${itemsEditorHTML('locations', asLocationList(world.locations))}
+          ${text('ns-factions', '阵营势力（每行一条）', joinLines(asStringList(world.factions)), 3)}
+          ${itemsEditorHTML('glossary', asGlossaryList(world.glossary))}
         </div>
       </div>
       <div class="card">
@@ -410,7 +633,7 @@ function settingHTML() {
         </div>
         <div class="card-body" style="display:grid;gap:10px">
           ${text('ns-tone', '语调', style.tone, 3)}
-          <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px">
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
             <div class="field"><label>叙事视角</label>
               ${selectHTML('pov', {
                 id: 'ns-pov',
@@ -425,10 +648,10 @@ function settingHTML() {
                 emptyLabel: '未设置',
                 title: '叙述时态，只能从列表选择',
               })}</div>
-            ${line('ns-visual', '视觉风格', style.visual_style, '自由填写，给分镜与封面用')}
           </div>
+          ${text('ns-visual', '视觉风格', style.visual_style, 2, '给分镜与封面用，写具体场景、光线、色彩与质感')}
           ${text('ns-prose', '行文风格', style.prose_style, 3)}
-          ${text('ns-forbidden', '禁止项（每行一条）', joinLines(style.forbidden), 3)}
+          ${text('ns-forbidden', '禁止项（每行一条）', joinLines(asStringList(style.forbidden)), 3)}
         </div>
       </div>
     </div>`;
@@ -467,18 +690,14 @@ function worldHTML() {
           world.summary || ''
         )}</textarea></div>
         <div class="field"><label>规则（每行一条）</label><textarea class="textarea" id="nw-rules" rows="4">${esc(
-          joinLines(world.rules)
+          joinLines(asStringList(world.rules))
         )}</textarea></div>
         <div class="field"><label>阵营（每行一条）</label><textarea class="textarea" id="nw-factions" rows="3">${esc(
-          joinLines(world.factions)
+          joinLines(asStringList(world.factions))
         )}</textarea></div>
-        <div class="field"><label>地点（每行：名称 | 描述 | 氛围）</label><textarea class="textarea" id="nw-locations" rows="3">${esc(
-          joinLines((world.locations || []).map(locationLine))
-        )}</textarea></div>
-        <div class="field"><label>词条（每行：词条 | 释义 | 别名）</label><textarea class="textarea" id="nw-glossary" rows="3">${esc(
-          joinLines((world.glossary || []).map(glossaryLine))
-        )}</textarea></div>
-        <div class="field"><label>视觉风格</label><textarea class="textarea" id="nw-visual" rows="2">${esc(
+        ${itemsEditorHTML('locations', asLocationList(world.locations))}
+        ${itemsEditorHTML('glossary', asGlossaryList(world.glossary))}
+        <div class="field"><label>视觉风格</label><textarea class="textarea" id="nw-visual" rows="3">${esc(
           world.visual_style || ''
         )}</textarea></div>
       </div></div>
@@ -817,7 +1036,7 @@ function topRightHTML() {
 /** 保存当前世界条目（无 id 时创建） */
 async function saveWorld() {
   const base = findWorld(ui.sel.id) || {};
-  const locationText = document.getElementById('nw-locations')?.value;
+  const isNew = !base.id;
   const payload = {
     ...base,
     name: document.getElementById('nw-name')?.value.trim() || '',
@@ -825,10 +1044,13 @@ async function saveWorld() {
     summary: document.getElementById('nw-summary')?.value.trim() || '',
     rules: splitLines(document.getElementById('nw-rules')?.value),
     factions: splitLines(document.getElementById('nw-factions')?.value),
-    locations: parseLocations(locationText, base.locations || []),
-    glossary: parseGlossary(document.getElementById('nw-glossary')?.value, base.glossary || []),
+    locations: collectItems(document, 'locations', asLocationList(base.locations)),
+    glossary: collectItems(document, 'glossary', asGlossaryList(base.glossary)),
     visual_style: document.getElementById('nw-visual')?.value.trim() || '',
+    // 系统字段界面上不展示，保存时按原值带回，避免被清空
     cover_asset: base.cover_asset ?? null,
+    created_at: base.created_at,
+    updated_at: base.updated_at,
   };
   if (!payload.name) return toast('世界名称不能为空', 'warn');
   if (!payload.era) return toast('时代不能为空', 'warn');
@@ -841,7 +1063,20 @@ async function saveWorld() {
   if (matched) ui.sel = { kind: 'world', id: matched.id };
   ui.draftWorld = false;
   toast('世界条目已保存', 'ok');
-  paint();
+  // 已有条目只就地更新标题与目录，不整页重绘，保住输入焦点与滚动位置
+  if (isNew) {
+    paint();
+    return;
+  }
+  const head = document.querySelector('#novel-main .ed-head .et');
+  if (head) head.textContent = payload.name;
+  const row = document.querySelector(`[data-act="novel-sel-world"][data-id="${esc(payload.id)}"]`);
+  if (row) {
+    const nameNode = row.querySelector('.novel-world-name');
+    const descNode = row.querySelector('.novel-world-desc');
+    if (nameNode) nameNode.textContent = payload.name;
+    if (descNode) descNode.textContent = payload.summary || payload.era || '';
+  }
 }
 
 /** 删除当前世界条目 */
@@ -885,9 +1120,9 @@ async function saveSetting(section) {
     Object.assign(fields, {
       era: read('ns-era'),
       rules: splitLines(document.getElementById('ns-rules')?.value),
-      locations: parseLocations(document.getElementById('ns-locations')?.value, current.locations || []),
+      locations: collectItems(document, 'locations', asLocationList(current.locations)),
       factions: splitLines(document.getElementById('ns-factions')?.value),
-      glossary: parseGlossary(document.getElementById('ns-glossary')?.value, current.glossary || []),
+      glossary: collectItems(document, 'glossary', asGlossaryList(current.glossary)),
     });
   } else {
     Object.assign(fields, {
@@ -899,17 +1134,19 @@ async function saveSetting(section) {
       forbidden: splitLines(document.getElementById('ns-forbidden')?.value),
     });
   }
-  // 目标总字数允许为 0（表示清空），其余空值不提交，避免覆盖已有设定
+  // 目标总字数允许为 0（表示清空）；列表字段（地点/词条等）允许为空，
+  // 否则用户删光条目后旧数据会被「空值不提交」逻辑保留下来。
+  const keepEmpty = new Set(['target_words', 'locations', 'glossary', 'rules', 'factions', 'forbidden']);
   const clean = Object.fromEntries(
     Object.entries(fields).filter(([key, value]) =>
-      key === 'target_words' ? true : Array.isArray(value) ? value.length : value
+      keepEmpty.has(key) ? true : Array.isArray(value) ? value.length : value
     )
   );
   if (!Object.keys(clean).length) return toast('没有可保存的内容', 'warn');
   await run('保存设定', () => postJSON('/api/ui/setting/apply', { path: cache.path, section, fields: clean }));
   cache.setting = await getJSON('/api/ui/setting', { path: cache.path });
   toast('设定已保存', 'ok');
-  paint();
+  // 保存成功后不重绘页面：保住输入焦点与滚动位置（失败时也不会走到这里）
 }
 
 /** 保存大纲章：标题 / 概要 / 各节拍摘要 */
@@ -937,7 +1174,14 @@ async function saveOutlineChapter() {
   });
   cache.outline = await getJSON('/api/ui/outline', { path: cache.path });
   toast('大纲已保存', 'ok');
-  paint();
+  // 就地更新标题，不整页重绘，避免输入焦点与滚动位置丢失
+  const head = document.querySelector('#novel-main .ed-head .et');
+  if (head) head.textContent = title || '未命名章节';
+  const row = document.querySelector(`[data-act="novel-sel-chapter"][data-id="${esc(chapter.id)}"] .novel-chapter-title`);
+  if (row) {
+    row.textContent = title || '未命名章节';
+    row.setAttribute('title', title || '未命名章节');
+  }
 }
 
 /**
@@ -1090,11 +1334,11 @@ function renderWorldPreview() {
           </div>
           <div class="card-body" style="display:grid;gap:6px">
             <div>${esc(world.summary || '')}</div>
-            ${(world.rules || []).length ? `<div class="hint">规则：${esc(world.rules.join('；'))}</div>` : ''}
+            ${asStringList(world.rules).length ? `<div class="hint">规则：${esc(asStringList(world.rules).join('；'))}</div>` : ''}
             ${
               (world.locations || []).length
                 ? `<div class="hint">地点：${esc(
-                    world.locations.map((item) => locationLine(item).split(' | ')[0]).join('、')
+                    asLocationList(world.locations).map((item) => locationLine(item).split(' | ')[0]).join('、')
                   )}</div>`
                 : ''
             }
@@ -1361,8 +1605,15 @@ async function runSettingGenerate(section, label, brief, seed = null, mode = 're
   }
 }
 
-/** 设定预览：列出字段可编辑，确认后 apply */
+/** 设定预览：只展示业务字段，可编辑后写入 */
 function openSettingPreview(section, label, fields) {
+  // 每个分区允许出现的字段：系统字段（id/created_at/updated_at/cover_asset 等）
+  // 与模型编造的多余键都不进表单，避免裸露英文键名与误改元数据。
+  const allowed = {
+    premise: ['logline', 'theme', 'core_conflict', 'ending_intent', 'target_audience', 'target_length', 'target_words'],
+    world: ['era', 'rules', 'locations', 'factions', 'glossary'],
+    style: ['tone', 'pov', 'tense', 'prose_style', 'forbidden', 'visual_style'],
+  }[section] || [];
   const labelOf = {
     logline: '一句话梗概',
     theme: '主题',
@@ -1370,36 +1621,52 @@ function openSettingPreview(section, label, fields) {
     ending_intent: '结局意图',
     target_audience: '目标读者',
     target_length: '目标篇幅',
+    target_words: '目标总字数',
     era: '时代与舞台',
     locations: '关键地点',
     rules: '世界规则',
     factions: '阵营势力',
     glossary: '名词表',
     tone: '语调',
-    pov: '视角',
+    pov: '叙事视角',
     tense: '时态',
     prose_style: '行文风格',
     forbidden: '禁止项',
     visual_style: '视觉风格',
   };
-  const rows = Object.entries(fields)
-    .map(([key, value]) => {
-      const label = esc(ENUMS[key]?.label || labelOf[key] || key);
-      // 枚举字段（篇幅 / 视角 / 时态）在预览里也用下拉，避免把裸值当文本改
-      if (ENUMS[key] && !Array.isArray(value)) {
+  /** 长文本字段用多行，其余用单行/短行 */
+  const longFields = new Set(['logline', 'theme', 'core_conflict', 'ending_intent', 'target_audience', 'era', 'tone', 'prose_style', 'visual_style']);
+  const keys = allowed.filter((key) => key in fields);
+  const currentWorld = cache.setting?.world || {};
+  const rows = keys
+    .map((key) => {
+      const value = fields[key];
+      const textLabel = esc(ENUMS[key]?.label || labelOf[key] || key);
+      if (key === 'locations') return itemsEditorHTML('locations', asLocationList(value));
+      if (key === 'glossary') return itemsEditorHTML('glossary', asGlossaryList(value));
+      if (ENUMS[key]) {
         return `
-      <div class="field"><label>${label}</label>
+      <div class="field"><label>${textLabel}</label>
         ${selectHTML(key, { current: value, emptyLabel: '未设置', attrs: `data-sf-key="${esc(key)}"` })}</div>`;
       }
-      // 地点/名词表是对象数组，先转成可编辑文本行
-      const raw = Array.isArray(value) ? value : [];
-      const textValue =
-        key === 'locations' ? joinLines(raw.map(locationLine)) : key === 'glossary' ? joinLines(raw.map(glossaryLine)) : joinLines(raw);
-      return `
-      <div class="field"><label>${label}</label>
-        <textarea class="textarea" data-free="1" data-sf-key="${esc(key)}" rows="${Array.isArray(value) ? 3 : 2}">${esc(
-          Array.isArray(value) ? textValue : value || ''
-        )}</textarea></div>`;
+      if (key === 'target_words') {
+        return `
+      <div class="field"><label>${textLabel}</label>
+        <input class="input" type="number" min="0" step="1000" data-sf-key="${esc(key)}"
+          value="${Number(value) > 0 ? Number(value) : ''}" placeholder="可留空" /></div>`;
+      }
+      if (Array.isArray(value) || ['rules', 'factions', 'forbidden'].includes(key)) {
+        const list = asStringList(value);
+        return `
+      <div class="field"><label>${textLabel}（每行一条）</label>
+        <textarea class="textarea" data-free="1" data-sf-key="${esc(key)}" rows="3">${esc(joinLines(list))}</textarea></div>`;
+      }
+      const text = readableText(value);
+      return longFields.has(key)
+        ? `<div class="field"><label>${textLabel}</label>
+            <textarea class="textarea" data-free="1" data-sf-key="${esc(key)}" rows="${key === 'visual_style' ? 3 : 2}">${esc(text)}</textarea></div>`
+        : `<div class="field"><label>${textLabel}</label>
+            <input class="input" data-free="1" data-sf-key="${esc(key)}" value="${esc(text)}" /></div>`;
     })
     .join('');
   openDialog({
@@ -1411,15 +1678,28 @@ function openSettingPreview(section, label, fields) {
     onMount: (mask) => {
       mask.querySelector('[data-sf-apply]').addEventListener('click', async () => {
         const next = {};
-        const currentWorld = cache.setting?.world || {};
+        // 结构化字段按条目收集，保留未知字段与 id
+        if (keys.includes('locations')) {
+          next.locations = collectItems(mask, 'locations', asLocationList(currentWorld.locations));
+        }
+        if (keys.includes('glossary')) {
+          next.glossary = collectItems(mask, 'glossary', asGlossaryList(currentWorld.glossary));
+        }
         mask.querySelectorAll('[data-sf-key]').forEach((node) => {
           const key = node.dataset.sfKey;
           const original = fields[key];
           const rawText = node.value.trim();
-          if (key === 'locations') next[key] = parseLocations(rawText, currentWorld.locations || []);
-          else if (key === 'glossary') next[key] = parseGlossary(rawText, currentWorld.glossary || []);
-          else next[key] = Array.isArray(original) ? splitLines(rawText) : rawText;
+          if (key === 'target_words') {
+            next[key] = Number.isFinite(Number(rawText)) ? Math.max(0, Math.round(Number(rawText) || 0)) : 0;
+            return;
+          }
+          // 空值不提交，避免把已有字段清空（显式清空请直接编辑表单后保存）
+          if (!rawText) return;
+          next[key] = Array.isArray(original) || ['rules', 'factions', 'forbidden'].includes(key)
+            ? splitLines(rawText)
+            : rawText;
         });
+        if (!Object.keys(next).length) return toast('没有可写入的内容', 'warn');
         try {
           await postJSON('/api/ui/setting/apply', { path: cache.path, section, fields: next });
           cache.setting = await getJSON('/api/ui/setting', { path: cache.path });
@@ -1450,9 +1730,15 @@ async function deleteBeat(index) {
 async function deleteChapter() {
   const hit = findOutlineChapter(ui.sel.id);
   if (!hit) return;
-  const impact = await run('评估影响', () =>
-    postJSON('/api/ui/outline/chapter/delete', { path: cache.path, chapter: hit.chapter.id, dry_run: true })
-  );
+  const chapterId = hit.chapter.id;
+  let impact = null;
+  try {
+    impact = await run('评估影响', () =>
+      postJSON('/api/ui/outline/chapter/delete', { path: cache.path, chapter: chapterId, dry_run: true })
+    );
+  } catch {
+    return; // run 已经弹出可读错误
+  }
   const parts = [];
   if (impact?.landed) parts.push('已落成正文');
   if (impact?.chars) parts.push(`${Number(impact.chars)} 字`);
@@ -1461,14 +1747,31 @@ async function deleteChapter() {
   if (impact?.image) parts.push(`${Number(impact.image)} 张图`);
   if (impact?.video) parts.push(`${Number(impact.video)} 个视频`);
   if (!window.confirm(`删除「${hit.chapter.title || '未命名章节'}」？\n影响：${parts.join(' · ') || '仅大纲'}`)) return;
-  await run('删除章节', () =>
-    postJSON('/api/ui/outline/chapter/delete', { path: cache.path, chapter: hit.chapter.id })
-  );
-  cache.outline = await getJSON('/api/ui/outline', { path: cache.path });
-  cache.chapters = await getJSON('/api/ui/chapters', { path: cache.path });
-  ui.sel = { kind: 'setting', id: '' };
-  toast('章节已删除', 'ok');
-  paint();
+  const button = document.querySelector('[data-act="novel-chapter-delete"]');
+  if (button) {
+    button.disabled = true;
+    button.textContent = '删除中…';
+  }
+  try {
+    // 删除会同步清理章节文件、脚本与时间轴：给足超时并落明确结果
+    await run('删除章节', () =>
+      postJSON('/api/ui/outline/chapter/delete', { path: cache.path, chapter: chapterId }, { timeout: 30000 })
+    );
+    cache.outline = await getJSON('/api/ui/outline', { path: cache.path });
+    cache.chapters = await getJSON('/api/ui/chapters', { path: cache.path });
+    // 图标栏与其它视图都读 state.chapters：同步更新，避免留下悬空引用
+    state.chapters = cache.chapters;
+    if (state.chapterId === chapterId) state.chapterId = cache.chapters[0]?.id || '';
+    if (ui.sel.kind === 'chapter' && ui.sel.id === chapterId) ui.sel = { kind: 'setting', id: '' };
+    toast('章节已删除', 'ok');
+    paint();
+    syncChapterEntry();
+  } catch {
+    if (button) {
+      button.disabled = false;
+      button.textContent = '删除本章';
+    }
+  }
 }
 
 /** 大纲落地成章节（幂等：已落章的不会重复建） */
@@ -2075,6 +2378,35 @@ async function onClick(event) {
     paint();
     loadBody(el.dataset.id);
     loadPlan(el.dataset.id);
+    return;
+  }
+  if (act === 'novel-item-add') {
+    const container = el.closest('[data-rows]');
+    const kind = el.dataset.kind || container?.dataset.rows;
+    const body = container?.querySelector('[data-rows-body]');
+    if (!body || !kind) return;
+    body.insertAdjacentHTML('beforeend', itemRowHTML(kind, {}, -1));
+    syncItemsHead(container);
+    body.lastElementChild?.querySelector('input, textarea')?.focus();
+    return;
+  }
+  if (act === 'novel-item-move') {
+    const row = el.closest('[data-row]');
+    if (!row) return;
+    const dir = Number(el.dataset.dir) || 0;
+    const sibling = dir < 0 ? row.previousElementSibling : row.nextElementSibling;
+    if (sibling) {
+      const parent = row.parentElement;
+      if (dir < 0) parent.insertBefore(row, sibling);
+      else parent.insertBefore(sibling, row);
+    }
+    return;
+  }
+  if (act === 'novel-item-del') {
+    const row = el.closest('[data-row]');
+    const container = el.closest('[data-rows]');
+    row?.remove();
+    syncItemsHead(container);
     return;
   }
   if (act === 'novel-world-new') return newWorld();

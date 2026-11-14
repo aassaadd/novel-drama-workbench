@@ -26,6 +26,7 @@ from fastapi.responses import StreamingResponse
 from ..adapters.base import AdapterError
 from ..config import load_config
 from ..store import ProjectStore
+from .job_tracker import UiJob
 from ..writing.character_plan import generate_from_plan, load_plan, plan_characters
 from ..writing.continuation import continue_chapter
 from ..writing.outline_hier import generate_hierarchical_outline
@@ -97,35 +98,68 @@ def _error_message(exc: Exception) -> str:
     return str(exc) or exc.__class__.__name__
 
 
-def _stream_response(task) -> StreamingResponse:
+def _chapter_target(store, chapter_id: str) -> dict:
+    """构造任务队列展示用的章节目标（章节标题取不到时只留 ID）。
+
+    参数:
+        store: 工程。
+        chapter_id: 章节 ID。
+
+    返回:
+        `{chapter_id, chapter_title}`。
+    """
+    title = ""
+    try:
+        title = str(store.load_chapter(chapter_id).get("title") or "")
+    except Exception:  # noqa: BLE001 - 章节还没落盘时不影响生成
+        title = ""
+    return {"chapter_id": chapter_id, "chapter_title": title}
+
+
+def _stream_response(task, job=None) -> StreamingResponse:
     """在后台线程执行生成任务，把增量与最终结果转成 SSE。
 
     参数:
         task: `task(on_delta) -> dict`，内部应把模型增量交给 on_delta。
+        job: 可选的 `UiJob`，用于把本次生成登记到任务页。
 
     返回:
         StreamingResponse（text/event-stream）。
     """
     events: queue.Queue = queue.Queue()
     stop = threading.Event()
+    received = {"chars": 0}
 
     def on_delta(text: str) -> None:
         """接收模型增量；客户端已断开时抛异常中断生成。"""
         if stop.is_set():
             raise _Cancelled()
+        received["chars"] += len(str(text))
+        if job:
+            job.progress(f"已接收 {received['chars']} 字")
         events.put(("delta", {"text": text}))
 
     def worker() -> None:
         """后台生成线程。"""
+        if job:
+            job.start("已提交生成请求")
         try:
             result = task(on_delta)
+            if job:
+                job.finish("生成完成")
             events.put(("done", {"result": result}))
         except _Cancelled:
-            pass
+            if job:
+                job.cancel()
         except AdapterError as exc:
+            if job:
+                job.fail(f"生成失败：{exc.message}")
             events.put(("error", {"message": f"生成失败：{exc.message}"}))
         except Exception as exc:  # 其它异常统一转成中文可读错误
-            events.put(("error", {"message": f"生成失败：{_error_message(exc)}"}))
+            message = f"生成失败：{_error_message(exc)}"
+            if job:
+                job.fail(message)
+            events.put(("error", {"message": message}))
         finally:
             events.put(None)
 
@@ -145,11 +179,13 @@ def _stream_response(task) -> StreamingResponse:
         finally:
             # 浏览器断开或正常结束：通知后台在下一个增量处停止
             stop.set()
+            if job:
+                job.cancel()
 
     return StreamingResponse(events_iter(), media_type="text/event-stream", headers=_SSE_HEADERS)
 
 
-def _progress_response(task) -> StreamingResponse:
+def _progress_response(task, job=None) -> StreamingResponse:
     """在后台线程执行结构化生成，把 batch/chars 进度与最终结果转成 SSE。
 
     与 `_stream_response` 的区别：任务通过 `on_progress(event)` 上报批次与
@@ -157,6 +193,7 @@ def _progress_response(task) -> StreamingResponse:
 
     参数:
         task: `task(on_progress) -> dict`。
+        job: 可选的 `UiJob`，用于把本次生成登记到任务页。
 
     返回:
         StreamingResponse（text/event-stream）。
@@ -184,19 +221,31 @@ def _progress_response(task) -> StreamingResponse:
             # 新批次 / 新角色的字数从头累计，重置节流基线，保证首个 chars 事件不被吞
             throttle["chars"] = 0
             throttle["at"] = 0.0
+        if job:
+            job.event(kind, event)
         events.put((kind, event))
 
     def worker() -> None:
         """后台生成线程。"""
+        if job:
+            job.start("已提交生成请求")
         try:
             result = task(on_progress)
+            if job:
+                job.finish("生成完成")
             events.put(("done", {"result": result}))
         except _Cancelled:
-            pass
+            if job:
+                job.cancel()
         except AdapterError as exc:
+            if job:
+                job.fail(f"生成失败：{exc.message}")
             events.put(("error", {"message": f"生成失败：{exc.message}"}))
         except Exception as exc:  # 其它异常统一转成中文可读错误
-            events.put(("error", {"message": f"生成失败：{_error_message(exc)}"}))
+            message = f"生成失败：{_error_message(exc)}"
+            if job:
+                job.fail(message)
+            events.put(("error", {"message": message}))
         finally:
             events.put(None)
 
@@ -215,6 +264,8 @@ def _progress_response(task) -> StreamingResponse:
                 yield _sse(event, data)
         finally:
             stop.set()
+            if job:
+                job.cancel()
 
     return StreamingResponse(events_iter(), media_type="text/event-stream", headers=_SSE_HEADERS)
 
@@ -260,7 +311,7 @@ def register_stream_routes(app, config_path: str | None = None) -> None:
                 on_delta=on_delta,
             )
 
-        return _stream_response(task)
+        return _stream_response(task, UiJob(store, "chapter", _chapter_target(store, chapter_id), "生成本章正文"))
 
     @app.post("/api/ui/chapter/continue/stream")
     def ui_chapter_continue_stream(body: dict) -> StreamingResponse:
@@ -292,7 +343,7 @@ def register_stream_routes(app, config_path: str | None = None) -> None:
                 on_delta=on_delta,
             )
 
-        return _stream_response(task)
+        return _stream_response(task, UiJob(store, "chapter.continue", _chapter_target(store, chapter_id), "续写本章"))
 
     @app.post("/api/ui/characters/generate/stream")
     def ui_characters_generate_stream(body: dict) -> StreamingResponse:
@@ -317,7 +368,7 @@ def register_stream_routes(app, config_path: str | None = None) -> None:
                 on_progress=on_progress,
             )
 
-        return _progress_response(task)
+        return _progress_response(task, UiJob(store, "character", {"label": "批量生成人物"}, "批量生成角色"))
 
     @app.post("/api/ui/characters/plan/stream")
     def ui_characters_plan_stream(body: dict) -> StreamingResponse:
@@ -351,7 +402,7 @@ def register_stream_routes(app, config_path: str | None = None) -> None:
             on_progress({"type": "plan", "total": len(plan.get("items") or []), "basis": plan.get("basis")})
             return generate_from_plan(store, config, plan, statuses=statuses, on_progress=on_progress)
 
-        return _progress_response(task)
+        return _progress_response(task, UiJob(store, "character", {"label": "两阶段生成人物"}, "两阶段生成角色"))
 
     @app.post("/api/ui/worlds/generate/stream")
     def ui_worlds_generate_stream(body: dict) -> StreamingResponse:
@@ -377,7 +428,7 @@ def register_stream_routes(app, config_path: str | None = None) -> None:
                 on_progress=on_progress,
             )
 
-        return _progress_response(task)
+        return _progress_response(task, UiJob(store, "world", {"label": str(body.get("brief") or "")}, "世界设定"))
 
     @app.post("/api/ui/outline/generate/stream")
     def ui_outline_generate_stream(body: dict) -> StreamingResponse:
@@ -409,7 +460,10 @@ def register_stream_routes(app, config_path: str | None = None) -> None:
                 on_progress=on_progress,
             )
 
-        return _progress_response(task)
+        return _progress_response(
+            task,
+            UiJob(store, "outline", {"label": f"{int(body.get('acts') or 3)} 幕"}, "分层大纲"),
+        )
 
     @app.post("/api/ui/outline/hierarchical/stream")
     def ui_outline_hierarchical_stream(body: dict) -> StreamingResponse:
@@ -441,7 +495,10 @@ def register_stream_routes(app, config_path: str | None = None) -> None:
                 on_progress=on_progress,
             )
 
-        return _progress_response(task)
+        return _progress_response(
+            task,
+            UiJob(store, "outline", {"label": "三级分层大纲"}, "三级分层大纲"),
+        )
 
     @app.post("/api/ui/voices/design/batch/{job_id}/stream")
     def ui_voices_batch_stream(job_id: str, body: dict) -> StreamingResponse:
@@ -571,4 +628,7 @@ def register_stream_routes(app, config_path: str | None = None) -> None:
                 result["apply"] = _apply_script_to_chapter(store, store.load_chapter(chapter_id), result["script"])
             return result
 
-        return _progress_response(task)
+        return _progress_response(
+            task,
+            UiJob(store, "script", _chapter_target(store, chapter_id), "导演标注"),
+        )

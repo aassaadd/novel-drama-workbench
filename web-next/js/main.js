@@ -3,6 +3,7 @@
  * 路由格式：
  *   #/projects
  *   #/settings[?project=<工程路径>]   全局设置（不依赖工程）
+ *   #/logs                            全平台日志（操作 + LLM 调用）
  *   #/p/<encodeURIComponent(工程路径)>/c/<章节 ID>
  *   #/p/<encodeURIComponent(工程路径)>/export/<章节 ID>
  */
@@ -16,6 +17,7 @@ import { renderVoices, leaveVoices } from './pages/voices.js';
 import { renderMedia } from './pages/media.js';
 import { renderTasks, leaveTasks } from './pages/tasks.js';
 import { renderSettings } from './pages/settings.js';
+import { renderLogs, leaveLogs } from './pages/logs.js';
 import { renderProjectSettings } from './pages/project-settings.js';
 import { renderExport, leaveExport } from './pages/export.js';
 import { decodePath } from './shell.js';
@@ -33,6 +35,8 @@ function parseRoute() {
   if (body === '/projects/all') return { view: 'projects', scope: 'all' };
   // 全局设置：与任何工程无关，不再接受 ?project= 参数
   if (body === '/settings') return { view: 'settings', section: query.get('section') || '' };
+  // 全平台日志：与工程无关，筛选条件在页面内维护
+  if (body === '/logs') return { view: 'logs', trace: query.get('trace') || '' };
   const parts = body.split('/').filter(Boolean);
   if (parts[0] === 'p' && parts[1]) {
     const path = decodePath(parts[1]);
@@ -57,6 +61,7 @@ async function route() {
   if (currentView === 'export') leaveExport();
   if (currentView === 'tasks') leaveTasks();
   if (currentView === 'voices') leaveVoices();
+  if (currentView === 'logs') leaveLogs();
   currentView = target.view;
   root.innerHTML = '';
   if (target.view === 'projects') {
@@ -89,6 +94,10 @@ async function route() {
   }
   if (target.view === 'settings') {
     await renderSettings(root, target);
+    return;
+  }
+  if (target.view === 'logs') {
+    await renderLogs(root, target);
     return;
   }
   if (target.view === 'project-settings') {

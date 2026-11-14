@@ -42,7 +42,7 @@ def cmd_produce(args, config: AppConfig) -> int:
     result = produce(
         store,
         config,
-        args.chapter,
+        args.chapter or "",
         from_stage=args.from_stage or "setting",
         to_stage=args.to_stage or "export",
         resume=not args.no_resume,
@@ -77,8 +77,25 @@ def cmd_run_show(args, config: AppConfig) -> int:
         if record is None:
             raise FileNotFoundError("还没有任何编排记录：先执行 ndw produce")
     text = (
-        f"run {record['run_id']}（{record.get('status')}）章节 {record.get('chapter_id')}\n"
+        f"run {record['run_id']}（{record.get('status')}）{_scope_text(record)}\n"
         f"开始 {record.get('started_at')}　结束 {record.get('finished_at')}\n" + _fmt_stages(record.get("stages") or [])
     )
     _emit(args, text, record)
     return EXIT_OK
+
+
+def _scope_text(record: dict) -> str:
+    """编排记录的适用范围中文描述。
+
+    参数:
+        record: 编排记录。
+
+    返回:
+        如「章节 chp_x」「全书（8 章）」「工程级（不涉及章节）」。
+    """
+    scope = record.get("scope")
+    if scope == "book":
+        return f"全书（{len(record.get('chapters') or [])} 章）"
+    if record.get("chapter_id"):
+        return f"章节 {record['chapter_id']}"
+    return "工程级（不涉及章节）"

@@ -36,7 +36,7 @@ export function stateClass(name) {
  * 渲染 56px 图标栏。
  * 第一阶段只保留参考产品存在的入口（目录 / 角色 / 素材 / 任务 / 设置），
  * 本系统独有的导出、工程切换不作为导航项。
- * @param {'projects'|'chapter'|'characters'|'voices'|'media'|'tasks'|'settings'} active 当前阶段
+ * @param {'projects'|'chapter'|'characters'|'voices'|'media'|'tasks'|'settings'|'logs'} active 当前阶段
  * @param {{chapters?:number, ready?:number, total?:number}} counts 角标
  */
 export function railbar(active, counts = {}) {
@@ -92,6 +92,10 @@ export function railbar(active, counts = {}) {
         <button class="rail-item" data-act="global-search" title="全局搜索（⌘/Ctrl + K）">
           <span class="rail-ic">${icon('search', 18)}</span>搜索
         </button>
+        <a class="rail-item ${active === 'logs' ? 'active' : ''}" href="#/logs"
+          title="全平台日志：操作记录与大模型调用（含完整提示词）">
+          <span class="rail-ic">${icon('log', 18)}</span>日志
+        </a>
         <a class="rail-item ${active === 'settings' ? 'active' : ''}" href="${toSettings}"
           title="设置：全局与本机环境（不需要先打开工程）">
           <span class="rail-ic">${icon('gear', 18)}</span>设置
@@ -347,7 +351,10 @@ export function chapterCtx({ search = '' } = {}) {
       </div>`;
     })
     .join('');
-  const empty = `<div class="empty"><b>没有匹配的章节</b><span>换个关键词，或清空搜索与筛选</span></div>`;
+  const empty =
+    state.chapters.length === 0
+      ? `<div class="empty"><b>还没有章节</b><span>先在「小说」视图落地章节，或导入已有正文</span></div>`
+      : `<div class="empty"><b>没有匹配的章节</b><span>换个关键词，或清空搜索与筛选</span></div>`;
   return `
     <section class="ctx" aria-label="章节目录">
       <div class="ctx-head">
@@ -688,25 +695,36 @@ function confirmChapterDelete(chapter) {
       <button class="btn danger" id="cd-ok">删除章节</button></div>`,
   });
   mask.querySelector('#cd-ok').addEventListener('click', async (event) => {
-    event.currentTarget.disabled = true;
+    const button = event.currentTarget;
+    button.disabled = true;
+    button.textContent = '删除中…';
     try {
       await deleteChapter(chapter.id);
       closeDialog();
     } catch (error) {
-      toast(error.message, 'bad');
-      event.currentTarget.disabled = false;
+      toast(`删除失败：${error.message}`, 'bad', 4000);
+      button.disabled = false;
+      button.textContent = '删除章节';
     }
   });
 }
 
 /** 删除单个章节并刷新目录；删的是当前章时跳到剩余第一章 */
 async function deleteChapter(chapterId) {
-  await postJSON('/api/ui/chapter/delete', { path: state.path, chapter: chapterId });
+  // 删除需要同时清理大纲条目与派生物，给足超时，避免界面无限等待
+  await postJSON('/api/ui/chapter/delete', { path: state.path, chapter: chapterId }, { timeout: 30000 });
   const wasCurrent = chapterId === state.chapterId;
   await reloadChapters();
   notifyChaptersChanged(chapterId);
   toast('章节已删除', 'ok');
-  if (wasCurrent && state.chapters.length) goChapter(state.path, state.chapters[0].id);
+  if (!wasCurrent) return;
+  if (state.chapters.length) {
+    goChapter(state.path, state.chapters[0].id);
+    return;
+  }
+  // 章节被删空：清掉当前选中，回到小说视图，避免保留悬空引用
+  state.chapterId = '';
+  location.hash = `#/p/${encodeURIComponent(state.path)}/novel`;
 }
 
 /** 批量操作条上的动作 */
@@ -735,11 +753,13 @@ async function onChapterBatch(act) {
         <button class="btn danger" id="cb-del">删除 ${ids.length} 章</button></div>`,
     });
     mask.querySelector('#cb-del').addEventListener('click', async (event) => {
-      event.currentTarget.disabled = true;
+      const button = event.currentTarget;
+      button.disabled = true;
       let done = 0;
       for (const id of ids) {
+        button.textContent = `删除中 ${done + 1}/${ids.length}`;
         try {
-          await postJSON('/api/ui/chapter/delete', { path: state.path, chapter: id });
+          await postJSON('/api/ui/chapter/delete', { path: state.path, chapter: id }, { timeout: 30000 });
           done += 1;
         } catch (error) {
           toast(`${chapterOf(id)?.title || id}：${error.message}`, 'warn', 4000);

@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 
 from ..models.ids import new_id
@@ -123,6 +124,15 @@ def normalize_locations(rows) -> list[dict]:
     if rows is None:
         return []
     if isinstance(rows, str):
+        # 模型有时把整个数组写成 JSON 字符串：先按 JSON 解析，避免把原文当成一个地名
+        text = rows.strip()
+        if text[:1] in ("[", "{"):
+            try:
+                parsed = json.loads(text)
+            except json.JSONDecodeError:
+                parsed = None
+            if isinstance(parsed, (list, dict)):
+                return normalize_locations(parsed)
         parts = [part.strip() for part in rows.replace("；", "\n").replace(";", "\n").splitlines() if part.strip()]
         rows = parts
     elif isinstance(rows, dict):
@@ -224,6 +234,15 @@ def normalize_glossary(rows) -> list[dict]:
     if rows is None:
         return []
     if isinstance(rows, str):
+        # 模型有时把整个数组写成 JSON 字符串：先解析，避免把原文当成一个词条
+        text = rows.strip()
+        if text[:1] in ("[", "{"):
+            try:
+                parsed = json.loads(text)
+            except json.JSONDecodeError:
+                parsed = None
+            if isinstance(parsed, (list, dict)):
+                return normalize_glossary(parsed)
         # 模型有时把词条写成整段文本，按换行/分号拆成多项
         rows = [part.strip() for part in rows.replace("；", "\n").replace(";", "\n").splitlines() if part.strip()]
     if isinstance(rows, dict):

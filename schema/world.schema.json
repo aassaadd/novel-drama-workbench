@@ -28,7 +28,7 @@
         "created_at",
         "updated_at"
       ],
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "id": { "type": "string", "pattern": "^wld_[0-9A-Za-z]{6,32}$" },
         "name": { "type": "string", "minLength": 1, "maxLength": 120, "description": "世界名称，如「主世界」「镜中城」" },
@@ -58,7 +58,7 @@
     "location": {
       "type": "object",
       "required": ["id", "name"],
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "id": { "type": "string", "pattern": "^loc_[0-9A-Za-z]{6,32}$" },
         "name": { "type": "string", "maxLength": 120 },
@@ -69,7 +69,7 @@
     "glossary_entry": {
       "type": "object",
       "required": ["term", "meaning"],
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "term": { "type": "string", "maxLength": 120 },
         "meaning": { "type": "string", "maxLength": 1000 },

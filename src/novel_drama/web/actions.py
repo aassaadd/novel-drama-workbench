@@ -16,6 +16,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 from typing import NamedTuple
 
 #: CLI 执行串行锁。CLI 用全局 stdout/stderr 重定向捕获输出，
@@ -87,9 +88,25 @@ def run(*argv: str) -> CliResult:
         CliResult。
     """
     args = [str(item) for item in argv if item is not None]
+    started = time.monotonic()
     # 生成类长命令走独立子进程：不占全局锁，页面数据请求可与生成并发
     if _is_long_command(args):
-        return _run_process(args)
+        result = _run_process(args)
+    else:
+        result = _run_inline(args)
+    _record_cli(args, result, started)
+    return result
+
+
+def _run_inline(args: list[str]) -> CliResult:
+    """在当前进程执行 CLI（秒级读写命令）。
+
+    参数:
+        args: CLI 参数列表。
+
+    返回:
+        CliResult。
+    """
     from ..cli import main
 
     out, err = io.StringIO(), io.StringIO()
@@ -102,6 +119,33 @@ def run(*argv: str) -> CliResult:
                 # 参数说明已写进 stderr（上面已重定向），这里只转成退出码。
                 code = error.code if isinstance(error.code, int) else 2
     return _parse_result(code, out.getvalue(), err.getvalue())
+
+
+def _record_cli(args: list[str], result: CliResult, started: float) -> None:
+    """把一次 CLI 调用记进日志（实际参数、退出码、stderr、耗时）。
+
+    写日志失败静默忽略，绝不影响业务请求。
+
+    参数:
+        args: CLI 参数列表。
+        result: 执行结果。
+        started: 开始时间（time.monotonic）。
+
+    返回:
+        无。
+    """
+    try:
+        from .. import oplog
+
+        oplog.record_cli(
+            argv=args,
+            code=result.code,
+            duration_ms=int((time.monotonic() - started) * 1000),
+            stderr=result.stderr,
+            stdout=result.text,
+        )
+    except Exception:  # noqa: BLE001 - 日志异常不得冒泡到业务
+        pass
 
 
 def _is_long_command(args: list[str]) -> bool:
@@ -155,6 +199,19 @@ def _run_process(args: list[str]) -> CliResult:
     command = [sys.executable, "-m", "novel_drama.cli", *args]
     env = dict(os.environ)
     env.setdefault("PYTHONIOENCODING", "utf-8")
+    # 把 trace / 工程 / 操作名透传给子进程：子进程里的 LLM 调用日志归到同一次操作
+    try:
+        from .. import oplog
+
+        ctx = oplog.current_trace()
+        env["NDW_LOG_TRACE"] = str(ctx.get("trace_id") or "")
+        if ctx.get("project"):
+            env["NDW_LOG_PROJECT"] = str(ctx["project"])
+        if ctx.get("action"):
+            env["NDW_LOG_ACTION"] = str(ctx["action"])
+        env["NDW_LOG_DIR"] = str(oplog.log_dir())
+    except Exception:  # noqa: BLE001 - 日志上下文缺失不影响命令执行
+        pass
     try:
         completed = subprocess.run(
             command,

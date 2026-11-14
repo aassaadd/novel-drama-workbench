@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 from ..config import AppConfig
@@ -61,6 +62,27 @@ STAGE_LABELS = {
     "export": "导出",
 }
 
+#: 工程级阶段：不依赖章节，整个工程只跑一次（设定库、大纲）
+PROJECT_STAGES = ("setting", "outline")
+#: 章节级阶段：依赖章节；未指定章节时按全书逐章执行
+CHAPTER_STAGES = tuple(stage for stage in STAGES if stage not in PROJECT_STAGES)
+
+
+def stages_needing_chapter(from_stage: str, to_stage: str) -> list[str]:
+    """列出区间内需要章节的阶段。
+
+    参数:
+        from_stage: 起始阶段 key。
+        to_stage: 结束阶段 key。
+
+    返回:
+        阶段 key 列表（按执行顺序）；区间非法时返回空列表。
+    """
+    if from_stage not in STAGES or to_stage not in STAGES:
+        return []
+    index_from, index_to = STAGES.index(from_stage), STAGES.index(to_stage)
+    return [stage for stage in STAGES[index_from : index_to + 1] if stage in CHAPTER_STAGES]
+
 
 def runs_dir(store: ProjectStore) -> Path:
     """编排记录目录。
@@ -77,7 +99,7 @@ def runs_dir(store: ProjectStore) -> Path:
 
 
 def save_run(store: ProjectStore, run: dict) -> Path:
-    """写入编排记录。
+    """写入编排记录（原子替换，避免并发读到写了一半的 JSON）。
 
     参数:
         store: 工程。
@@ -88,7 +110,9 @@ def save_run(store: ProjectStore, run: dict) -> Path:
     """
     run["updated_at"] = now_iso()
     path = runs_dir(store) / f"{run['run_id']}.json"
-    path.write_text(json.dumps(run, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    tmp = path.with_name(f"{path.name}.tmp-{os.getpid()}")
+    tmp.write_text(json.dumps(run, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    tmp.replace(path)
     return path
 
 
@@ -121,7 +145,13 @@ def latest_run(store: ProjectStore) -> dict | None:
         记录 dict；没有记录时返回 None。
     """
     files = sorted(runs_dir(store).glob("run_*.json"), key=lambda item: item.stat().st_mtime)
-    return json.loads(files[-1].read_text(encoding="utf-8")) if files else None
+    # 从新到旧找第一份能解析的记录：避免读到正在写的临时内容或损坏文件直接抛错
+    for item in reversed(files):
+        try:
+            return json.loads(item.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+    return None
 
 
 def _artifact(kind: str, path: str | Path) -> dict:
@@ -415,7 +445,7 @@ class _Namespace:
 def produce(
     store: ProjectStore,
     config: AppConfig,
-    chapter_id: str,
+    chapter_id: str = "",
     from_stage: str = "setting",
     to_stage: str = "export",
     resume: bool = True,
@@ -425,10 +455,13 @@ def produce(
 ) -> dict:
     """执行全链路编排。
 
+    工程级阶段（设定库、大纲）只跑一次；章节级阶段在 chapter_id 为空时
+    按全书逐章执行，指定 chapter_id 时只跑该章。
+
     参数:
         store: 工程。
         config: 本机配置。
-        chapter_id: 目标章节。
+        chapter_id: 目标章节；为空表示全书（章节级阶段逐章执行）。
         from_stage: 起始阶段（含）。
         to_stage: 结束阶段（含）。
         resume: 跳过上一次已成功的阶段。
@@ -440,7 +473,7 @@ def produce(
         {"run_id", "status", "stages": [...], "path"}。
 
     异常:
-        ValueError: 阶段名非法或章节不存在。
+        ValueError: 阶段名非法、区间不成立、需要章节但工程没有章节。
     """
     if from_stage not in STAGES:
         raise ValueError(f"未知阶段: {from_stage}（可选 {', '.join(STAGES)}）")
@@ -449,18 +482,49 @@ def produce(
     index_from, index_to = STAGES.index(from_stage), STAGES.index(to_stage)
     if index_from > index_to:
         raise ValueError(f"--from {from_stage} 在 --to {to_stage} 之后，顺序不成立")
-    store.load_chapter(chapter_id)  # 章节不存在直接报错
+
+    selected = STAGES[index_from : index_to + 1]
+    need_chapters = [stage for stage in selected if stage in CHAPTER_STAGES]
+    if need_chapters and chapter_id:
+        store.load_chapter(chapter_id)  # 章节不存在直接报错
+    elif need_chapters and not store.list_chapters():
+        labels = "、".join(STAGE_LABELS.get(stage, stage) for stage in need_chapters)
+        raise ValueError(
+            f"所选区间包含需要章节的阶段：{labels}。工程还没有章节：请先落地章节或导入正文，"
+            "或只选择工程级阶段（设定库 / 大纲）"
+        )
+
+    # 章节目标延迟解析：大纲阶段可能新建章节，等真正跑到章节级阶段再取全书章节
+    chapter_targets: list[str] | None = None
+    chapter_titles: dict[str, str] = {}
+
+    def resolve_chapters() -> list[str]:
+        """返回章节级阶段要遍历的章节 ID（结果缓存）。"""
+        nonlocal chapter_targets
+        if chapter_targets is None:
+            if chapter_id:
+                chapter_targets = [chapter_id]
+                chapter_titles[chapter_id] = store.load_chapter(chapter_id).get("title") or chapter_id[-6:]
+            else:
+                rows = store.list_chapters()
+                chapter_targets = [row["id"] for row in rows]
+                chapter_titles.update(
+                    {row["id"]: row.get("title") or f"第 {row.get('index')} 章" for row in rows}
+                )
+        return chapter_targets
 
     previous = latest_run(store) if resume else None
     done = {
-        stage.get("stage")
+        (stage.get("stage"), stage.get("chapter_id") or "")
         for stage in (previous or {}).get("stages", [])
-        if stage.get("status") == "succeeded" and stage.get("chapter_id") == chapter_id
+        if stage.get("status") == "succeeded"
     }
 
     run = {
         "run_id": new_id("run"),
         "chapter_id": chapter_id,
+        "scope": "project" if not need_chapters else ("chapter" if chapter_id else "book"),
+        "chapters": [],
         "started_at": now_iso(),
         "from_stage": from_stage,
         "to_stage": to_stage,
@@ -470,35 +534,53 @@ def produce(
     }
     # 先落一条 running 记录：Web 端在首个阶段结束前也能看到「正在跑哪一段」
     save_run(store, run)
-    ctx = {"store": store, "config": config, "chapter_id": chapter_id, "force": force}
+    ctx = {"store": store, "config": config, "chapter_id": "", "force": force}
     aborted = False
 
-    for stage in STAGES[index_from : index_to + 1]:
-        record = {"stage": stage, "label": STAGE_LABELS.get(stage, stage), "chapter_id": chapter_id, "status": "pending", "started_at": now_iso(), "finished_at": None, "artifacts": [], "note": "", "error": None}
-        if dry_run:
-            record["note"] = "dry-run：未执行"
-            record["status"] = "skipped"
+    for stage in selected:
+        targets = [""] if stage in PROJECT_STAGES else resolve_chapters()
+        multi = len(targets) > 1
+        base_label = STAGE_LABELS.get(stage, stage)
+        if stage not in PROJECT_STAGES:
+            run["chapters"] = list(targets)
+        for target in targets:
+            title = chapter_titles.get(target) or ""
+            record = {
+                "stage": stage,
+                "label": f"{base_label} · {title}" if multi and title else base_label,
+                "chapter_id": target,
+                "status": "pending",
+                "started_at": now_iso(),
+                "finished_at": None,
+                "artifacts": [],
+                "note": "",
+                "error": None,
+            }
+            if dry_run:
+                record["note"] = "dry-run：未执行"
+                record["status"] = "skipped"
+                run["stages"].append(record)
+                continue
+            if aborted:
+                record["status"] = "skipped"
+                record["note"] = "前序阶段失败"
+                run["stages"].append(record)
+                continue
+            if resume and (stage, target) in done:
+                record["status"] = "skipped"
+                record["note"] = "续跑：上次已成功"
+                run["stages"].append(record)
+                continue
+            ctx["chapter_id"] = target
+            try:
+                artifacts, note = STAGE_RUNNERS[stage](ctx)
+                record.update({"status": "succeeded", "artifacts": artifacts, "note": note})
+            except Exception as exc:  # 记录原始错误，按策略决定是否继续
+                record.update({"status": "failed", "error": f"{type(exc).__name__}: {exc}"})
+                aborted = not keep_going
+            record["finished_at"] = now_iso()
             run["stages"].append(record)
-            continue
-        if aborted:
-            record["status"] = "skipped"
-            record["note"] = "前序阶段失败"
-            run["stages"].append(record)
-            continue
-        if resume and stage in done:
-            record["status"] = "skipped"
-            record["note"] = "续跑：上次已成功"
-            run["stages"].append(record)
-            continue
-        try:
-            artifacts, note = STAGE_RUNNERS[stage](ctx)
-            record.update({"status": "succeeded", "artifacts": artifacts, "note": note})
-        except Exception as exc:  # 记录原始错误，按策略决定是否继续
-            record.update({"status": "failed", "error": f"{type(exc).__name__}: {exc}"})
-            aborted = not keep_going
-        record["finished_at"] = now_iso()
-        run["stages"].append(record)
-        save_run(store, run)
+            save_run(store, run)
 
     failed = [item for item in run["stages"] if item["status"] == "failed"]
     run["status"] = "failed" if failed else ("dry_run" if dry_run else "succeeded")

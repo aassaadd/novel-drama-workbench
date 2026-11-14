@@ -1544,9 +1544,12 @@ _STYLE_TOOL_SCHEMA = {
             "items": {"type": "string"},
             "description": "需要避免的写法，每条 40 字以内",
         },
-        "visual_style": {"type": "string", "description": "画面风格关键词，200 字以内"},
+        "visual_style": {
+            "type": "string",
+            "description": "画面风格：具体的场景、光线、色彩、材质与镜头质感，120-300 字，不能为空",
+        },
     },
-    "required": ["tone"],
+    "required": ["tone", "visual_style"],
 }
 
 
@@ -1935,6 +1938,15 @@ def _clean_str_list(rows, item_limit: int, label: str) -> list[str]:
     if rows is None:
         return []
     if isinstance(rows, str):
+        # 模型有时把数组直接写成 JSON 字符串：先解析，避免整段 JSON 被当成一条规则
+        text = rows.strip()
+        if text[:1] in ("[", "{"):
+            try:
+                parsed = json.loads(text)
+            except json.JSONDecodeError:
+                parsed = None
+            if isinstance(parsed, (list, dict)):
+                return _clean_str_list(parsed, item_limit, label)
         rows = [rows]
     if isinstance(rows, dict):
         # 模型可能把规则/势力返回成单个对象或「名称→说明」映射，统一转成字符串数组
@@ -2102,7 +2114,10 @@ def _clean_setting_fields(step: str, payload: dict) -> dict:
         if "forbidden" in payload:
             fields["forbidden"] = _clean_str_list(payload.get("forbidden"), 200, "forbidden")
         if "visual_style" in payload:
-            fields["visual_style"] = _check_text(payload.get("visual_style"), 500, "visual_style")
+            visual = _check_text(payload.get("visual_style"), 500, "visual_style")
+            # 空串不写入，交给 _ensure_visual_style 补一次，避免覆盖/落空
+            if visual:
+                fields["visual_style"] = visual
         return fields
 
     fields = {"era": _check_text(payload.get("era"), 200, "era", required=True)}
@@ -2397,6 +2412,44 @@ def generate_worlds(
     }
 
 
+def _ensure_visual_style(adapter, req: TextGenRequest, fields: dict) -> None:
+    """确保文风字段 visual_style 有实际内容。
+
+    模型在工具调用里常省略非必填的 visual_style，导致前端「视觉风格」显示空白。
+    这里先做一次只补该字段的定向生成；仍失败时用已生成的基调/文笔拼出可读内容兜底。
+
+    参数:
+        adapter: 写作适配器。
+        req: 原始文风生成请求（复用上下文与元信息）。
+        fields: 已清洗的文风字段（就地修改）。
+
+    返回:
+        无。
+    """
+    if str(fields.get("visual_style") or "").strip():
+        return
+    ask = (
+        "只补充 visual_style：用 120-300 字写可拍摄的画面风格，必须覆盖场景、光线、色彩、"
+        "材质与镜头质感；不要留空，不要写「暂无」「略」这类占位内容。"
+    )
+    try:
+        retry = replace(req, messages=list(req.messages) + [Message("user", ask)])
+        payload = _generate_json(adapter, retry, "style")
+        if isinstance(payload.get("style"), dict):
+            payload = payload["style"]
+        visual = _check_text(payload.get("visual_style"), 500, "visual_style")
+        if visual:
+            fields["visual_style"] = visual
+            return
+    except Exception:  # noqa: BLE001 - 定向补一次失败时走兜底，不影响整次生成
+        pass
+    fallback = "；".join(
+        part for part in (str(fields.get("tone") or "").strip(), str(fields.get("prose_style") or "").strip()) if part
+    )
+    if fallback:
+        fields["visual_style"] = fallback[:500]
+
+
 def generate_settings(store: ProjectStore, config: AppConfig, step: str, overwrite: bool = False, brief: str | None = None, seed: int | None = None) -> dict:
     """生成世界 / 梗概 / 文风设定（只返回结果，不写盘）。
 
@@ -2428,6 +2481,9 @@ def generate_settings(store: ProjectStore, config: AppConfig, step: str, overwri
     target_length = (bible.get("premise") or {}).get("target_length") or (skeleton.get("premise") or {}).get("target_length")
     brief_text = str(brief or "").strip()
     ask = f"为《{work.get('title') or '未命名'}》生成{label}，字段：{', '.join(allowed)}。"
+    if step == "style":
+        # visual_style 常被模型省略：明确要求写具体、非空，避免前端回显空白
+        ask += "其中 visual_style 必填：写 120-300 字具体画面风格（场景、光线、色彩、材质与镜头质感），不能留空。"
     if brief_text:
         ask += f"补充要求：{brief_text}。"
     # 生成某个分区时，把其他已完成的分区与已有世界作为上下文，避免设定互相矛盾
@@ -2461,6 +2517,11 @@ def generate_settings(store: ProjectStore, config: AppConfig, step: str, overwri
     if isinstance(payload.get(step), dict):
         payload = payload[step]
     fields = _clean_setting_fields(step, payload)
+    if step == "style":
+        # 「只补缺失」且已有非空视觉风格时无需额外补写，避免多一次模型调用
+        existing_visual = str((bible.get("style") or {}).get("visual_style") or "").strip()
+        if overwrite or not existing_visual:
+            _ensure_visual_style(adapter, req, fields)
 
     existing_section = bible.get(step) or {}
     baseline_section = skeleton.get(step) or {}
