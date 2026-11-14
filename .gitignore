@@ -36,3 +36,17 @@ config/config.ui.yaml
 .trae-html-share-packages
 docs/
 design/
+
+# 内部参考 / 功能核验资料（含来源与对照细节，不入库；原件备份在仓库外）
+docs/parity-*
+docs/*-parity.md
+docs/*competitive*
+docs/unique-capabilities.md
+docs/spec-r18-voice-bgm-preplanning.md
+docs/spec-r19-outline-and-chapter-continuation.md
+design/parity/
+design/feature-parity.md
+tools/parity/
+**/parity/
+*.parity.json
+docs/screenshots/

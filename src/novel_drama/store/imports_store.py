@@ -52,7 +52,7 @@ def split_paragraphs(text: str) -> list[dict]:
 
     返回:
         `[{index, char_start, char_end, text, key, sha256}]`；`key` 是去掉所有空白后的文本，
-        用于对标点/缩进/换行差异免疫；`index` 从 0 开始。
+        用于比对点/缩进/换行差异免疫；`index` 从 0 开始。
     """
     spans: list[tuple[int, int]] = []
     start: int | None = None

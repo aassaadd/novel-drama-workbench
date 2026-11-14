@@ -25,8 +25,6 @@
 | [spec-r15-resident-tts-worker.md](spec-r15-resident-tts-worker.md) | 常驻配音 worker（整批复用进程） | 已实现（仅静态检查，未做整章跑测） |
 | [spec-r16-jianying-draft-export.md](spec-r16-jianying-draft-export.md) | 剪映草稿 zip 导出 | 已实现（未做剪映侧人工导入实测） |
 | [spec-r17-voice-design.md](spec-r17-voice-design.md) | 按人物设定生成音色（本地 VoxCPM2） | 已实现；真实 worker 跑通单条候选与入库，未做 4 条候选的完整页面验收 |
-| [spec-r18-voice-bgm-preplanning.md](spec-r18-voice-bgm-preplanning.md) | 音色编排、旁白/龙套音色池、镜头级 BGM 描述 | 已实现并做界面验证，待整体验收 |
-| [spec-r19-outline-and-chapter-continuation.md](spec-r19-outline-and-chapter-continuation.md) | 大纲续写与正文续写 | 已实现：CLI 闭环实测；正文页/大纲页浏览器实测通过 |
 | [spec-r19-bgm-modes-and-memory.md](spec-r19-bgm-modes-and-memory.md) | 配乐叙事/铺底两档 + ComfyUI 显存释放 | 已实现并实测（归一、释放、耗时均有记录） |
 | [spec-r20-sfx-provider.md](spec-r20-sfx-provider.md) | 音效 provider：本地 Stable Audio 3 Small-SFX（独立 venv + 常驻 worker） | 已实现并实测出音；2 条样例与参数快扫；页面未接入 |
 | [spec-r21-bgm-local-provider.md](spec-r21-bgm-local-provider.md) | 配乐 provider：本地 Stable Audio Open 1.0（独立 venv + 常驻 worker，可回落 ACE-Step） | 已实现并实测两档样例；媒体页已接入后端选择与本地生成；ACE-Step 出音回归待 ComfyUI 启动 |
@@ -42,18 +40,10 @@
 | [spec-r31-anchor-orphan-fix.md](spec-r31-anchor-orphan-fix.md) | 标注锚点误判 orphan（游标漂移 / 标点差异）修复 | 已实现；真实工程副本 orphan 148→0 |
 | [spec-r32-warning-locator.md](spec-r32-warning-locator.md) | 标注/配音告警点击定位：台词行 / 镜头 / 告警区三级跳转与降级说明 | 已实现；真实浏览器验证三类目标与降级 |
 
-## 对照与能力清单
-
-| 文档 | 内容 | 状态 |
-| --- | --- | --- |
-| [spec-audimind-parity.md](spec-audimind-parity.md) | 与 audimind 的 90 项功能对照、批次收敛记录、排除项与必然差异 | 已收敛：74 已对齐 / 1 必然差异 / 1 未实现 / 14 排除 |
-| [unique-capabilities.md](unique-capabilities.md) | 本系统独有能力表（视图入口与 CLI 入口）、14 项排除项与 #88 理由、叠加到竞品流程的位置建议 | 按当前代码整理，只列已落地能力 |
-
 ## 调研（只作依据，不改生产代码）
 
 | 文档 | 内容 | 状态 |
 | --- | --- | --- |
-| [research-r19-continuation-competitive-analysis.md](research-r19-continuation-competitive-analysis.md) | 同类产品续写入口/长度/上下文/落盘做法 | 调研定稿，证据按官方/二手分级标注 |
 | [r20-jianying-draft-compat-review.md](r20-jianying-draft-compat-review.md) | 剪映草稿 10.8/11.x 字段兼容性核对：字段对照、风险等级、最可能问题 | 核对完成；两处确定性修复已应用，剪映侧未实测 |
 | [research-sfx-local-commercial-options.md](research-sfx-local-commercial-options.md) | 本地可商用音效（SFX）方案调研：候选模型许可/体积/条件生成/ComfyUI 支持、与本项目匹配度、推荐与备选路线 | 已随实测更新：11 项待查逐条标注，ComfyUI 模板路线已停用，改本项目 provider |
 
