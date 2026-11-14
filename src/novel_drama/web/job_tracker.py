@@ -329,7 +329,10 @@ class UiJob:
         elif kind == "item":
             name = str(data.get("name") or "").strip()
             status = str(data.get("status") or "").strip()
-            if name:
+            if name and status == "failed":
+                reason = str(data.get("message") or "").strip()
+                self.progress(f"{name} · 失败{('（' + reason + '）') if reason else ''}", force=True)
+            elif name:
                 self.progress(f"{name}{' · 已完成' if status == 'done' else ''}", force=status == "done")
         elif kind == "stage":
             stage = str(data.get("stage") or data.get("message") or "").strip()
@@ -371,8 +374,13 @@ class UiJob:
         self.job["timings"]["finished_at"] = now_iso()
         self._save()
 
-    def fail(self, message: str) -> None:
-        """标记失败并保留中文原因（已被停止时保持「已取消」）。"""
+    def fail(self, message: str, current: str | None = None) -> None:
+        """标记失败并保留中文原因。
+
+        参数:
+            message: 失败原因（写入错误列）。
+            current: 进度列的简短失败定位；省略时写「生成失败」，避免残留最后一次运行中进度。
+        """
         if not self.job or self._done:
             return
         if self.cancel_requested():
@@ -382,6 +390,7 @@ class UiJob:
         self._retire()
         self.job["status"] = "failed"
         self.job["error"] = str(message or "生成失败")
+        self.job["progress"] = {"percent": None, "current": str(current or "生成失败")}
         self.job["timings"]["finished_at"] = now_iso()
         self._save()
 

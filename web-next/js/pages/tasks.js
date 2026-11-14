@@ -98,6 +98,9 @@ let consistency = null;
 let queueFilter = 'all';
 let timer = null;
 let bound = false;
+/** 写作模型自查状态（进入任务页加载一次；点「检测连接」重新探测，不参与 3 秒轮询） */
+let llmStatus = null;
+let llmChecking = false;
 
 /** 状态徽标语义色 */
 function badgeClass(name) {
@@ -457,6 +460,86 @@ function queueHTML() {
     </div>`;
 }
 
+/**
+ * 写作模型自查卡：现在生效的 provider / 地址 / 模型、是否连通、最近一次真实调用的证据。
+ * @returns {string} 卡片 HTML
+ */
+function llmHTML() {
+  const data = llmStatus;
+  const last = (data && data.last_call) || null;
+  let badge = '<span class="badge mute">未检测</span>';
+  if (llmChecking) {
+    badge = '<span class="badge run">检测中…</span>';
+  } else if (data) {
+    if (!data.connected) badge = '<span class="badge bad">连不上</span>';
+    else if (!data.model_found) badge = '<span class="badge bad">已连通 · 模型不可用</span>';
+    else badge = `<span class="badge ok">已连通${data.latency_ms != null ? ` · ${data.latency_ms}ms` : ''}</span>`;
+  }
+  const line = (label, value, mono = false) => `
+        <div style="display:flex;gap:8px;font-size:12px;line-height:1.9">
+          <span style="color:var(--text-4);min-width:76px">${label}</span>
+          <span class="${mono ? 'mono' : ''}" style="word-break:break-all">${esc(value || '—')}</span>
+        </div>`;
+  const lastText = last
+    ? `${last.at || '—'} · HTTP ${last.status ?? '—'} · ${last.elapsed_ms ?? '—'}ms · ${
+        last.ok ? '成功' : '失败'
+      } · tool_calls=${last.tool_calls ?? 0}${last.finish_reason ? ` · finish=${last.finish_reason}` : ''}`
+    : '';
+  const lastSnippet = last && (last.snippet || last.error) ? (last.snippet || last.error) : '';
+  return `
+    <div class="card" style="margin:14px 18px 0" id="llm-card">
+      <div class="card-head"><span class="ct">写作模型</span>
+        <div class="right" style="display:flex;gap:8px;align-items:center">
+          ${badge}
+          <button class="btn sm" data-act="llm-check" ${llmChecking ? 'disabled' : ''}
+            title="探测当前配置的服务地址与模型，并读取最近一次真实调用记录">检测连接</button>
+        </div>
+      </div>
+      <div class="card-body" style="padding:10px 14px">
+        ${line('服务提供方', data ? data.provider || '未配置' : '加载中…')}
+        ${line('服务地址', data ? data.endpoint : '', true)}
+        ${line('使用模型', data ? data.model : '', true)}
+        ${line('检测结论', data ? data.message : '进入页面后自动检测一次', true)}
+        ${line('最近调用', lastText || '本次进程还没有发出过写作请求', true)}
+        ${
+          last
+            ? `${line('请求地址', last.url, true)}${
+                lastSnippet
+                  ? `<div class="mono" style="font-size:11.5px;color:var(--text-3);white-space:pre-wrap;word-break:break-all;margin-top:4px;max-height:72px;overflow:auto">${esc(
+                      String(lastSnippet).slice(0, 300)
+                    )}</div>`
+                  : ''
+              }`
+            : ''
+        }
+      </div>
+    </div>`;
+}
+
+/** 只重画写作模型卡，避免整页重绘打断其它卡片状态 */
+function repaintLlm() {
+  const card = document.getElementById('llm-card');
+  if (card) card.outerHTML = llmHTML();
+}
+
+/**
+ * 探测写作模型（POST /api/ui/llm/status）。
+ * @returns {Promise<void>}
+ */
+async function refreshLlm() {
+  if (llmChecking) return;
+  llmChecking = true;
+  repaintLlm();
+  try {
+    llmStatus = await postJSON('/api/ui/llm/status', {});
+  } catch (error) {
+    llmStatus = { ok: false, connected: false, message: `检测失败：${error.message}` };
+  } finally {
+    llmChecking = false;
+  }
+  repaintLlm();
+}
+
 /** 主区 */
 function mainHTML() {
   const chapter = state.chapters.find((item) => item.id === state.chapterId);
@@ -475,6 +558,7 @@ function mainHTML() {
       </div>
     </div>
     ${progressHTML()}
+    ${llmHTML()}
     ${produceHTML()}
     ${gpuHTML()}
     ${queueHTML()}`;
@@ -743,6 +827,7 @@ async function onRootClick(event) {
     return goChapter(state.path, state.chapterId);
   }
   if (act === 'refresh') return refresh({ silent: false });
+  if (act === 'llm-check') return refreshLlm();
   if (act === 'gpu-release') return releaseGpuLock(button);
   if (act === 'job-stop') return stopJob(button.dataset.job, button);
   if (act === 'queue-clear') return clearQueue(button);
@@ -1018,6 +1103,8 @@ export async function renderTasks(root, { path }) {
   bindProduceMode();
   await refreshConsistency();
   await refresh();
+  // 写作模型自查：进入页面探测一次，点「检测连接」可随时复测（不参与 3 秒轮询）
+  void refreshLlm();
   // 顶部「重新切分本章」：完成后复核一致性并刷新进度
   onResplit(async () => {
     await refreshConsistency();

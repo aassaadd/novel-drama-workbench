@@ -14,8 +14,10 @@ from __future__ import annotations
 
 import http.client
 import json
+import logging
 import re
 import socket
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -23,6 +25,46 @@ import urllib.request
 from typing import Iterator
 
 from .base import AdapterError, ErrorCode, HealthStatus, TextGenChunk, TextGenRequest, TextGenResult, Usage
+
+#: 日志：每次写作 LLM HTTP 调用记录地址、状态码、耗时与返回片段
+logger = logging.getLogger(__name__)
+
+#: 最近一次写作 LLM 调用摘要（进程级），供任务页 / 设置页随时自查
+_LAST_CALL: dict = {}
+_LAST_CALL_LOCK = threading.Lock()
+
+
+def last_llm_call() -> dict:
+    """返回最近一次写作 LLM HTTP 调用摘要。
+
+    返回:
+        `{at, url, status, elapsed_ms, ok, finish_reason, tool_calls, snippet, error}`；
+        尚未调用时为空 dict。
+    """
+    with _LAST_CALL_LOCK:
+        return dict(_LAST_CALL)
+
+
+def _record_llm_call(**fields) -> None:
+    """覆盖写入最近一次调用摘要（进程内）。"""
+    with _LAST_CALL_LOCK:
+        _LAST_CALL.clear()
+        _LAST_CALL.update(fields)
+
+
+def _call_snippet(data: dict | None, limit: int = 300) -> tuple[str, str, int]:
+    """从非流式响应里提取正文/工具参数片段、finish_reason 与 tool_calls 数量。"""
+    if not isinstance(data, dict):
+        return "", "", 0
+    choices = data.get("choices") or [{}]
+    choice = choices[0] if isinstance(choices[0], dict) else {}
+    message = choice.get("message") or {}
+    pieces = [str(message.get("content") or "")]
+    calls = message.get("tool_calls") or []
+    for call in calls:
+        pieces.append(str(((call or {}).get("function") or {}).get("arguments") or ""))
+    text = "".join(piece for piece in pieces if piece).strip()
+    return text[:limit], str(choice.get("finish_reason") or ""), len(calls)
 
 # 一次非流式请求的默认超时（秒）；长文任务已改走流式，这里只覆盖短调用
 DEFAULT_TIMEOUT_S = 300.0
@@ -1125,14 +1167,61 @@ class OmlxWritingAdapter:
             payload["reasoning_effort"] = self.reasoning_effort
         payload["max_tokens"] = max(int(payload.get("max_tokens") or 0), TOOL_MIN_MAX_TOKENS)
 
-        if req.stream:
-            # 流式：tool_calls 会按 index 分片下发，先拼接 name/arguments 再交给同一套解析逻辑
-            data = self._aggregate_tool_stream(payload, on_delta=on_delta)
-        else:
-            data = self._request_json("POST", "/v1/chat/completions", payload, timeout_s=timeout_s)
-            if on_delta is not None:
-                self._emit_tool_text(data, on_delta)
-        return self._tool_result(data, name, stream=bool(req.stream), required=required)
+        started = time.monotonic()
+        url = f"{str(self.endpoint).rstrip('/')}/v1/chat/completions"
+        try:
+            if req.stream:
+                # 流式：tool_calls 会按 index 分片下发，先拼接 name/arguments 再交给同一套解析逻辑
+                data = self._aggregate_tool_stream(payload, on_delta=on_delta)
+            else:
+                data = self._request_json("POST", "/v1/chat/completions", payload, timeout_s=timeout_s)
+                if on_delta is not None:
+                    self._emit_tool_text(data, on_delta)
+            result = self._tool_result(data, name, stream=bool(req.stream), required=required)
+        except AdapterError as exc:
+            detail = exc.detail if isinstance(exc.detail, dict) else {}
+            elapsed = int((time.monotonic() - started) * 1000)
+            _record_llm_call(
+                at=time.strftime("%Y-%m-%dT%H:%M:%S"),
+                url=url,
+                status=detail.get("status"),
+                elapsed_ms=elapsed,
+                ok=False,
+                finish_reason=detail.get("finish_reason"),
+                tool_calls=detail.get("tool_calls"),
+                snippet=str(detail.get("content_head") or "")[:300],
+                error=exc.message,
+            )
+            logger.warning(
+                "LLM 调用失败 url=%s status=%s elapsed=%sms error=%s",
+                url,
+                detail.get("status"),
+                elapsed,
+                exc.message,
+            )
+            raise
+        elapsed = int((time.monotonic() - started) * 1000)
+        snippet, finish, call_count = _call_snippet(data)
+        _record_llm_call(
+            at=time.strftime("%Y-%m-%dT%H:%M:%S"),
+            url=url,
+            status=200,
+            elapsed_ms=elapsed,
+            ok=True,
+            finish_reason=finish,
+            tool_calls=call_count,
+            snippet=snippet,
+            error="",
+        )
+        logger.info(
+            "LLM 调用成功 url=%s status=200 elapsed=%sms finish_reason=%s tool_calls=%s snippet=%s",
+            url,
+            elapsed,
+            finish,
+            call_count,
+            snippet[:200],
+        )
+        return result
 
     @staticmethod
     def _emit_tool_text(data: dict, on_delta) -> None:

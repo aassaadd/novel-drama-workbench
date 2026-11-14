@@ -22,7 +22,7 @@ from pathlib import Path
 from fastapi import HTTPException
 
 from ..adapters.comfyui import LocalComfyGateway
-from ..adapters.writing import OmlxWritingAdapter
+from ..adapters.writing import OmlxWritingAdapter, last_llm_call
 from ..config import DEFAULT_UI_CONFIG_PATH, load_config, save_ui_config
 from ..media import comfy_media, comfy_models
 from ..tts import model_store
@@ -1142,6 +1142,8 @@ def register_models_routes(app, config_path: str | None = None) -> None:
             "probes": probes,
             "latency_ms": latency,
             "message": message,
+            "provider": str(config.get("adapters.writing") or ""),
+            "last_call": last_llm_call(),
         }
 
     @app.post("/api/ui/settings/models")

@@ -290,12 +290,17 @@ export function openProgress({ title, hint = '', stage = '准备中…', stream 
 
     /**
      * 失败结束：给出中文原因，可选「重试」。
-     * @param {{message: string, detail?: string, retry?: Function}} result
+     * @param {{message: string, detail?: string, current?: string, retry?: Function}} result
      */
     fail(result = {}) {
       settle('failed');
       el.stage.textContent = '生成失败';
       card.classList.remove('indeterminate');
+      // 失败后禁止残留「进行中」：百分比徽标改成失败，清掉最后一次进度文案
+      el.percent.textContent = '失败';
+      el.current.textContent = result.current || '';
+      el.bar.style.width = '0%';
+      el.live.hidden = true;
       el.result.hidden = false;
       el.result.className = 'prog-result bad';
       el.result.innerHTML = `${icon('warn', 12)} ${esc(result.message || '生成失败')}${

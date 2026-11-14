@@ -99,6 +99,66 @@ def _error_message(exc: Exception) -> str:
     return str(exc) or exc.__class__.__name__
 
 
+def _failure_current(exc: AdapterError) -> str:
+    """给任务队列进度列生成简短的失败定位文案。
+
+    参数:
+        exc: 适配器错误。
+
+    返回:
+        有失败幕时返回「第 2 幕失败 · 可只补失败幕」，否则「生成失败」。
+    """
+    detail = exc.detail if isinstance(exc.detail, dict) else {}
+    failures = detail.get("failures")
+    if not isinstance(failures, list) or not failures:
+        return "生成失败"
+    rows = [item for item in failures if isinstance(item, dict)]
+    nums = "、".join(str(item.get("act_index")) for item in rows if item.get("act_index"))
+    return f"第 {nums} 幕失败{(' · 可只补失败幕') if detail.get('resume') else ''}"
+
+
+def _adapter_error_payload(exc: AdapterError) -> dict:
+    """把适配器错误转成带诊断信息的 SSE error 负载。
+
+    参数:
+        exc: 适配器抛出的错误（可能带 finish_reason / tool_calls / content 片段 / 失败幕）。
+
+    返回:
+        `{message, detail?, retryable?, resume?}`；detail 供页面在失败后展示原始报文摘要。
+    """
+    data: dict = {"message": f"生成失败：{exc.message}"}
+    detail = exc.detail if isinstance(exc.detail, dict) else {}
+    rows: list[str] = []
+    failures = detail.get("failures")
+    if isinstance(failures, list) and failures:
+        rows.append(
+            "失败幕："
+            + "；".join(
+                f"第 {item.get('act_index')} 幕（{item.get('kind') or '未知原因'}）"
+                for item in failures[:6]
+                if isinstance(item, dict)
+            )
+        )
+    finish = detail.get("finish_reason")
+    calls = detail.get("tool_calls")
+    head = str(detail.get("content_head") or "").strip()
+    if finish or calls is not None:
+        rows.append(
+            f"finish_reason={finish or '空'} · tool_calls={calls if calls is not None else '未知'}"
+            + (f" · content 前 200 字：{head}" if head else " · content 为空")
+        )
+    raw = str(detail.get("raw") or "").strip()
+    if raw:
+        rows.append(f"原始参数片段：{raw[:500]}")
+    if rows:
+        data["detail"] = " / ".join(rows)[:1500]
+    if exc.retryable:
+        data["retryable"] = True
+    if detail.get("resume"):
+        data["resume"] = True
+    return data
+
+
 def _chapter_target(store, chapter_id: str) -> dict:
     """构造任务队列展示用的章节目标（章节标题取不到时只留 ID）。
 
@@ -156,8 +216,8 @@ def _stream_response(task, job=None) -> StreamingResponse:
             events.put(("canceled", {"message": "任务已停止，已接收的内容保留"}))
         except AdapterError as exc:
             if job:
-                job.fail(f"生成失败：{exc.message}")
-            events.put(("error", {"message": f"生成失败：{exc.message}"}))
+                job.fail(f"生成失败：{exc.message}", current=_failure_current(exc))
+            events.put(("error", _adapter_error_payload(exc)))
         except Exception as exc:  # 其它异常统一转成中文可读错误
             message = f"生成失败：{_error_message(exc)}"
             if job:
@@ -244,8 +304,8 @@ def _progress_response(task, job=None) -> StreamingResponse:
             events.put(("canceled", {"message": "任务已停止，已接收的内容保留"}))
         except AdapterError as exc:
             if job:
-                job.fail(f"生成失败：{exc.message}")
-            events.put(("error", {"message": f"生成失败：{exc.message}"}))
+                job.fail(f"生成失败：{exc.message}", current=_failure_current(exc))
+            events.put(("error", _adapter_error_payload(exc)))
         except Exception as exc:  # 其它异常统一转成中文可读错误
             message = f"生成失败：{_error_message(exc)}"
             if job:
@@ -441,7 +501,7 @@ def register_stream_routes(app, config_path: str | None = None) -> None:
 
         参数:
             body: `{path, acts?, chapters_per_act?, beats_per_chapter?, words?, binding?,
-                multi_turn?, acts_per_round?, dry_run?}`。
+                multi_turn?, acts_per_round?, resume?, dry_run?}`；resume=True 时只补失败/缺失的幕。
 
         返回:
             SSE：start → batch/chars* → done(result) / error(message)。
@@ -462,6 +522,7 @@ def register_stream_routes(app, config_path: str | None = None) -> None:
                 binding=str(body.get("binding") or "auto"),
                 multi_turn=bool(body.get("multi_turn")),
                 acts_per_round=int(body.get("acts_per_round") or 1),
+                resume=bool(body.get("resume")),
                 on_progress=on_progress,
             )
 

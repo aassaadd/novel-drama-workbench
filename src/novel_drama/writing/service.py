@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import logging
 import re
 from dataclasses import replace
 
@@ -28,6 +29,12 @@ from .worlds import clean_world_entry, worlds_digest
 
 # 默认每章目标字数
 DEFAULT_CHAPTER_WORDS = 1200
+
+#: 日志：工具调用解析失败时记录原始片段，便于定位模型返回了什么
+logger = logging.getLogger(__name__)
+
+#: 按幕多轮大纲的中间结果版本（`.ndw/outline_acts.json`）
+_ACT_WORK_VERSION = "outline_acts/1"
 
 # 工具调用输出预算：schema 普遍较大，且 reasoning_tokens 也计入 max_tokens。
 # 适配器只会保证不低于 4096，这里按「固定附加内容 + 条目数」估算，避免参数被截断。
@@ -94,7 +101,14 @@ def build_writing_adapter(config: AppConfig, settings: dict | None = None):
         AdapterError(INVALID_INPUT): 配置名未知。
     """
     # 配置里适配器写在 adapters.writing；providers.writing 是旧键，保留兼容
-    name = str(config.get("adapters.writing") or config.get("providers.writing") or "offline").strip()
+    name = str(config.get("adapters.writing") or config.get("providers.writing") or "").strip()
+    if not name:
+        # 不能默认回落到离线假数据：配置缺失必须明确报错，避免假结果写进正式产物
+        raise AdapterError(
+            ErrorCode.INVALID_INPUT,
+            "未配置写作模型（adapters.writing）：请在设置页选择 omlx 并填写真实服务地址与模型；"
+            "离线适配器只能显式配置为 offline 时使用",
+        )
     if name in ("offline", "offline-writing"):
         return OfflineWritingAdapter(config.get("writing.offline") or settings or {})
     if name == "omlx":
@@ -131,6 +145,7 @@ def generate_outline(
     binding: str = "auto",
     multi_turn: bool = False,
     acts_per_round: int = 1,
+    resume: bool = False,
     on_progress=None,
 ) -> dict:
     """生成幕/章/节拍大纲并写入设定库。
@@ -146,6 +161,7 @@ def generate_outline(
         binding: auto=把节拍绑定到已有人物；none=不改动角色引用。
         multi_turn: True 时按幕分批调用 `emit_act`，False 走原单轮 `emit_outline`。
         acts_per_round: 每轮计划生成的幕数（默认 1）；每次工具调用产出一幕。
+        resume: 多轮模式下只补失败/缺失的幕，复用 `.ndw/outline_acts.json` 里已成功的幕。
         on_progress: 进度回调（batch/chars 事件）；仅页面流式接口传入。
 
     返回:
@@ -202,6 +218,9 @@ def generate_outline(
             beats_per_chapter,
             acts_per_round,
             config=config,
+            store=store,
+            chapter_words=chapter_words,
+            resume=resume,
             on_progress=on_progress,
         )
         outline_rounds = (max(1, int(acts)) + max(1, int(acts_per_round)) - 1) // max(1, int(acts_per_round))
@@ -278,6 +297,163 @@ def generate_outline(
     }
 
 
+def _act_work_file(store: ProjectStore):
+    """按幕多轮大纲的中间结果文件路径。"""
+    return store.root / ".ndw" / "outline_acts.json"
+
+
+def _act_params(acts, chapters_per_act, beats_per_chapter, chapter_words) -> dict:
+    """生成参数指纹：参数变化时不复用旧中间结果。"""
+    return {
+        "acts": max(1, int(acts)),
+        "chapters_per_act": max(1, int(chapters_per_act)),
+        "beats_per_chapter": max(1, int(beats_per_chapter)),
+        "chapter_words": max(1, int(chapter_words)),
+    }
+
+
+def _load_act_work(store: ProjectStore, params: dict) -> list:
+    """读取上次已成功生成的幕（仅参数一致时复用）。
+
+    参数:
+        store: 工程。
+        params: 参数指纹。
+
+    返回:
+        与幕序号对齐的列表（未完成的项为 None）。
+    """
+    path = _act_work_file(store)
+    if not path.exists():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    if not isinstance(data, dict) or data.get("params") != params:
+        return []
+    rows = data.get("acts")
+    return rows if isinstance(rows, list) else []
+
+
+def _save_act_work(store: ProjectStore, params: dict, acts: list, failures: list) -> None:
+    """原子保存已完成/失败的幕，供失败后续跑。"""
+    path = _act_work_file(store)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "schema_version": _ACT_WORK_VERSION,
+        "params": params,
+        "acts": acts,
+        "failures": failures,
+        "updated_at": now_iso(),
+    }
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    tmp.replace(path)
+
+
+def _clear_act_work(store: ProjectStore) -> None:
+    """全部成功后删除中间文件（失败时保留供续跑）。"""
+    try:
+        _act_work_file(store).unlink(missing_ok=True)
+    except OSError:
+        return
+
+
+def _raw_preview(payload) -> str:
+    """把工具参数压成一段可写入错误的原文片段。"""
+    try:
+        text = json.dumps(payload, ensure_ascii=False)
+    except (TypeError, ValueError):
+        text = str(payload)
+    return text[:500] or "（空）"
+
+
+def _maybe_json_obj(value) -> dict | None:
+    """把 JSON 字符串（可被 ``` 代码块包裹）解析成非空对象。
+
+    参数:
+        value: 任意值；只有字符串会尝试解析。
+
+    返回:
+        解析出的非空 dict；不是可解析对象时返回 None。
+    """
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    fence = re.match(r"^```[a-zA-Z0-9_-]*\s*(.*?)\s*```$", text, flags=re.DOTALL)
+    if fence:
+        text = fence.group(1).strip()
+    try:
+        data = json.loads(text)
+    except (TypeError, ValueError):
+        return None
+    return data if isinstance(data, dict) and data else None
+
+
+def _pick_act(payload) -> tuple[dict | None, str, str]:
+    """从工具参数里取出单幕对象，并给出失败分类。
+
+    参数:
+        payload: 适配器解析后的工具参数。
+
+    返回:
+        `(act, 失败分类, 原始片段)`；成功时分类为空串。
+    """
+    raw = _raw_preview(payload)
+    if not isinstance(payload, dict):
+        # 模型把整个参数序列化成 JSON 字符串时，先剥壳再判断
+        payload = _maybe_json_obj(payload) or payload
+    if not isinstance(payload, dict):
+        return None, "模型没走工具调用：返回值不是 JSON 对象", raw
+    act = payload.get("act")
+    if isinstance(act, str):
+        # 部分模型会把 act 序列化成 JSON 字符串再塞进参数，先剥壳（含 ``` 包裹）
+        act = _maybe_json_obj(act) or act
+    if isinstance(act, dict) and act:
+        return act, "", ""
+    fallback = payload.get("acts")
+    if isinstance(fallback, list) and fallback and isinstance(fallback[0], str):
+        fallback = [_maybe_json_obj(fallback[0]) or fallback[0]] + list(fallback[1:])
+    if isinstance(fallback, list) and fallback and isinstance(fallback[0], dict) and fallback[0]:
+        return fallback[0], "", ""
+    if "act" not in payload:
+        return None, "工具参数不合法：缺少 act 字段", raw
+    if not isinstance(act, dict):
+        return None, f"工具参数不合法：act 应为对象，实际为 {type(act).__name__}", raw
+    return None, "工具参数不合法：act 是空对象", raw
+
+
+def _tool_error_kind(exc: AdapterError) -> tuple[str, str]:
+    """按适配器诊断字段给工具调用失败分类。
+
+    参数:
+        exc: 适配器抛出的错误。
+
+    返回:
+        `(分类文案, 原始诊断片段)`。
+    """
+    detail = exc.detail or {}
+    finish = str(detail.get("finish_reason") or "")
+    calls = detail.get("tool_calls")
+    head = str(detail.get("content_head") or "").strip()
+    message = str(exc.message or "").strip()
+    raw = (
+        f"finish_reason={finish or '空'}，tool_calls={calls if calls is not None else '未知'}，"
+        f"content 前 200 字：{head or '（空）'}"
+    )
+    if finish == "length" or "截断" in message:
+        kind = "输出被截断"
+    elif "未返回 tool_calls" in message or "不支持工具调用" in message:
+        kind = "模型没走工具调用"
+    elif "content" in message or "JSON" in message or "参数" in message:
+        kind = "工具参数不合法"
+    else:
+        kind = "上游调用失败"
+    return f"{kind}：{message or '工具调用失败'}", raw
+
+
 def _generate_outline_acts(
     adapter,
     req: TextGenRequest,
@@ -286,12 +462,18 @@ def _generate_outline_acts(
     beats_per_chapter: int,
     acts_per_round: int,
     config: AppConfig | None = None,
+    store: ProjectStore | None = None,
+    chapter_words: int = DEFAULT_CHAPTER_WORDS,
+    resume: bool = False,
     on_progress=None,
 ) -> list[dict]:
     """按幕分批调用 `emit_act`，合并为完整幕列表。
 
     每轮的 user 消息追加在固定首条 user 之后：先说明本轮要生成第几幕，
     再给出已完成幕的「标题 + 概要」只读摘要（不回传整段节拍），保证前缀稳定。
+
+    单幕解析失败会带纠正提示重试一次；仍失败则记录失败项并继续后续幕，
+    已成功的幕写入 `.ndw/outline_acts.json`，resume=True 时只补失败/缺失的幕。
 
     参数:
         adapter: 写作适配器（需实现 generate_tool）。
@@ -301,22 +483,38 @@ def _generate_outline_acts(
         beats_per_chapter: 每章节拍数（用于估算单幕输出预算）。
         acts_per_round: 每轮计划生成的幕数（每次工具调用产出一幕）。
         config: 本机配置，用于读取 `omlx.max_tokens`；可为 None。
+        store: 工程；传入时启用断点续跑。
+        chapter_words: 单章目标字数，参与参数指纹。
+        resume: True 时复用已成功的幕，只补失败/缺失的幕。
         on_progress: 进度回调。
 
     返回:
         合并后的幕对象列表，顺序与生成顺序一致。
 
     异常:
-        AdapterError: 某轮未返回 act 对象。
+        AdapterError: 存在无法补齐的幕；错误里带失败幕、已成功幕数与续跑提示。
     """
     total = max(1, int(acts))
     per_round = max(1, int(acts_per_round))
+    params = _act_params(total, chapters_per_act, beats_per_chapter, chapter_words)
+    results: list = [None] * total
+    if store is not None:
+        if resume:
+            cached = _load_act_work(store, params)
+            for index, cached_act in enumerate(cached[:total]):
+                if isinstance(cached_act, dict) and cached_act:
+                    results[index] = cached_act
+        else:
+            # 重新生成：丢掉上次的中间结果，避免新旧大纲混在一起
+            _clear_act_work(store)
     base_messages = list(req.messages)
     base_metadata = dict(req.metadata or {})
-    collected: list[dict] = []
     progress_state = {"chars": 0}
+    failures: list[dict] = []
     for act_index in range(total):
         start = act_index + 1
+        if results[act_index]:
+            continue
         end = min(total, (act_index // per_round + 1) * per_round)
         _progress(on_progress, {"type": "batch", "index": start, "total": total, "unit": "act"})
         lines = []
@@ -324,34 +522,97 @@ def _generate_outline_acts(
             lines.append(f"请生成第 {start}–{end} 幕中的第 {start} 幕（共 {total} 幕，每幕 {chapters_per_act} 章）。")
         else:
             lines.append(f"请生成第 {start} 幕（共 {total} 幕，每幕 {chapters_per_act} 章）。")
-        if collected:
-            done = []
-            for done_index, act in enumerate(collected, start=1):
-                title = str(act.get("title") or "").strip()
-                summary = str(act.get("summary") or "").strip()
-                done.append(f"第 {done_index} 幕《{title}》：{summary}")
+        done = []
+        for done_index, done_act in enumerate(results, start=1):
+            if not isinstance(done_act, dict):
+                continue
+            title = str(done_act.get("title") or "").strip()
+            summary = str(done_act.get("summary") or "").strip()
+            done.append(f"第 {done_index} 幕《{title}》：{summary}")
+        if done:
             lines.append("已完成幕（不要重复）：\n" + "\n".join(done))
         request = replace(req, messages=base_messages + [Message("user", "\n".join(lines))])
         # 单幕输出预算按本幕章数 × 每章节拍数估算，避免多轮时沿用整本预算或默认 2048
         request.max_tokens = _tool_max_tokens(config, "act", chapters_per_act * beats_per_chapter)
         # 离线适配器据此从确定性整本大纲里挑出对应幕
         request.metadata = dict(base_metadata, act_offset=act_index)
-        payload = _generate_json(
-            adapter,
-            request,
-            "act",
-            on_delta=_char_delta(progress_state, on_progress, start, total),
+        act = None
+        reason = ""
+        raw = ""
+        for attempt in (1, 2):
+            try:
+                payload = _generate_json(
+                    adapter,
+                    request,
+                    "act",
+                    on_delta=_char_delta(progress_state, on_progress, start, total),
+                )
+            except AdapterError as exc:
+                reason, raw = _tool_error_kind(exc)
+                act = None
+            else:
+                act, reason, raw = _pick_act(payload)
+            if act:
+                break
+            logger.warning(
+                "大纲第 %s/%s 幕工具调用解析失败（第 %s 次）：%s | %s",
+                start,
+                total,
+                attempt,
+                reason,
+                raw,
+            )
+            if attempt == 1 and not reason.startswith("上游调用失败"):
+                # 带纠正提示重试一次：强调只调用 emit_act、参数必须是 act 对象
+                correction = Message(
+                    "user",
+                    "上一次输出没有返回合法的 act 对象："
+                    + reason
+                    + "。请只调用 emit_act，严格按 schema 返回 "
+                    + '{"act": {"title": "...", "summary": "...", "chapters": [...]}}；'
+                    + "不要输出解释、代码块或额外字段。",
+                )
+                request = replace(request, messages=list(request.messages) + [correction])
+        if not act:
+            failures.append(
+                {
+                    "act_index": start,
+                    "act_name": f"第 {start} 幕",
+                    "kind": reason,
+                    "raw": raw,
+                }
+            )
+            if store is not None:
+                _save_act_work(store, params, results, failures)
+            _progress(
+                on_progress,
+                {
+                    "type": "item",
+                    "index": start,
+                    "total": total,
+                    "name": f"第 {start} 幕",
+                    "status": "failed",
+                    "message": reason,
+                },
+            )
+            continue
+        results[act_index] = act
+        if store is not None:
+            _save_act_work(store, params, results, failures)
+    if failures:
+        ok = total - len(failures)
+        nums = "、".join(str(item["act_index"]) for item in failures)
+        first = failures[0]
+        raise AdapterError(
+            ErrorCode.UPSTREAM_ERROR,
+            f"大纲未完成：第 {nums} 幕失败（已成功 {ok}/{total} 幕）。原因：{first['kind']}。"
+            "已成功的幕已保留，可点「重试」只补失败幕。",
+            retryable=True,
+            detail={"failures": failures, "resume": True, "raw": first.get("raw", "")},
         )
-        act = payload.get("act") if isinstance(payload, dict) else None
-        if not isinstance(act, dict) and isinstance(payload, dict):
-            # 最小兼容：模型仍按整本大纲返回 {"acts": [...]}
-            fallback = payload.get("acts")
-            if isinstance(fallback, list) and fallback and isinstance(fallback[0], dict):
-                act = fallback[0]
-        if not isinstance(act, dict) or not act:
-            raise AdapterError(ErrorCode.INVALID_INPUT, f"大纲第 {start} 幕生成失败：工具调用未返回 act 对象")
-        collected.append(act)
-    return collected
+    if store is not None:
+        _clear_act_work(store)
+    return [act for act in results if isinstance(act, dict)]
 
 
 def apply_outline(store: ProjectStore, dry_run: bool = False) -> dict:

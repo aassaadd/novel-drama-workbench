@@ -1816,7 +1816,7 @@ async function runOutlineGenerate(body, mode = 'regen') {
     )} 个节拍 · 每章约 ${Number(body.words || 3000)} 字${mode === 'fill' ? ' · 保留现有大纲' : ' · 覆盖现有大纲'}`,
     stage: '已提交生成请求，正在拆解幕结构…',
   });
-  panel.update({ percent: 0 });
+  panel.update({ percent: null });
   let settled = false;
   const finishWithOutline = async (result) => {
     cache.outline = await getJSON('/api/ui/outline', { path: cache.path });
@@ -1869,7 +1869,14 @@ async function runOutlineGenerate(body, mode = 'regen') {
         panel.fail({ message: '已停止生成', detail: '任务已在任务队列中取消，已接收的内容不会写入大纲。' });
       } else if (event === 'error') {
         settled = true;
-        panel.fail({ message: data.message || '大纲生成失败', retry: () => runOutlineGenerate(body, mode) });
+        // 可续跑时只补失败幕：复用后端保留的已完成幕
+        const canResume = Boolean(data.resume || data.retryable);
+        panel.fail({
+          message: data.message || '大纲生成失败',
+          detail: data.detail || '',
+          current: canResume ? '已成功的幕已保留；点「重试」只补失败幕' : '',
+          retry: () => runOutlineGenerate(canResume ? { ...body, resume: true } : body, mode),
+        });
       }
     });
     if (!settled) {
