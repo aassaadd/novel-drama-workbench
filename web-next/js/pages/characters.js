@@ -4,7 +4,10 @@
  * 主区是选中角色的档案表单；音色绑定在 V4 音色视图里完成。
  */
 import { esc, icon, toast, openDialog, closeDialog } from '../dom.js';
-import { getJSON, patchJSON, postJSON, fileUrl } from '../api.js';
+import { getJSON, patchJSON, postJSON, fileUrl, streamJSON } from '../api.js';
+import { selectHTML, labelOf } from '../enums.js';
+import { openProgress } from '../progress.js';
+import { modeSwitchHTML, bindModeSwitch } from '../gen-mode.js';
 import { state, resetProject } from '../store.js';
 import { railbar, topbar, goChapter, goProjects } from '../shell.js';
 
@@ -396,9 +399,6 @@ function profileHTML() {
       </div>
     </div>`;
   }
-  const roleOptions = ROLE_ORDER.map(
-    (role) => `<option value="${role}" ${item.role === role ? 'selected' : ''}>${ROLE_LABEL[role]}</option>`
-  ).join('');
   const locked = item.role === 'narrator';
   const lockHint = locked ? '旁白是固定角色，不可改名或改定位' : '';
   const rowStats = stats[item.id] || { lines: 0, chapters: [] };
@@ -448,37 +448,45 @@ function profileHTML() {
       <div class="card-body">
         <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px">
           <div class="field"><label>姓名</label>
-            <input class="input" id="ch-name" value="${esc(item.name || '')}" ${locked ? 'disabled' : ''}
+            <input class="input" data-free="1" id="ch-name" value="${esc(item.name || '')}" ${locked ? 'disabled' : ''}
               title="${esc(lockHint || '角色正式名，用于台词说话人识别')}" /></div>
-          <div class="field"><label>别名（逗号分隔）</label>
-            <input class="input" id="ch-aliases" value="${esc((item.aliases || []).join('，'))}"
+          <div class="field"><label>别名（逗号分隔，自由填写）</label>
+            <input class="input" data-free="1" id="ch-aliases" value="${esc((item.aliases || []).join('，'))}"
               title="别名也用于台词说话人识别，用逗号分隔" /></div>
           <div class="field"><label>定位</label>
-            <select class="select" id="ch-role" ${locked ? 'disabled' : ''} title="${esc(lockHint || '决定角色在列表里的排序与筛选')}">${roleOptions}</select></div>
+            ${selectHTML('role', {
+              id: 'ch-role',
+              current: item.role,
+              title: lockHint || '决定角色在列表里的排序与筛选，只能从列表选择',
+              attrs: locked ? 'disabled' : '',
+            })}</div>
           <div class="field"><label>性别</label>
-            <select class="select" id="ch-gender" title="影响音色推荐与同场听感">
-              ${['unknown', 'male', 'female', 'other']
-                .map((key) => `<option value="${key}" ${(item.gender || 'unknown') === key ? 'selected' : ''}>${
-                  { unknown: '未指定', male: '男', female: '女', other: '其他' }[key]
-                }</option>`)
-                .join('')}
-            </select></div>
+            ${selectHTML('gender', {
+              id: 'ch-gender',
+              current: item.gender || 'unknown',
+              title: '影响音色推荐与同场听感，只能从列表选择',
+            })}</div>
           <div class="field"><label>年龄段</label>
-            <input class="input" id="ch-age" value="${esc(item.age_range || '')}" placeholder="例如 25-35"
-              title="用于音色选择，可填区间或「中年」这类描述" /></div>
-          <div class="field"><label>性格（逗号分隔）</label>
-            <input class="input" id="ch-personality" value="${esc((item.personality || []).join('，'))}"
+            ${selectHTML('age_range', {
+              id: 'ch-age',
+              current: item.age_range || '',
+              emptyLabel: '未指定',
+              extra: [item.age_range || ''],
+              title: '用于音色推荐；旧工程里的自定义区间会保留为可选项',
+            })}</div>
+          <div class="field"><label>性格（逗号分隔，自由填写）</label>
+            <input class="input" data-free="1" id="ch-personality" value="${esc((item.personality || []).join('，'))}"
               title="性格关键词，多个用逗号分隔" /></div>
-          <div class="field" style="grid-column:1/-1"><label>背景</label>
-            <textarea class="textarea" id="ch-background" rows="3" title="角色的来历、动机与关系背景">${esc(item.background || '')}</textarea></div>
+          <div class="field" style="grid-column:1/-1"><label>背景（自由填写）</label>
+            <textarea class="textarea" data-free="1" id="ch-background" rows="3" title="角色的来历、动机与关系背景">${esc(item.background || '')}</textarea></div>
           <div class="field" style="grid-column:1/-1"><label>说话风格（只读）</label>
             <div class="input" style="display:flex;align-items:center;color:var(--text-3)"
               title="说话风格由音色与行内参数决定，这里只读展示">${esc(speechLine(item))}</div></div>
-          <div class="field" style="grid-column:1/-1"><label>外貌提示词</label>
-            <textarea class="textarea" id="ch-appearance" rows="3"
+          <div class="field" style="grid-column:1/-1"><label>外貌提示词（自由填写）</label>
+            <textarea class="textarea" data-free="1" id="ch-appearance" rows="3"
               title="用于角色立绘与配图的形象描述">${esc(item.appearance_prompt || '')}</textarea></div>
-          <div class="field" style="grid-column:1/-1"><label>负向提示词</label>
-            <textarea class="textarea" id="ch-negative" rows="2"
+          <div class="field" style="grid-column:1/-1"><label>负向提示词（自由填写）</label>
+            <textarea class="textarea" data-free="1" id="ch-negative" rows="2"
               title="生成角色形象时要避免的特征，多个用逗号分隔">${esc(item.negative_prompt || '')}</textarea></div>
         </div>
         <div class="hint">音色绑定在下方或「音色」视图完成；档案改动自动保存并写回 characters.json。</div>
@@ -576,12 +584,12 @@ async function saveCharacter({ silent = false } = {}) {
 function newCharacter() {
   const mask = openDialog({
     title: '新增角色',
-    body: `<div class="field"><label>姓名</label><input class="input" id="nc-name" placeholder="角色正式名" /></div>
-      <div class="field"><label>定位</label><select class="select" id="nc-role">
-        ${['protagonist', 'supporting', 'antagonist', 'minor']
-          .map((role) => `<option value="${role}">${ROLE_LABEL[role]}</option>`)
-          .join('')}
-      </select></div>`,
+    body: `<div class="field"><label>姓名</label><input class="input" data-free="1" id="nc-name" placeholder="角色正式名" /></div>
+      <div class="field"><label>定位</label>${selectHTML('role', {
+        id: 'nc-role',
+        current: 'protagonist',
+        attrs: '',
+      })}</div>`,
     foot: `<div class="right"><button class="btn" data-dlg-close>取消</button>
       <button class="btn primary" id="nc-ok">创建</button></div>`,
   });
@@ -782,13 +790,17 @@ function openCharacterImage(autoKind = '') {
   const mask = openDialog({
     title: `${item.name} 的形象图`,
     wide: true,
-    body: `<div id="ci-body">${characterImageBodyHTML(item)}</div>`,
+    // 生成方式放在 #ci-body 之外：刷新缩略图时只重绘 #ci-body，分段按钮的绑定不会丢
+    body: `${modeSwitchHTML('character.image', { fallback: 'regen' })}
+      <div id="ci-body">${characterImageBodyHTML(item)}</div>`,
     foot: `<div class="right">
       <button class="btn" data-ci="close">关闭</button>
       <button class="btn" data-ci="refresh" title="重新读取角色档案里的形象图">刷新</button>
       <button class="btn primary" data-ci="gen" data-kind="fullbody">生成全身像</button>
     </div>`,
   });
+  /** 读取当前选择的生成方式：fill=已有类型跳过，regen=覆盖重生成 */
+  const modeOf = bindModeSwitch(mask, 'character.image', { fallback: 'regen' });
   mask.addEventListener('click', (event) => {
     const button = event.target.closest('[data-ci]');
     if (!button) return;
@@ -799,89 +811,211 @@ function openCharacterImage(autoKind = '') {
       if (body && fresh) body.innerHTML = characterImageBodyHTML(fresh);
       return;
     }
-    if (button.dataset.ci === 'gen') void runCharacterImage(mask, button.dataset.kind);
+    if (button.dataset.ci === 'gen') void runCharacterImage(mask, button.dataset.kind, modeOf);
   });
-  if (autoKind) void runCharacterImage(mask, autoKind);
+  if (autoKind) void runCharacterImage(mask, autoKind, modeOf);
 }
 
 /**
  * 生成一类角色形象图并刷新档案。
  * @param {HTMLElement} mask 弹窗根节点
  * @param {string} kind fullbody / closeup / turnaround
+ * @param {() => 'fill'|'regen'} [modeOf] 读取生成方式；fill 且该类图已存在时跳过
  */
-async function runCharacterImage(mask, kind) {
+async function runCharacterImage(mask, kind, modeOf = () => 'regen') {
   const item = current();
   if (!item || !kind) return;
+  const mode = modeOf();
+  const label = (IMAGE_KINDS.find(([key]) => key === kind) || [kind, kind])[1];
+  // 与 characterImageBodyHTML 一致：characters.json 的 image_assets[kind] 即该类形象图
+  const existed = Boolean((item.image_assets || {})[kind]);
+  if (mode === 'fill' && existed) {
+    const skippedText = `已有${label}，已跳过；要覆盖请选「重新生成」`;
+    const progress = mask.querySelector('#ci-progress');
+    if (progress) progress.innerHTML = `<div class="dlg-note">${esc(skippedText)}</div>`;
+    const panel = openProgress({
+      title: `「${item.name}」的${label}已存在`,
+      hint: '只补缺失模式不会覆盖已有形象图',
+      stage: '已跳过本次生成',
+    });
+    panel.finish({ message: skippedText });
+    toast(skippedText, 'info');
+    return;
+  }
   const buttons = mask.querySelectorAll('[data-ci="gen"]');
   buttons.forEach((button) => (button.disabled = true));
   const progress = mask.querySelector('#ci-progress');
-  const label = (IMAGE_KINDS.find(([key]) => key === kind) || [kind, kind])[1];
   if (progress) {
     progress.innerHTML = `<div class="dlg-note">正在生成${esc(label)}…（ComfyUI 出图可能需要几十秒）</div>`;
   }
+  const panel = openProgress({
+    title: mode === 'regen' ? `正在重新生成「${item.name}」的${label}…` : `正在生成「${item.name}」的${label}…`,
+    hint: mode === 'regen' ? '重新生成并覆盖同类型旧图；本机 ComfyUI 出图通常需要几十秒' : '只生成缺失的形象图，不覆盖已有图片',
+    stage: '已提交出图任务，等待模型返回…',
+  });
+  panel.update({ percent: null });
   try {
-    const result = await postJSON('/api/ui/characters/image', { path: state.path, id: item.id, kind });
+    const result = await postJSON('/api/ui/characters/image', {
+      path: state.path,
+      id: item.id,
+      kind,
+      force: mode === 'regen',
+    });
     await loadAll(state.path);
     repaint();
     const fresh = current();
     const body = mask.querySelector('#ci-body');
     if (body && fresh) body.innerHTML = characterImageBodyHTML(fresh);
+    panel.finish({
+      message: `${label}${result?.created ? '已生成' : '已复用旧图'}`,
+      detail: '形象图已写入角色档案，可在弹窗里查看。',
+      actions: [{ label: '重新读取', primary: true, onClick: () => {
+        const latest = current();
+        const host = mask.querySelector('#ci-body');
+        if (host && latest) host.innerHTML = characterImageBodyHTML(latest);
+      } }],
+    });
     toast(`${label}${result?.created ? '已生成' : '已复用旧图'}`, 'ok');
   } catch (error) {
     toast(error.message, 'bad', 4600);
     if (progress) progress.innerHTML = `<div class="dlg-note bad">${esc(error.message)}</div>`;
+    panel.fail({ message: `${label}生成失败：${error.message}`, retry: () => void runCharacterImage(mask, kind, modeOf) });
   } finally {
     buttons.forEach((button) => (button.disabled = false));
   }
 }
 
-/** AI 补全当前角色的音色 / 外貌描述（只补缺失，不覆盖已有内容） */
+/** AI 补全当前角色的音色 / 外貌描述（可选只补缺失或重新生成并覆盖） */
 function openAiFill() {
   const item = current();
   if (!item) return toast('先从左侧选择一个角色', 'warn');
   const mask = openDialog({
     title: 'AI 补全角色档案',
-    body: `<div class="dlg-note">只补缺失的音色描述、外貌描述与负向提示词（中英文），已有内容不会被覆盖。</div>
+    body: `${modeSwitchHTML('character.desc', { fallback: 'fill' })}
+      <div class="dlg-note">「只补缺失」保留已有内容，只生成空缺字段；「重新生成」会重写音色描述、外貌描述与负向提示词并覆盖已有内容。</div>
       <div class="summary-line"><span>目标角色</span><span class="right">${esc(item.name)}</span></div>
       <div id="af-result" style="margin-top:8px"></div>`,
     foot: `<div class="right"><button class="btn" data-dlg-close>取消</button>
-      <button class="btn primary" id="af-run">开始补全</button></div>`,
+      <button class="btn primary" id="af-run">补全缺失字段</button></div>`,
   });
-  mask.querySelector('#af-run').addEventListener('click', async (event) => {
+  /** 读取当前选择的生成方式：fill=只补缺失，regen=重新生成并覆盖 */
+  const modeOf = bindModeSwitch(mask, 'character.desc', {
+    fallback: 'fill',
+    action: mask.querySelector('#af-run'),
+    labels: { fill: '补全缺失字段', regen: '重新生成并覆盖' },
+  });
+  mask.querySelector('#af-run').addEventListener('click', (event) => {
     const button = event.currentTarget;
-    const resultHost = mask.querySelector('#af-result');
     button.disabled = true;
     button.textContent = '补全中…';
+    const resultHost = mask.querySelector('#af-result');
     if (resultHost) resultHost.innerHTML = `<div class="dlg-note">正在调用写作模型补全，请稍候…</div>`;
-    try {
-      const result = await postJSON('/api/ui/characters/descriptions/fill', {
-        path: state.path,
-        names: [item.name],
-      });
-      if (resultHost) {
-        resultHost.innerHTML = `
-          <div class="summary-line"><span>补全成功</span><span class="right">${(result.updated || []).length} 个</span></div>
-          <div class="summary-line"><span>字段已齐全</span><span class="right">${(result.skipped || []).length} 个</span></div>
-          ${
-            (result.failures || []).length
-              ? `<div class="dlg-note bad">失败：${result.failures
-                  .map((row) => `${esc(row.name)}：${esc(row.message)}`)
-                  .join('；')}</div>`
-              : ''
-          }
-          <div class="hint" style="margin-top:6px">${esc(result.summary || '')}</div>`;
-      }
-      await loadAll(state.path);
-      repaint();
-      toast((result.updated || []).length ? '角色档案已补全' : '没有需要补全的字段', 'ok');
-    } catch (error) {
-      toast(error.message, 'bad', 4600);
-      if (resultHost) resultHost.innerHTML = `<div class="dlg-note bad">${esc(error.message)}</div>`;
-    } finally {
+    void runDescriptionFill(item, mask, resultHost, modeOf()).finally(() => {
+      if (!document.body.contains(button)) return;
       button.disabled = false;
-      button.textContent = '重新补全';
-    }
+      button.textContent = modeOf() === 'regen' ? '重新生成并覆盖' : '补全缺失字段';
+    });
   });
+}
+
+/**
+ * 执行角色描述补全 / 重新生成（流式进度），进度走统一浮层，结果同时回填弹窗。
+ * @param {object} item 目标角色
+ * @param {HTMLElement} mask 弹窗根节点
+ * @param {HTMLElement|null} resultHost 弹窗内结果容器
+ * @param {'fill'|'regen'} [mode] 生成方式：fill 只补缺失，regen 重新生成并覆盖
+ */
+async function runDescriptionFill(item, mask, resultHost, mode = 'fill') {
+  const regen = mode === 'regen';
+  const panel = openProgress({
+    title: regen ? `正在重新生成「${item.name}」的档案…` : `正在补全「${item.name}」的档案…`,
+    hint: regen
+      ? '重新生成音色描述、外貌描述与负向提示词，并覆盖已有内容'
+      : '只补缺失的音色描述、外貌描述与负向提示词，已有内容不会被覆盖',
+    stage: '正在分析缺失字段…',
+  });
+  panel.update({ percent: null });
+  let settled = false;
+  try {
+    await streamJSON(
+      '/api/ui/characters/descriptions/fill/stream',
+      { path: state.path, names: [item.name], overwrite: regen },
+      (event, data) => {
+        if (!data) return;
+        if (event === 'total') {
+          panel.update({
+            stage: `共 ${Number(data.total || 0)} 个角色待处理`,
+            current: `待补全 ${Number(data.pending || 0)} · 跳过 ${Number(data.skipped || 0)}`,
+          });
+        } else if (event === 'batch') {
+          const index = Number(data.index || 1);
+          const total = Number(data.total || 1) || 1;
+          panel.update({
+            stage: `${regen ? '正在重新生成' : '正在补全'} ${data.name || item.name}…`,
+            percent: Math.round(((index - 1) / total) * 100),
+            current: `第 ${index} / ${total} 个`,
+          });
+        } else if (event === 'chars') {
+          panel.update({ current: `${data.name || item.name} · 已接收 ${Number(data.chars || 0)} 字` });
+        } else if (event === 'item') {
+          const status = String(data.status || '');
+          const text =
+            status === 'done'
+              ? `${data.name}：已补 ${Number(data.fields || 0)} 个字段`
+              : status === 'skipped'
+                ? `${data.name}：跳过（${data.reason || '无需补全'}）`
+                : `${data.name}：失败（${data.message || '未知原因'}）`;
+          panel.update({ current: text });
+        } else if (event === 'done') {
+          settled = true;
+          const result = data.result || {};
+          const updated = result.updated || [];
+          const failures = result.failures || [];
+          panel.update({ percent: 100 });
+          // 流式返回的模型原文保留在灰色一行里，结束时不覆盖（摘要放到 message/detail）
+          panel.finish({
+            message: result.overwrite
+              ? `已重新生成并覆盖 ${updated.length} 个角色${failures.length ? `，${failures.length} 个失败` : ''}`
+              : `补全完成：更新 ${updated.length} 个角色${failures.length ? `，${failures.length} 个失败` : ''}`,
+            detail: result.summary || '',
+            actions: [
+              { label: '重新读取档案', primary: true, onClick: () => void loadAll(state.path).then(repaint) },
+            ],
+          });
+          renderFillResult(resultHost, result);
+          void loadAll(state.path).then(repaint);
+          toast(updated.length ? '角色档案已补全' : '没有需要补全的字段', 'ok');
+        } else if (event === 'error') {
+          settled = true;
+          panel.fail({ message: data.message || '补全失败', retry: () => void runDescriptionFill(item, mask, resultHost, mode) });
+        }
+      }
+    );
+    if (!settled) panel.fail({ message: '连接已中断，没有收到补全结果', retry: () => void runDescriptionFill(item, mask, resultHost, mode) });
+  } catch (error) {
+    if (!settled) panel.fail({ message: `补全失败：${error.message}`, retry: () => void runDescriptionFill(item, mask, resultHost, mode) });
+    if (resultHost) resultHost.innerHTML = `<div class="dlg-note bad">${esc(error.message)}</div>`;
+  }
+}
+
+/**
+ * 把补全结果写回弹窗内的结果区。
+ * @param {HTMLElement|null} host 结果容器
+ * @param {object} result 补全结果
+ */
+function renderFillResult(host, result) {
+  if (!host) return;
+  host.innerHTML = `
+    <div class="summary-line"><span>补全成功</span><span class="right">${(result.updated || []).length} 个</span></div>
+    <div class="summary-line"><span>字段已齐全</span><span class="right">${(result.skipped || []).length} 个</span></div>
+    ${
+      (result.failures || []).length
+        ? `<div class="dlg-note bad">失败：${result.failures
+            .map((row) => `${esc(row.name)}：${esc(row.message)}`)
+            .join('；')}</div>`
+        : ''
+    }
+    <div class="hint" style="margin-top:6px">${esc(result.summary || '')}</div>`;
 }
 
 /** AI 生成角色名单：预览 → 勾选 → 追加 */
@@ -889,7 +1023,8 @@ function openAiGenerate() {
   const mask = openDialog({
     title: 'AI 生成角色',
     wide: true,
-    body: `<div class="dlg-note">按作品设定与已有角色生成名单；先预览，勾选后才会写入 characters.json。</div>
+    body: `${modeSwitchHTML('character.generate', { fallback: 'fill' })}
+      <div class="dlg-note">按作品设定与已有角色生成名单；先预览，勾选后才会写入 characters.json。「只补缺失」会跳过与已有角色同名的行。</div>
       <div style="display:grid;grid-template-columns:140px 1fr;gap:10px;margin-top:10px">
         <div class="field"><label>人数</label>
           <input class="input" id="ag-count" type="number" min="1" max="30" value="4" /></div>
@@ -898,8 +1033,14 @@ function openAiGenerate() {
       </div>
       <div id="ag-result" style="margin-top:10px"></div>`,
     foot: `<div class="right"><button class="btn" data-dlg-close>取消</button>
-      <button class="btn" id="ag-preview">生成预览</button>
+      <button class="btn" id="ag-preview">生成缺失角色</button>
       <button class="btn primary" id="ag-apply" disabled>追加选中角色</button></div>`,
+  });
+  /** 读取当前选择的生成方式：fill=过滤同名角色，regen=重新生成完整名单 */
+  const modeOf = bindModeSwitch(mask, 'character.generate', {
+    fallback: 'fill',
+    action: mask.querySelector('#ag-preview'),
+    labels: { fill: '生成缺失角色', regen: '重新生成名单' },
   });
   let rows = [];
   const applyButton = mask.querySelector('#ag-apply');
@@ -922,7 +1063,9 @@ function openAiGenerate() {
               )}</div>
             </span>
           </span>
-          <span class="right hint">${esc([row.gender, row.age_range].filter(Boolean).join(' · '))}</span>
+          <span class="right hint">${esc(
+            [labelOf('gender', row.gender, ''), row.age_range].filter(Boolean).join(' · ')
+          )}</span>
         </div>`
           )
           .join('')
@@ -935,27 +1078,24 @@ function openAiGenerate() {
     if (!box) return;
     rows[Number(box.dataset.agPick)].__pick = box.checked;
   });
-  mask.querySelector('#ag-preview').addEventListener('click', async (event) => {
+  mask.querySelector('#ag-preview').addEventListener('click', (event) => {
     const button = event.currentTarget;
+    const mode = modeOf();
     button.disabled = true;
     button.textContent = '生成中…';
     resultHost.innerHTML = `<div class="dlg-note">正在生成角色名单与档案，请稍候…</div>`;
-    try {
-      const result = await postJSON('/api/ui/characters/generate', {
-        path: state.path,
-        count: Number(mask.querySelector('#ag-count').value || 4),
-        brief: mask.querySelector('#ag-brief').value.trim() || undefined,
+    const count = Number(mask.querySelector('#ag-count').value || 4);
+    const brief = mask.querySelector('#ag-brief').value.trim() || undefined;
+    void runCharacterGenerate(count, brief, resultHost, mode)
+      .then((list) => {
+        rows = list;
+        renderRows();
+      })
+      .finally(() => {
+        if (!document.body.contains(button)) return;
+        button.disabled = false;
+        button.textContent = mode === 'regen' ? '重新生成名单' : '生成缺失角色';
       });
-      rows = (result.characters || []).map((row) => ({ ...row }));
-      renderRows();
-      toast(`已生成 ${rows.length} 个角色预览`, 'ok');
-    } catch (error) {
-      toast(error.message, 'bad', 4600);
-      resultHost.innerHTML = `<div class="dlg-note bad">${esc(error.message)}</div>`;
-    } finally {
-      button.disabled = false;
-      button.textContent = '重新预览';
-    }
   });
   applyButton.addEventListener('click', async (event) => {
     const picks = rows.filter((row) => row.__pick !== false);
@@ -973,6 +1113,98 @@ function openAiGenerate() {
       event.currentTarget.disabled = false;
     }
   });
+}
+
+/**
+ * 执行角色名单生成（SSE 进度），返回可勾选的预览行。
+ * @param {number} count 生成人数
+ * @param {string|undefined} brief 补充要求
+ * @param {HTMLElement|null} resultHost 弹窗内结果容器（失败时显示原因）
+ * @param {'fill'|'regen'} [mode] 生成方式：fill 过滤与已有角色同名（含结果内部重名）的行
+ * @returns {Promise<Array<object>>} 角色预览行
+ */
+async function runCharacterGenerate(count, brief, resultHost, mode = 'fill') {
+  const regen = mode === 'regen';
+  const panel = openProgress({
+    title: regen ? `正在重新生成 ${count} 个角色名单…` : `正在生成缺失角色（目标 ${count} 个）…`,
+    hint: regen ? brief || '忽略已有角色，重新生成完整名单' : brief || '跳过与已有角色同名的行，只生成缺失角色',
+    stage: '已提交生成请求，等待模型返回…',
+  });
+  panel.update({ percent: null });
+  let settled = false;
+  let rows = [];
+  // 已有角色名来自 loadAll 写入的模块级 characters，与左侧列表同源
+  const existingNames = new Set(
+    (characters || []).map((item) => String(item.name || '').trim()).filter(Boolean)
+  );
+  try {
+    await streamJSON('/api/ui/characters/generate/stream', { path: state.path, count, brief }, (event, data) => {
+      if (!data) return;
+      if (event === 'batch') {
+        const index = Number(data.index || 1);
+        const total = Number(data.total || 1) || 1;
+        panel.update({
+          stage: `正在生成第 ${index}/${total} 批角色…`,
+          percent: Math.round(((index - 1) / total) * 100),
+          current: `第 ${index} / ${total} 批`,
+        });
+      } else if (event === 'chars') {
+        panel.update({ current: `第 ${Number(data.index || 1)} 批 · 已接收 ${Number(data.chars || 0)} 字` });
+      } else if (event === 'done') {
+        settled = true;
+        const raw = (data.result?.characters || []).map((row) => ({ ...row }));
+        let skipped = 0;
+        if (regen) {
+          rows = raw;
+        } else {
+          // fill：先按已有角色名去重，再按结果内部重名去重
+          const seen = new Set();
+          rows = raw.filter((row) => {
+            const name = String(row.name || '').trim();
+            if (!name) return true;
+            if (existingNames.has(name) || seen.has(name)) {
+              skipped += 1;
+              return false;
+            }
+            seen.add(name);
+            return true;
+          });
+        }
+        panel.update({ percent: 100, current: skipped ? `已跳过 ${skipped} 个同名角色` : '' });
+        // 非流式结果摘要：让进度浮层显示最近一条模型返回内容
+        panel.note(rows[0] ? `${rows[0].name || ''} / ${rows[0].one_line || ''}` : `已返回 ${raw.length} 个角色`);
+        panel.finish({
+          message: regen
+            ? `角色名单已重新生成：${rows.length} 个待勾选`
+            : `缺失角色生成完成：${rows.length} 个待勾选${skipped ? ` · 已跳过 ${skipped} 个同名角色` : ''}`,
+          detail: '在弹窗里勾选后点「追加选中角色」才会写入 characters.json。',
+        });
+        toast(`已生成 ${rows.length} 个角色预览`, 'ok');
+      } else if (event === 'error') {
+        settled = true;
+        panel.fail({
+          message: data.message || '角色生成失败',
+          retry: () => void runCharacterGenerate(count, brief, resultHost, mode),
+        });
+      }
+    });
+    if (!settled) {
+      panel.fail({
+        message: '连接已中断，没有收到角色生成结果',
+        retry: () => void runCharacterGenerate(count, brief, resultHost, mode),
+      });
+    }
+  } catch (error) {
+    if (!settled) {
+      panel.fail({
+        message: `角色生成失败：${error.message}`,
+        retry: () => void runCharacterGenerate(count, brief, resultHost, mode),
+      });
+    }
+    if (resultHost) resultHost.innerHTML = `<div class="dlg-note bad">${esc(error.message)}</div>`;
+    throw error;
+  }
+  return rows;
 }
 
 /** 全剧自动推荐音色：预览计划 → 应用 / 撤回 */
@@ -1032,12 +1264,19 @@ async function openAutofill() {
   });
   mask.querySelector('#af-apply').addEventListener('click', async (event) => {
     event.currentTarget.disabled = true;
+    const panel = openProgress({
+      title: '正在应用音色编排…',
+      hint: `新建 ${Number(stats.created || 0)} · 补齐 ${Number(stats.filled || stats.changed || 0)}`,
+      stage: '正在写入 cast 并刷新角色绑定…',
+    });
+    panel.update({ percent: null });
     try {
       const result = await postJSON('/api/ui/cast/autofill', { path: state.path });
-      toast(
-        result.applied ? `已应用，改动 ${Number(result.changed || 0)} 项` : '当前已是最优编排，没有需要改动的地方',
-        result.applied ? 'ok' : 'info'
-      );
+      const message = result.applied
+        ? `已应用音色编排，改动 ${Number(result.changed || 0)} 项`
+        : '当前已是最优编排，没有需要改动的地方';
+      panel.finish({ message, detail: '可在「音色」视图逐个角色查看绑定结果。' });
+      toast(message, result.applied ? 'ok' : 'info');
       closeDialog();
       await loadAll(state.path);
       repaint();
@@ -1046,6 +1285,7 @@ async function openAutofill() {
     } catch (error) {
       toast(error.message, 'bad', 4600);
       event.currentTarget.disabled = false;
+      panel.fail({ message: `应用音色编排失败：${error.message}` });
     }
   });
   mask.querySelector('#af-undo').addEventListener('click', async (event) => {

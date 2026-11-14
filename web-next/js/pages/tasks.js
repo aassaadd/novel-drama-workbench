@@ -4,8 +4,10 @@
  */
 import { esc, icon, toast, openDialog, closeDialog, fmtDuration, impactListHTML } from '../dom.js';
 import { getJSON, postJSON } from '../api.js';
+import { openProgress, watchProgress } from '../progress.js';
+import { modeSwitchHTML, bindModeSwitch, getGenMode } from '../gen-mode.js';
 import { state, resetProject } from '../store.js';
-import { railbar, topbar, chapterCtx, goChapter, goProjects, checkConsistency, resplitBannerHTML, onResplit } from '../shell.js';
+import { railbar, topbar, chapterCtx, goChapter, goProjects, emptyProjectHTML, checkConsistency, resplitBannerHTML, onResplit } from '../shell.js';
 
 const QUEUE_LABEL = {
   tts: '配音',
@@ -76,6 +78,21 @@ function badgeClass(name) {
   return '';
 }
 
+/**
+ * 把后端错误统一转成可读文本（错误可能是字符串，也可能是 {message} 对象）。
+ * @param {any} value 错误值
+ * @returns {string} 中文错误文本
+ */
+function errorText(value) {
+  if (!value) return '';
+  if (typeof value === 'string') return value;
+  if (typeof value === 'object') {
+    return String(value.message || value.detail?.message || value.detail || value.reason || '').trim() ||
+      JSON.stringify(value);
+  }
+  return String(value);
+}
+
 /** 过滤队列 */
 function visibleQueue() {
   if (queueFilter === 'all') return queue;
@@ -90,7 +107,7 @@ function failedRowHTML(row) {
   return `
     <div class="summary-line">
       <span style="min-width:0">${esc(label)}
-        <span style="color:var(--text-4);font-size:11px"> · ${esc(row.error || '生成失败')}</span></span>
+        <span style="color:var(--text-4);font-size:11px"> · ${esc(errorText(row.error) || '生成失败')}</span></span>
       <span class="right"><button class="btn sm" data-act="retry" data-line="${esc(lineId)}"
         title="只重新生成这一行的配音，旧版本保留">重试</button></span>
     </div>`;
@@ -174,7 +191,9 @@ function produceHTML() {
           <td>${esc(item.label || item.stage || '')}</td>
           <td><span class="badge ${ok ? 'ok' : bad ? 'bad' : skip ? 'mute' : item.status === 'running' ? 'run' : 'mute'}">${esc(status)}</span></td>
           <td class="mono">${(item.artifacts || []).length}</td>
-          <td style="color:${bad ? 'var(--bad)' : 'var(--text-3)'};font-size:11.5px">${esc(item.error || item.note || '')}</td>
+          <td style="color:${bad ? 'var(--bad)' : 'var(--text-3)'};font-size:11.5px">${esc(
+            errorText(item.error) || item.note || ''
+          )}</td>
         </tr>`;
     })
     .join('');
@@ -184,7 +203,7 @@ function produceHTML() {
         <div class="right">${
           run
             ? `<span class="badge ${run.status === 'succeeded' ? 'ok' : run.status === 'failed' ? 'bad' : 'run'}">
-                 ${esc(run.status)} · ${doneCount}/${stages.length}${run.run_id ? ` · ${esc(String(run.run_id).slice(-6))}` : ''}
+                 ${esc(PRODUCE_STATUS[run.status] || '未识别')} · ${doneCount}/${stages.length}${run.run_id ? ` · ${esc(String(run.run_id).slice(-6))}` : ''}
                </span>`
             : '<span class="badge mute">还没有编排记录</span>'
         }</div>
@@ -192,16 +211,15 @@ function produceHTML() {
       <div class="card-body">
         <div style="display:grid;grid-template-columns:1fr 1fr auto auto;gap:10px;align-items:end">
           <div class="field"><label>从</label>
-            <select class="select" id="prod-from">${options('setting')}</select></div>
+            <select class="select" id="prod-from" data-enum="produce_stage" title="起始阶段，只能从列表选择">${options('setting')}</select></div>
           <div class="field"><label>到</label>
-            <select class="select" id="prod-to">${options('export')}</select></div>
-          <label style="display:flex;gap:6px;align-items:center;font-size:11.5px;color:var(--text-3);padding-bottom:7px">
-            <input type="checkbox" id="prod-force" /> 强制重跑</label>
+            <select class="select" id="prod-to" data-enum="produce_stage" title="结束阶段，只能从列表选择">${options('export')}</select></div>
+          ${modeSwitchHTML('produce', { fallback: 'fill' })}
           <button class="btn primary" data-act="produce-start"
             title="后台启动 ndw produce，按记录续跑已完成的阶段">启动编排</button>
         </div>
         <div class="hint" style="margin-top:6px">
-          默认续跑：已完成的阶段会跳过；勾选「强制重跑」会忽略已有产物。运行期间本卡片随任务轮询一起刷新。
+          只补缺失：已完成的阶段会跳过；重新生成：忽略已有产物并强制重跑全部阶段。运行期间本卡片随任务轮询一起刷新。
         </div>
         ${
           stages.length
@@ -310,7 +328,7 @@ function queueHTML() {
                         )}</span></td>
                         <td class="mono">${Number(item.attempts || 0)}</td>
                         <td class="mono">${(item.artifacts || []).length}</td>
-                        <td style="color:var(--bad)">${esc(item.error || '')}</td>
+                        <td style="color:var(--bad)">${esc(errorText(item.error))}</td>
                       </tr>`
                     )
                     .join('')
@@ -348,6 +366,21 @@ function mainHTML() {
 function repaint() {
   const main = document.getElementById('task-main');
   if (main) main.innerHTML = mainHTML();
+  bindProduceMode();
+}
+
+/**
+ * 全链路编排卡每次重画后重新绑定生成方式（分段按钮 + 启动按钮文案）。
+ * 生成方式存在 localStorage，轮询重画不会丢。
+ */
+function bindProduceMode() {
+  const main = document.getElementById('task-main');
+  if (!main) return;
+  bindModeSwitch(main, 'produce', {
+    fallback: 'fill',
+    action: main.querySelector('[data-act="produce-start"]'),
+    labels: { fill: '只补缺失阶段', regen: '强制重跑全部' },
+  });
 }
 
 /** 检查本章正文与切分是否一致（只读，不阻塞任务刷新） */
@@ -438,6 +471,11 @@ function openPlanDialog(plan) {
       await postJSON('/api/ui/tts/batch-all', { path: state.path, scope: 'chapter', chapter: state.chapterId });
       closeDialog();
       toast(`已开始补齐 ${total} 行`, 'ok');
+      watchProgress({
+        path: state.path,
+        title: '正在补齐缺失配音…',
+        hint: `本次 ${total} 行 · 已配好的行会自动跳过`,
+      });
       await refresh();
     } catch (error) {
       toast(error.message, 'bad');
@@ -494,7 +532,11 @@ async function onRootClick(event) {
     if (!lineId) return toast('这一行缺少 ID，无法重试', 'bad');
     button.disabled = true;
     try {
-      await postJSON('/api/ui/line/rerun', { path: state.path, chapter: state.chapterId, line: lineId });
+      await postJSON(
+        '/api/ui/line/rerun',
+        { path: state.path, chapter: state.chapterId, line: lineId },
+        { timeout: 0 }
+      );
       toast('这一行已重新生成', 'ok');
       await refresh();
     } catch (error) {
@@ -506,7 +548,11 @@ async function onRootClick(event) {
   if (act === 'produce-start') {
     const from = document.getElementById('prod-from')?.value || 'setting';
     const to = document.getElementById('prod-to')?.value || 'export';
-    const force = Boolean(document.getElementById('prod-force')?.checked);
+    // 生成方式：只补缺失阶段（续跑）或强制重跑全部阶段
+    const mode = getGenMode('produce', 'fill');
+    const regen = mode === 'regen';
+    const force = regen;
+    const noResume = regen;
     const order = PRODUCE_STAGES.map(([key]) => key);
     if (order.indexOf(from) > order.indexOf(to)) {
       return toast('「从」阶段必须排在「到」阶段之前', 'warn');
@@ -519,14 +565,109 @@ async function onRootClick(event) {
         from,
         to,
         force,
+        no_resume: noResume,
       });
-      toast(`编排已启动（pid ${result.pid || '—'}），进度会自动刷新`, 'ok', 4200);
+      toast(`编排已启动（pid ${result.pid || '—'}），进度见浮层`, 'ok', 4200);
+      watchProduceProgress(from, to, mode);
       window.setTimeout(() => refresh({ silent: true }), 1500);
     } catch (error) {
       toast(error.message, 'bad', 4800);
       button.disabled = false;
     }
   }
+}
+
+/**
+ * 轮询全链路编排记录并用浮层展示当前阶段与进度。
+ * @param {string} from 起始阶段 key
+ * @param {string} to 结束阶段 key
+ * @param {'fill'|'regen'} [mode] fill 只补缺失阶段；regen 强制重跑全部
+ */
+function watchProduceProgress(from, to, mode = 'fill') {
+  const order = PRODUCE_STAGES.map(([key]) => key);
+  const labelOf = (key) => PRODUCE_STAGES.find(([item]) => item === key)?.[1] || key;
+  const scope = order.slice(Math.max(0, order.indexOf(from)), order.indexOf(to) + 1);
+  const regen = mode === 'regen';
+  const panel = openProgress({
+    title: regen ? '正在强制重跑全链路编排…' : '正在补齐缺失阶段的编排…',
+    hint: `${labelOf(from)} → ${labelOf(to)}${regen ? ' · 忽略已有产物' : ' · 已完成阶段会跳过'}`,
+    stage: '后台进程已启动，正在读取编排记录…',
+  });
+  panel.update({ percent: 0 });
+  let stopped = false;
+  let timer = null;
+  let errors = 0;
+  let ticks = 0;
+
+  /** 读取一次 run show */
+  const tick = async () => {
+    if (stopped) return;
+    ticks += 1;
+    try {
+      const data = await getJSON('/api/ui/produce/latest', { path: state.path });
+      errors = 0;
+      const run = data?.run;
+      if (!run) {
+        if (ticks > 6) {
+          stopped = true;
+          panel.fail({
+            message: '没有找到编排记录，可能启动失败',
+            detail: '可到任务页查看日志。',
+            retry: () => watchProduceProgress(from, to, mode),
+          });
+          return;
+        }
+      } else {
+        const stages = run.stages || [];
+        const finishedKeys = stages.map((item) => item.stage);
+        const failed = stages.filter((item) => item.status === 'failed').length;
+        const done = scope.filter((key) => finishedKeys.includes(key)).length;
+        const total = scope.length || 1;
+        if (run.status === 'running') {
+          const nextKey = scope.find((key) => !finishedKeys.includes(key));
+          panel.update({
+            stage: nextKey ? `正在执行：${labelOf(nextKey)}` : '正在收尾…',
+            percent: Math.round((done / total) * 100),
+            current: `已完成 ${done}/${total} 个阶段${failed ? ` · 失败 ${failed}` : ''}`,
+          });
+        } else {
+          stopped = true;
+          if (timer) window.clearTimeout(timer);
+          if (run.status === 'failed' || failed) {
+            panel.fail({
+              message: `编排结束：${failed} 个阶段失败`,
+              detail: '失败原因可在任务页「最近一次编排」里逐阶段查看。',
+              retry: () => watchProduceProgress(from, to, mode),
+            });
+          } else {
+            const lastStage = stages[stages.length - 1];
+            panel.note(
+              lastStage ? `最后一个阶段：${lastStage.label || labelOf(lastStage.stage)}` : ''
+            );
+            panel.finish({
+              message: `编排完成：${done}/${total} 个阶段`,
+              detail: run.status === 'dry_run' ? '本次是 dry-run，没有执行实际生成。' : '产物已写入工程目录。',
+              actions: [{ label: '刷新本页', primary: true, onClick: () => void refresh() }],
+            });
+          }
+          void refresh({ silent: true });
+          return;
+        }
+      }
+    } catch (error) {
+      errors += 1;
+      if (errors >= 3) {
+        stopped = true;
+        panel.fail({
+          message: `读取编排进度失败：${error.message}`,
+          retry: () => watchProduceProgress(from, to, mode),
+        });
+        return;
+      }
+    }
+    if (!stopped) timer = window.setTimeout(tick, 2500);
+  };
+  void tick();
 }
 
 /** 输入（章节目录搜索） */
@@ -574,7 +715,21 @@ export async function renderTasks(root, { path }) {
       state.chapterId = state.chapters[0]?.id || '';
     }
     if (!state.chapterId) {
-      root.innerHTML = `<div class="page"><div class="empty">${icon('warn', 22)}<b>这个工程还没有章节</b></div></div>`;
+      // 空工程：任务页给出「去写小说 / 导入正文」两条入口，不报错
+      root.innerHTML = `
+        ${topbar({
+          left: `<button class="btn icon" data-act="back" title="回工作区">${icon('back')}</button>
+                 <div class="brand"><span class="brand-mark"></span><span style="font-size:12.5px">任务<small>本地版</small></span></div>`,
+          crumbs: `<a href="#/projects">${esc(state.info?.work?.title || '工程')}</a>
+                   <span class="sep">/</span><span class="cur">任务</span>`,
+          right: '',
+        })}
+        <div class="studio" id="studio">
+          ${railbar('tasks', { chapters: 0 })}
+          ${chapterCtx({ search: state.chapterSearch })}
+          <section class="editor"><div class="page" style="overflow:auto">${emptyProjectHTML(path)}</div></section>
+          <aside class="studio-right"></aside>
+        </div>`;
       return;
     }
   } catch (error) {
@@ -598,6 +753,7 @@ export async function renderTasks(root, { path }) {
       </section>
       <aside class="studio-right"></aside>
     </div>`;
+  bindProduceMode();
   await refreshConsistency();
   await refresh();
   // 顶部「重新切分本章」：完成后复核一致性并刷新进度

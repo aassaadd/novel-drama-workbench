@@ -363,13 +363,21 @@ def generate_from_plan(
         state = {"chars": 0}
 
         def on_delta(text, _item=item, _index=index, _name=name, _state=state):
-            """累计本角色的接收长度并上报 chars 事件。"""
+            """累计本角色的接收长度并上报 chars 事件（附带最新原文片段）。"""
             if not text:
                 return
             _state["chars"] += len(str(text))
+            _state["tail"] = (str(_state.get("tail") or "") + str(text))[-200:]
             _progress(
                 on_progress,
-                {"type": "chars", "chars": _state["chars"], "index": _index, "total": total, "name": _name},
+                {
+                    "type": "chars",
+                    "chars": _state["chars"],
+                    "sample": _state["tail"],
+                    "index": _index,
+                    "total": total,
+                    "name": _name,
+                },
             )
 
         prompt = _character_prompt(work, context, item, items, done_names, brief_text)
@@ -469,8 +477,12 @@ def fill_character_descriptions(
     config: AppConfig,
     names: list[str] | None = None,
     on_progress=None,
+    overwrite: bool = False,
 ) -> dict:
-    """给已有人物补全缺失的描述性字段（只补缺失，不覆盖已有内容）。
+    """给已有人物补全或重新生成描述性字段。
+
+    默认只补缺失、不覆盖已有内容；`overwrite=True` 时重新生成全部描述字段并覆盖，
+    用于页面上的「重新生成」入口。
 
     逐个角色调用 `emit_character`；单个失败只记录，不影响其它角色；
     每次成功立即写盘，重跑时会自动跳过已补全的角色（失败项可重试）。
@@ -482,9 +494,10 @@ def fill_character_descriptions(
         on_progress: 进度回调。事件依次为 `total{total,pending,skipped,narrator}`、
             `batch{index,total,name}`、`chars{chars,index,total,name}`、
             `item{status,reason?|message?}`；跳过项也会出现在 batch 与 item 里。
+        overwrite: True 时重新生成全部描述字段并覆盖已有内容。
 
     返回:
-        {"total", "updated", "skipped", "failures", "summary"}。
+        {"total", "updated", "skipped", "failures", "summary", "overwrite"}。
     """
     settings_store = SettingsStore(store.root)
     bible = settings_store.ensure()
@@ -510,9 +523,9 @@ def fill_character_descriptions(
             continue
         if keys and character.get("id") not in keys and character.get("name") not in keys:
             continue
-        if missing_description_fields(character):
+        if overwrite or missing_description_fields(character):
             wanted.append(character)
-            steps.append({"character": character, "name": name, "skip": ""})
+            steps.append({"character": character, "name": name, "skip": "", "overwrite": overwrite})
         else:
             skipped.append(name)
             steps.append({"character": character, "name": name, "skip": "已齐全"})
@@ -544,21 +557,27 @@ def fill_character_descriptions(
             })
             continue
         missing = missing_description_fields(character)
+        # 重新生成模式下要覆盖全部描述字段；只补缺失模式只处理空缺项
+        targets = list(DESCRIPTION_FIELDS) if overwrite else missing
         profile = {
             key: value
             for key, value in character.items()
             if key in ("name", "role", "gender", "age_range", "personality", "background",
                        "appearance_prompt", "negative_prompt")
         }
+        if overwrite:
+            ask = f"重新生成以下字段并覆盖已有内容：{'、'.join(targets)}。\n"
+        else:
+            ask = f"只补以下缺失字段：{'、'.join(targets)}；已有内容的字段一律不要输出或改写。\n"
         prompt = (
             f"{context}\n\n" if context else ""
         ) + (
             f"已有角色「{name}」的档案（不要改写）：{json.dumps(profile, ensure_ascii=False)}\n"
-            f"只补以下缺失字段：{'、'.join(missing)}；已有内容的字段一律不要输出或改写。\n"
+            f"{ask}"
         ) + _CHARACTER_DESC_RULES + f"\n只输出「{name}」这一个人物，姓名保持不变。"
         req = TextGenRequest(
             task="character",
-            system="你是中文小说的人物编辑，只按工具参数输出缺失字段，不要解释。",
+            system="你是中文小说的人物编辑，只按工具参数输出描述字段，不要解释。",
             messages=[Message("user", prompt)],
             stream=True,
             temperature=0.7,
@@ -569,20 +588,23 @@ def fill_character_descriptions(
                 "premise": bible.get("premise") or {},
                 "characters": [{"id": character.get("id"), "name": name, "role": character.get("role")}],
                 "existing_character": character,
-                "brief": "只补缺失的描述性字段，不覆盖已有内容",
+                "brief": "重新生成描述性字段并覆盖已有内容" if overwrite else "只补缺失的描述性字段，不覆盖已有内容",
+                "overwrite": bool(overwrite),
                 "seed": work.get("id"),
             },
         )
         state = {"chars": 0}
 
         def on_delta(text: str) -> None:
-            """累计接收长度并上报（直接调用回调，断开时可中断）。"""
+            """累计接收长度并上报（直接调用回调，断开时可中断；附带最新原文片段）。"""
             if not text:
                 return
             state["chars"] += len(str(text))
+            state["tail"] = (str(state.get("tail") or "") + str(text))[-200:]
             emit({
                 "type": "chars",
                 "chars": state["chars"],
+                "sample": state["tail"],
                 "index": index,
                 "total": progress_total,
                 "name": name,
@@ -596,7 +618,7 @@ def fill_character_descriptions(
                 rows = payload.get("characters")
                 raw = rows[0] if isinstance(rows, list) and rows and isinstance(rows[0], dict) else payload
             changed = 0
-            for field in missing:
+            for field in targets:
                 value = str((raw or {}).get(field) or "").strip()
                 if value:
                     character[field] = value[: _DESC_LIMITS[field]]
@@ -619,14 +641,15 @@ def fill_character_descriptions(
                     "fields": changed,
                 })
             else:
-                failures.append({"name": name, "message": "模型没有返回缺失字段"})
+                reason = "模型没有返回描述字段" if overwrite else "模型没有返回缺失字段"
+                failures.append({"name": name, "message": reason})
                 emit({
                     "type": "item",
                     "index": index,
                     "total": progress_total,
                     "name": name,
                     "status": "failed",
-                    "message": "模型没有返回缺失字段",
+                    "message": reason,
                 })
         except Exception as exc:  # 单人失败不影响其他人
             failures.append({"name": name, "message": str(exc) or exc.__class__.__name__})
@@ -639,7 +662,7 @@ def fill_character_descriptions(
                 "message": str(exc) or exc.__class__.__name__,
             })
     failed_text = "；".join(f"{item['name']}：{item['message']}" for item in failures)
-    summary = f"补全 {len(updated)}、失败 {len(failures)}"
+    summary = f"{'重新生成' if overwrite else '补全'} {len(updated)}、失败 {len(failures)}"
     if failures:
         summary += f"（{failed_text}）"
     if skipped:
@@ -650,4 +673,5 @@ def fill_character_descriptions(
         "skipped": skipped,
         "failures": failures,
         "summary": summary,
+        "overwrite": bool(overwrite),
     }

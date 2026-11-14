@@ -32,8 +32,8 @@ def register_character_desc_routes(app, config_path: str | None = None) -> None:
         """补全缺失的音色 / 外貌中英文描述（只补缺失）。
 
         参数:
-            body: `{path, names?: string[]}`；names 为空表示全部非旁白角色。
-
+            body: `{path, names?: string[], overwrite?: boolean}`；names 为空表示全部非旁白角色，
+            overwrite=true 时重新生成全部描述字段并覆盖已有内容。
         返回:
             `{total, updated, skipped, failures, summary}`；
             failures 每项 `{name, message}`，有失败时仍返回 200，页面据此提示重试。
@@ -50,11 +50,13 @@ def register_character_desc_routes(app, config_path: str | None = None) -> None:
         if not store.exists():
             raise HTTPException(status_code=404, detail={"code": 3, "message": f"工程不存在: {store.root}"})
         names = [str(item) for item in ((body or {}).get("names") or []) if str(item).strip()]
+        overwrite = bool((body or {}).get("overwrite"))
         try:
             result = fill_character_descriptions(
                 store,
                 load_config(config_path) if config_path else load_config(),
                 names=names or None,
+                overwrite=overwrite,
             )
         except Exception as exc:  # noqa: BLE001 - 统一转中文错误，避免前端拿到 500 堆栈
             raise HTTPException(status_code=500, detail={"code": 5, "message": f"补全描述失败：{exc}"}) from exc
@@ -64,6 +66,7 @@ def register_character_desc_routes(app, config_path: str | None = None) -> None:
             "skipped": result.get("skipped", []),
             "failures": result.get("failures", []),
             "summary": result.get("summary", ""),
+            "overwrite": result.get("overwrite", overwrite),
         }
 
     @app.post("/api/ui/characters/descriptions/fill/stream")
@@ -76,8 +79,8 @@ def register_character_desc_routes(app, config_path: str | None = None) -> None:
         停止后已完成的角色已逐个落盘，重跑只会处理仍缺失的角色。
 
         参数:
-            body: `{path, names?: string[]}`；names 为空表示全部非旁白角色。
-
+            body: `{path, names?: string[], overwrite?: boolean}`；names 为空表示全部非旁白角色，
+            overwrite=true 时重新生成全部描述字段并覆盖已有内容。
         返回:
             StreamingResponse（text/event-stream）。
 
@@ -92,6 +95,7 @@ def register_character_desc_routes(app, config_path: str | None = None) -> None:
         if not store.exists():
             raise HTTPException(status_code=404, detail={"code": 3, "message": f"工程不存在: {store.root}"})
         names = [str(item) for item in ((body or {}).get("names") or []) if str(item).strip()]
+        overwrite = bool((body or {}).get("overwrite"))
         config = load_config(config_path) if config_path else load_config()
 
         def task(on_progress):
@@ -101,6 +105,7 @@ def register_character_desc_routes(app, config_path: str | None = None) -> None:
                 config,
                 names=names or None,
                 on_progress=on_progress,
+                overwrite=overwrite,
             )
 
         return _progress_response(task)

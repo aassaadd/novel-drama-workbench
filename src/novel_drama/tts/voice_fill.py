@@ -244,7 +244,7 @@ def _refresh_stats(job: dict) -> None:
     )
 
 
-def _plan_pools(store, characters: list[dict], groups: dict[str, dict], cast: dict) -> list[dict]:
+def _plan_pools(store, characters: list[dict], groups: dict[str, dict], cast: dict, overwrite: bool = False) -> list[dict]:
     """规划龙套池：已有池保持不动，缺的优先复用，仍缺则生成。
 
     参数:
@@ -252,6 +252,7 @@ def _plan_pools(store, characters: list[dict], groups: dict[str, dict], cast: di
         characters: 全部人物档案。
         groups: `_pool_slot` 分组结果。
         cast: 当前音色编排配置。
+        overwrite: True 时已有音色池也重新生成（覆盖原池音色）。
 
     返回:
         池条目列表（action 为 ready/reuse/generate）。
@@ -271,8 +272,14 @@ def _plan_pools(store, characters: list[dict], groups: dict[str, dict], cast: di
         if voice_id:
             candidate = find_voice(table, voice_id)
             existing_voice = candidate if candidate and voice_casting._usable(candidate) else None
-        if existing_voice:
+        if existing_voice and not overwrite:
             pool_items.append(_make_pool_item(group, "ready", existing_voice, "已有音色池，保持不动", label))
+            continue
+        if overwrite:
+            # 重新生成模式：忽略已有池音色与可复用音色，直接为该池生成新音色
+            pool_items.append(
+                _make_pool_item(group, "generate", None, "重新生成音色池（覆盖已有）", label)
+            )
             continue
         first_bound = next((bound[row.get("id")] for row in group["characters"] if bound.get(row.get("id"))), None)
         # 只复用年龄感也匹配的库内音色；年龄不符时宁可为该池生成新音色
@@ -290,11 +297,12 @@ def _plan_pools(store, characters: list[dict], groups: dict[str, dict], cast: di
     return pool_items
 
 
-def scan(store) -> dict:
+def scan(store, overwrite: bool = False) -> dict:
     """扫描全部角色与龙套分组，产出补齐计划（只读，不落盘、不生成）。
 
     参数:
         store: 工程。
+        overwrite: True 时已有音色的角色 / 龙套池也纳入重新生成计划（覆盖原绑定）。
 
     返回:
         `{items, pool_items, stats, minor_pool}`；plan 为 ready/reuse/generate/manual。
@@ -314,12 +322,12 @@ def scan(store) -> dict:
         groups.setdefault(slot, {"slot": slot, "suffix": suffix, "gender": character.get("gender"), "characters": []})[
             "characters"
         ].append(character)
-    pool_items = _plan_pools(store, characters, groups, cast)
+    pool_items = _plan_pools(store, characters, groups, cast, overwrite=overwrite)
     pools_by_slot = {item["slot"]: item for item in pool_items}
     items: list[dict] = []
     for character in characters:
         bound = voice_casting.bound_voice(store, character, table)
-        if bound:
+        if bound and not (overwrite and str(character.get("role") or "") != "narrator"):
             items.append(
                 _make_item(character, "ready", "ready", "已有可用音色，跳过", bound.get("id"), bound.get("name"))
             )
@@ -376,6 +384,10 @@ def scan(store) -> dict:
             if not brief_text(character):
                 items.append(_make_item(character, "manual", "manual", "缺少角色描述，需要人工补充"))
                 continue
+        if overwrite:
+            # 重新生成模式：主角 / 配角不再复用已有音色，直接重新生成并覆盖绑定
+            items.append(_make_item(character, "generate", "pending", "重新生成音色（覆盖已有）"))
+            continue
         suggestion = suggestions.get(character.get("id"))
         if suggestion:
             items.append(
@@ -518,13 +530,14 @@ def _start_thread(store, cfg: AppConfig, job: dict, char_targets: set[str] | Non
     thread.start()
 
 
-def start_job(store, cfg: AppConfig, count: int | None = None) -> dict:
+def start_job(store, cfg: AppConfig, count: int | None = None, overwrite: bool = False) -> dict:
     """创建并启动一键补齐任务。
 
     参数:
         store: 工程。
         cfg: 本机配置（AppConfig）。
         count: 每个角色/每个池生成的候选数；为空时取 `voice.design.candidates`。
+        overwrite: True 时已有音色的角色 / 龙套池也重新生成并覆盖原绑定。
 
     返回:
         任务元数据。
@@ -538,7 +551,7 @@ def start_job(store, cfg: AppConfig, count: int | None = None) -> dict:
     with _RUNNING_LOCK:
         if existing_id and existing_id in _RUNNING:
             raise ValueError("补齐任务仍在进行中，请先停止或等待完成")
-    scanned = scan(store)
+    scanned = scan(store, overwrite=overwrite)
     if not any(item.get("plan") in ("reuse", "generate") for item in scanned["items"]) and not any(
         item.get("action") in ("reuse", "generate") for item in scanned["pool_items"]
     ):
@@ -550,6 +563,7 @@ def start_job(store, cfg: AppConfig, count: int | None = None) -> dict:
         "status": "running",
         "stage": "scan",
         "count": count,
+        "overwrite": bool(overwrite),
         "current": None,
         "progress": None,
         "items": scanned["items"],
@@ -927,8 +941,8 @@ def _run_pool(
         item["error"] = None
         _sync_pool_characters(store, job, item, voice)
         return
-    # 生成前再确认一次池槽位：可能已被手动补齐，保持不动
-    existing = _existing_pool_voice(store, item["slot"])
+    # 生成前再确认一次池槽位：可能已被手动补齐，保持不动；重新生成模式除外
+    existing = None if job.get("overwrite") else _existing_pool_voice(store, item["slot"])
     if existing:
         item["action"] = "reuse"
         item["voice_id"] = existing.get("id")
@@ -1185,7 +1199,8 @@ def _run_generate(
         item["status"] = "failed"
         item["error"] = "角色已删除"
         return
-    bound = voice_casting.bound_voice(store, character)
+    # 重新生成模式忽略已绑定音色，强制走模型生成并覆盖绑定
+    bound = None if job.get("overwrite") else voice_casting.bound_voice(store, character)
     if bound:
         item["status"] = "ready"
         item["voice_id"] = bound.get("id")

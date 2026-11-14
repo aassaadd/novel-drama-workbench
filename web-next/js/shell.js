@@ -42,7 +42,7 @@ export function stateClass(name) {
 export function railbar(active, counts = {}) {
   const path = encodeURIComponent(state.path);
   const chapterId = state.chapterId;
-  const toChapter = path && chapterId ? `#/p/${path}/c/${chapterId}` : '#/projects';
+  const hasChapter = Boolean(state.path && chapterId);
   const toNovel = path ? `#/p/${path}/novel` : '#/projects';
   const toCharacters = path ? `#/p/${path}/characters` : '#/projects';
   const toVoices = path ? `#/p/${path}/voices` : '#/projects';
@@ -53,7 +53,19 @@ export function railbar(active, counts = {}) {
   const items = [
     { key: 'projects', label: '项目', href: '#/projects', icon: 'folder', n: '' },
     { key: 'novel', label: '小说', href: toNovel, icon: 'book', n: '' },
-    { key: 'chapter', label: '目录', href: toChapter, icon: 'chapter', n: counts.chapters ? String(counts.chapters) : '' },
+    // 无章节时「目录」不再是链接：不回工程列表、也不进空选择页，
+    // 改成按钮，由 need-chapter 引导当前页给出「写小说 / 导入正文」两条入口
+    hasChapter
+      ? {
+          key: 'chapter',
+          label: '目录',
+          href: `#/p/${path}/c/${chapterId}`,
+          icon: 'chapter',
+          n: counts.chapters ? String(counts.chapters) : '',
+        }
+      : state.path
+        ? { key: 'chapter', label: '目录', act: 'need-chapter', icon: 'chapter', n: '' }
+        : { key: 'chapter', label: '目录', href: '#/projects', icon: 'chapter', n: '' },
     { key: 'characters', label: '角色', href: toCharacters, icon: 'user', n: '' },
     { key: 'voices', label: '音色', href: toVoices, icon: 'audio', n: '' },
     { key: 'media', label: '素材', href: toMedia, icon: 'image', n: '' },
@@ -62,8 +74,14 @@ export function railbar(active, counts = {}) {
   return `
     <nav class="railbar" aria-label="制作阶段">
       ${items
-        .map(
-          (item) => `
+        .map((item) =>
+          item.act
+            ? `
+        <button class="rail-item ${active === item.key ? 'active' : ''}" data-act="${item.act}"
+          title="${item.label}：进入画本编辑；没有章节时给出写小说 / 导入入口">
+          <span class="rail-ic">${icon(item.icon, 18)}</span>${item.label}
+        </button>`
+            : `
         <a class="rail-item ${active === item.key ? 'active' : ''}" href="${item.href}" title="${item.label}">
           <span class="rail-ic">${icon(item.icon, 18)}</span>${item.label}
           ${item.n ? `<span class="rail-n">${esc(item.n)}</span>` : ''}
@@ -1300,19 +1318,21 @@ export function goProjects() {
   location.hash = '#/projects';
 }
 
-/** 跳到某工程的某章 */
+/** 跳到某工程的某章；工程还没有章节时留在当前页给引导，不回列表 */
 export function goChapter(path, chapterId) {
   if (!path || !chapterId) {
-    location.hash = '#/projects';
+    if (path) showNeedChapter(path);
+    else goProjects();
     return;
   }
   location.hash = `#/p/${encodeURIComponent(path)}/c/${encodeURIComponent(chapterId)}`;
 }
 
-/** 跳到导出页 */
+/** 跳到导出页；没有章节时同样给引导，不落到空选择页 */
 export function goExport(path, chapterId) {
   if (!path || !chapterId) {
-    location.hash = '#/projects';
+    if (path) showNeedChapter(path);
+    else goProjects();
     return;
   }
   location.hash = `#/p/${encodeURIComponent(path)}/export/${encodeURIComponent(chapterId)}`;
@@ -1380,6 +1400,174 @@ export async function openSwitchProject() {
       goProjects();
     }
   });
+}
+
+// ---------------- 空工程引导 / 导入正文 ----------------
+
+/**
+ * 导入已有正文：选 txt / md 文件或直接粘贴，按标题切章写入。
+ * 供工程列表和各视图的空工程引导共用，成功后默认进入第一章。
+ * @param {{path: string, title?: string, onDone?: (result: object) => Promise<void>|void}} options
+ */
+export function openImportDialog({ path, title = '', onDone } = {}) {
+  if (!path) return;
+  const mask = openDialog({
+    title: title ? `导入正文 · ${title}` : '导入正文',
+    body: `
+      <div class="field"><label>选择 txt / md 文件</label>
+        <input type="file" id="imp-file" accept=".txt,.md,text/plain,text/markdown" /></div>
+      <div class="field"><label>标题匹配规则</label>
+        <input class="input" id="imp-pattern" value="^#{1,3}\\s+(.+)$" /></div>
+      <div class="field"><label>重复章节</label>
+        <select class="select" id="imp-dup">
+          <option value="skip">跳过（默认）</option>
+          <option value="replace">覆盖正文</option>
+          <option value="new">再建一份</option>
+        </select></div>
+      <div class="field"><label>正文（选文件后自动填入，可直接编辑）</label>
+        <textarea class="textarea" id="imp-text" rows="8" placeholder="粘贴正文，或用上面的文件选择"></textarea></div>
+      <div class="hint">导入会按标题切章写入章节文件；纯文本无标题时整篇作为一章。</div>`,
+    foot: `<div class="right"><button class="btn" data-dlg-close>取消</button>
+      <button class="btn primary" id="imp-ok">开始导入</button></div>`,
+  });
+  mask.querySelector('#imp-file').addEventListener('change', async (event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    try {
+      mask.querySelector('#imp-text').value = await file.text();
+    } catch (error) {
+      toast(`读取失败：${error.message}`, 'bad');
+    }
+  });
+  mask.querySelector('#imp-ok').addEventListener('click', async (event) => {
+    const text = mask.querySelector('#imp-text').value;
+    if (!text.trim()) return toast('正文为空', 'warn');
+    const button = event.currentTarget;
+    button.disabled = true;
+    button.textContent = '导入中…';
+    try {
+      const result = await postJSON('/api/ui/chapter/import', {
+        path,
+        text,
+        pattern: mask.querySelector('#imp-pattern').value.trim(),
+        on_duplicate: mask.querySelector('#imp-dup').value,
+      });
+      closeDialog();
+      const created = result?.created ?? result?.imported ?? result?.chapters?.length ?? 0;
+      toast(created ? `已导入 ${created} 章` : '导入完成', 'ok');
+      rememberProject(path);
+      await onDone?.(result);
+      const chapters = await getJSON('/api/project/chapters', { path }).catch(() => []);
+      if (chapters?.length) goChapter(path, chapters[0].id);
+    } catch (error) {
+      toast(`导入失败：${error.message}`, 'bad');
+      button.disabled = false;
+      button.textContent = '开始导入';
+    }
+  });
+}
+
+/**
+ * 无章节时的统一引导：不跳空的章节选择页，在当前页给出「写小说 / 导入正文」。
+ * 页面上已经有空工程引导时只滚动定位并提示，不重复插入。
+ * @param {string} [path] 工程目录，默认当前工程
+ */
+export async function showNeedChapter(path = state.path) {
+  if (!path) {
+    goProjects();
+    return;
+  }
+  // 图标栏可能先于页面数据渲染：先确认这个工程到底有没有章节
+  if (!state.chapters.length) {
+    try {
+      const chapters = await getJSON('/api/ui/chapters', { path });
+      if (Array.isArray(chapters) && chapters.length) {
+        state.chapters = chapters;
+        state.chapterId = state.chapterId || chapters[0].id;
+        goChapter(path, state.chapterId);
+        return;
+      }
+    } catch {
+      // 读取失败按「没有章节」处理，下面给写小说 / 导入两条入口
+    }
+  }
+  if (state.path !== path) return;
+  const existing = document.querySelector('.project-empty, .project-empty-banner');
+  if (existing) {
+    existing.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    toast('这个工程还没有章节：先在小说视图写正文，或导入已有正文', 'warn', 4200);
+    return;
+  }
+  document.querySelector('.need-chapter-bar')?.remove();
+  const bar = document.createElement('div');
+  bar.className = 'need-chapter-bar';
+  bar.innerHTML = emptyProjectHTML(path, { compact: true });
+  const host = document.getElementById('app') || document.body;
+  const topbar = host.querySelector('.topbar');
+  if (topbar) topbar.after(bar);
+  else host.prepend(bar);
+  bar.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  toast('这个工程还没有章节：先在小说视图写正文，或导入已有正文', 'warn', 4200);
+}
+
+// 图标栏「目录」在无章节时改为按钮：留在当前页，给写小说 / 导入正文两条入口。
+// 图标栏可能先于页面数据渲染，点击时再按已加载的章节纠正一次。
+document.addEventListener('click', (event) => {
+  if (!event.target.closest('[data-act="need-chapter"]')) return;
+  event.preventDefault();
+  const current = state.chapterId && state.chapters.some((item) => item.id === state.chapterId);
+  if (current) {
+    goChapter(state.path, state.chapterId);
+    return;
+  }
+  if (state.chapters.length) {
+    goChapter(state.path, state.chapters[0].id);
+    return;
+  }
+  showNeedChapter();
+});
+
+// 任意视图的空工程引导都能直接导入正文，不必先回工程列表
+document.addEventListener('click', (event) => {
+  if (!event.target.closest('[data-act="empty-import"]')) return;
+  event.preventDefault();
+  if (state.path) openImportDialog({ path: state.path });
+});
+
+/**
+ * 空工程引导：说明下一步，并给出「从写小说开始 / 导入已有正文」两条入口。
+ * compact=true 时输出横幅，用于仍可正常使用的视图（如音色、小说工作台）。
+ * @param {string} path 工程目录
+ * @param {{compact?: boolean, title?: string}} [options]
+ * @returns {string} HTML
+ */
+export function emptyProjectHTML(path, { compact = false, title = '' } = {}) {
+  const href = `#/p/${encodeURIComponent(path)}/novel`;
+  if (compact) {
+    return `
+      <div class="banner project-empty-banner">
+        ${icon('book', 13)}
+        <div class="pe-main">
+          <b>这个工程还没有章节</b>
+          <span>先在小说视图写设定与大纲并落地成章节，或导入已有正文；本页的配置会保留。</span>
+        </div>
+        <div class="right">
+          <a class="btn sm" href="${href}">${icon('book', 12)} 从写小说开始</a>
+          <button class="btn sm" data-act="empty-import">${icon('arrow', 12)} 导入已有正文</button>
+        </div>
+      </div>`;
+  }
+  return `
+    <div class="empty project-empty">
+      ${icon('book', 22)}
+      <b>${esc(title || '这个工程还没有章节')}</b>
+      <span>可以从零开始写小说：先写设定与世界观，再生成大纲，落地成章节；也可以直接导入已有正文。</span>
+      <div class="pe-acts">
+        <a class="btn primary" href="${href}">${icon('book', 13)} 从写小说开始</a>
+        <button class="btn" data-act="empty-import">${icon('arrow', 13)} 导入已有正文</button>
+      </div>
+      <div class="hint">写小说路径：写作设定 / 世界观 → 分层大纲 → 生成正文 → 落地成章节</div>
+    </div>`;
 }
 
 /** 字符数统计（供目录与标题使用） */

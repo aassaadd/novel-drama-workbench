@@ -4,8 +4,10 @@
  */
 import { esc, icon, toast, openDialog, fmtDuration } from '../dom.js';
 import { getJSON, postJSON } from '../api.js';
+import { openProgress } from '../progress.js';
+import { modeSwitchHTML, bindModeSwitch } from '../gen-mode.js';
 import { state, resetProject } from '../store.js';
-import { railbar, topbar, goChapter, goProjects, checkConsistency, resplitBannerHTML, onResplit } from '../shell.js';
+import { railbar, topbar, goChapter, goProjects, emptyProjectHTML, checkConsistency, resplitBannerHTML, onResplit } from '../shell.js';
 
 const GENDER_LABEL = { male: '男声', female: '女声', unknown: '中性', other: '其他' };
 
@@ -250,7 +252,10 @@ function repaint({ ctxOnly = false } = {}) {
   if (old) old.outerHTML = ctxHTML();
   if (!ctxOnly) {
     const main = document.getElementById('voice-main');
-    if (main) main.innerHTML = mainHTML();
+    // 音色池本身不依赖章节；无章节时在顶部补一条起步引导，配置照常可用
+    if (main) {
+      main.innerHTML = `${state.chapters.length ? '' : emptyProjectHTML(state.path, { compact: true })}${mainHTML()}`;
+    }
   }
 }
 
@@ -322,6 +327,8 @@ function openCompare() {
 
 /** 音色设计弹窗的轮询定时器（关闭弹窗后自动停止） */
 let designTimer = null;
+/** 音色抽卡进度浮层：独立于弹窗，弹窗被关掉也能继续显示到结束 */
+let designPanel = null;
 
 /** 候选批次状态文案 */
 const DESIGN_STATUS = {
@@ -343,22 +350,30 @@ function openVoiceDesign() {
     window.clearTimeout(designTimer);
     designTimer = null;
   }
+  if (designPanel) {
+    designPanel.close();
+    designPanel = null;
+  }
   let profile = null;
   let batchId = '';
+  /** 复用已有批次时给进度浮层的结束文案（空串表示本次是新抽卡） */
+  let reuseMessage = '';
   const mask = openDialog({
     title: `音色设计 · ${character.name}`,
     wide: true,
     body: `
+      ${modeSwitchHTML('voice.desc', { fallback: 'regen' })}
+      ${modeSwitchHTML('voice.draw', { fallback: 'regen' })}
       <div class="dlg-note">按角色档案生成中文音色描述，再由本机 VoxCPM2 抽卡候选；采用后可直接绑定给该角色。</div>
       <div class="field" style="margin-top:8px"><label>音色描述（可手动改写）</label>
         <textarea class="textarea" id="vd-prompt" rows="3"
           placeholder="例如：中年男性，低沉沙哑，语速偏慢，带一点疲惫感"></textarea></div>
       <div style="display:flex;gap:10px;align-items:center;margin-top:8px;flex-wrap:wrap">
-        <button class="btn" id="vd-preview">按档案生成描述</button>
+        <button class="btn" id="vd-preview">重新生成描述</button>
         <label style="font-size:11.5px;color:var(--text-3)">候选数
           <input class="input" id="vd-count" type="number" min="1" max="6" value="4"
             style="width:64px;height:26px;display:inline-block" /></label>
-        <button class="btn primary" id="vd-start">开始抽卡</button>
+        <button class="btn primary" id="vd-start">重新抽卡</button>
         <span class="hint" id="vd-hint"></span>
       </div>
       <div id="vd-profile" style="margin-top:10px"></div>
@@ -368,6 +383,19 @@ function openVoiceDesign() {
       <button class="btn" data-vd="close">关闭</button>
       <button class="btn" data-vd="history" title="列出该角色历史抽卡批次，可恢复查看或清理">历史批次</button>
     </div>`,
+  });
+
+  /** 读取描述生成方式：fill=已有描述时保留，regen=按档案重写 */
+  const descModeOf = bindModeSwitch(mask, 'voice.desc', {
+    fallback: 'regen',
+    action: mask.querySelector('#vd-preview'),
+    labels: { fill: '补缺失', regen: '重新生成描述' },
+  });
+  /** 读取抽卡方式：fill=复用已有就绪批次，regen=重新抽卡 */
+  const drawModeOf = bindModeSwitch(mask, 'voice.draw', {
+    fallback: 'regen',
+    action: mask.querySelector('#vd-start'),
+    labels: { fill: '只补缺失候选', regen: '重新抽卡' },
   });
 
   const promptNode = mask.querySelector('#vd-prompt');
@@ -394,7 +422,7 @@ function openVoiceDesign() {
     return `/api/ui/voices/design/audio?${query.toString()}`;
   };
 
-  /** 渲染批次进度与候选清单 */
+  /** 渲染批次进度与候选清单；进度浮层独立于弹窗，弹窗关闭也不影响 */
   const paintBatch = (meta) => {
     if (!meta) return;
     batchId = meta.batch_id || batchId;
@@ -403,6 +431,41 @@ function openVoiceDesign() {
     const total = Number(meta.total || 0);
     const done = Number(meta.done || candidates.length);
     const running = ['running', 'queued'].includes(meta.status);
+    if (designPanel) {
+      if (running) {
+        designPanel.update({
+          stage: `${DESIGN_STATUS[meta.status] || '生成中'} ${done}/${total}`,
+          percent: total ? Math.round((done / total) * 100) : null,
+          current: meta.current_index ? `正在生成第 ${meta.current_index} 个候选` : '候选中…',
+        });
+      } else if (meta.status === 'failed') {
+        designPanel.fail({
+          message: `音色抽卡失败${failures.length ? `：${failures[0]?.message || '未知原因'}` : ''}`,
+          detail: failures.length ? `共有 ${failures.length} 个候选失败，可在弹窗里单独重试。` : '',
+          retry: () => {
+            designPanel = openProgress({
+              title: `正在重试「${character.name}」的音色候选…`,
+              stage: '已提交重试请求…',
+            });
+            designPanel.update({ percent: null });
+            void retryDesign();
+          },
+        });
+        designPanel = null;
+      } else {
+        designPanel.finish({
+          message: reuseMessage || `音色候选已生成：${candidates.length} 个`,
+          detail: failures.length ? `${failures.length} 个候选失败，可在弹窗里单独重试。` : '可在弹窗里试听后采用并绑定。',
+        });
+        designPanel = null;
+        reuseMessage = '';
+      }
+    }
+    // 弹窗被关掉后仍继续轮询到批次结束，保证浮层能读到最终结果
+    if (!document.body.contains(mask)) {
+      schedulePoll(running);
+      return;
+    }
     if (hintNode) {
       hintNode.textContent = `${DESIGN_STATUS[meta.status] || meta.status || ''} ${done}/${total}${
         meta.current_index ? ` · 正在生成第 ${meta.current_index} 个` : ''
@@ -447,14 +510,29 @@ function openVoiceDesign() {
                title="停止后续候选，已完成的候选保留">停止抽卡</button></div>`
           : ''
       }`;
-    if (running) {
-      stopPoll();
-      designTimer = window.setTimeout(() => {
-        if (!document.body.contains(mask)) return stopPoll();
-        void poll(batchId);
-      }, 1500);
-    } else {
-      stopPoll();
+    schedulePoll(running);
+  };
+
+  /** 安排下一次轮询；弹窗和浮层都关闭时停止，避免后台空转 */
+  const schedulePoll = (running) => {
+    stopPoll();
+    if (!running) return;
+    if (!document.body.contains(mask) && !designPanel) return;
+    designTimer = window.setTimeout(() => void poll(batchId), 1500);
+  };
+
+  /** 只重试失败候选（沿用弹窗内已有的 retry 接口） */
+  const retryDesign = async () => {
+    if (!batchId) return;
+    try {
+      const meta = await postJSON(
+        `/api/ui/voices/design/batches/${encodeURIComponent(batchId)}/retry`,
+        { path: state.path }
+      );
+      paintBatch(meta);
+      toast('已重试失败候选', 'ok');
+    } catch (error) {
+      designPanel?.fail({ message: `重试失败：${error.message}` });
     }
   };
 
@@ -464,24 +542,42 @@ function openVoiceDesign() {
       const meta = await getJSON(`/api/ui/voices/design/batches/${encodeURIComponent(id)}`, {
         path: state.path,
       });
-      if (!document.body.contains(mask)) return;
       paintBatch(meta);
     } catch (error) {
       stopPoll();
-      resultHost.innerHTML = `<div class="dlg-note bad">${esc(error.message)}</div>`;
+      if (document.body.contains(mask)) resultHost.innerHTML = `<div class="dlg-note bad">${esc(error.message)}</div>`;
+      designPanel?.fail({ message: `读取抽卡进度失败：${error.message}` });
+      designPanel = null;
     }
   };
 
-  /** 预览音色描述 */
+  /** 预览音色描述：fill 保留已有描述，regen 忽略文本框旧内容按档案重写 */
   mask.querySelector('#vd-preview').addEventListener('click', async (event) => {
     const button = event.currentTarget;
+    const mode = descModeOf();
+    if (mode === 'fill' && promptNode.value.trim()) {
+      return toast('已有音色描述，已保留；要覆盖请选重新生成', 'info', 3200);
+    }
+    const idleLabel = mode === 'fill' ? '补缺失' : '重新生成描述';
     button.disabled = true;
     button.textContent = '生成中…';
+    const panel = openProgress({
+      title:
+        mode === 'fill'
+          ? `正在补全「${character.name}」的音色描述…`
+          : `正在重新生成「${character.name}」的音色描述…`,
+      hint:
+        mode === 'fill'
+          ? '只补缺失：文本框为空时才调用模型生成描述'
+          : '忽略文本框旧内容，按角色档案重新生成描述',
+      stage: '正在调用写作模型…',
+    });
+    panel.update({ percent: null });
     try {
+      // regen 不传 prompt，让后端忽略旧文本、按档案重新生成
       const result = await postJSON('/api/ui/voices/design/preview', {
         path: state.path,
         character_id: character.id,
-        prompt: promptNode.value.trim() || undefined,
       });
       profile = result.profile || null;
       promptNode.value = result.prompt || promptNode.value;
@@ -499,24 +595,76 @@ function openVoiceDesign() {
             ? `<div class="hint" style="margin-top:6px">试听台词：${esc(result.script)}</div>`
             : ''
         }`;
+      // 非流式结果：把模型返回的描述压成一行显示在进度浮层
+      panel.note(String(result.prompt || '').slice(0, 80));
+      panel.finish({
+        message: mode === 'fill' ? '音色描述已补全' : '音色描述已重新生成',
+        detail: '已写回文本框，可直接抽卡或手动改写。',
+      });
       toast('音色描述已生成', 'ok');
     } catch (error) {
       toast(error.message, 'bad', 4600);
       profileHost.innerHTML = `<div class="dlg-note bad">${esc(error.message)}</div>`;
+      panel.fail({ message: `生成音色描述失败：${error.message}` });
     } finally {
       button.disabled = false;
-      button.textContent = '按档案生成描述';
+      button.textContent = idleLabel;
     }
   });
 
-  /** 开始抽卡 */
+  /** 开始抽卡：fill 复用已有就绪批次，regen 按新描述重新抽卡 */
   mask.querySelector('#vd-start').addEventListener('click', async (event) => {
+    const mode = drawModeOf();
     const prompt = promptNode.value.trim();
-    if (!prompt) return toast('先填音色描述，或点「按档案生成描述」', 'warn');
     const button = event.currentTarget;
     button.disabled = true;
-    resultHost.innerHTML = `<div class="dlg-note">正在启动抽卡…</div>`;
     try {
+      if (mode === 'fill') {
+        const wanted = Number(mask.querySelector('#vd-count').value || 4);
+        const availableCount = (batch) =>
+          (batch.candidates || []).filter((item) => item.available !== false).length;
+        let reuse = null;
+        try {
+          // 先查历史批次：已有就绪且候选数量足够的批次直接复用，不重新抽卡
+          const data = await getJSON('/api/ui/voices/design/history', {
+            path: state.path,
+            character_id: character.id,
+          });
+          reuse = (data.batches || []).find(
+            (batch) => batch.status === 'ready' && availableCount(batch) >= wanted
+          );
+        } catch {
+          // 历史读取失败时按「没有可复用批次」处理，继续走新建流程
+        }
+        if (reuse) {
+          batchId = reuse.batch_id || '';
+          const existing = availableCount(reuse);
+          reuseMessage = `已有 ${existing} 个候选，未重新抽卡`;
+          resultHost.innerHTML = `<div class="dlg-note">已找到 ${existing} 个候选的批次，正在载入…</div>`;
+          designPanel = openProgress({
+            title: `正在载入「${character.name}」已有的音色候选…`,
+            hint: `只补缺失候选：已有 ${existing} 个，未重新抽卡`,
+            stage: '正在读取批次结果…',
+          });
+          designPanel.update({ percent: null });
+          await poll(batchId);
+          toast(`已复用批次 ${String(batchId).slice(-6)}，未重新抽卡`, 'info', 2600);
+          return;
+        }
+      }
+      if (!prompt) return toast('先填音色描述，或点「按档案生成描述」', 'warn');
+      resultHost.innerHTML = `<div class="dlg-note">正在启动抽卡…</div>`;
+      designPanel = openProgress({
+        title:
+          mode === 'fill'
+            ? `正在补抽「${character.name}」的音色候选…`
+            : `正在重新抽卡「${character.name}」的音色候选…`,
+        hint: `候选数 ${Number(mask.querySelector('#vd-count').value || 4)} · ${
+          mode === 'fill' ? '已有候选不足，补抽缺失' : '逐个重新抽卡'
+        }`,
+        stage: '已提交抽卡请求，等待第一个候选…',
+      });
+      designPanel.update({ percent: 0 });
       const meta = await postJSON('/api/ui/voices/design/batches', {
         path: state.path,
         character_id: character.id,
@@ -530,6 +678,8 @@ function openVoiceDesign() {
     } catch (error) {
       toast(error.message, 'bad', 4600);
       resultHost.innerHTML = `<div class="dlg-note bad">${esc(error.message)}</div>`;
+      designPanel?.fail({ message: `启动抽卡失败：${error.message}` });
+      designPanel = null;
     } finally {
       button.disabled = false;
     }
@@ -798,7 +948,9 @@ export async function renderVoices(root, { path }) {
       ${railbar('voices', { chapters: state.chapters.length })}
       ${ctxHTML()}
       <section class="editor">
-        <div id="voice-main" style="display:flex;flex-direction:column;min-height:0;flex:1">${mainHTML()}</div>
+        <div id="voice-main" style="display:flex;flex-direction:column;min-height:0;flex:1">${
+          state.chapters.length ? '' : emptyProjectHTML(state.path, { compact: true })
+        }${mainHTML()}</div>
       </section>
       <aside class="studio-right"></aside>
     </div>`;

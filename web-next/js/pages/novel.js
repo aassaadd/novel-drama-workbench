@@ -8,6 +8,9 @@
  */
 import { esc, icon, toast, openDialog, closeDialog } from '../dom.js';
 import { getJSON, postJSON, streamJSON } from '../api.js';
+import { ENUMS, selectHTML } from '../enums.js';
+import { openProgress, watchProgress } from '../progress.js';
+import { modeSwitchHTML, bindModeSwitch } from '../gen-mode.js';
 import { state } from '../store.js';
 import { railbar, topbar, goChapter, goProjects } from '../shell.js';
 
@@ -47,6 +50,19 @@ let previewPicked = new Set();
 /** 根节点点击监听只绑一次（main.js 复用同一个根节点） */
 let bound = false;
 
+/**
+ * 启动数据块状态：每块独立加载、独立渲染，慢接口不阻塞其它区域。
+ * state 取值 idle / loading / ok / error；errors 存中文失败原因。
+ */
+const boot = {
+  /** 当前启动批次；切换工程或重进视图后旧响应直接丢弃 */
+  seq: 0,
+  /** 这些状态对应的工程目录；同一工程再次进入时先用缓存渲染 */
+  path: '',
+  state: { info: 'idle', chapters: 'idle', setting: 'idle', worlds: 'idle', outline: 'idle' },
+  errors: {},
+};
+
 // ---------------- 数据 ----------------
 
 /**
@@ -55,10 +71,12 @@ let bound = false;
  * @param {boolean} [keepCheck] 是否保留上一次黄金三章检查结果
  */
 async function loadAll(path, keepCheck = false) {
+  // 空工程允许设定库 / 世界条目 / 大纲尚未初始化：单项失败按空数据处理，
+  // 不让整个小说视图中断（章节列表仍以真实返回为准）
   const [setting, worlds, outline, chapters] = await Promise.all([
-    getJSON('/api/ui/setting', { path }),
-    getJSON('/api/ui/worlds', { path }),
-    getJSON('/api/ui/outline', { path }),
+    getJSON('/api/ui/setting', { path }).catch(() => ({})),
+    getJSON('/api/ui/worlds', { path }).catch(() => ({ worlds: [] })),
+    getJSON('/api/ui/outline', { path }).catch(() => ({ acts: [] })),
     getJSON('/api/ui/chapters', { path }),
   ]);
   cache.path = path;
@@ -66,6 +84,12 @@ async function loadAll(path, keepCheck = false) {
   cache.worlds = worlds?.worlds || [];
   cache.outline = outline || { acts: [] };
   cache.chapters = Array.isArray(chapters) ? chapters : [];
+  // 手动刷新成功后清掉启动阶段的失败态，避免旧错误块一直留在界面上
+  boot.state.setting = 'ok';
+  boot.state.worlds = 'ok';
+  boot.state.outline = 'ok';
+  boot.state.chapters = 'ok';
+  boot.errors = {};
   if (!keepCheck) cache.check = null;
 }
 
@@ -193,6 +217,29 @@ function selectionTitle() {
 
 // ---------------- 左侧目录 ----------------
 
+/**
+ * 目录区的加载 / 失败占位（世界条目、分层大纲共用）。
+ * @param {'worlds'|'outline'} key 数据块
+ * @param {string} emptyText 已加载但为空时的提示
+ * @returns {string} HTML
+ */
+function ctxBlockHTML(key, emptyText) {
+  const status = boot.state[key];
+  if (status === 'error') {
+    return `<div class="ctx-boot bad">
+      <span>${esc(boot.errors[key] || '读取失败')}</span>
+      <button class="link" data-act="boot-retry" data-key="${key}">重试</button>
+    </div>`;
+  }
+  if (status !== 'ok') {
+    return `<div class="ctx-boot" aria-busy="true">
+      <span class="skel skel-line" style="width:76%"></span>
+      <span class="skel skel-line" style="width:52%"></span>
+    </div>`;
+  }
+  return emptyText;
+}
+
 /** 左侧面板：写作设定入口 + 世界列表 + 分层大纲树 */
 function ctxHTML() {
   const counts = outlineCounts();
@@ -261,7 +308,7 @@ function ctxHTML() {
             ${icon('spark', 12)}
           </button>
         </div>
-        ${worlds || '<div class="hint" style="padding:6px 12px">还没有世界条目，点上方 ✨ 让 AI 生成</div>'}
+        ${boot.state.worlds === 'ok' ? worlds || '<div class="hint" style="padding:6px 12px">还没有世界条目，点上方 ✨ 让 AI 生成</div>' : ctxBlockHTML('worlds')}
         <button class="chap-row novel-row novel-world-new" data-act="novel-world-new">
           <span class="mono novel-row-icon">${icon('plus', 12)}</span>
           <b class="novel-row-title">新建世界</b>
@@ -272,7 +319,7 @@ function ctxHTML() {
             ${icon('spark', 12)}
           </button>
         </div>
-        ${acts || '<div class="hint" style="padding:6px 12px">还没有大纲，先让 AI 生成一版</div>'}
+        ${boot.state.outline === 'ok' ? acts || '<div class="hint" style="padding:6px 12px">还没有大纲，先让 AI 生成一版</div>' : ctxBlockHTML('outline')}
       </div>
       <div class="ctx-foot hint">
         <span>${counts.beats} 个节拍</span>
@@ -296,13 +343,13 @@ function settingHTML() {
   const text = (id, label, value, rows = 3, hint = '') => `
     <div class="field">
       <label>${esc(label)}</label>
-      <textarea class="textarea" id="${id}" rows="${rows}">${esc(value || '')}</textarea>
+      <textarea class="textarea" data-free="1" id="${id}" rows="${rows}">${esc(value || '')}</textarea>
       ${hint ? `<div class="hint" style="margin-top:2px">${esc(hint)}</div>` : ''}
     </div>`;
   const line = (id, label, value, hint = '') => `
     <div class="field">
       <label>${esc(label)}</label>
-      <input class="input" id="${id}" value="${esc(value || '')}" />
+      <input class="input" data-free="1" id="${id}" value="${esc(value || '')}" />
       ${hint ? `<div class="hint" style="margin-top:2px">${esc(hint)}</div>` : ''}
     </div>`;
 
@@ -329,9 +376,19 @@ function settingHTML() {
           ${text('ns-theme', '主题', premise.theme, 2)}
           ${text('ns-conflict', '核心冲突', premise.core_conflict, 3)}
           ${text('ns-ending', '结局意图', premise.ending_intent, 2)}
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
-            ${line('ns-audience', '目标读者', premise.target_audience)}
-            ${line('ns-length', '目标篇幅（字）', premise.target_length)}
+          <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px">
+            ${line('ns-audience', '目标读者', premise.target_audience, '自由填写，例如：都市悬疑读者')}
+            <div class="field"><label>目标篇幅</label>
+              ${selectHTML('target_length', {
+                id: 'ns-length',
+                current: premise.target_length,
+                emptyLabel: '未设置',
+                title: '目标篇幅档位，只能从列表选择；具体字数用右侧字段单独填',
+              })}</div>
+            <div class="field"><label>目标总字数（可选）</label>
+              <input class="input" id="ns-words" type="number" min="0" step="1000"
+                value="${Number(premise.target_words) > 0 ? Number(premise.target_words) : ''}"
+                placeholder="例如 120000" title="可选；只作为字数约束参考，不影响上面的篇幅档位" /></div>
           </div>
         </div>
       </div>
@@ -354,9 +411,21 @@ function settingHTML() {
         <div class="card-body" style="display:grid;gap:10px">
           ${text('ns-tone', '语调', style.tone, 3)}
           <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px">
-            ${line('ns-pov', '视角', style.pov, 'first / third_limited / third_omniscient')}
-            ${line('ns-tense', '时态', style.tense, 'past / present')}
-            ${line('ns-visual', '视觉风格', style.visual_style, '给分镜与封面用')}
+            <div class="field"><label>叙事视角</label>
+              ${selectHTML('pov', {
+                id: 'ns-pov',
+                current: style.pov,
+                emptyLabel: '未设置',
+                title: '叙事人称与视角，只能从列表选择',
+              })}</div>
+            <div class="field"><label>时态</label>
+              ${selectHTML('tense', {
+                id: 'ns-tense',
+                current: style.tense,
+                emptyLabel: '未设置',
+                title: '叙述时态，只能从列表选择',
+              })}</div>
+            ${line('ns-visual', '视觉风格', style.visual_style, '自由填写，给分镜与封面用')}
           </div>
           ${text('ns-prose', '行文风格', style.prose_style, 3)}
           ${text('ns-forbidden', '禁止项（每行一条）', joinLines(style.forbidden), 3)}
@@ -584,7 +653,12 @@ function openBatchDialog() {
             chapter: hit.chapter.id,
           });
           closeDialog();
-          toast(`已开始补齐 ${Number(result?.total || 0)} 行，去「任务」页看进度`, 'ok', 3200);
+          toast(`已开始补齐 ${Number(result?.total || 0)} 行，进度见浮层或「任务」页`, 'ok', 3200);
+          watchProgress({
+            path: cache.path,
+            title: '正在补齐本章配音…',
+            hint: `本次 ${Number(result?.total || 0)} 行 · 已有音频自动跳过`,
+          });
           cache.plan = null;
           cache.planChapter = '';
           paint();
@@ -647,11 +721,87 @@ function bodyCardHTML(chapter, landed) {
     </div>`;
 }
 
-/** 主区 HTML：按选中对象切换 */
+/** 主区 HTML：按选中对象切换；对应数据块未就绪时先显示骨架或失败原因 */
 function mainHTML() {
-  if (ui.sel.kind === 'world') return worldHTML();
-  if (ui.sel.kind === 'chapter') return chapterHTML();
+  if (ui.sel.kind === 'world') {
+    if (boot.state.worlds !== 'ok') return bootBlockHTML('worlds', '世界设定');
+    return worldHTML();
+  }
+  if (ui.sel.kind === 'chapter') {
+    if (boot.state.outline !== 'ok') return bootBlockHTML('outline', '分层大纲');
+    return chapterHTML();
+  }
+  if (boot.state.setting !== 'ok') return bootBlockHTML('setting', '写作设定');
   return settingHTML();
+}
+
+/**
+ * 主区数据块的骨架 / 失败提示（失败时给出中文原因与重试入口）。
+ * @param {'setting'|'worlds'|'outline'} key 数据块
+ * @param {string} label 用户可读名称
+ * @returns {string} HTML
+ */
+function bootBlockHTML(key, label) {
+  if (boot.state[key] === 'error') {
+    return `<div class="boot-block bad" role="alert">
+      <div class="bb-head">${icon('warn', 16)}<b>${esc(label)}读取失败</b></div>
+      <div class="hint">${esc(boot.errors[key] || '未知原因，请稍后重试')}</div>
+      <button class="btn sm" data-act="boot-retry" data-key="${key}">重新载入${esc(label)}</button>
+    </div>`;
+  }
+  return `<div class="boot-block" aria-busy="true">
+    <div class="bb-head">${icon('refresh', 15)}<b>正在读取${esc(label)}…</b></div>
+    <div class="skel skel-line" style="width:38%"></div>
+    <div class="skel skel-line" style="width:86%"></div>
+    <div class="skel skel-line" style="width:68%"></div>
+    <div class="skel skel-card"></div>
+  </div>`;
+}
+
+/**
+ * 空工程引导条：还没有章节时固定在主区顶部。
+ * 给出「从写小说开始 / 导入已有正文」两条入口；已有大纲时再给「落地成章节」。
+ * @returns {string} HTML；有章节时为空串
+ */
+function emptyGuideHTML() {
+  // 章节列表还没返回时先不判断空工程，避免一闪而过的错误引导
+  if (boot.state.chapters !== 'ok' || state.chapters.length) return '';
+  const counts = outlineCounts();
+  return `
+    <div class="banner project-empty-banner">
+      ${icon('book', 13)}
+      <div class="pe-main">
+        <b>这个工程还没有章节</b>
+        <span>从写小说开始：先写设定与世界观，再生成分层大纲并落地成章节；也可以直接导入已有正文。</span>
+      </div>
+      <div class="right">
+        <button class="btn sm" data-act="novel-start">${icon('book', 12)} 从写小说开始</button>
+        ${
+          counts.chapters
+            ? `<button class="btn sm" data-act="novel-outline-apply">${icon('export', 12)} 把大纲落地成章节</button>`
+            : ''
+        }
+        <button class="btn sm" data-act="empty-import">${icon('arrow', 12)} 导入已有正文</button>
+      </div>
+    </div>`;
+}
+
+/**
+ * 落章后同步图标栏「目录」入口。
+ * 小说视图首次进入时还没有章节，图标栏按空章节渲染成回项目列表；
+ * 这里把入口改到第一章，保证落地后能直接进画本。
+ */
+function syncChapterEntry() {
+  if (!state.chapterId) return;
+  const link = [...document.querySelectorAll('#novel-root .railbar a.rail-item')].find(
+    (node) => node.getAttribute('title') === '目录'
+  );
+  if (link) {
+    link.setAttribute(
+      'href',
+      `#/p/${encodeURIComponent(cache.path)}/c/${encodeURIComponent(state.chapterId)}`
+    );
+  }
 }
 
 /** 顶栏右侧：进入画本 / 回工作区 */
@@ -719,6 +869,7 @@ async function saveSetting(section) {
   const fields = {};
   const read = (id) => document.getElementById(id)?.value.trim() || '';
   if (section === 'premise') {
+    const words = Number(document.getElementById('ns-words')?.value || 0);
     Object.assign(fields, {
       logline: read('ns-logline'),
       theme: read('ns-theme'),
@@ -726,6 +877,8 @@ async function saveSetting(section) {
       ending_intent: read('ns-ending'),
       target_audience: read('ns-audience'),
       target_length: read('ns-length'),
+      // 目标总字数是可选数字字段：0 表示清空，但仍要写入以覆盖旧值
+      target_words: Number.isFinite(words) && words > 0 ? Math.round(words) : 0,
     });
   } else if (section === 'world') {
     const current = cache.setting?.world || {};
@@ -746,7 +899,12 @@ async function saveSetting(section) {
       forbidden: splitLines(document.getElementById('ns-forbidden')?.value),
     });
   }
-  const clean = Object.fromEntries(Object.entries(fields).filter(([, value]) => (Array.isArray(value) ? value.length : value)));
+  // 目标总字数允许为 0（表示清空），其余空值不提交，避免覆盖已有设定
+  const clean = Object.fromEntries(
+    Object.entries(fields).filter(([key, value]) =>
+      key === 'target_words' ? true : Array.isArray(value) ? value.length : value
+    )
+  );
   if (!Object.keys(clean).length) return toast('没有可保存的内容', 'warn');
   await run('保存设定', () => postJSON('/api/ui/setting/apply', { path: cache.path, section, fields: clean }));
   cache.setting = await getJSON('/api/ui/setting', { path: cache.path });
@@ -803,40 +961,111 @@ async function run(label, action) {
 
 /** AI 生成世界：先出预览，勾选后逐条创建 */
 function openWorldGenerate() {
+  const modeKey = 'world.generate';
   openDialog({
     title: 'AI 生成世界设定',
     body: `
+      ${modeSwitchHTML(modeKey, { fallback: 'fill' })}
       <div class="field"><label>题材 / 一句话方向</label>
         <textarea class="textarea" id="wg-brief" rows="3" placeholder="例：民国上海，一个能听见器物记忆的当铺伙计"></textarea></div>
       <div class="field"><label>生成数量</label>
         <select class="select" id="wg-count">
           <option value="1">1 个</option><option value="2">2 个</option><option value="3">3 个</option>
         </select></div>
-      <div class="hint">生成结果先预览，勾选「采用」后才会写入世界库，不改动已有条目。</div>`,
+      <div class="hint">生成结果先预览，勾选「采用」后才会写入世界库；「只补缺失」会跳过与现有世界重名的条目。</div>`,
     foot: `<div class="right"><button class="btn" data-dlg-close>取消</button>
       <button class="btn primary" data-wg-run>${icon('spark', 12)} 生成预览</button></div>`,
     onMount: (mask) => {
-      mask.querySelector('[data-wg-run]').addEventListener('click', async () => {
+      const modeOf = bindModeSwitch(mask, modeKey, {
+        fallback: 'fill',
+        action: mask.querySelector('[data-wg-run]'),
+        labels: { fill: '补缺失预览', regen: '重新生成预览' },
+      });
+      mask.querySelector('[data-wg-run]').addEventListener('click', () => {
         const brief = mask.querySelector('#wg-brief').value.trim();
         const count = Number(mask.querySelector('#wg-count').value) || 1;
         if (!brief) return toast('先写一句方向', 'warn');
-        const button = mask.querySelector('[data-wg-run]');
-        button.disabled = true;
-        button.textContent = '生成中…';
-        try {
-          const data = await postJSON('/api/ui/worlds/generate', { path: cache.path, brief, count });
-          ui.worldPreview = data?.worlds || [];
-          previewPicked = new Set(ui.worldPreview.map((_, index) => index));
-          closeDialog();
-          renderWorldPreview();
-        } catch (error) {
-          toast(`生成失败：${error.message}`, 'bad', 3600);
-          button.disabled = false;
-          button.textContent = '生成预览';
-        }
+        const mode = modeOf();
+        closeDialog();
+        runWorldGenerate(brief, count, mode);
       });
     },
   });
+}
+
+/**
+ * 执行世界条目生成（SSE 进度），完成后打开勾选预览。
+ * @param {string} brief 方向描述
+ * @param {number} count 生成数量
+ * @param {'fill'|'regen'} [mode] 只补缺失 / 重新生成
+ */
+async function runWorldGenerate(brief, count, mode = 'fill') {
+  const panel = openProgress({
+    title: `正在${mode === 'fill' ? '补缺失' : '重新生成'}世界设定…`,
+    hint: `${brief} · ${mode === 'fill' ? '跳过与现有世界重名的条目' : '忽略现有条目重新生成预览'}`,
+    stage: '已提交生成请求，等待模型返回…',
+  });
+  panel.update({ percent: null });
+  let settled = false;
+  try {
+    await streamJSON(
+      '/api/ui/worlds/generate/stream',
+      { path: cache.path, brief, count, overwrite: mode === 'regen' },
+      (event, data) => {
+        if (event === 'batch') {
+          const index = Number(data.index || 1);
+          const total = Number(data.total || 1) || 1;
+          panel.update({
+            stage: `正在生成第 ${index}/${total} 批世界条目…`,
+            percent: Math.round(((index - 1) / total) * 100),
+            current: `第 ${index} / ${total} 批`,
+          });
+        } else if (event === 'chars') {
+          panel.update({ current: `第 ${Number(data.index || 1)} 批 · 已接收 ${Number(data.chars || 0)} 字` });
+        } else if (event === 'done') {
+          settled = true;
+          const all = data?.result?.worlds || [];
+          panel.update({ percent: 100 });
+          // 只补缺失：过滤掉与现有世界重名的条目，避免重复写入
+          const existingNames = new Set(cache.worlds.map((item) => String(item.name || '').trim()));
+          const worlds = mode === 'fill' ? all.filter((item) => !existingNames.has(String(item.name || '').trim())) : all;
+          const skipped = all.length - worlds.length;
+          panel.note(worlds.map((item) => item.name).filter(Boolean).join('、') || '模型已返回世界条目');
+          if (!worlds.length) {
+            panel.finish({
+              message: skipped ? `生成结果与现有 ${skipped} 个世界重名，已全部跳过` : '模型没有返回可用的世界条目',
+              detail: '要覆盖现有条目请选「重新生成」后重试。',
+            });
+            return;
+          }
+          ui.worldPreview = worlds;
+          previewPicked = new Set(worlds.map((_, index) => index));
+          panel.finish({
+            message: `世界生成完成：${worlds.length} 个条目待采用${skipped ? `，跳过重名 ${skipped} 个` : ''}`,
+            detail: '预览里勾选后点「采用选中」才会写入世界库。',
+            actions: [
+              {
+                label: '查看预览',
+                primary: true,
+                onClick: () => renderWorldPreview(),
+              },
+            ],
+          });
+          renderWorldPreview();
+        } else if (event === 'error') {
+          settled = true;
+          panel.fail({ message: data?.message || '世界生成失败', retry: () => runWorldGenerate(brief, count, mode) });
+        }
+      }
+    );
+    if (!settled) {
+      panel.fail({ message: '连接已中断，没有收到世界生成结果', retry: () => runWorldGenerate(brief, count, mode) });
+    }
+  } catch (error) {
+    if (!settled) {
+      panel.fail({ message: `世界生成失败：${error.message}`, retry: () => runWorldGenerate(brief, count, mode) });
+    }
+  }
 }
 
 /** 世界预览弹窗：勾选 + 采用 */
@@ -903,12 +1132,14 @@ function renderWorldPreview() {
 /** AI 生成大纲：参数确认后直接生成并落盘（生成结果整份替换大纲，不动已落章正文） */
 function openOutlineGenerate() {
   const counts = outlineCounts();
+  const modeKey = 'outline.generate';
   openDialog({
     title: 'AI 生成分层大纲',
     body: `
+      ${modeSwitchHTML(modeKey, { fallback: 'regen' })}
       <div class="hint" style="margin-bottom:8px">
         当前大纲：${counts.acts} 幕 / ${counts.chapters} 章 / ${counts.beats} 个节拍。
-        重新生成会替换大纲，但不会删除已落成的正文文件。
+        「只补缺失」在没有大纲时生成，已有大纲时不会覆盖；「重新生成」会替换整份大纲，但不会删除已落成的正文文件。
       </div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
         <div class="field"><label>幕数</label><input class="input" id="og-acts" type="number" min="1" max="12" value="${counts.acts || 3}" /></div>
@@ -924,10 +1155,12 @@ function openOutlineGenerate() {
     foot: `<div class="right"><button class="btn" data-dlg-close>取消</button>
       <button class="btn primary" data-og-run>${icon('spark', 12)} 开始生成</button></div>`,
     onMount: (mask) => {
-      mask.querySelector('[data-og-run]').addEventListener('click', async () => {
-        const button = mask.querySelector('[data-og-run]');
-        button.disabled = true;
-        button.textContent = '生成中…';
+      const modeOf = bindModeSwitch(mask, modeKey, {
+        fallback: 'regen',
+        action: mask.querySelector('[data-og-run]'),
+        labels: { fill: '补缺失', regen: '重新生成大纲' },
+      });
+      mask.querySelector('[data-og-run]').addEventListener('click', () => {
         const body = {
           path: cache.path,
           acts: Number(mask.querySelector('#og-acts').value) || 3,
@@ -938,53 +1171,194 @@ function openOutlineGenerate() {
         };
         const brief = mask.querySelector('#og-brief').value.trim();
         if (brief) body.brief = brief;
-        try {
-          await run('生成大纲', () => postJSON('/api/ui/outline/generate', body));
-          cache.outline = await getJSON('/api/ui/outline', { path: cache.path });
-          closeDialog();
-          const first = outlineChapters()[0];
-          ui.sel = first ? { kind: 'chapter', id: first.chapter.id } : { kind: 'setting', id: '' };
-          toast('大纲已生成', 'ok');
-          paint();
-        } catch {
-          button.disabled = false;
-          button.textContent = '开始生成';
-        }
+        const mode = modeOf();
+        closeDialog();
+        runOutlineGenerate(body, mode);
       });
     },
   });
 }
 
+/**
+ * 执行大纲生成（SSE 进度）：按幕逐批推进，完成后刷新目录。
+ * @param {object} body 生成参数
+ * @param {'fill'|'regen'} [mode] 只补缺失 / 重新生成
+ */
+async function runOutlineGenerate(body, mode = 'regen') {
+  const counts = outlineCounts();
+  // 只补缺失且已有大纲：不调用模型，避免把现有大纲整体覆盖掉
+  if (mode === 'fill' && counts.acts > 0) {
+    const panel = openProgress({
+      title: '检查大纲缺失…',
+      hint: '只补缺失不会覆盖现有大纲',
+      stage: '已读取现有大纲',
+    });
+    panel.note(`现有 ${counts.acts} 幕 / ${counts.chapters} 章 / ${counts.beats} 个节拍`);
+    panel.finish({
+      message: `已有 ${counts.acts} 幕大纲，没有缺失需要补`,
+      detail: '「只补缺失」不会覆盖现有大纲；要重写整份大纲请选「重新生成」。',
+      actions: [
+        {
+          label: '改为重新生成',
+          primary: true,
+          onClick: (close) => {
+            close();
+            runOutlineGenerate(body, 'regen');
+          },
+        },
+      ],
+    });
+    return;
+  }
+  const totalActs = Number(body.acts || 3);
+  const panel = openProgress({
+    title: `正在${mode === 'fill' ? '补缺失' : '重新生成'}分层大纲…`,
+    hint: `${totalActs} 幕 × ${Number(body.chapters_per_act || 3)} 章 × ${Number(
+      body.beats_per_chapter || 4
+    )} 个节拍 · 每章约 ${Number(body.words || 3000)} 字${mode === 'fill' ? ' · 保留现有大纲' : ' · 覆盖现有大纲'}`,
+    stage: '已提交生成请求，正在拆解幕结构…',
+  });
+  panel.update({ percent: 0 });
+  let settled = false;
+  const finishWithOutline = async (result) => {
+    cache.outline = await getJSON('/api/ui/outline', { path: cache.path });
+    const counts = outlineCounts();
+    const first = outlineChapters()[0];
+    ui.sel = first ? { kind: 'chapter', id: first.chapter.id } : { kind: 'setting', id: '' };
+    paint();
+    const firstAct = (cache.outline?.acts || [])[0];
+    panel.note(firstAct ? `第 1 幕：${firstAct.title || '未命名幕'}` : `共 ${counts.acts} 幕`);
+    panel.finish({
+      message: `大纲已生成：${counts.acts} 幕 / ${counts.chapters} 章 / ${counts.beats} 个节拍`,
+      detail: result?.failures?.length
+        ? `有 ${result.failures.length} 个批次失败，可在目录里补生成。`
+        : '已写入工程大纲，可点「查看大纲」继续编辑。',
+      actions: [{ label: '查看大纲', primary: true, onClick: () => paint() }],
+    });
+    toast('大纲已生成', 'ok');
+  };
+  try {
+    await streamJSON('/api/ui/outline/generate/stream', body, (event, data) => {
+      if (!data) return;
+      if (event === 'batch') {
+        const index = Number(data.index || 1);
+        const total = Number(data.total || totalActs) || 1;
+        panel.update({
+          stage: `正在生成第 ${index}/${total} 幕…`,
+          percent: Math.round(((index - 1) / total) * 100),
+          current: `第 ${index} / ${total} 批`,
+        });
+      } else if (event === 'chars') {
+        panel.update({ current: `第 ${Number(data.index || 1)} 批 · 已接收 ${Number(data.chars || 0)} 字` });
+      } else if (event === 'done') {
+        settled = true;
+        panel.update({ percent: 100 });
+        void finishWithOutline(data.result || {}).catch((error) =>
+          panel.fail({
+            message: `大纲已生成，但刷新目录失败：${error.message}`,
+            retry: () => runOutlineGenerate(body, mode),
+          })
+        );
+      } else if (event === 'error') {
+        settled = true;
+        panel.fail({ message: data.message || '大纲生成失败', retry: () => runOutlineGenerate(body, mode) });
+      }
+    });
+    if (!settled) {
+      panel.fail({ message: '连接已中断，没有收到大纲结果', retry: () => runOutlineGenerate(body, mode) });
+    }
+  } catch (error) {
+    if (!settled) {
+      panel.fail({ message: `大纲生成失败：${error.message}`, retry: () => runOutlineGenerate(body, mode) });
+    }
+  }
+}
+
 /** AI 补设定分区：预览字段后合并写入 */
 function openSettingGenerate(section) {
   const label = { premise: '故事内核', world: '世界观', style: '文风' }[section] || section;
+  const modeKey = `setting.${section}`;
   openDialog({
-    title: `AI 补${label}`,
+    title: `AI 生成${label}`,
     body: `
+      ${modeSwitchHTML(modeKey, { fallback: 'regen' })}
       <div class="field"><label>补充要求（可选）</label>
         <textarea class="textarea" id="sg-brief" rows="2" placeholder="例：更冷峻一些，突出器物记忆的规则"></textarea></div>
+      <div class="field"><label>固定种子（可选）</label>
+        <input class="input" id="sg-seed" type="number" placeholder="留空 = 每次随机" /></div>
+      <div class="hint">随机性：温度 0.7，默认不固定种子，每次生成结果都会不同。填了种子会把 seed 传给模型，本机服务支持 seed 时可复现同一结果。</div>
       <div class="hint">生成结果先预览；点「写入设定」才覆盖对应字段，其余字段保持不动。</div>`,
     foot: `<div class="right"><button class="btn" data-dlg-close>取消</button>
       <button class="btn primary" data-sg-run>${icon('spark', 12)} 生成预览</button></div>`,
     onMount: (mask) => {
-      mask.querySelector('[data-sg-run]').addEventListener('click', async () => {
+      const modeOf = bindModeSwitch(mask, modeKey, {
+        action: mask.querySelector('[data-sg-run]'),
+        labels: { fill: '补缺失', regen: '重新生成' },
+      });
+      mask.querySelector('[data-sg-run]').addEventListener('click', () => {
         const brief = mask.querySelector('#sg-brief').value.trim();
-        const button = mask.querySelector('[data-sg-run]');
-        button.disabled = true;
-        button.textContent = '生成中…';
-        try {
-          const data = await postJSON('/api/ui/setting/generate', { path: cache.path, section, brief });
-          const fields = data?.fields || data || {};
-          closeDialog();
-          openSettingPreview(section, label, fields);
-        } catch (error) {
-          toast(`生成失败：${error.message}`, 'bad', 3600);
-          button.disabled = false;
-          button.textContent = '生成预览';
-        }
+        const seedText = mask.querySelector('#sg-seed').value.trim();
+        const seed = seedText ? Number(seedText) : null;
+        if (seedText && !Number.isInteger(seed)) return toast('种子必须是整数', 'warn');
+        const mode = modeOf();
+        closeDialog();
+        runSettingGenerate(section, label, brief, seed, mode);
       });
     },
   });
+}
+
+/**
+ * 补全设定分区（无流式接口，用不确定进度浮层），完成后打开字段预览。
+ * @param {string} section premise / world / style
+ * @param {string} label 分区中文名
+ * @param {string} brief 补充要求
+ * @param {number|null} seed 固定种子；null 表示每次随机
+ * @param {'fill'|'regen'} mode 只补缺失 / 重新生成
+ */
+async function runSettingGenerate(section, label, brief, seed = null, mode = 'regen') {
+  const panel = openProgress({
+    title: `正在${mode === 'fill' ? '补缺失' : '重新生成'}${label}…`,
+    hint: `${mode === 'fill' ? '保留已有字段，只生成空缺' : '已有字段会被新结果覆盖'} · 温度 0.7${
+      seed === null ? ' · 未固定种子' : ` · 种子 ${seed}`
+    }`,
+    stage: '已提交生成请求，等待模型返回…',
+  });
+  panel.update({ percent: null });
+  try {
+    // 生成可能持续数十秒：不设前端超时，避免把仍在跑的生成误判为失败
+    const data = await postJSON(
+      '/api/ui/setting/generate',
+      { path: cache.path, section, brief, seed: seed === null ? undefined : seed, overwrite: mode !== 'fill' },
+      { timeout: 0 }
+    );
+    const fields = data?.fields || data || {};
+    const count = Object.keys(fields).length;
+    const skipped = Array.isArray(data?.skipped) ? data.skipped.length : 0;
+    // 非流式入口也要展示最近一条模型返回内容（一行灰色小字）
+    panel.note(fields.logline || fields.summary || fields.tone || fields.premise || '模型已返回字段');
+    panel.finish({
+      message:
+        mode === 'fill'
+          ? `${label}补缺失完成：${count} 个字段，跳过已有 ${skipped} 个`
+          : `${label}重新生成完成：${count} 个字段待确认`,
+      detail: '确认后点「写入设定」才会覆盖对应字段。',
+      actions: [
+        { label: '查看字段', primary: true, onClick: () => openSettingPreview(section, label, fields) },
+        // 明确的重新生成入口：不关闭浮层时也能直接再抽一版
+        { label: '重新生成', onClick: (close) => {
+          close();
+          runSettingGenerate(section, label, brief, seed, 'regen');
+        } },
+      ],
+    });
+    openSettingPreview(section, label, fields);
+  } catch (error) {
+    panel.fail({
+      message: `生成失败：${error.message}`,
+      retry: () => runSettingGenerate(section, label, brief, seed, mode),
+    });
+  }
 }
 
 /** 设定预览：列出字段可编辑，确认后 apply */
@@ -1010,13 +1384,20 @@ function openSettingPreview(section, label, fields) {
   };
   const rows = Object.entries(fields)
     .map(([key, value]) => {
+      const label = esc(ENUMS[key]?.label || labelOf[key] || key);
+      // 枚举字段（篇幅 / 视角 / 时态）在预览里也用下拉，避免把裸值当文本改
+      if (ENUMS[key] && !Array.isArray(value)) {
+        return `
+      <div class="field"><label>${label}</label>
+        ${selectHTML(key, { current: value, emptyLabel: '未设置', attrs: `data-sf-key="${esc(key)}"` })}</div>`;
+      }
       // 地点/名词表是对象数组，先转成可编辑文本行
       const raw = Array.isArray(value) ? value : [];
       const textValue =
         key === 'locations' ? joinLines(raw.map(locationLine)) : key === 'glossary' ? joinLines(raw.map(glossaryLine)) : joinLines(raw);
       return `
-      <div class="field"><label>${esc(labelOf[key] || key)}</label>
-        <textarea class="textarea" data-sf-key="${esc(key)}" rows="${Array.isArray(value) ? 3 : 2}">${esc(
+      <div class="field"><label>${label}</label>
+        <textarea class="textarea" data-free="1" data-sf-key="${esc(key)}" rows="${Array.isArray(value) ? 3 : 2}">${esc(
           Array.isArray(value) ? textValue : value || ''
         )}</textarea></div>`;
     })
@@ -1095,9 +1476,15 @@ async function applyOutline() {
   const result = await run('落地章节', () => postJSON('/api/ui/outline/apply', { path: cache.path }));
   cache.chapters = await getJSON('/api/ui/chapters', { path: cache.path });
   cache.outline = await getJSON('/api/ui/outline', { path: cache.path });
+  // 其它视图与图标栏都读 state.chapters：落章后立刻同步，避免继续显示「没有章节」
+  state.chapters = cache.chapters;
+  if (!cache.chapters.some((chapter) => chapter.id === state.chapterId)) {
+    state.chapterId = cache.chapters[0]?.id || '';
+  }
   const created = result?.created?.length || result?.chapters?.length || 0;
   toast(created ? `已落地 ${created} 章` : '没有需要新建的章节', created ? 'ok' : 'info');
   paint();
+  syncChapterEntry();
 }
 
 /** 黄金三章检查：结果放主区顶部，不阻断流程 */
@@ -1163,51 +1550,16 @@ async function saveBody() {
   toast(`正文已保存（${Number(result?.word_count || 0)} 字）`, 'ok');
 }
 
-/** 打开流式面板：正文生成/续写共用；完成后出现一个二次操作按钮 */
-function openStreamPanel(title, doneLabel, onDoneClick) {
-  const mask = openDialog({
-    title,
-    wide: true,
-    body: `<pre class="novel-stream" id="stream-live"></pre>
-           <div class="hint" id="stream-note">正在准备…</div>`,
-    foot: `<div class="right"><button class="btn" data-dlg-close>关闭</button>
-      <button class="btn primary" data-stream-extra hidden>${doneLabel}</button></div>`,
-  });
-  const live = mask.querySelector('#stream-live');
-  const note = mask.querySelector('#stream-note');
-  const extra = mask.querySelector('[data-stream-extra]');
-  return {
-    /** 追加增量并滚到底部 */
-    append(text) {
-      live.textContent += text;
-      live.scrollTop = live.scrollHeight;
-    },
-    /** 完成：显示结果摘要与二次操作 */
-    finish(message, label) {
-      note.textContent = message;
-      extra.textContent = label || doneLabel;
-      extra.hidden = false;
-      extra.onclick = () => {
-        closeDialog();
-        onDoneClick?.();
-      };
-    },
-    /** 失败：红色提示，不再出现二次操作 */
-    fail(message) {
-      note.textContent = message;
-      note.style.color = 'var(--bad)';
-    },
-  };
-}
-
 /** 正文生成：确认参数后走 SSE 流，完成后刷新 */
 function openGenerateDialog(hasBody) {
   const hit = findOutlineChapter(ui.sel.id);
   if (!hit) return;
+  const modeKey = 'chapter.generate';
   openDialog({
     title: hasBody ? '重新生成本章正文' : 'AI 生成本章正文',
     body: `
-      ${hasBody ? '<div class="banner warn" style="margin-bottom:8px">重新生成会覆盖当前正文，旧版本仍可从章节版本记录找回。</div>' : ''}
+      ${modeSwitchHTML(modeKey, { fallback: hasBody ? 'regen' : 'fill' })}
+      ${hasBody ? '<div class="banner warn" style="margin-bottom:8px">选「重新生成」会覆盖当前正文，旧版本仍可从章节版本记录找回；选「只补缺失」则保留现有正文不调用模型。</div>' : ''}
       <div class="hint" style="margin-bottom:8px">按大纲节拍写作，读取写作设定与本章节拍作为提示词。</div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
         <div class="field"><label>每段字数</label><input class="input" id="gen-seg" type="number" min="200" step="100" value="1200" /></div>
@@ -1219,43 +1571,101 @@ function openGenerateDialog(hasBody) {
     foot: `<div class="right"><button class="btn" data-dlg-close>取消</button>
       <button class="btn primary" data-gen-run>${icon('spark', 12)} 开始生成</button></div>`,
     onMount: (mask) => {
+      const modeOf = bindModeSwitch(mask, modeKey, {
+        fallback: hasBody ? 'regen' : 'fill',
+        action: mask.querySelector('[data-gen-run]'),
+        labels: { fill: '生成缺失正文', regen: '重新生成并覆盖' },
+      });
       mask.querySelector('[data-gen-run]').addEventListener('click', () => {
+        const mode = modeOf();
         const body = {
           path: cache.path,
           chapter: hit.chapter.id,
-          regen: hasBody,
+          regen: mode === 'regen',
           multi_turn: mask.querySelector('#gen-multi').checked,
           segment_words: Number(mask.querySelector('#gen-seg').value) || 1200,
           max_rounds: Number(mask.querySelector('#gen-rounds').value) || 3,
         };
         closeDialog();
-        runGenerate(body);
+        runGenerate(body, hasBody);
       });
     },
   });
 }
 
 /**
- * 执行正文生成（SSE）；完成后可刷新正文。
+ * 执行正文生成（SSE）；进度走统一浮层，完成后可刷新正文。
  * @param {object} body 生成参数
+ * @param {boolean} [hadBody] 打开弹窗时本章是否已有正文
  */
-async function runGenerate(body) {
-  const panel = openStreamPanel('正在生成正文…', '刷新正文', async () => {
-    await reloadAfterBodyChange(body.chapter);
+async function runGenerate(body, hadBody = false) {
+  // 只补缺失且已有正文：不调用模型，避免报「已有正文」或误覆盖
+  if (!body.regen && hadBody) {
+    const landed = landedChapter(body.chapter);
+    const panel = openProgress({
+      title: '检查本章正文…',
+      hint: '只补缺失不会覆盖已有正文',
+      stage: '已读取本章正文',
+    });
+    panel.note(`现有正文 ${Number(landed?.word_count || cache.body?.word_count || 0)} 字`);
+    panel.finish({
+      message: '本章已有正文，已跳过生成',
+      detail: '要重写正文请选「重新生成」；只想续写请用「AI 续写本章」。',
+      actions: [
+        {
+          label: '改为重新生成',
+          primary: true,
+          onClick: (close) => {
+            close();
+            runGenerate({ ...body, regen: true }, true);
+          },
+        },
+      ],
+    });
+    return;
+  }
+  const panel = openProgress({
+    title: body.regen ? '正在重新生成本章正文…' : '正在生成本章正文…',
+    hint: `每段 ${Number(body.segment_words || 0)} 字 · 最多 ${Number(body.max_rounds || 0)} 段${
+      body.regen ? ' · 覆盖现有正文' : ''
+    }`,
+    stage: '已提交生成请求，等待模型返回…',
+    stream: true,
   });
+  panel.update({ percent: null });
+  let settled = false;
   try {
     await streamJSON('/api/ui/chapter/generate/stream', body, (event, data) => {
-      if (event === 'delta') panel.append(data?.text || '');
-      else if (event === 'done') {
+      if (event === 'start') {
+        panel.update({ stage: '模型正在写作…', percent: null });
+      } else if (event === 'delta') {
+        panel.append(data?.text || '');
+      } else if (event === 'done') {
+        settled = true;
         const result = data?.result || {};
-        const words = Number(result.word_count || cache.body?.word_count || 0);
-        panel.finish(`生成完成：${words} 字${result.status ? ` · ${result.status}` : ''}`, '刷新正文');
+        const words = Number(result.word_count || 0);
+        panel.finish({
+          message: `正文生成完成：${words} 字${result.status ? ` · ${result.status}` : ''}`,
+          detail: '结果已写入本章正文，可点「刷新正文」查看。',
+          actions: [
+            {
+              label: '刷新正文',
+              primary: true,
+              onClick: async () => {
+                await reloadAfterBodyChange(body.chapter);
+                toast('正文已刷新', 'ok');
+              },
+            },
+          ],
+        });
       } else if (event === 'error') {
-        panel.fail(data?.message || '生成失败');
+        settled = true;
+        panel.fail({ message: data?.message || '生成失败', retry: () => runGenerate(body) });
       }
     });
+    if (!settled) panel.fail({ message: '连接已中断，没有收到生成结果', retry: () => runGenerate(body) });
   } catch (error) {
-    panel.fail(`生成失败：${error.message}`);
+    if (!settled) panel.fail({ message: `生成失败：${error.message}`, retry: () => runGenerate(body) });
   }
 }
 
@@ -1263,10 +1673,15 @@ async function runGenerate(body) {
 function openContinueDialog(retry = false) {
   const hit = findOutlineChapter(ui.sel.id);
   if (!hit) return;
+  const modeKey = 'chapter.continue';
+  const hasDraft = Boolean(cache.draft?.draft?.text);
   openDialog({
     title: retry ? '重新生成续写草稿' : 'AI 续写本章',
     body: `
-      <div class="hint" style="margin-bottom:8px">续写基于当前正文与后续节拍；生成结果先存草稿，确认后写入。</div>
+      ${modeSwitchHTML(modeKey, { fallback: retry ? 'regen' : hasDraft ? 'fill' : 'regen' })}
+      <div class="hint" style="margin-bottom:8px">续写基于当前正文与后续节拍；生成结果先存草稿，确认后写入。${
+        hasDraft ? '选「只补缺失」会沿用现有草稿，不再调用模型。' : ''
+      }</div>
       <div class="field"><label>本轮字数</label>
         <input class="input" id="ct-words" type="number" min="200" step="100" value="800" /></div>
       <div class="field"><label>接下来发生什么（可选）</label>
@@ -1274,41 +1689,104 @@ function openContinueDialog(retry = false) {
     foot: `<div class="right"><button class="btn" data-dlg-close>取消</button>
       <button class="btn primary" data-ct-run>${icon('spark', 12)} 生成续写预览</button></div>`,
     onMount: (mask) => {
+      const modeOf = bindModeSwitch(mask, modeKey, {
+        fallback: retry ? 'regen' : hasDraft ? 'fill' : 'regen',
+        action: mask.querySelector('[data-ct-run]'),
+        labels: { fill: '沿用现有草稿', regen: '重新生成续写' },
+      });
       mask.querySelector('[data-ct-run]').addEventListener('click', () => {
+        const mode = modeOf();
         const body = {
           path: cache.path,
           chapter: hit.chapter.id,
           words: Number(mask.querySelector('#ct-words').value) || 800,
           intent: mask.querySelector('#ct-intent').value.trim(),
-          retry,
+          // 重新生成时才作废旧草稿并重抽
+          retry: mode === 'regen',
         };
         closeDialog();
-        runContinue(body);
+        runContinue(body, mode);
       });
     },
   });
 }
 
 /**
- * 执行续写预览（SSE），完成后可应用草稿。
+ * 执行续写预览（SSE）；进度走统一浮层，完成后可应用草稿。
  * @param {object} body 续写参数
+ * @param {'fill'|'regen'} [mode] 只补缺失（沿用草稿）/ 重新生成
  */
-async function runContinue(body) {
-  const panel = openStreamPanel('正在续写…', '应用草稿', async () => {
-    await applyDraft(body.chapter);
+async function runContinue(body, mode = 'regen') {
+  // 只补缺失且已有草稿：直接复用，不调用模型
+  if (mode === 'fill' && cache.draft?.draft?.text) {
+    const draftText = String(cache.draft.draft.text || '');
+    const panel = openProgress({
+      title: '检查续写草稿…',
+      hint: '只补缺失会沿用现有草稿',
+      stage: '已读取未应用草稿',
+    });
+    panel.note(draftText.replace(/\s+/g, ' ').slice(-160));
+    panel.finish({
+      message: `已有续写草稿 ${Array.from(draftText).length} 字，未重新生成`,
+      detail: '可直接应用草稿；要重抽请选「重新生成」。',
+      actions: [
+        {
+          label: '应用草稿',
+          primary: true,
+          onClick: async () => {
+            try {
+              await applyDraft(body.chapter);
+            } catch {
+              // applyDraft 内部已给出失败提示
+            }
+          },
+        },
+      ],
+    });
+    return;
+  }
+  const panel = openProgress({
+    title: body.retry ? '正在重新生成续写草稿…' : '正在生成续写草稿…',
+    hint: `本轮约 ${Number(body.words || 0)} 字${body.retry ? ' · 覆盖旧草稿' : ''}`,
+    stage: '已提交续写请求，等待模型返回…',
+    stream: true,
   });
+  panel.update({ percent: null });
+  let settled = false;
   try {
     await streamJSON('/api/ui/chapter/continue/stream', body, (event, data) => {
-      if (event === 'delta') panel.append(data?.text || '');
-      else if (event === 'done') {
+      if (event === 'start') {
+        panel.update({ stage: '模型正在续写…', percent: null });
+      } else if (event === 'delta') {
+        panel.append(data?.text || '');
+      } else if (event === 'done') {
+        settled = true;
         const result = data?.result || {};
-        panel.finish(`续写完成：+${Number(result.added_words || 0)} 字，已存为草稿`, '应用草稿');
+        panel.finish({
+          message: `续写完成：+${Number(result.added_words || 0)} 字，已存为草稿`,
+          detail: '草稿不会自动写入正文，确认后可应用。',
+          actions: [
+            {
+              label: '应用草稿',
+              primary: true,
+              onClick: async () => {
+                try {
+                  await applyDraft(body.chapter);
+                } catch {
+                  // applyDraft 内部已给出失败提示
+                }
+              },
+            },
+          ],
+        });
       } else if (event === 'error') {
-        panel.fail(data?.message || '续写失败');
+        settled = true;
+        panel.fail({ message: data?.message || '续写失败', retry: () => runContinue(body) });
       }
     });
+    if (!settled) panel.fail({ message: '连接已中断，没有收到续写结果', retry: () => runContinue(body) });
   } catch (error) {
-    panel.fail(`续写失败：${error.message}`);
+    if (!settled) panel.fail({ message: `续写失败：${error.message}`, retry: () => runContinue(body) });
   }
 }
 
@@ -1359,25 +1837,53 @@ function checkBannerHTML() {
     </div>`;
 }
 
+/** 工程标题：info 未返回时用目录名兜底，失败时给可重试的中文提示 */
+function projectLabelHTML() {
+  if (boot.state.info === 'error') {
+    return `<button class="link" data-act="boot-retry" data-key="info" title="${esc(
+      boot.errors.info || '读取失败'
+    )}">工程名读取失败，点此重试</button>`;
+  }
+  const title = state.info?.title || state.info?.name || '';
+  if (title) return esc(title);
+  const base = String(cache.path || '').split('/').filter(Boolean).pop() || '未命名工程';
+  return boot.state.info === 'ok' ? esc(base) : `${esc(base)}（正在读取工程信息…）`;
+}
+
+/** 顶栏面包屑：工程名 / 当前选中对象 */
+function crumbHTML() {
+  return `${projectLabelHTML()}<span class="sep">/</span>
+    <span class="cur novel-title">${esc(selectionTitle())}</span>`;
+}
+
 /** 整页重画（保留滚动位置） */
 function paint() {
+  // 选中对象可能在数据到达后失效（例如工程被外部改动），回落到写作设定
+  if (boot.state.outline === 'ok' && ui.sel.kind === 'chapter' && !findOutlineChapter(ui.sel.id)) {
+    ui.sel = { kind: 'setting', id: '' };
+  }
+  if (boot.state.worlds === 'ok' && ui.sel.kind === 'world' && !ui.draftWorld && !findWorld(ui.sel.id)) {
+    ui.sel = { kind: 'setting', id: '' };
+  }
   const main = document.getElementById('novel-main');
   const ctx = document.querySelector('#novel-root .ctx');
   const scroll = main?.scrollTop || 0;
   const listScroll = document.querySelector('#novel-root .chap-list')?.scrollTop || 0;
   if (ctx) ctx.outerHTML = ctxHTML();
   if (main) {
-    main.innerHTML = `${checkBannerHTML()}${mainHTML()}`;
+    main.innerHTML = `${emptyGuideHTML()}${checkBannerHTML()}${mainHTML()}`;
     main.scrollTop = scroll;
   }
   const list = document.querySelector('#novel-root .chap-list');
   if (list) list.scrollTop = listScroll;
-  const title = document.querySelector('#novel-root .novel-title');
-  if (title) title.textContent = selectionTitle();
+  const crumbs = document.getElementById('novel-crumb');
+  if (crumbs) crumbs.innerHTML = crumbHTML();
 }
 
 /**
  * 渲染小说工作台。
+ * 外壳与骨架先出现，设定 / 世界 / 大纲 / 章节各自到达后局部填充，
+ * 任一慢接口都不会把整页挡在 loading 里。
  * @param {HTMLElement} root 应用根节点
  * @param {{path: string}} target 路由参数
  */
@@ -1385,38 +1891,29 @@ export async function renderNovel(root, target) {
   const path = target.path;
   state.path = path;
   if (cache.path !== path) {
+    cache.path = path;
+    cache.setting = null;
+    cache.worlds = [];
+    cache.outline = null;
+    cache.chapters = [];
+    cache.check = null;
     cache.bodyChapter = '';
     cache.body = null;
     cache.draft = null;
     cache.planChapter = '';
     cache.plan = null;
+    state.info = null;
+    state.chapters = [];
+    ui.sel = { kind: 'setting', id: '' };
+    ui.draftWorld = false;
   }
-  root.innerHTML = `${topbar({ left: '', crumbs: '<span class="cur">正在加载小说工作台…</span>' })}`;
-  try {
-    const [info, chapters] = await Promise.all([
-      getJSON('/api/project/info', { path }),
-      getJSON('/api/ui/chapters', { path }),
-    ]);
-    state.info = info;
-    state.chapters = Array.isArray(chapters) ? chapters : [];
-    await loadAll(path);
-  } catch (error) {
-    root.innerHTML = `<div class="page"><div class="empty">${icon('warn', 22)}<b>小说工作台加载失败</b>
-      <span>${esc(error.message)}</span><a class="btn" href="#/projects" style="margin-top:10px">回工作区</a></div></div>`;
-    return;
-  }
-  // 默认选中：优先上次的对象，其次写作设定
-  if (ui.sel.kind === 'world' && !ui.draftWorld && !findWorld(ui.sel.id)) ui.sel = { kind: 'setting', id: '' };
-  if (ui.sel.kind === 'chapter' && !findOutlineChapter(ui.sel.id)) ui.sel = { kind: 'setting', id: '' };
-
   root.innerHTML = `
     <div id="novel-root" style="display:flex;flex-direction:column;height:100vh">
       ${topbar({
         left: `<button class="btn icon" data-act="novel-back" title="回工作区">${icon('back')}</button>
                <div class="brand"><span class="brand-mark"></span>
                  <span style="font-size:12.5px">小说<small>AI 写作</small></span></div>`,
-        crumbs: `${esc(state.info?.title || state.info?.name || '未命名工程')}<span class="sep">/</span>
-                 <span class="cur novel-title">${esc(selectionTitle())}</span>`,
+        crumbs: `<span id="novel-crumb">${crumbHTML()}</span>`,
         stateText: ui.busy || '',
         right: topRightHTML(),
       })}
@@ -1425,7 +1922,7 @@ export async function renderNovel(root, target) {
         ${ctxHTML()}
         <section class="editor">
           <div id="novel-main" style="display:flex;flex-direction:column;min-height:0;flex:1;overflow:hidden">
-            ${checkBannerHTML()}${mainHTML()}
+            ${emptyGuideHTML()}${checkBannerHTML()}${mainHTML()}
           </div>
         </section>
         <aside class="studio-right"></aside>
@@ -1434,10 +1931,96 @@ export async function renderNovel(root, target) {
 
   if (!bound) root.addEventListener('click', onClick);
   bound = true;
+  // 各数据块并发拉取，谁先返回谁先渲染
+  startBoot(path);
+  syncChapterEntry();
   // 初始若停在大纲章，异步补正文、草稿与配音预检
   if (ui.sel.kind === 'chapter') {
     loadBody(ui.sel.id);
     loadPlan(ui.sel.id);
+  }
+}
+
+/** 启动阶段各数据块对应的接口（章节只请求一次，后续复用缓存） */
+const BOOT_REQUESTS = {
+  info: (path) => getJSON('/api/project/info', { path }),
+  chapters: (path) => getJSON('/api/ui/chapters', { path }),
+  setting: (path) => getJSON('/api/ui/setting', { path }),
+  worlds: (path) => getJSON('/api/ui/worlds', { path }),
+  outline: (path) => getJSON('/api/ui/outline', { path }),
+};
+
+/**
+ * 把某个数据块的结果写入缓存。
+ * @param {'info'|'chapters'|'setting'|'worlds'|'outline'} key 数据块
+ * @param {any} data 接口返回
+ */
+function applyBootData(key, data) {
+  if (key === 'info') {
+    state.info = data || null;
+  } else if (key === 'chapters') {
+    cache.chapters = Array.isArray(data) ? data : [];
+    state.chapters = cache.chapters;
+  } else if (key === 'setting') {
+    cache.setting = data || {};
+  } else if (key === 'worlds') {
+    cache.worlds = data?.worlds || [];
+  } else if (key === 'outline') {
+    cache.outline = data || { acts: [] };
+  }
+}
+
+/**
+ * 单个数据块：独立请求、独立加载态，返回后立刻局部重画。
+ * @param {'info'|'chapters'|'setting'|'worlds'|'outline'} key 数据块
+ * @param {string} path 工程目录
+ * @param {number} seq 启动批次，用于丢弃过期响应
+ * @param {{ silent?: boolean }} [options] silent 表示已有缓存的后台刷新，不闪骨架
+ */
+async function bootBlock(key, path, seq, options = {}) {
+  const silent = Boolean(options.silent);
+  if (!silent) {
+    boot.state[key] = 'loading';
+    delete boot.errors[key];
+  }
+  if (seq === boot.seq) paint();
+  try {
+    const data = await BOOT_REQUESTS[key](path);
+    if (seq !== boot.seq) return;
+    applyBootData(key, data);
+    boot.state[key] = 'ok';
+    delete boot.errors[key];
+  } catch (error) {
+    if (seq !== boot.seq) return;
+    // 空工程允许设定 / 世界 / 大纲文件不存在：按空数据处理，不报阻断
+    if (error?.status === 404 && key !== 'chapters' && key !== 'info') {
+      applyBootData(key, null);
+      boot.state[key] = 'ok';
+    } else if (silent) {
+      // 后台刷新失败时保留旧数据，不让界面突然变成错误页
+      boot.state[key] = 'ok';
+    } else {
+      boot.state[key] = 'error';
+      boot.errors[key] = error?.message || '读取失败';
+    }
+  }
+  if (seq === boot.seq) paint();
+}
+
+/**
+ * 并行启动所有数据块；同一工程再次进入时保留旧数据并后台静默刷新。
+ * @param {string} path 工程目录
+ */
+function startBoot(path) {
+  const warm = boot.path === path;
+  if (!warm) {
+    boot.path = path;
+    for (const key of Object.keys(BOOT_REQUESTS)) boot.state[key] = 'idle';
+    boot.errors = {};
+  }
+  const seq = ++boot.seq;
+  for (const key of Object.keys(BOOT_REQUESTS)) {
+    bootBlock(key, path, seq, { silent: warm && boot.state[key] === 'ok' });
   }
 }
 
@@ -1447,10 +2030,20 @@ async function onClick(event) {
   const el = event.target.closest('[data-act]');
   if (!el) return;
   const act = el.dataset.act;
+  if (act === 'boot-retry') {
+    // 只重试这一块，不影响其它已在途 / 已完成的区块
+    const key = el.dataset.key;
+    if (key && BOOT_REQUESTS[key]) {
+      el.disabled = true;
+      bootBlock(key, cache.path, boot.seq);
+    }
+    return;
+  }
   if (act === 'novel-back') return goProjects();
   if (act === 'novel-refresh') {
     try {
       await loadAll(cache.path);
+      bootBlock('info', cache.path, boot.seq);
       paint();
       toast('已刷新', 'ok', 1200);
     } catch (error) {
@@ -1462,6 +2055,14 @@ async function onClick(event) {
     ui.sel = { kind: 'setting', id: '' };
     ui.draftWorld = false;
     return paint();
+  }
+  if (act === 'novel-start') {
+    // 「从写小说开始」：回到写作设定并把光标放进第一个字段
+    ui.sel = { kind: 'setting', id: '' };
+    ui.draftWorld = false;
+    paint();
+    document.getElementById('ns-logline')?.focus();
+    return;
   }
   if (act === 'novel-sel-world') {
     ui.sel = { kind: 'world', id: el.dataset.id };

@@ -676,7 +676,7 @@ function connectionHTML() {
               </label>
             </div>
             <div class="field"><label>思考强度</label>
-              <select class="select" id="conn-llm-effort" ${llm.thinking_enabled ? '' : 'disabled'}
+              <select class="select" id="conn-llm-effort" data-enum="thinking_effort" ${llm.thinking_enabled ? '' : 'disabled'}
                 title="关闭思考时不可用；开启后随请求的 reasoning_effort 下发">
                 <option value="low" ${llm.thinking_effort === 'low' ? 'selected' : ''}>低（更快、更省）</option>
                 <option value="medium" ${llm.thinking_effort !== 'low' && llm.thinking_effort !== 'high' ? 'selected' : ''}>中（默认）</option>

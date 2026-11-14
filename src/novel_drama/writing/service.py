@@ -1112,7 +1112,16 @@ def suggest_script(
             if not text or on_progress is None:
                 return
             state["chars"] += len(str(text))
-            on_progress({"type": "chars", "chars": state["chars"], "index": index, "total": rounds})
+            state["tail"] = (str(state.get("tail") or "") + str(text))[-200:]
+            on_progress(
+                {
+                    "type": "chars",
+                    "chars": state["chars"],
+                    "sample": state["tail"],
+                    "index": index,
+                    "total": rounds,
+                }
+            )
 
         try:
             result = _generate_text(adapter, request, on_delta if on_progress else None)
@@ -1826,11 +1835,21 @@ def _char_delta(state: dict, on_progress, index: int, total: int):
     """
 
     def on_delta(text):
-        """累计增量并上报 chars 事件。"""
+        """累计增量并上报 chars 事件（附带一小段最新原文，供界面显示实时输出）。"""
         if not text:
             return
         state["chars"] = int(state.get("chars") or 0) + len(str(text))
-        _progress(on_progress, {"type": "chars", "chars": state["chars"], "batch": index, "total": total})
+        state["tail"] = (str(state.get("tail") or "") + str(text))[-200:]
+        _progress(
+            on_progress,
+            {
+                "type": "chars",
+                "chars": state["chars"],
+                "sample": state["tail"],
+                "batch": index,
+                "total": total,
+            },
+        )
 
     return on_delta
 
@@ -2082,6 +2101,7 @@ def _bible_digest(bible: dict) -> dict:
         "theme": premise.get("theme"),
         "core_conflict": premise.get("core_conflict"),
         "target_length": premise.get("target_length"),
+        "target_words": premise.get("target_words"),
         "era": world.get("era"),
         "tone": style.get("tone"),
         "pov": style.get("pov"),
@@ -2344,7 +2364,7 @@ def generate_worlds(
     }
 
 
-def generate_settings(store: ProjectStore, config: AppConfig, step: str, overwrite: bool = False, brief: str | None = None) -> dict:
+def generate_settings(store: ProjectStore, config: AppConfig, step: str, overwrite: bool = False, brief: str | None = None, seed: int | None = None) -> dict:
     """生成世界 / 梗概 / 文风设定（只返回结果，不写盘）。
 
     参数:
@@ -2353,6 +2373,7 @@ def generate_settings(store: ProjectStore, config: AppConfig, step: str, overwri
         step: world|premise|style。
         overwrite: True 时用生成值整体替换该分区；False 时保留已有非空值并记入 skipped。
         brief: 可选的用户补充要求（拼进提示词与请求元信息）。
+        seed: 显式固定随机种子；None 表示每次由服务端随机采样（默认）。
 
     返回:
         {"step", "fields", "skipped"}。
@@ -2383,6 +2404,17 @@ def generate_settings(store: ProjectStore, config: AppConfig, step: str, overwri
     world_items = world_store.list_worlds() if world_store.exists() else []
     context = _project_context(work, context_bible, None, world_items)
     prompt = f"{context}\n\n任务：{ask}" if context else ask
+    metadata = {
+        "step": step,
+        "work": {"title": work.get("title"), "author": work.get("author"), "genre": work.get("genre") or []},
+        "existing": _bible_digest(bible),
+        "target_length": target_length,
+        "brief": brief_text,
+        "work_id": work.get("id"),
+    }
+    # 只有用户显式固定种子时才下发，默认交给服务端随机采样（同一设定重复生成应有差异）
+    if seed is not None:
+        metadata["extra_body"] = {"seed": int(seed)}
     req = TextGenRequest(
         task="setting",
         system="你是中文小说的设定编辑，设定必须与给定的作品信息一致，只按工具参数输出，不要解释。",
@@ -2390,14 +2422,7 @@ def generate_settings(store: ProjectStore, config: AppConfig, step: str, overwri
         stream=True,
         temperature=0.7,
         max_tokens=_tool_max_tokens(config, step, 1),
-        metadata={
-            "step": step,
-            "work": {"title": work.get("title"), "author": work.get("author"), "genre": work.get("genre") or []},
-            "existing": _bible_digest(bible),
-            "target_length": target_length,
-            "brief": brief_text,
-            "seed": work.get("id"),
-        },
+        metadata=metadata,
     )
     payload = _generate_json(adapter, req, step)
     if isinstance(payload.get(step), dict):
@@ -2902,6 +2927,8 @@ def generate_section(
     section: str,
     brief: str | None = None,
     target_id: str | None = None,
+    seed: int | None = None,
+    overwrite: bool = True,
 ) -> dict:
     """一次生成一个区块的全部字段（梗概 / 文风 / 单条世界 / 单个人物）。
 
@@ -2911,6 +2938,8 @@ def generate_section(
         section: premise|style|world|character。
         brief: 用户补充要求。
         target_id: world 用世界 ID、character 用角色 ID；命中时作为改写上下文。
+        seed: 显式固定随机种子；None 表示每次随机采样。
+        overwrite: True 时重新生成并覆盖已有字段；False 时保留已有非空值（只补缺失）。
 
     返回:
         {"section", "fields", "target_id"?}；world/character 的 fields 为完整条目。
@@ -2925,7 +2954,9 @@ def generate_section(
     settings_store = SettingsStore(store.root)
     bible = settings_store.load_or_none() or {}
     if key in ("premise", "style"):
-        result = generate_settings(store, config, key, brief=brief)
+        # overwrite=True（重新生成）时关闭「只补缺失」，已有字段也会被新结果覆盖；
+        # overwrite=False（只补缺失）时保留已有非空值，模型只补空缺。
+        result = generate_settings(store, config, key, overwrite=overwrite, brief=brief, seed=seed)
         return {
             "section": key,
             "fields": _section_fields(key, result.get("fields") or {}, bible),

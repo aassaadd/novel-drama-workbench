@@ -525,11 +525,15 @@ async function rerunRecordLine(lineId) {
   paintView();
   toast('正在重录这一行，可以继续浏览', 'info');
   try {
-    const result = await postJSON('/api/ui/line/rerun', {
-      path: state.path,
-      chapter: state.chapterId,
-      line: lineId,
-    });
+    const result = await postJSON(
+      '/api/ui/line/rerun',
+      {
+        path: state.path,
+        chapter: state.chapterId,
+        line: lineId,
+      },
+      { timeout: 0 }
+    );
     timelineCache = { chapter: '', data: null };
     toast(`已重录 r${result?.revision ?? '?'}，旧版本仍可试听`, 'ok');
   } catch (error) {
@@ -1163,6 +1167,7 @@ function postTrackHTML(track, total) {
         </div>
         <div class="post-vol-row" title="轨道音量（-24dB ~ +6dB）">
           <input class="post-vol" type="range" min="-24" max="6" step="1" value="${volume}"
+            aria-label="轨道音量：${esc(track.name || TRACK_LABEL[kind] || kind)}"
             data-vact="post-volume" data-track="${esc(key)}" />
           <span class="mono vol-val">${volume > 0 ? '+' : ''}${volume}dB</span>
         </div>

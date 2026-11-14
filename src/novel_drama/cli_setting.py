@@ -36,9 +36,11 @@ SCALAR_FIELDS = {
 # `setting apply` / `setting generate` 各分区允许写入的字段
 SECTION_FIELDS = {
     "world": ("era", "rules", "factions", "locations", "glossary"),
-    "premise": ("logline", "theme", "core_conflict", "ending_intent", "target_audience", "target_length"),
+    "premise": ("logline", "theme", "core_conflict", "ending_intent", "target_audience", "target_length", "target_words"),
     "style": ("tone", "pov", "tense", "prose_style", "forbidden", "visual_style"),
 }
+#: 整数型分区字段：写入前转 int，避免存成字符串
+INT_FIELDS = {"target_words"}
 
 
 def _as_str_list(rows) -> list[str]:
@@ -152,7 +154,15 @@ def _merge_section(bible: dict, section: str, fields: dict) -> list[str]:
             if key not in fields:
                 continue
             value = fields.get(key)
-            target[key] = _as_str_list(value) if key == "forbidden" else str(value or "").strip()
+            if key in INT_FIELDS:
+                # 目标总字数：空值或 0 都表示不约束，统一存 int
+                try:
+                    number = int(value or 0)
+                except (TypeError, ValueError) as error:
+                    raise ValueError(f"{key} 必须是整数") from error
+                target[key] = max(0, number)
+            else:
+                target[key] = _as_str_list(value) if key == "forbidden" else str(value or "").strip()
             changed.append(key)
 
     if not changed:
@@ -398,10 +408,25 @@ def cmd_setting(args, config: AppConfig) -> int:
                 section,
                 brief=getattr(args, "brief", None),
                 target_id=getattr(args, "target_id", None),
+                seed=getattr(args, "seed", None),
+                overwrite=not bool(getattr(args, "keep_existing", False)),
             )
             fields = result["fields"] or {}
             head = "[dry-run] " if getattr(args, "dry_run", False) else ""
-            _emit(args, f"{head}已生成 {section} 区块：{len(fields)} 个字段", {"section": result["section"], "fields": fields})
+            kept = result.get("skipped") or []
+            text = f"{head}已生成 {section} 区块：{len(fields)} 个字段"
+            if kept:
+                text += f"（保留已有：{'、'.join(kept)}）"
+            _emit(
+                args,
+                text,
+                {
+                    "section": result["section"],
+                    "fields": fields,
+                    "skipped": kept,
+                    "overwrite": not bool(getattr(args, "keep_existing", False)),
+                },
+            )
             return 0
 
         step = getattr(args, "step", None)
@@ -413,6 +438,7 @@ def cmd_setting(args, config: AppConfig) -> int:
             step,
             overwrite=bool(getattr(args, "overwrite", False)),
             brief=getattr(args, "brief", None),
+            seed=getattr(args, "seed", None),
         )
         label = {"world": "世界设定", "premise": "故事梗概", "style": "文风"}[step]
         applied = False

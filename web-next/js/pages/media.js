@@ -2,10 +2,13 @@
  * 素材视图（V5）：按音效 / 配图 / 视频 / BGM 浏览本章已有素材。
  * 支持生成本章待生成素材（音效可逐条看进度），BGM 可手填描述或按计划生成。
  */
-import { esc, icon, toast, fmtDuration, openMenu } from '../dom.js';
+import { esc, icon, toast, fmtDuration, openDialog, closeDialog } from '../dom.js';
 import { getJSON, postJSON, fileUrl } from '../api.js';
+import { labelOf } from '../enums.js';
+import { openProgress } from '../progress.js';
+import { modeSwitchHTML, bindModeSwitch, getGenMode } from '../gen-mode.js';
 import { state, resetProject } from '../store.js';
-import { railbar, topbar, chapterCtx, goChapter, goProjects } from '../shell.js';
+import { railbar, topbar, chapterCtx, goChapter, goProjects, emptyProjectHTML } from '../shell.js';
 
 const TABS = [
   ['sfx', '音效'],
@@ -181,13 +184,14 @@ function bgmHTML() {
         }</span></div>
       </div>
       <div class="card-body">
+        ${modeSwitchHTML('media.bgm', { fallback: 'fill' })}
         <div style="display:grid;grid-template-columns:2fr 120px 140px;gap:10px">
           <div class="field"><label>关联计划</label>
             <select class="select" id="bgm-plan"><option value="">不关联（手填描述）</option>${planOptions}</select></div>
           <div class="field"><label>时长（秒）</label>
             <input class="input" id="bgm-duration" type="number" min="5" max="300" value="40" /></div>
           <div class="field"><label>用途</label>
-            <select class="select" id="bgm-mode"><option value="auto">自动判断</option>${modeOptions}</select></div>
+            <select class="select" id="bgm-mode" data-enum="bgm_mode" title="音乐用途，只能从列表选择"><option value="auto">自动判断</option>${modeOptions}</select></div>
         </div>
         <div class="field" style="margin-top:8px"><label>音乐描述（中文，留空时用计划里的英文提示）</label>
           <textarea class="textarea" id="bgm-prompt" rows="2"
@@ -213,7 +217,7 @@ function bgmHTML() {
             <span style="min-width:0">
               <span style="color:var(--text)">${esc(item.prompt || '(无描述)')}</span>
               <span style="display:block;color:var(--text-4);font-size:11px;margin-top:2px">
-                ${esc(item.created_at || '')} · ${esc(item.mode_label || item.mode || '')} ·
+                ${esc(item.created_at || '')} · ${esc(item.mode_label || labelOf('bgm_mode', item.mode, '未标注用途'))} ·
                 ${Number(item.duration_s || 0)}s · ${esc(item.provider || '')}
               </span>
             </span>
@@ -245,7 +249,7 @@ function bgmHTML() {
             <span style="min-width:0">${esc(cue.name || cue.id)}
               <span style="display:block;color:var(--text-4);font-size:11px;margin-top:2px">
                 ${fmtDuration(cue.start_ms)} 起 · ${cue.loop ? '循环' : '单次'} ·
-                ${esc(cue.mode || '未标注用途')}</span>
+                ${esc(labelOf('bgm_mode', cue.mode, '未标注用途'))}</span>
             </span>
             <span class="right" style="display:flex;gap:6px">
               ${
@@ -337,6 +341,21 @@ function repaint() {
   if (old) old.outerHTML = chapterCtx({ search: state.chapterSearch });
   const main = document.getElementById('media-main');
   if (main) main.innerHTML = mainHTML();
+  bindBgmMode();
+}
+
+/**
+ * BGM 表单每次重画后重新绑定生成方式（分段按钮 + 「生成 BGM」按钮文案）。
+ * 生成方式本身存在 localStorage，重画不会丢。
+ */
+function bindBgmMode() {
+  const main = document.getElementById('media-main');
+  if (!main) return;
+  bindModeSwitch(main, 'media.bgm', {
+    fallback: 'fill',
+    action: main.querySelector('[data-act="bgm-generate"]'),
+    labels: { fill: '补缺失', regen: '重新生成' },
+  });
 }
 
 /** 读取本章素材与 BGM（BGM 失败不阻断素材浏览） */
@@ -360,6 +379,34 @@ async function loadBgm() {
 }
 
 /**
+ * 「生成本章X」前的确认弹窗：先选生成方式（只补缺失 / 重新生成），再提交。
+ * @param {string} kind sfx / image / video
+ * @param {HTMLElement} button 入口按钮（用于忙碌态与结束后恢复文案）
+ */
+function openRunKindDialog(kind, button) {
+  const label = TAB_LABEL[kind] || kind;
+  const key = `media.${kind}`;
+  const mask = openDialog({
+    title: `生成本章${label}`,
+    body: `${modeSwitchHTML(key, { fallback: 'fill' })}
+      <div class="dlg-note">只补缺失=只生成待生成 / 失败的条目；重新生成=覆盖本章同类型全部条目。</div>`,
+    foot: `<div class="right"><button class="btn" data-dlg-close>取消</button>
+      <button class="btn primary" id="media-run-ok">生成缺失条目</button></div>`,
+  });
+  const action = mask.querySelector('#media-run-ok');
+  const readMode = bindModeSwitch(mask, key, {
+    fallback: 'fill',
+    action,
+    labels: { fill: '生成缺失条目', regen: '重新生成全部' },
+  });
+  action.addEventListener('click', () => {
+    const mode = readMode();
+    closeDialog();
+    void runMedia(kind, mode === 'regen', button);
+  });
+}
+
+/**
  * 生成一类本章素材（音效 / 配图 / 视频）。
  * @param {string} kind sfx / image / video
  * @param {boolean} force 是否覆盖已生成条目
@@ -367,27 +414,47 @@ async function loadBgm() {
  */
 async function runMedia(kind, force, button) {
   const oldText = button.textContent;
+  const label = TAB_LABEL[kind] || kind;
   button.disabled = true;
   button.textContent = '生成中…';
+  const panel = openProgress({
+    title: `正在${force ? '重新生成' : '生成'}本章${label}…`,
+    hint: force
+      ? '忽略已有产物，覆盖本章同类型全部条目'
+      : '只生成待生成 / 失败的条目，已完成条目会跳过',
+    stage: '已提交生成请求，等待本机模型返回…',
+  });
+  panel.update({ percent: null });
   try {
-    const result = await postJSON('/api/ui/media/run', {
-      path: state.path,
-      chapter: state.chapterId,
-      kind,
-      force,
-    });
-    const made = (result?.generated || []).length || result?.count || 0;
-    toast(
-      `${force ? '已重新生成' : '已生成'}本章${TAB_LABEL[kind]}${made ? ` ${made} 条` : ''}，列表已刷新`,
-      'ok',
-      4200
+    const result = await postJSON(
+      '/api/ui/media/run',
+      {
+        path: state.path,
+        chapter: state.chapterId,
+        kind,
+        force,
+      },
+      { timeout: 0 }
     );
+    const made = (result?.generated || []).length || result?.count || 0;
     await loadChapter(state.path, state.chapterId);
     repaint();
+    const message = `${force ? '已重新生成' : '已生成'}本章${label}${made ? ` ${made} 条` : ''}`;
+    panel.note(`${made} 条 · ${label}`);
+    panel.finish({
+      message,
+      detail: '素材列表已刷新，可在本页逐条试听或查看。',
+      actions: [{ label: '查看列表', primary: true, onClick: () => repaint() }],
+    });
+    toast(`${message}，列表已刷新`, 'ok', 4200);
   } catch (error) {
     toast(error.message, 'bad', 5200);
     button.disabled = false;
     button.textContent = oldText;
+    panel.fail({
+      message: `${label}生成失败：${error.message}`,
+      retry: () => void runMedia(kind, force, button),
+    });
   }
 }
 
@@ -399,8 +466,16 @@ async function generateSfx(button) {
   const id = button.dataset.id;
   if (!id) return;
   const oldText = button.textContent;
+  const rowTitle =
+    button.closest('.summary-line')?.querySelector('span[style*="color:var(--text)"]')?.textContent?.trim() || '';
   button.disabled = true;
   button.textContent = '排队…';
+  const panel = openProgress({
+    title: '正在生成单条音效…',
+    hint: rowTitle || '按这一条的描述调用本机音效模型',
+    stage: '任务已排队，等待开始…',
+  });
+  panel.update({ percent: 0 });
   try {
     const { job_id: jobId } = await postJSON('/api/ui/sfx/generate', {
       path: state.path,
@@ -411,32 +486,54 @@ async function generateSfx(button) {
       await new Promise((resolve) => window.setTimeout(resolve, 1500));
       const job = await getJSON('/api/ui/sfx/job', { job_id: jobId });
       if (job.status === 'done') {
-        toast('这段音效已生成', 'ok');
         await loadChapter(state.path, state.chapterId);
         repaint();
+        panel.finish({
+          message: '这段音效已生成',
+          detail: rowTitle ? `条目：${rowTitle}` : '',
+          actions: [{ label: '查看列表', primary: true, onClick: () => repaint() }],
+        });
+        toast('这段音效已生成', 'ok');
         return;
       }
       if (job.status === 'failed') {
         throw new Error(job.error?.message || '音效生成失败');
       }
-      button.textContent = `${Number(job.percent || 0)}%`;
+      const percent = Number(job.percent || 0);
+      button.textContent = `${percent}%`;
+      panel.update({
+        stage: `正在生成${rowTitle ? `「${rowTitle}」` : ''}…`,
+        percent,
+        current: job.stage || job.message || `${percent}%`,
+      });
     }
     throw new Error('生成超时，请稍后点「刷新」查看结果');
   } catch (error) {
     toast(error.message, 'bad', 5200);
     button.disabled = false;
     button.textContent = oldText;
+    panel.fail({ message: `音效生成失败：${error.message}`, retry: () => void generateSfx(button) });
   }
 }
 
 /** 生成 BGM 并刷新记录 */
 async function generateBgm(button) {
+  const genMode = getGenMode('media.bgm', 'fill');
   const planId = document.getElementById('bgm-plan')?.value || '';
   const prompt = document.getElementById('bgm-prompt')?.value.trim() || '';
   const promptEn = document.getElementById('bgm-prompt-en')?.value.trim() || '';
   const duration = Number(document.getElementById('bgm-duration')?.value || 0);
   const mode = document.getElementById('bgm-mode')?.value || 'auto';
   const hint = document.getElementById('bgm-hint');
+  // 只补缺失：本章已有记录且用户没改提示词时不重复生成，避免误覆盖
+  const records = bgm?.records || [];
+  if (genMode === 'fill' && records.length > 0 && !prompt && !promptEn) {
+    return toast(
+      `本章已有 ${records.length} 条 BGM 记录，未重新生成；要再生成请选「重新生成」`,
+      'info',
+      5000
+    );
+  }
   if (!planId && !promptEn) {
     return toast('不选计划时请填英文提示词（本地模型只认英文提示）', 'warn', 4600);
   }
@@ -444,30 +541,44 @@ async function generateBgm(button) {
   const oldText = button.textContent;
   button.textContent = '生成中…';
   if (hint) hint.textContent = '正在生成，本地模型通常需要几十秒…';
+  const panel = openProgress({
+    title: genMode === 'regen' ? '正在重新生成 BGM…' : '正在生成 BGM…',
+    hint: prompt || promptEn || '按 BGM 计划生成音乐',
+    stage: '已提交生成请求，等待本机音乐模型返回…',
+  });
+  panel.update({ percent: null });
   try {
-    const result = await postJSON('/api/ui/bgm/generate', {
-      path: state.path,
-      chapter: state.chapterId,
-      prompt,
-      prompt_en: promptEn || undefined,
-      duration: duration || undefined,
-      mode,
-      plan_id: planId || undefined,
-    });
-    toast(
-      `已生成 ${Number(result?.duration_s || 0)}s BGM${
-        result?.auto_switched ? '（超过本地时长上限，已自动改用 ACE-Step）' : ''
-      }`,
-      'ok',
-      4600
+    const result = await postJSON(
+      '/api/ui/bgm/generate',
+      {
+        path: state.path,
+        chapter: state.chapterId,
+        prompt,
+        prompt_en: promptEn || undefined,
+        duration: duration || undefined,
+        mode,
+        plan_id: planId || undefined,
+      },
+      { timeout: 0 }
     );
     await loadBgm();
     repaint();
+    const message = `已生成 ${Number(result?.duration_s || 0)}s BGM${
+      result?.auto_switched ? '（超过本地时长上限，已自动改用 ACE-Step）' : ''
+    }`;
+    panel.note(message);
+    panel.finish({
+      message,
+      detail: '生成记录已刷新，可在本页试听或插入 cue。',
+      actions: [{ label: '查看记录', primary: true, onClick: () => repaint() }],
+    });
+    toast(message, 'ok', 4600);
   } catch (error) {
     toast(error.message, 'bad', 5200);
     if (hint) hint.textContent = error.message;
     button.disabled = false;
     button.textContent = oldText;
+    panel.fail({ message: `BGM 生成失败：${error.message}`, retry: () => void generateBgm(button) });
   }
 }
 
@@ -526,15 +637,7 @@ async function onRootClick(event) {
     return;
   }
   if (act === 'run-kind') {
-    const kind = tab;
-    return openMenu(
-      button,
-      [
-        { key: 'missing', label: `只生成待生成 / 失败的${TAB_LABEL[kind]}` },
-        { key: 'force', label: `强制重新生成本章全部${TAB_LABEL[kind]}` },
-      ],
-      (key) => void runMedia(kind, key === 'force', button)
-    );
+    return openRunKindDialog(tab, button);
   }
   if (act === 'sfx-generate') return void generateSfx(button);
   if (act === 'bgm-generate') return void generateBgm(button);
@@ -605,7 +708,21 @@ export async function renderMedia(root, { path }) {
       state.chapterId = state.chapters[0]?.id || '';
     }
     if (!state.chapterId) {
-      root.innerHTML = `<div class="page"><div class="empty">${icon('warn', 22)}<b>这个工程还没有章节</b></div></div>`;
+      // 空工程：保留素材页骨架，主区引导先去小说视图起稿或导入正文
+      root.innerHTML = `
+        ${topbar({
+          left: `<button class="btn icon" data-act="back" title="回工作区">${icon('back')}</button>
+                 <div class="brand"><span class="brand-mark"></span><span style="font-size:12.5px">素材<small>本地版</small></span></div>`,
+          crumbs: `<a href="#/projects">${esc(state.info?.work?.title || '工程')}</a>
+                   <span class="sep">/</span><span class="cur">素材</span>`,
+          right: '',
+        })}
+        <div class="studio" id="studio">
+          ${railbar('media', { chapters: 0 })}
+          ${chapterCtx({ search: state.chapterSearch })}
+          <section class="editor"><div class="page" style="overflow:auto">${emptyProjectHTML(path)}</div></section>
+          <aside class="studio-right"></aside>
+        </div>`;
       return;
     }
     await loadChapter(path, state.chapterId);
@@ -630,4 +747,5 @@ export async function renderMedia(root, { path }) {
       </section>
       <aside class="studio-right"></aside>
     </div>`;
+  bindBgmMode();
 }

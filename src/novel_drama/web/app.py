@@ -3084,6 +3084,15 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
                 argv += ["--brief", str(body["brief"])]
             if body.get("target_id"):
                 argv += ["--target-id", str(body["target_id"])]
+            # overwrite=false 表示「只补缺失」：保留已有字段，只生成空缺
+            if body.get("overwrite") is False:
+                argv.append("--keep-existing")
+            # 显式固定种子才传；缺省不固定，保证同一设定重复生成结果不同
+            if body.get("seed") is not None and str(body.get("seed")).strip() != "":
+                try:
+                    argv += ["--seed", str(int(body["seed"]))]
+                except (TypeError, ValueError):
+                    raise HTTPException(status_code=400, detail={"code": 2, "message": "seed 必须是整数"})
             return _respond_business(_cli(*argv))
         step = str(body.get("step") or "").strip()
         if step not in ("world", "premise", "style"):
@@ -3383,7 +3392,7 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         """启动一键补齐全部音色（扫描 → 复用绑定 → 缺失生成）。
 
         参数:
-            body: `{path, count?}`。
+            body: `{path, count?, overwrite?}`；overwrite=true 时已有音色也重新生成并覆盖。
 
         返回:
             `{job}`。
@@ -3391,7 +3400,12 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         from ..tts import voice_fill
 
         try:
-            job = voice_fill.start_job(_store(body.get("path")), _tts_config(), body.get("count"))
+            job = voice_fill.start_job(
+                _store(body.get("path")),
+                _tts_config(),
+                body.get("count"),
+                overwrite=bool(body.get("overwrite")),
+            )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail={"code": 2, "message": str(exc)}) from exc
         return {"job": job}

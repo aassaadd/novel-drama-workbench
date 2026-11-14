@@ -11,6 +11,7 @@ import {
   chapterCtx,
   goChapter,
   goProjects,
+  emptyProjectHTML,
   openSwitchProject,
 } from '../shell.js';
 
@@ -233,11 +234,16 @@ async function exportBundle(ignoreIssues = false) {
         return;
       }
     }
-    const result = await postJSON('/api/ui/export/bundle', {
-      path: state.path,
-      chapter: state.chapterId,
-      ignore_issues: ignoreIssues,
-    });
+    // 打包可能涉及转码，耗时较长：不设前端超时
+    const result = await postJSON(
+      '/api/ui/export/bundle',
+      {
+        path: state.path,
+        chapter: state.chapterId,
+        ignore_issues: ignoreIssues,
+      },
+      { timeout: 0 }
+    );
     lastResult = result;
     toast('交付包已生成', 'ok');
     const files = await loadFiles();
@@ -257,10 +263,14 @@ async function exportJianying() {
   exporting = 'jianying';
   repaint([]);
   try {
-    const result = await postJSON('/api/ui/export/jianying', {
-      path: state.path,
-      chapter: state.chapterId,
-    });
+    const result = await postJSON(
+      '/api/ui/export/jianying',
+      {
+        path: state.path,
+        chapter: state.chapterId,
+      },
+      { timeout: 0 }
+    );
     const zipPath = result?.zip || '';
     lastResult = zipPath ? { name: String(zipPath).split('/').pop(), rel: String(zipPath).split('/exports/').pop() } : null;
     if (lastResult && String(zipPath).includes('/exports/')) {
@@ -333,7 +343,20 @@ export async function renderExport(root, { path, chapterId }) {
       ? chapterId
       : state.chapters[0]?.id || '';
     if (!state.chapterId) {
-      root.innerHTML = `<div class="page"><div class="empty">${icon('warn', 22)}<b>这个工程还没有章节</b></div></div>`;
+      // 空工程：导出页保留导航骨架，主区引导先起稿或导入正文
+      root.innerHTML = `
+        ${topbar({
+          left: `<button class="btn icon" data-act="back" title="回工程列表">${icon('back')}</button>
+                 <div class="brand"><span class="brand-mark"></span><span style="font-size:12.5px">导出<small>本地版 · NEW</small></span></div>`,
+          crumbs: `<a href="#/projects">${esc(state.info?.work?.title || '工程')}</a>
+                   <span class="sep">/</span><span class="cur">导出</span>`,
+          right: '',
+        })}
+        <div class="studio no-right">
+          ${railbar('export', { chapters: 0 })}
+          ${chapterCtx({ search: state.chapterSearch })}
+          <div class="page" style="min-width:0;overflow:auto">${emptyProjectHTML(path)}</div>
+        </div>`;
       return;
     }
     const [payload, files, check] = await Promise.all([

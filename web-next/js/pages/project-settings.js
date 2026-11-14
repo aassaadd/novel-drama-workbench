@@ -4,6 +4,7 @@
  */
 import { esc, icon, toast } from '../dom.js';
 import { getJSON, postJSON } from '../api.js';
+import { selectHTML, labelOf } from '../enums.js';
 import { state, resetProject } from '../store.js';
 import { railbar, topbar, goChapter, goProjects } from '../shell.js';
 
@@ -84,10 +85,6 @@ function productionHTML() {
         </div>
       </div>`
   ).join('');
-  const options = (values, current, unit) =>
-    values
-      .map((item) => `<option value="${item}" ${Number(current) === Number(item) ? 'selected' : ''}>${item}${unit}</option>`)
-      .join('');
   return `
     <div class="card" style="margin-top:14px">
       <div class="card-head"><span class="ct">制作要求（当前工程）</span>
@@ -101,17 +98,23 @@ function productionHTML() {
           <h4>音频格式参数</h4>
           <div class="prod-grid">
             <div class="field prod-field"><label>音频格式</label>
-              <select class="select" data-prod-audio="format" title="交付包音频格式">
-                ${['mp3', 'wav', 'm4a']
-                  .map((item) => `<option value="${item}" ${audio.format === item ? 'selected' : ''}>${item}</option>`)
-                  .join('')}
-              </select></div>
+              ${selectHTML('export_format', {
+                current: audio.format || 'mp3',
+                attrs: 'data-prod-audio="format"',
+                title: '交付包音频格式，只能从列表选择',
+              })}</div>
             <div class="field prod-field"><label>采样率</label>
-              <select class="select" data-prod-audio="sample_rate" title="导出与混音采样率">
-                ${options([44100, 48000], audio.sample_rate || 48000, 'hz')}</select></div>
+              ${selectHTML('sample_rate', {
+                current: String(audio.sample_rate || 48000),
+                attrs: 'data-prod-audio="sample_rate"',
+                title: '导出与混音采样率，只能从列表选择',
+              })}</div>
             <div class="field prod-field"><label>目标码率</label>
-              <select class="select" data-prod-audio="bitrate_kbps" title="有损格式的目标码率；wav 忽略">
-                ${options([192, 256], audio.bitrate_kbps || 192, 'kbps')}</select></div>
+              ${selectHTML('bitrate', {
+                current: String(audio.bitrate_kbps || 192),
+                attrs: 'data-prod-audio="bitrate_kbps"',
+                title: '有损格式的目标码率；wav 忽略，只能从列表选择',
+              })}</div>
           </div>
         </div>
         <div class="hint" style="margin-top:12px">改动静音间隔后，已有时间轴需重建一次才会生效；新导出的交付包立即使用新的音频参数。</div>
@@ -128,16 +131,16 @@ function projectInfoHTML(item) {
       <div class="card-body">
         <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px">
           <div class="field"><label>书名</label>
-            <input class="input" id="set-title" value="${esc(item.title || '')}" title="作品名，显示在顶栏与工程列表" /></div>
+            <input class="input" data-free="1" id="set-title" value="${esc(item.title || '')}" title="作品名，显示在顶栏与工程列表" /></div>
           <div class="field"><label>作者</label>
-            <input class="input" id="set-author" value="${esc(item.author || '')}" placeholder="未填写"
+            <input class="input" data-free="1" id="set-author" value="${esc(item.author || '')}" placeholder="未填写"
               title="作者署名，可留空" /></div>
-          <div class="field" style="grid-column:1/-1"><label>题材（逗号分隔）</label>
-            <input class="input" id="set-genres" value="${esc((item.genres || []).join('，'))}" placeholder="例如：悬疑，都市"
-              title="题材关键词，多个用逗号分隔" /></div>
+          <div class="field" style="grid-column:1/-1"><label>题材（逗号分隔，自由填写）</label>
+            <input class="input" data-free="1" id="set-genres" value="${esc((item.genres || []).join('，'))}" placeholder="例如：悬疑，都市"
+              title="题材关键词，多个用逗号分隔；这不是枚举，可自由填写" /></div>
           <div class="field"><label>语言</label>
             <div class="input" style="display:flex;align-items:center;color:var(--text-3)"
-              title="语言在导入阶段确定，本地版暂不支持在这里修改">${esc(item.language || 'zh-CN')}</div></div>
+              title="语言在导入阶段确定，本地版暂不支持在这里修改">${esc(labelOf('language', item.language, '简体中文'))}</div></div>
           <div class="field"><label>目标时长</label>
             <div class="input" style="display:flex;align-items:center;color:var(--text-3)"
               title="目标时长在导入阶段确定，本地版暂不支持在这里修改">${durationText(item.target_duration_ms)}</div></div>

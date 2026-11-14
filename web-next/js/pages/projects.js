@@ -5,7 +5,7 @@
 import { esc, icon, toast, openDialog, closeDialog, fmtBytes } from '../dom.js';
 import { getJSON, postJSON } from '../api.js';
 import { state, lastProject, rememberProject, forgetProject } from '../store.js';
-import { goChapter } from '../shell.js';
+import { goChapter, openImportDialog } from '../shell.js';
 
 /** 标题前两个字，作为无封面工程的视觉标识 */
 function glyphOf(title) {
@@ -142,63 +142,15 @@ function confirmDelete(item) {
   });
 }
 
-/** 导入正文：选文件或直接粘贴，按标题切章 */
+/** 导入正文：共用 shell 里的导入弹窗，导入后刷新列表卡片 */
 function openImport(item) {
-  const mask = openDialog({
-    title: '导入正文',
-    body: `
-      <div class="field"><label>选择 txt / md 文件</label>
-        <input type="file" id="imp-file" accept=".txt,.md,text/plain,text/markdown" /></div>
-      <div class="field"><label>标题匹配规则</label>
-        <input class="input" id="imp-pattern" value="^#{1,3}\\s+(.+)$" /></div>
-      <div class="field"><label>重复章节</label>
-        <select class="select" id="imp-dup">
-          <option value="skip">跳过（默认）</option>
-          <option value="replace">覆盖正文</option>
-          <option value="new">再建一份</option>
-        </select></div>
-      <div class="field"><label>正文（选文件后自动填入，可直接编辑）</label>
-        <textarea class="textarea" id="imp-text" rows="8" placeholder="粘贴正文，或用上面的文件选择"></textarea></div>
-      <div class="hint">导入会按标题切章写入章节文件；纯文本无标题时整篇作为一章。</div>`,
-    foot: `<div class="right"><button class="btn" data-dlg-close>取消</button>
-      <button class="btn primary" id="imp-ok">开始导入</button></div>`,
-  });
-  mask.querySelector('#imp-file').addEventListener('change', async (event) => {
-    const file = event.target.files?.[0];
-    if (!file) return;
-    try {
-      mask.querySelector('#imp-text').value = await file.text();
-    } catch (error) {
-      toast(`读取失败：${error.message}`, 'bad');
-    }
-  });
-  mask.querySelector('#imp-ok').addEventListener('click', async (event) => {
-    const text = mask.querySelector('#imp-text').value;
-    if (!text.trim()) return toast('正文为空', 'warn');
-    event.currentTarget.disabled = true;
-    event.currentTarget.textContent = '导入中…';
-    try {
-      const result = await postJSON('/api/ui/chapter/import', {
-        path: item.path,
-        text,
-        pattern: mask.querySelector('#imp-pattern').value.trim(),
-        on_duplicate: mask.querySelector('#imp-dup').value,
-      });
-      closeDialog();
-      const created = result?.created ?? result?.imported ?? result?.chapters?.length ?? 0;
-      toast(created ? `已导入 ${created} 章` : '导入完成', 'ok');
+  openImportDialog({
+    path: item.path,
+    title: item.title || '',
+    onDone: async () => {
       await loadProjects();
       paintList();
-      const chapters = await getJSON('/api/project/chapters', { path: item.path }).catch(() => []);
-      if (chapters?.length) {
-        rememberProject(item.path);
-        goChapter(item.path, chapters[0].id);
-      }
-    } catch (error) {
-      toast(`导入失败：${error.message}`, 'bad');
-      event.currentTarget.disabled = false;
-      event.currentTarget.textContent = '开始导入';
-    }
+    },
   });
 }
 
@@ -233,14 +185,58 @@ function openDuplicate(item) {
 
 /** 拉取工程列表（含章节/字数/占用）；后发请求覆盖先发，避免旧响应盖掉新数据 */
 let projectsSeq = 0;
-async function loadProjects() {
+/** 同一时刻只保留一个在途请求，重复调用复用同一个 Promise */
+let projectsInFlight = null;
+function loadProjects() {
+  if (projectsInFlight) return projectsInFlight;
   const seq = ++projectsSeq;
-  const list = await getJSON('/api/ui/projects/overview');
-  // 已有更新的请求在途/已返回：丢弃这次的旧响应
-  if (seq !== projectsSeq) return false;
-  state.projects = list || [];
-  state.projectInfos = {};
-  return true;
+  const task = getJSON('/api/ui/projects/overview')
+    .then((list) => {
+      // 已有更新的请求在途/已返回：丢弃这次的旧响应
+      if (seq !== projectsSeq) return false;
+      state.projects = list || [];
+      state.projectInfos = {};
+      return true;
+    })
+    .finally(() => {
+      if (projectsInFlight === task) projectsInFlight = null;
+    });
+  projectsInFlight = task;
+  return task;
+}
+
+/**
+ * 列表骨架卡：首屏先占位，数据到达后原地替换，不整屏转圈。
+ * @param {number} count 骨架数量
+ * @returns {string} HTML
+ */
+function skeletonCards(count = 4) {
+  return Array.from({ length: count })
+    .map(
+      () => `
+    <article class="proj-card skel-card" aria-hidden="true">
+      <div class="skel skel-cover"></div>
+      <div class="pc-body">
+        <div class="skel skel-line" style="width:58%"></div>
+        <div class="skel skel-line" style="width:82%"></div>
+        <div class="skel skel-line" style="width:44%"></div>
+      </div>
+    </article>`
+    )
+    .join('');
+}
+
+/**
+ * 列表读取失败：在列表区直接给中文原因与重试，不只弹一个会消失的提示。
+ * @param {string} message 失败原因
+ * @returns {string} HTML
+ */
+function projectsErrorHTML(message) {
+  return `<div class="boot-block bad" role="alert">
+    <div class="bb-head">${icon('warn', 16)}<b>工程列表读取失败</b></div>
+    <div class="hint">${esc(message || '未知原因，请稍后重试')}</div>
+    <button class="btn sm" data-act="retry-projects">重新读取工程列表</button>
+  </div>`;
 }
 
 /** 首页筛选：状态（按配音完成度）/ 编辑时间 / 关键词，均为本地真实数据 */
@@ -406,13 +402,21 @@ function homeNavHTML(scope) {
 export async function renderProjects(root, target = {}) {
   const scope = target.scope === 'all' ? 'all' : 'home';
   pageScope = scope;
+  const heading = scope === 'all' ? '项目' : '最近项目';
+  // 外壳与骨架立即可见：数据回来前不空屏，也不用整屏 loading
   root.innerHTML = `
     <div class="home-layout">
       ${homeNavHTML(scope)}
       <div class="home-main">
         ${renderShell()}
         <main class="page" id="projects-main">
-          <div class="empty">${icon('refresh', 20)}<span>正在读取本机工程…</span></div>
+          <div class="page-head">
+            <div class="ph">
+              <h1 class="page-title">${heading}</h1>
+              <div class="page-sub" id="proj-sub">正在读取本机工程…</div>
+            </div>
+          </div>
+          <div class="cards" id="proj-cards" aria-busy="true">${skeletonCards(4)}</div>
         </main>
       </div>
     </div>`;
@@ -420,7 +424,18 @@ export async function renderProjects(root, target = {}) {
   try {
     fresh = await loadProjects();
   } catch (error) {
-    toast(error.message, 'bad');
+    const failed = root.querySelector('#projects-main');
+    if (!failed) return;
+    failed.innerHTML = `
+      <div class="page-head">
+        <div class="ph"><h1 class="page-title">${heading}</h1></div>
+      </div>
+      ${projectsErrorHTML(error.message)}`;
+    failed.querySelector('[data-act="retry-projects"]')?.addEventListener('click', (event) => {
+      event.currentTarget.disabled = true;
+      renderProjects(root, target);
+    });
+    return;
   }
   const main = root.querySelector('#projects-main');
   // 期间又触发了新的列表渲染：这次结果作废，避免旧数据盖掉新页面
@@ -497,9 +512,10 @@ export async function renderProjects(root, target = {}) {
         getJSON('/api/project/chapters', { path: item.path })
           .then((chapters) => {
             if (chapters && chapters.length) goChapter(item.path, chapters[0].id);
-            else toast('这个工程还没有章节，先导入正文', 'warn');
+            // 空工程不是错误：直接进小说视图，由首屏引导「从写小说开始 / 导入已有正文」
+            else location.hash = `#/p/${encodeURIComponent(item.path)}/novel`;
           })
-          .catch((error) => toast(error.message, 'bad'));
+          .catch((error) => toast(`打开失败：${error.message}`, 'bad'));
         return;
       }
       if (action === 'settings') {
@@ -555,9 +571,9 @@ export async function renderProjects(root, target = {}) {
     getJSON('/api/project/chapters', { path: last })
       .then((chapters) => {
         if (chapters && chapters.length) goChapter(last, chapters[0].id);
-        else toast('这个工程还没有章节，先导入正文', 'warn');
+        else location.hash = `#/p/${encodeURIComponent(last)}/novel`;
       })
-      .catch((error) => toast(error.message, 'bad'));
+      .catch((error) => toast(`打开失败：${error.message}`, 'bad'));
   });
 }
 

@@ -312,6 +312,20 @@ svg { display: block; }
 .empty .em-ico { color: var(--text-4); opacity: 0.7; }
 .empty b { color: var(--text-2); font-weight: 500; }
 
+/* 空工程引导：说明下一步，并给「从写小说开始 / 导入已有正文」两条入口 */
+.empty.project-empty { gap: 10px; padding: 56px 24px; }
+.empty.project-empty .pe-acts { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; margin-top: 4px; }
+.project-empty-banner { margin: 10px 16px 0; display: grid; grid-template-columns: auto minmax(0, 1fr);
+  align-items: center; gap: 8px;
+  background: var(--bg-2); border: 1px solid var(--line-2); color: var(--text-2); }
+.project-empty-banner .pe-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.project-empty-banner .pe-main b { color: var(--text); font-weight: 500; }
+.project-empty-banner .right { grid-column: 1 / -1; margin-left: 0; display: flex; gap: 6px;
+  flex-wrap: wrap; justify-content: flex-end; }
+/* 无章节时点「目录」：贴在顶栏下方的引导条，不跳空选择页 */
+.need-chapter-bar { position: sticky; top: 0; z-index: 35; background: var(--bg-1); padding-bottom: 10px; }
+.need-chapter-bar .project-empty-banner { margin-top: 10px; }
+
 /* ---------------- 5. 台词行 ---------------- */
 .seg-block { border-bottom: 1px solid rgba(255, 255, 255, 0.055); }
 .seg-row {
@@ -550,6 +564,14 @@ table.files .mono { font-size: 11px; color: var(--text-4); }
   border: 1px solid var(--line); border-radius: var(--radius-sm); font-size: 12px; }
 .summary-line .right { margin-left: auto; font-family: var(--mono); color: var(--text-2); }
 
+/* 统一轻提示：由 js/tooltip.js 接管全站 title / data-tip，替代原生提示 */
+.tip-bubble { position: fixed; left: 0; top: 0; z-index: 130; max-width: 280px; padding: 5px 8px;
+  border-radius: var(--radius-sm); background: var(--bg-4); border: 1px solid var(--line-3);
+  color: var(--text); font-size: 11.5px; line-height: 1.55; letter-spacing: 0.01em;
+  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.5); pointer-events: none;
+  opacity: 0; transform: translateY(2px); transition: opacity 0.12s ease, transform 0.12s ease; }
+.tip-bubble.on { opacity: 1; transform: none; }
+
 .toast-host { position: fixed; right: 18px; bottom: 18px; z-index: 120; display: flex; flex-direction: column; gap: 8px; }
 .toast { max-width: 380px; padding: 10px 13px; border-radius: var(--radius-sm);
   background: var(--bg-3); border: 1px solid var(--line-2); color: var(--text);
@@ -563,6 +585,62 @@ table.files .mono { font-size: 11px; color: var(--text-4); }
 .spin { display: inline-block; width: 12px; height: 12px; border: 2px solid rgba(232, 180, 76, 0.3);
   border-top-color: var(--accent); border-radius: 50%; animation: spin 0.8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
+
+/* AI 生成进度浮层：独立于弹窗单例，页面重渲染 / 其它弹窗都不会移除它 */
+.prog-host {
+  position: fixed; top: 56px; right: 18px; z-index: 115; width: 400px;
+  max-width: calc(100vw - 36px); max-height: calc(100vh - 80px); overflow: auto;
+  display: flex; flex-direction: column; gap: 10px; pointer-events: none;
+}
+.prog-card {
+  pointer-events: auto; display: flex; flex-direction: column; gap: 8px;
+  padding: 12px 14px; background: var(--bg-1); border: 1px solid var(--line-2);
+  border-radius: 10px; box-shadow: 0 18px 48px rgba(0, 0, 0, 0.55);
+  animation: progIn 0.16s ease;
+}
+@keyframes progIn { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: none; } }
+.prog-head { display: flex; align-items: center; gap: 8px; }
+.prog-spinner {
+  flex: 0 0 auto; width: 12px; height: 12px; border: 2px solid rgba(232, 180, 76, 0.3);
+  border-top-color: var(--accent); border-radius: 50%; animation: spin 0.8s linear infinite;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.prog-spinner.ok { width: 16px; height: 16px; border: 0; animation: none; color: var(--ok); }
+.prog-spinner.bad { width: 16px; height: 16px; border: 0; animation: none; color: var(--bad); }
+.prog-title { font-size: 12.5px; font-weight: 600; color: var(--text); min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.prog-time { margin-left: auto; font-size: 10.5px; color: var(--text-4); }
+.prog-close { flex: 0 0 auto; width: 20px; height: 20px; padding: 0; border: 0; border-radius: 4px;
+  background: transparent; color: var(--text-4); cursor: pointer; display: inline-flex;
+  align-items: center; justify-content: center; }
+.prog-close:hover { background: var(--bg-3); color: var(--text); }
+.prog-hint { font-size: 11px; color: var(--text-4); line-height: 1.55; }
+.prog-stage { font-size: 12px; color: var(--text-2); line-height: 1.5; }
+.prog-bar { height: 5px; background: #1b212a; border-radius: 99px; overflow: hidden; }
+.prog-bar > span { display: block; width: 0; height: 100%;
+  background: linear-gradient(90deg, #b8802a, var(--accent)); transition: width 0.25s ease; }
+.prog-card.indeterminate .prog-bar > span { width: 34% !important; animation: progSlide 1.1s ease-in-out infinite; }
+@keyframes progSlide { 0% { transform: translateX(-110%); } 100% { transform: translateX(320%); } }
+.prog-meta { display: flex; align-items: baseline; gap: 8px; font-size: 11px; color: var(--text-3); }
+.prog-percent { color: var(--accent); }
+.prog-current { margin-left: auto; text-align: right; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; }
+.prog-detail { font-size: 11px; color: var(--text-4); word-break: break-word; }
+.prog-live {
+  /* 只留一行灰色小字：显示模型最新输出，超长省略，不再铺一大段 */
+  margin: 0; padding: 2px 0; white-space: nowrap; overflow: hidden;
+  text-overflow: ellipsis; font-family: inherit; font-size: 11px;
+  line-height: 1.5; color: var(--text-4);
+}
+.prog-result { font-size: 12px; line-height: 1.65; padding: 8px 10px; border-radius: 6px;
+  background: var(--bg-2); border: 1px solid var(--line); color: var(--text-2);
+  display: flex; flex-direction: column; gap: 4px; }
+.prog-result.ok { border-color: rgba(79, 191, 139, 0.35); }
+.prog-result.bad { border-color: rgba(238, 107, 107, 0.42); color: #f3a1a1; }
+.prog-card.done { border-color: rgba(79, 191, 139, 0.35); }
+.prog-card.failed { border-color: rgba(238, 107, 107, 0.42); }
+.prog-actions { display: flex; /* 结束后的操作按钮统一右对齐 */ justify-content: flex-end; gap: 8px; }
+.prog-actions:empty { display: none; }
 
 /* ---------------- 11. 自适应 ---------------- */
 @media (max-width: 1439px) {
@@ -1044,3 +1122,40 @@ table.files .mono { font-size: 11px; color: var(--text-4); }
   0% { background: var(--accent-weak); }
   100% { background: transparent; }
 }
+
+/* ---------- 启动骨架 / 局部加载（首屏不挡屏，慢接口不阻塞其它区域） ---------- */
+.skel {
+  position: relative; overflow: hidden;
+  background: var(--bg-3); border-radius: 6px;
+}
+.skel::after {
+  content: ''; position: absolute; inset: 0;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.06), transparent);
+  transform: translateX(-100%); animation: skel-sweep 1.2s ease-in-out infinite;
+}
+.skel-line { display: block; height: 10px; margin: 8px 0; }
+.skel-line:first-child { margin-top: 0; }
+.skel-card { display: block; height: 120px; margin-top: 14px; }
+.skel-cover { height: 118px; border-radius: 10px 10px 0 0; }
+.skel-card .pc-body { gap: 2px; }
+@keyframes skel-sweep { 100% { transform: translateX(100%); } }
+
+.boot-block {
+  display: flex; flex-direction: column; gap: 6px;
+  margin: 14px 16px; padding: 16px 18px;
+  border: 1px solid var(--line); border-radius: 10px; background: var(--bg-1);
+}
+.boot-block.bad { border-color: rgba(238, 107, 107, 0.32); background: var(--bad-weak); }
+.boot-block .bb-head { display: flex; align-items: center; gap: 8px; color: var(--text-2); font-size: 12.5px; }
+.boot-block.bad .bb-head { color: var(--bad); }
+.boot-block .hint { font-size: 11.5px; color: var(--text-3); }
+.boot-block .btn { align-self: flex-start; margin-top: 6px; }
+
+.ctx-boot { display: flex; flex-direction: column; gap: 2px; padding: 10px 12px; }
+.ctx-boot.bad { font-size: 11px; color: var(--bad); gap: 4px; align-items: flex-start; }
+.ctx-boot.bad span { line-height: 1.5; }
+
+/* ---------- AI 生成方式：只补缺失 / 重新生成 ---------- */
+.gen-mode { display: flex; flex-direction: column; gap: 5px; margin-bottom: 10px; }
+.gen-mode .seg-chips { display: flex; gap: 6px; }
+.gen-mode .hint { font-size: 11px; color: var(--text-4); }

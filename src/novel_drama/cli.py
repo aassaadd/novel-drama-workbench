@@ -1100,6 +1100,8 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--brief", help="补充要求，如「外星世界，双恒星」")
     q.add_argument("--target-id", dest="target_id", help="world / character 区块的改写目标 ID")
     q.add_argument("--overwrite", action="store_true", help="用生成值整体替换已有内容（仅 --step 生效）")
+    q.add_argument("--seed", type=int, help="固定随机种子以便复现；缺省不固定，每次采样不同")
+    q.add_argument("--keep-existing", action="store_true", help="只补缺失：保留已有非空字段，不覆盖")
     q.add_argument("--dry-run", action="store_true", help="只预览，不落盘")
     q.set_defaults(func=cmd_setting)
     q = p_sub.add_parser("polish", help="AI 润色单个字段")

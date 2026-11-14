@@ -12,12 +12,32 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import os
+import subprocess
+import sys
 import threading
 from typing import NamedTuple
 
 #: CLI 执行串行锁。CLI 用全局 stdout/stderr 重定向捕获输出，
 #: FastAPI 同步接口跑在线程池里，并发调用会互相抢缓冲导致输出丢失（表现为空负载）。
+#: 只用于「秒级」的读写命令；生成类长命令走子进程，见 `_LONG_COMMANDS`。
 _RUN_LOCK = threading.Lock()
+
+#: 会调用模型 / 媒体生成、耗时可能以分钟计的命令。
+#: 这些命令改在独立子进程执行：既不占 `_RUN_LOCK`，也不会因为等待模型
+#: 让章节、角色等页面数据接口排队（否则切视图会一直停在「正在加载」）。
+_LONG_COMMANDS: set[tuple[str, str]] = {
+    ("setting", "generate"),
+    ("setting", "polish"),
+    ("outline", "generate"),
+    ("chapter", "generate"),
+    ("character", "generate"),
+    ("script", "suggest"),
+    ("world", "generate"),
+    ("sfx", "run"),
+    ("image", "run"),
+    ("video", "run"),
+}
 
 #: CLI 退出码 → HTTP 状态码
 EXIT_TO_STATUS: dict[int, int] = {
@@ -66,25 +86,87 @@ def run(*argv: str) -> CliResult:
     返回:
         CliResult。
     """
+    args = [str(item) for item in argv if item is not None]
+    # 生成类长命令走独立子进程：不占全局锁，页面数据请求可与生成并发
+    if _is_long_command(args):
+        return _run_process(args)
     from ..cli import main
 
     out, err = io.StringIO(), io.StringIO()
     with _RUN_LOCK:
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             try:
-                code = main([str(item) for item in argv if item is not None])
+                code = main(args)
             except SystemExit as error:
                 # argparse 参数错误会直接 SystemExit；不接住会把 500 抛给页面。
                 # 参数说明已写进 stderr（上面已重定向），这里只转成退出码。
                 code = error.code if isinstance(error.code, int) else 2
-    text = out.getvalue().strip()
+    return _parse_result(code, out.getvalue(), err.getvalue())
+
+
+def _is_long_command(args: list[str]) -> bool:
+    """判断是否属于「会等模型 / 媒体生成」的长命令。
+
+    参数:
+        args: CLI 参数列表（如 `["--project", p, "--json", "setting", "generate"]`）。
+
+    返回:
+        命中 `_LONG_COMMANDS` 时为 True。
+    """
+    for index in range(len(args) - 1):
+        if (args[index], args[index + 1]) in _LONG_COMMANDS:
+            return True
+    return False
+
+
+def _parse_result(code: int, text: str, stderr: str) -> CliResult:
+    """把退出码与输出统一整理成 `CliResult`。
+
+    参数:
+        code: 退出码。
+        text: 标准输出原文。
+        stderr: 标准错误原文。
+
+    返回:
+        CliResult；标准输出是 JSON 时解析为 payload。
+    """
+    text = text.strip()
     payload = None
     if text.startswith(("{", "[")):
         try:
             payload = json.loads(text)
         except json.JSONDecodeError:
             payload = None
-    return CliResult(code=code, payload=payload, text=text, stderr=err.getvalue().strip())
+    return CliResult(code=code, payload=payload, text=text, stderr=stderr.strip())
+
+
+def _run_process(args: list[str]) -> CliResult:
+    """在独立子进程执行一条 CLI 命令（长任务专用）。
+
+    与 `run` 的区别：不触碰 `_RUN_LOCK`，因此生成期间其它接口不会被排队；
+    生成进程独立持有自己的模型连接与内存，请求线程只等待结果。
+
+    参数:
+        args: CLI 参数列表。
+
+    返回:
+        CliResult；子进程无法启动时按任务失败返回中文原因。
+    """
+    command = [sys.executable, "-m", "novel_drama.cli", *args]
+    env = dict(os.environ)
+    env.setdefault("PYTHONIOENCODING", "utf-8")
+    try:
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=env,
+        )
+    except OSError as exc:
+        return CliResult(code=5, payload=None, text="", stderr=f"无法启动生成进程：{exc}")
+    return _parse_result(completed.returncode, completed.stdout, completed.stderr)
 
 
 def fail_body(result: CliResult) -> dict:

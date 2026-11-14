@@ -5,6 +5,9 @@
  */
 import { esc, icon, toast, openDialog, closeDialog, openMenu, fmtDuration, fmtClock, fmtBytes, impactListHTML } from '../dom.js';
 import { getJSON, postJSON, streamJSON, fileUrl } from '../api.js';
+import { ENUMS, selectHTML } from '../enums.js';
+import { openProgress, watchProgress } from '../progress.js';
+import { modeSwitchHTML, bindModeSwitch } from '../gen-mode.js';
 import {
   state,
   resetProject,
@@ -18,6 +21,7 @@ import {
   chapterCtx,
   goChapter,
   goProjects,
+  emptyProjectHTML,
   STATE_LABEL,
   stateClass,
   resplitBannerHTML,
@@ -39,20 +43,7 @@ import {
   stopAuditPlayback,
 } from './studio-views.js';
 
-const EMOTIONS = [
-  ['neutral', '平静'],
-  ['joy', '喜悦'],
-  ['sad', '悲伤'],
-  ['angry', '愤怒'],
-  ['fear', '恐惧'],
-  ['surprise', '惊讶'],
-  ['tender', '温柔'],
-  ['excited', '激动'],
-  ['whisper', '低语'],
-  ['serious', '严肃'],
-];
-
-const EMOTION_LABEL = Object.fromEntries(EMOTIONS);
+const EMOTION_LABEL = Object.fromEntries(ENUMS.emotion.options);
 
 let pollTimer = null;
 let bound = false;
@@ -225,16 +216,14 @@ function speakerOptions(currentId) {
 /** 行内编辑面板 */
 function lineEditHTML(row) {
   const drift = state.consistency?.ok === false;
-  const emotionOptions = EMOTIONS.map(
-    ([value, label]) => `<option value="${value}" ${row.emotion === value ? 'selected' : ''}>${label}</option>`
-  ).join('');
   return `
     <div class="seg-edit" data-edit-for="${esc(row.line_id)}">
       <div class="grid">
         <div class="field full"><label>台词文本</label>
-          <textarea class="textarea" id="le-text" ${drift ? 'disabled' : ''}>${esc(row.text || '')}</textarea>
+          <textarea class="textarea" data-free="1" id="le-text" ${drift ? 'disabled' : ''}>${esc(row.text || '')}</textarea>
         </div>
-        <div class="field"><label>情绪</label><select class="select" id="le-emotion">${emotionOptions}</select></div>
+        <div class="field"><label>情绪</label>
+          ${selectHTML('emotion', { id: 'le-emotion', current: row.emotion || 'neutral' })}</div>
         <div class="field"><label>强度 0–1</label>
           <input class="input" id="le-intensity" type="number" min="0" max="1" step="0.1" value="${Number(row.emotion_intensity ?? 0.5)}" />
         </div>
@@ -690,7 +679,19 @@ function pageHTML() {
             rows.length
               ? rows.map(rowHTML).join('')
               : `<div class="empty">${icon('chapter', 22)}<b>${state.lines.length ? '当前筛选下没有行' : '本章还没有台词行'}</b>
-                  <span>${state.lines.length ? '切回「全部」或清空搜索' : '在左侧目录新建章节并导入正文后，台词行会出现在这里'}</span></div>`
+                  <span>${
+                    state.lines.length
+                      ? '切回「全部」或清空搜索'
+                      : state.chapters.find((item) => item.id === state.chapterId)?.word_count
+                        ? '重新切分本章后，台词行会出现在这里'
+                        : '这一章是从大纲落地的，正文还没写：回小说视图生成或粘贴正文并保存，台词会自动切分。'
+                  }</span>
+                  ${
+                    state.lines.length || state.chapters.find((item) => item.id === state.chapterId)?.word_count
+                      ? ''
+                      : `<a class="btn primary" href="#/p/${encodeURIComponent(state.path || '')}/novel"
+                           style="margin-top:10px">${icon('book', 13)} 去小说视图写正文</a>`
+                  }</div>`
           }
         </div>
         ${timelineHTML()}
@@ -1238,7 +1239,11 @@ async function runOne(lineId) {
   state.runningLine = lineId;
   repaintRows();
   try {
-    await postJSON('/api/ui/line/rerun', { path: state.path, chapter: state.chapterId, line: lineId });
+    await postJSON(
+      '/api/ui/line/rerun',
+      { path: state.path, chapter: state.chapterId, line: lineId },
+      { timeout: 0 }
+    );
     toast('这一行已重新生成', 'ok');
   } catch (error) {
     toast(error.message, 'bad');
@@ -1271,6 +1276,7 @@ async function openSceneSplitPreview() {
     title: '拆场景预览',
     wide: true,
     body: `
+      ${modeSwitchHTML('scene.split', { fallback: 'regen' })}
       <div class="dlg-note">按地点与时间切分为 ${scenes.length} 场${
         rebuilt.length ? ` · 将覆盖 ${rebuilt.length} 个已有场景` : ''
       }</div>
@@ -1299,33 +1305,64 @@ async function openSceneSplitPreview() {
     foot: `<div class="right"><button class="btn" data-dlg-close>取消</button>
       <button class="btn primary" id="ss-ok">确认拆场景</button></div>`,
   });
-  mask.querySelector('#ss-ok').addEventListener('click', async (event) => {
-    const button = event.currentTarget;
-    button.disabled = true;
-    button.textContent = '切分中…';
-    try {
-      await postJSON('/api/ui/scene/split', {
-        path: state.path,
-        chapter: state.chapterId,
-        force: true,
-        keep_lines: true,
-      });
-      const result = await postJSON('/api/ui/line/split', {
-        path: state.path,
-        chapter: state.chapterId,
-        force: true,
-        keep_manual: true,
-      });
-      closeDialog();
-      await loadChapterState();
-      repaintPage();
-      toast(`已拆场景：${Number(result?.scenes || 0)} 个场景 / ${Number(result?.lines || 0)} 行`, 'ok');
-    } catch (error) {
-      toast(error.message, 'bad', 4000);
-      button.disabled = false;
-      button.textContent = '确认拆场景';
-    }
+  const okButton = mask.querySelector('#ss-ok');
+  // 生成方式：只补缺失（只重建变化的场景 / 新增行）或全部重切
+  const readMode = bindModeSwitch(mask, 'scene.split', {
+    fallback: 'regen',
+    action: okButton,
+    labels: { fill: '只补缺失场景', regen: '重新切分全部' },
   });
+  okButton.addEventListener('click', () => {
+    const mode = readMode();
+    closeDialog();
+    void runSceneResplit(mode);
+  });
+}
+
+/**
+ * 执行重切场景 + 重切台词（两步），进度走统一浮层。
+ * 正文未变化的场景沿用原台词与配音，保留人工改写。
+ * @param {'fill'|'regen'} [mode] fill 只重建变化的场景与新增行；regen 强制全部重切
+ */
+async function runSceneResplit(mode = 'regen') {
+  const regen = mode === 'regen';
+  const panel = openProgress({
+    title: regen ? '正在重新切分全部场景与台词…' : '正在补齐缺失的场景与台词…',
+    hint: regen
+      ? '先重切场景，再重切台词；会强制覆盖已有切分结果'
+      : '先重切场景，再重切台词；正文未变化的场景与人工改写都会保留',
+    stage: '第 1/2 步：重切场景…',
+  });
+  panel.update({ percent: 0 });
+  try {
+    await postJSON('/api/ui/scene/split', {
+      path: state.path,
+      chapter: state.chapterId,
+      force: regen,
+      keep_lines: true,
+    });
+    panel.update({ stage: '第 2/2 步：重切台词…', percent: 55 });
+    const result = await postJSON('/api/ui/line/split', {
+      path: state.path,
+      chapter: state.chapterId,
+      force: regen,
+      keep_manual: true,
+    });
+    await loadChapterState();
+    repaintPage();
+    const message = `已拆场景：${Number(result?.scenes || 0)} 个场景 / ${Number(result?.lines || 0)} 行`;
+    panel.note(message);
+    panel.finish({
+      message,
+      detail: regen
+        ? '全部场景与台词已重切，人工改写按规则保留。'
+        : '只重建了变化的场景与新增行，其余台词与配音保持不变。',
+      actions: [{ label: '查看台词', primary: true, onClick: () => repaintPage() }],
+    });
+    toast(message, 'ok');
+  } catch (error) {
+    panel.fail({ message: `拆场景失败：${error.message}`, retry: () => void runSceneResplit(mode) });
+  }
 }
 
 /** 当前章节的场景下拉选项（按台词行出现顺序编号） */
@@ -1404,29 +1441,48 @@ function openMergeNarration() {
   refresh();
   chars.addEventListener('change', refresh);
   scene.addEventListener('change', refresh);
-  mask.querySelector('#mn-ok').addEventListener('click', async (event) => {
-    const button = event.currentTarget;
-    button.disabled = true;
-    try {
-      const result = await postJSON('/api/ui/line/merge-narration', {
-        path: state.path,
-        chapter: state.chapterId,
-        max_chars: target(),
-        scene: scene.value || undefined,
-        dry_run: false,
-      });
-      closeDialog();
-      state.selected = new Set();
-      await softRefresh();
-      toast(
-        `已合并 ${Number(result?.counts?.lines_before || 0)} 段旁白为 ${Number(result?.counts?.lines_after || 0)} 段`,
-        'ok'
-      );
-    } catch (error) {
-      toast(error.message, 'bad', 4000);
-      button.disabled = false;
-    }
+  mask.querySelector('#mn-ok').addEventListener('click', () => {
+    const maxChars = target();
+    const sceneId = scene.value || undefined;
+    closeDialog();
+    void runMergeNarration(maxChars, sceneId);
   });
+}
+
+/**
+ * 执行批量合并旁白，进度走统一浮层。
+ * @param {number} maxChars 期望每段字数
+ * @param {string|undefined} sceneId 限定场景
+ */
+async function runMergeNarration(maxChars, sceneId) {
+  const panel = openProgress({
+    title: '正在合并相邻旁白…',
+    hint: `目标每段约 ${maxChars} 字${sceneId ? ' · 仅当前场景' : ' · 本章全部场景'}`,
+    stage: '正在重排旁白段落…',
+  });
+  panel.update({ percent: null });
+  try {
+    const result = await postJSON('/api/ui/line/merge-narration', {
+      path: state.path,
+      chapter: state.chapterId,
+      max_chars: maxChars,
+      scene: sceneId,
+      dry_run: false,
+    });
+    state.selected = new Set();
+    await softRefresh();
+    const message = `已合并 ${Number(result?.counts?.lines_before || 0)} 段旁白为 ${Number(
+      result?.counts?.lines_after || 0
+    )} 段`;
+    panel.finish({
+      message,
+      detail: '被合并行已有配音会失去引用（文件仍保留在磁盘）。',
+      actions: [{ label: '查看台词', primary: true, onClick: () => repaintPage() }],
+    });
+    toast(message, 'ok');
+  } catch (error) {
+    panel.fail({ message: `合并旁白失败：${error.message}`, retry: () => void runMergeNarration(maxChars, sceneId) });
+  }
 }
 
 /**
@@ -1941,6 +1997,11 @@ async function openBatchDialog(scope = 'chapter') {
       });
       closeDialog();
       toast('已开始批量配音，进度见右侧任务面板', 'ok');
+      watchProgress({
+        path: state.path,
+        title: '正在补齐缺失配音…',
+        hint: `本次 ${Number(plan.total || 0)} 行 · 跳过 ${Number(plan.skipped || 0)} 行`,
+      });
       await refreshTask();
       startPolling();
     } catch (error) {
@@ -2578,7 +2639,8 @@ function openScriptAnnotate() {
   const mask = openDialog({
     title: '导演脚本规则标注',
     wide: true,
-    body: `<div id="sa-body"><div class="empty" style="padding:18px"><span>正在读取标注…</span></div></div>`,
+    body: `<div id="sa-mode">${modeSwitchHTML('script.annotate', { fallback: 'fill' })}</div>
+      <div id="sa-body"><div class="empty" style="padding:18px"><span>正在读取标注…</span></div></div>`,
     foot: `<div class="right">
       <button class="btn" data-sa="close">关闭</button>
       <button class="btn" data-sa="refresh" title="重新读取落盘标注与告警">重新读取</button>
@@ -2586,14 +2648,20 @@ function openScriptAnnotate() {
       <button class="btn primary" data-sa="apply" title="生成标注并同步到本章场景与台词">生成并写入本章</button>
     </div>`,
   });
+  // 生成方式：只补缺失批次（resume）或重新生成全部批次
+  const readMode = bindModeSwitch(mask, 'script.annotate', {
+    fallback: 'fill',
+    action: mask.querySelector('[data-sa="preview"]'),
+    labels: { fill: '只补缺失批次', regen: '重新生成全部' },
+  });
   mask.addEventListener('click', (event) => {
     const button = event.target.closest('[data-sa]');
     if (!button) return;
     const act = button.dataset.sa;
     if (act === 'close') return closeDialog();
     if (act === 'refresh') return void loadScriptAnnotate(mask);
-    if (act === 'preview') return runScriptSuggest(mask, false);
-    if (act === 'apply') return runScriptSuggest(mask, true);
+    if (act === 'preview') return runScriptSuggest(mask, false, readMode());
+    if (act === 'apply') return runScriptSuggest(mask, true, readMode());
     if (act === 'jump') {
       const lineId = button.dataset.line;
       const scene = Number(button.dataset.scene || 0);
@@ -2712,8 +2780,10 @@ async function loadScriptAnnotate(mask) {
  * 生成标注建议（流式）。
  * @param {HTMLElement} mask 弹窗根节点
  * @param {boolean} apply true 时同步到本章（有失败批次则只落标注文本）
+ * @param {'fill'|'regen'} [mode] fill 只补缺失 / 失败批次（resume=true），regen 从头生成
  */
-async function runScriptSuggest(mask, apply) {
+async function runScriptSuggest(mask, apply, mode = 'fill') {
+  const resume = mode === 'fill';
   const progress = mask.querySelector('#sa-progress');
   const buttons = mask.querySelectorAll('[data-sa="preview"], [data-sa="apply"], [data-sa="refresh"]');
   buttons.forEach((button) => (button.disabled = true));
@@ -2721,21 +2791,89 @@ async function runScriptSuggest(mask, apply) {
     progress.innerHTML = `<div class="dlg-note">正在生成标注建议…<span id="sa-progress-text"></span></div>`;
   }
   const label = mask.querySelector('#sa-progress-text');
+  const panel = openProgress({
+    title: apply
+      ? resume
+        ? '正在补齐标注批次并写入本章…'
+        : '正在重新生成标注并写入本章…'
+      : resume
+        ? '正在补齐缺失批次的标注建议…'
+        : '正在重新生成全部标注建议…',
+    hint: resume
+      ? '只补做缺失 / 失败的镜头批次，已完成批次会跳过'
+      : '忽略已有批次，按镜头重新生成全部标注',
+    stage: '已提交生成请求，等待模型返回…',
+  });
+  panel.update({ percent: null });
+  let settled = false;
   try {
     await streamJSON(
       '/api/ui/script/suggest/stream',
-      { path: state.path, chapter: state.chapterId, apply, dry_run: !apply },
+      { path: state.path, chapter: state.chapterId, apply, dry_run: !apply, resume },
       (event, data) => {
-        if (!label) return;
+        if (!data) return;
         if (event === 'batch') {
-          label.textContent = ` 第 ${Number(data.index) + 1}/${Number(data.total)} 批（镜头 ${
-            Number(data.start) + 1
-          }–${Number(data.end)}）`;
+          const index = Number(data.index || 0);
+          const total = Number(data.total || 1) || 1;
+          const text = ` 第 ${index + 1}/${total} 批（镜头 ${Number(data.start) + 1}–${Number(data.end)}）`;
+          if (label) label.textContent = text;
+          panel.update({
+            stage: `正在标注第 ${index + 1}/${total} 批镜头…`,
+            percent: Math.round((index / total) * 100),
+            current: `镜头 ${Number(data.start) + 1}–${Number(data.end)}`,
+          });
         } else if (event === 'chars') {
-          label.textContent = ` 已接收 ${Number(data.chars || 0)} 字`;
+          const text = ` 已接收 ${Number(data.chars || 0)} 字`;
+          if (label) label.textContent = text;
+          panel.update({ current: `已接收 ${Number(data.chars || 0)} 字` });
+        } else if (event === 'done') {
+          settled = true;
+          const result = data.result || {};
+          const failures = result.failures || [];
+          panel.update({ percent: 100 });
+          // 结果摘要：优先取模型返回的标注文本开头，便于确认最近一批内容
+          const markupLine = String(result.markup || '')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .slice(0, 80);
+          panel.note(
+            markupLine || (failures.length ? `仍有 ${failures.length} 个批次失败` : '全部批次已完成')
+          );
+          panel.finish({
+            message: apply
+              ? `标注已生成并同步到本章${failures.length ? `，${failures.length} 个批次失败` : ''}`
+              : `标注建议已生成（未写盘）${failures.length ? `，${failures.length} 个批次失败` : ''}`,
+            detail: failures.length
+              ? '失败批次可用「重试失败批次」只补做失败部分。'
+              : '标注文件已更新，可在弹窗里查看告警明细。',
+            actions: [
+              {
+                label: '刷新标注',
+                primary: true,
+                onClick: () => void loadScriptAnnotate(mask),
+              },
+              ...(failures.length
+                ? [
+                    {
+                      label: '重试失败批次',
+                      onClick: () => void runScriptSuggestResume(mask, apply),
+                    },
+                  ]
+                : []),
+            ],
+          });
+        } else if (event === 'error') {
+          settled = true;
+          panel.fail({
+            message: data.message || '标注生成失败',
+            retry: () => void runScriptSuggest(mask, apply, mode),
+          });
         }
       }
     );
+    if (!settled) {
+      panel.fail({ message: '连接已中断，没有收到标注结果', retry: () => void runScriptSuggest(mask, apply, mode) });
+    }
     if (apply) {
       toast('标注已生成并同步到本章，正在刷新台词', 'ok', 3600);
       await loadChapterState();
@@ -2747,8 +2885,43 @@ async function runScriptSuggest(mask, apply) {
   } catch (error) {
     toast(error.message, 'bad', 4600);
     if (progress) progress.innerHTML = `<div class="dlg-note bad">${esc(error.message)}</div>`;
+    if (!settled) panel.fail({ message: `标注生成失败：${error.message}`, retry: () => void runScriptSuggest(mask, apply, mode) });
   } finally {
     buttons.forEach((button) => (button.disabled = false));
+  }
+}
+
+/**
+ * 只重试失败批次的标注（resume=true）。
+ * @param {HTMLElement} mask 弹窗根节点
+ * @param {boolean} apply 是否同步到本章
+ */
+async function runScriptSuggestResume(mask, apply) {
+  const panel = openProgress({
+    title: '正在重试失败批次…',
+    hint: '只补做上次失败的镜头批次，已完成批次会跳过',
+    stage: '已提交重试请求…',
+  });
+  panel.update({ percent: null });
+  try {
+    await streamJSON(
+      '/api/ui/script/suggest/stream',
+      { path: state.path, chapter: state.chapterId, apply, dry_run: !apply, resume: true },
+      (event, data) => {
+        if (event === 'done') {
+          const failures = data?.result?.failures || [];
+          panel.finish({
+            message: failures.length ? `仍有 ${failures.length} 个批次失败` : '失败批次已补齐',
+            actions: [{ label: '刷新标注', primary: true, onClick: () => void loadScriptAnnotate(mask) }],
+          });
+        } else if (event === 'error') {
+          panel.fail({ message: data?.message || '重试失败', retry: () => void runScriptSuggestResume(mask, apply) });
+        }
+      }
+    );
+    await loadScriptAnnotate(mask);
+  } catch (error) {
+    panel.fail({ message: `重试失败：${error.message}`, retry: () => void runScriptSuggestResume(mask, apply) });
   }
 }
 
@@ -2784,12 +2957,15 @@ export async function renderEditor(root, { path, chapterId, lineId = '' }) {
   try {
     await loadData(path, chapterId);
     if (!state.chapterId) {
+      // 空工程不报错、不退回列表：保留完整骨架，主区给两条起步入口
       root.innerHTML = `
-        ${topbar({ left: `<button class="btn icon" data-act="back" title="返回工作区">${icon('back')}</button>`, crumbs: '<span class="cur">工程为空</span>', right: '' })}
-        <div class="page"><div class="empty">${icon('chapter', 22)}<b>这个工程还没有章节</b>
-          <span>可以在左侧加号新建章节，或回工作区用「导入正文」切章</span>
-          <button class="btn primary" data-act="new-chapter" style="margin-top:10px">${icon('plus')} 新建章节</button>
-        </div></div>`;
+        ${topbar({ left: `<button class="btn icon" data-act="back" title="返回工作区">${icon('back')}</button>`, crumbs: '<span class="cur">还没有章节</span>', right: '' })}
+        <div class="studio" id="studio">
+          ${railbar('chapter', { chapters: 0 })}
+          ${chapterCtx({ search: state.chapterSearch })}
+          <section class="editor"><div class="page" style="overflow:auto">${emptyProjectHTML(path)}</div></section>
+          <aside class="studio-right"></aside>
+        </div>`;
       return;
     }
     await loadChapterState();

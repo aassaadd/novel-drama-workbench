@@ -6,6 +6,8 @@
  *   #/p/<encodeURIComponent(工程路径)>/c/<章节 ID>
  *   #/p/<encodeURIComponent(工程路径)>/export/<章节 ID>
  */
+// 全站统一轻提示：接管 title / data-tip，替代浏览器原生提示
+import './tooltip.js';
 import { renderProjects } from './pages/projects.js';
 import { renderEditor, leaveEditor } from './pages/editor.js';
 import { renderCharacters } from './pages/characters.js';

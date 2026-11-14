@@ -32,7 +32,13 @@
         "core_conflict": { "type": "string", "maxLength": 1000 },
         "ending_intent": { "type": "string", "maxLength": 1000, "description": "结局意图，防止续写跑偏" },
         "target_audience": { "type": "string", "maxLength": 200 },
-        "target_length": { "type": "string", "enum": ["short", "novella", "novel", "series"] }
+        "target_length": { "type": "string", "enum": ["short", "novella", "novel", "series"] },
+        "target_words": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "maximum": 5000000,
+          "description": "可选：目标总字数，只作为写作参考，与 target_length 档位相互独立"
+        }
       }
     },
     "world": {
