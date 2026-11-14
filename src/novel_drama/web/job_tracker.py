@@ -16,7 +16,6 @@ import json
 import threading
 import time
 
-from ..cancel import is_active as _cancel_active
 from ..cancel import is_requested as _cancel_requested
 from ..cancel import register as _cancel_register
 from ..cancel import release as _cancel_release
@@ -50,18 +49,6 @@ def active_jobs(kind: str = "") -> list[str]:
         return [job_id for job_id, item_kind in _ACTIVE.items() if not kind or item_kind == kind]
 
 
-def running_in_process(job_id: str) -> bool:
-    """本进程是否仍有该任务的生成线程。
-
-    参数:
-        job_id: 任务 ID。
-
-    返回:
-        True 表示能找到取消登记（任务在本进程内运行）。
-    """
-    return _cancel_active(job_id)
-
-
 def request_cancel(job_id: str) -> bool:
     """请求停止运行中的生成任务。
 
@@ -72,18 +59,6 @@ def request_cancel(job_id: str) -> bool:
         True 表示确实通知到了本进程内的生成线程；False 表示查无进程（僵尸任务）。
     """
     return _cancel_request(job_id)
-
-
-def cancel_requested(job_id: str) -> bool:
-    """任务是否已被请求停止。
-
-    参数:
-        job_id: 任务 ID。
-
-    返回:
-        True 表示用户已点过停止。
-    """
-    return _cancel_requested(job_id)
 
 
 def _file(store: ProjectStore):
