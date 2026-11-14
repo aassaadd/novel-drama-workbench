@@ -1598,11 +1598,16 @@ async function runWorldGenerate(brief, count, mode = 'fill') {
           const total = Number(data.total || 1) || 1;
           panel.update({
             stage: `正在生成第 ${index}/${total} 批世界条目…`,
-            percent: Math.round(((index - 1) / total) * 100),
+            percent: index > 1 ? Math.round(((index - 1) / total) * 100) : null,
             current: `第 ${index} / ${total} 批`,
           });
         } else if (event === 'chars') {
-          panel.update({ current: `第 ${Number(data.index || 1)} 批 · 已接收 ${Number(data.chars || 0)} 字` });
+          const index = Number(data.batch || data.index || 1);
+          const total = Number(data.total || 1) || 1;
+          panel.update({
+            percent: null,
+            current: `第 ${index}/${total} 批 · 已接收 ${Number(data.chars || 0)} 字`,
+          });
         } else if (event === 'done') {
           settled = true;
           const all = data?.result?.worlds || [];
@@ -1838,11 +1843,18 @@ async function runOutlineGenerate(body, mode = 'regen') {
         const total = Number(data.total || totalActs) || 1;
         panel.update({
           stage: `正在生成第 ${index}/${total} 幕…`,
-          percent: Math.round(((index - 1) / total) * 100),
-          current: `第 ${index} / ${total} 批`,
+          // 第一批从 0% 起步会显得卡住；未完成前展示「进行中」，批次推进后再给百分比
+          percent: index > 1 ? Math.round(((index - 1) / total) * 100) : null,
+          current: `第 ${index} / ${total} 幕`,
         });
       } else if (event === 'chars') {
-        panel.update({ current: `第 ${Number(data.index || 1)} 批 · 已接收 ${Number(data.chars || 0)} 字` });
+        const index = Number(data.batch || data.index || 1);
+        const total = Number(data.total || totalActs) || 1;
+        panel.update({
+          percent: null,
+          stage: `正在生成第 ${index}/${total} 幕…`,
+          current: `第 ${index}/${total} 幕 · 已接收 ${Number(data.chars || 0)} 字`,
+        });
       } else if (event === 'done') {
         settled = true;
         panel.update({ percent: 100 });

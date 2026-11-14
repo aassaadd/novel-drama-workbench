@@ -1144,11 +1144,16 @@ async function runCharacterGenerate(count, brief, resultHost, mode = 'fill') {
         const total = Number(data.total || 1) || 1;
         panel.update({
           stage: `正在生成第 ${index}/${total} 批角色…`,
-          percent: Math.round(((index - 1) / total) * 100),
+          percent: index > 1 ? Math.round(((index - 1) / total) * 100) : null,
           current: `第 ${index} / ${total} 批`,
         });
       } else if (event === 'chars') {
-        panel.update({ current: `第 ${Number(data.index || 1)} 批 · 已接收 ${Number(data.chars || 0)} 字` });
+        const batch = Number(data.batch || data.index || 1);
+        const total = Number(data.total || 1) || 1;
+        panel.update({
+          percent: null,
+          current: `第 ${batch}/${total} 批 · 已接收 ${Number(data.chars || 0)} 字`,
+        });
       } else if (event === 'done') {
         settled = true;
         const raw = (data.result?.characters || []).map((row) => ({ ...row }));

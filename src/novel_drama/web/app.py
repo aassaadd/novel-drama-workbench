@@ -148,11 +148,15 @@ def _cancel_produce_job(store: ProjectStore, job_id: str) -> dict:
 
     process = entry["process"]
     code = process.poll()
+    kill_error = ""
     if code is None:
         for sig in (signal.SIGTERM, signal.SIGKILL):
             try:
                 os.killpg(os.getpgid(process.pid), sig)
-            except (ProcessLookupError, PermissionError):
+            except PermissionError:
+                kill_error = f"无权限终止进程（pid {process.pid}）"
+            except ProcessLookupError:
+                # 进程刚好已退出：下一轮 poll/wait 会拿到退出码
                 pass
             try:
                 code = process.wait(timeout=5)
@@ -176,6 +180,11 @@ def _cancel_produce_job(store: ProjectStore, job_id: str) -> dict:
             produce_mod.save_run(store, run)
     except Exception:  # noqa: BLE001 - 记录收尾失败不影响任务终态
         pass
+    if code is None:
+        # 进程没在 5 秒内退出：把可读原因写进任务，状态仍落取消，避免永远占着运行中
+        reason = f"{kill_error or '编排进程未响应终止信号'}，未能在 5 秒内退出（pid {process.pid}）；任务已标记为已取消"
+        update_job(store, job_id, status="canceled", error=reason)
+        return {"canceled": True, "message": reason, "status": "canceled"}
     update_job(store, job_id, status="canceled", error=f"已手动终止编排（退出码 {code}）")
     return {"canceled": True, "message": "已终止编排进程，任务标记为已取消", "status": "canceled", "exit_code": code}
 

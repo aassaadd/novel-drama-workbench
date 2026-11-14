@@ -206,7 +206,7 @@ def generate_outline(
         )
         outline_rounds = (max(1, int(acts)) + max(1, int(acts_per_round)) - 1) // max(1, int(acts_per_round))
     else:
-        _progress(on_progress, {"type": "batch", "index": 1, "total": 1})
+        _progress(on_progress, {"type": "batch", "index": 1, "total": 1, "unit": "outline"})
         payload = _generate_json(
             adapter,
             req,
@@ -318,7 +318,7 @@ def _generate_outline_acts(
     for act_index in range(total):
         start = act_index + 1
         end = min(total, (act_index // per_round + 1) * per_round)
-        _progress(on_progress, {"type": "batch", "index": start, "total": total})
+        _progress(on_progress, {"type": "batch", "index": start, "total": total, "unit": "act"})
         lines = []
         if end > start:
             lines.append(f"请生成第 {start}–{end} 幕中的第 {start} 幕（共 {total} 幕，每幕 {chapters_per_act} 章）。")
@@ -2260,7 +2260,7 @@ def generate_worlds(
             if take <= 0:
                 break
             progress_index = index + 1
-            _progress(on_progress, {"type": "batch", "index": progress_index, "total": batches})
+            _progress(on_progress, {"type": "batch", "index": progress_index, "total": batches, "unit": "world"})
             lines = [f"本批生成 {take} 条世界（第 {index + 1}/{batches} 批）。"]
             if names:
                 lines.append("已生成世界（不要重复名称）：" + "、".join(names))
@@ -2525,7 +2525,7 @@ def generate_characters(
             if take <= 0:
                 break
             progress_index = index + 1
-            _progress(on_progress, {"type": "batch", "index": progress_index, "total": batches})
+            _progress(on_progress, {"type": "batch", "index": progress_index, "total": batches, "unit": "character"})
             lines = [f"本批生成 {take} 条人物（第 {index + 1}/{batches} 批）。"]
             if names:
                 lines.append("已生成人物（不要重复姓名）：" + "、".join(names))

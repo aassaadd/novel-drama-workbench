@@ -180,6 +180,10 @@ class UiJob:
         self.job: dict | None = None
         self._last_write = 0.0
         self._done = False
+        #: 当前批次上下文（index/total/unit/name），char 事件缺字段时沿用
+        self._batch: dict = {}
+        #: 当前批次是否已经由 chars 事件清空过百分比
+        self._batch_touched = False
 
     def _save(self, **patch) -> None:
         """把字段补丁写回任务文件。
@@ -243,13 +247,20 @@ class UiJob:
             return False
         return _cancel_requested(str(self.job.get("id") or ""))
 
-    def progress(self, current: str | None = None, percent: float | None = None, force: bool = False) -> None:
+    def progress(
+        self,
+        current: str | None = None,
+        percent: float | None = None,
+        force: bool = False,
+        clear_percent: bool = False,
+    ) -> None:
         """更新进度（默认最多每秒写一次，避免高频写盘）。
 
         参数:
             current: 当前进度文案。
-            percent: 百分比；None 表示不确定。
+            percent: 百分比；None 表示不修改。
             force: True 时忽略节流立即写入。
+            clear_percent: True 时把百分比置为「未知」，界面显示进行中而不是停在 0%。
         """
         if not self.job or self._done or self.cancel_requested():
             return
@@ -259,7 +270,9 @@ class UiJob:
         self._last_write = now
         if current is not None:
             self.job["progress"]["current"] = str(current)
-        if percent is not None:
+        if clear_percent:
+            self.job["progress"]["percent"] = None
+        elif percent is not None:
             self.job["progress"]["percent"] = max(0, min(100, round(float(percent))))
         self._save()
 
@@ -291,15 +304,28 @@ class UiJob:
             index = _num(data.get("index"))
             total = _num(data.get("total")) or 1
             name = str(data.get("name") or data.get("title") or "").strip()
-            percent = ((index - 1) / total) * 100 if total else None
-            text = f"第 {int(index)}/{int(total)} 批"
-            if name:
-                text += f" · {name}"
-            self.progress(text, percent)
+            unit = str(data.get("unit") or "").strip()
+            self._batch = {"index": index, "total": total, "unit": unit, "name": name}
+            self._batch_touched = False
+            text = _batch_text(index, total, unit, name)
+            if total > 1:
+                self.progress(text, ((index - 1) / total) * 100)
+            else:
+                # 单批任务没有「批次推进」可展示：直接显示进行中，字数由 chars 事件累加
+                self.progress(text or None, clear_percent=True)
         elif kind == "chars":
             chars = _num(data.get("chars"))
+            batch = self._batch or {}
+            index = _num(data.get("index") or data.get("batch") or batch.get("index"))
+            total = _num(data.get("total") or batch.get("total")) or 1
+            unit = str(data.get("unit") or batch.get("unit") or "").strip()
             if chars:
-                self.progress(f"已接收 {int(chars)} 字")
+                head = _batch_text(index, total, unit)
+                text = f"{head} · 已接收 {int(chars)} 字" if head else f"已接收 {int(chars)} 字"
+                # 当前批还没结束：百分比停在批首（常见 0%），改为「进行中」并持续累加字数
+                force = not self._batch_touched
+                self._batch_touched = True
+                self.progress(text, force=force, clear_percent=True)
         elif kind == "item":
             name = str(data.get("name") or "").strip()
             status = str(data.get("status") or "").strip()
@@ -307,6 +333,7 @@ class UiJob:
                 self.progress(f"{name}{' · 已完成' if status == 'done' else ''}", force=status == "done")
         elif kind == "stage":
             stage = str(data.get("stage") or data.get("message") or "").strip()
+            stage = {"acts": "规划幕结构", "chapters": "补全章节", "beats": "补齐节拍"}.get(stage, stage)
             if stage:
                 self.progress(stage, force=True)
         elif kind == "plan":
@@ -381,3 +408,26 @@ def _num(value) -> float:
         return float(value or 0)
     except (TypeError, ValueError):
         return 0
+
+
+#: 批次单位中文名（空单位按「批」展示）
+_BATCH_UNIT = {"act": "幕", "chapter": "章", "outline": "", "world": "个世界", "character": "个角色"}
+
+
+def _batch_text(index: float, total: float, unit: str, name: str = "") -> str:
+    """把批次上下文格式化成「第 1/10 幕 · 幕名」。
+
+    参数:
+        index: 当前批次序号（从 1 开始）。
+        total: 批次总数。
+        unit: 批次单位（act/chapter/world/character/outline，空串按「批」）。
+        name: 批次名称（幕名 / 角色名等，可空）。
+
+    返回:
+        中文进度前缀；无法定位批次时返回空串。
+    """
+    label = _BATCH_UNIT.get(unit, "批")
+    head = f"第 {int(index)}/{int(total)} {label}" if total > 1 else ""
+    if name:
+        head = f"{head} · {name}" if head else name
+    return head
