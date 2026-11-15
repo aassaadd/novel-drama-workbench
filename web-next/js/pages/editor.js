@@ -5,7 +5,7 @@
  */
 import { esc, icon, toast, openDialog, closeDialog, openMenu, fmtDuration, fmtClock, fmtBytes, impactListHTML, reuseListHTML } from '../dom.js';
 import { getJSON, postJSON, streamJSON, fileUrl } from '../api.js';
-import { ENUMS, selectHTML } from '../enums.js';
+import { labelOf, selectHTML } from '../enums.js';
 import { openProgress, watchProgress } from '../progress.js';
 import { confirmLlm, llmErrorText } from '../llm.js';
 import { modeSwitchHTML, bindModeSwitch } from '../gen-mode.js';
@@ -23,7 +23,7 @@ import {
   goChapter,
   goProjects,
   emptyProjectHTML,
-  STATE_LABEL,
+  stateLabel,
   stateClass,
   resplitBannerHTML,
   onResplit,
@@ -44,7 +44,14 @@ import {
   stopAuditPlayback,
 } from './studio-views.js';
 
-const EMOTION_LABEL = Object.fromEntries(ENUMS.emotion.options);
+/**
+ * 情绪中文名：未识别的值显示中文兜底并打日志，不裸露英文。
+ * @param {string} value 情绪枚举值
+ * @returns {string} 中文标签
+ */
+function emotionLabel(value) {
+  return labelOf('emotion', value, '平静');
+}
 
 let pollTimer = null;
 let bound = false;
@@ -154,7 +161,7 @@ function rowHTML(row) {
   if (row.kind === 'narration') tags.push('<span class="stag">旁白</span>');
   if (row.kind === 'inner_monologue') tags.push('<span class="stag">内心</span>');
   if (row.emotion && row.emotion !== 'neutral') {
-    tags.push(`<span class="stag em">${esc(EMOTION_LABEL[row.emotion] || row.emotion)}</span>`);
+    tags.push(`<span class="stag em">${esc(emotionLabel(row.emotion))}</span>`);
   }
   if (Number(row.pause_after_ms) > 400) {
     tags.push(`<span class="stag cue">停顿 ${Math.round(Number(row.pause_after_ms))}ms</span>`);
@@ -184,7 +191,7 @@ function rowHTML(row) {
         </div>
         <div class="seg-text">${tags.join('')}${esc(row.text || '')}</div>
         <div class="seg-act">
-          <span class="st-row ${stateClass(row.state)}">${STATE_LABEL[row.state] || row.state}</span>
+          <span class="st-row ${stateClass(row.state)}">${esc(stateLabel(row.state))}</span>
           <button class="btn icon" data-act="line-menu" title="更多">${icon('more', 14)}</button>
         </div>
       </div>
@@ -885,7 +892,7 @@ function patchLineRow(row) {
   const badge = node.querySelector('.st-row');
   if (badge) {
     badge.className = `st-row ${stateClass(row.state)}`;
-    badge.textContent = STATE_LABEL[row.state] || row.state;
+    badge.textContent = stateLabel(row.state);
   }
   const text = node.querySelector('.seg-text');
   if (text) {
@@ -893,7 +900,7 @@ function patchLineRow(row) {
     if (row.kind === 'narration') tags.push('<span class="stag">旁白</span>');
     if (row.kind === 'inner_monologue') tags.push('<span class="stag">内心</span>');
     if (row.emotion && row.emotion !== 'neutral') {
-      tags.push(`<span class="stag em">${esc(EMOTION_LABEL[row.emotion] || row.emotion)}</span>`);
+      tags.push(`<span class="stag em">${esc(emotionLabel(row.emotion))}</span>`);
     }
     if (Number(row.pause_after_ms) > 400) {
       tags.push(`<span class="stag cue">停顿 ${Math.round(Number(row.pause_after_ms))}ms</span>`);
@@ -1666,7 +1673,7 @@ function confirmMergeSelected() {
     body: `<div class="dlg-note">将把选中的 ${rows.length} 行合并为一行，文本取正文里首行开头到末行结尾的原文片段。
       ${lost ? `被合并行里有 ${lost} 条已生成配音，会失去引用（文件仍保留在磁盘，可在版本记录里找回）。` : ''}</div>
       <div class="summary-line"><span>合并后说话人 / 情绪</span>
-        <span class="right">${esc(rows[0].speaker || '')} · ${esc(EMOTION_LABEL[rows[0].emotion] || rows[0].emotion || '平静')}</span></div>
+        <span class="right">${esc(rows[0].speaker || '')} · ${esc(emotionLabel(rows[0].emotion))}</span></div>
       <div class="summary-line"><span>合并后文本</span>
         <span class="right" style="max-width:62%;text-align:right">${esc(rows.map((row) => row.text || '').join(' ').slice(0, 120))}</span></div>`,
     foot: `<div class="right"><button class="btn" data-dlg-close>取消</button>

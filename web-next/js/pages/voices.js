@@ -4,13 +4,12 @@
  */
 import { esc, icon, toast, openDialog, fmtDuration } from '../dom.js';
 import { getJSON, postJSON } from '../api.js';
+import { labelOf } from '../enums.js';
 import { openProgress } from '../progress.js';
 import { confirmLlm, llmErrorText } from '../llm.js';
 import { modeSwitchHTML, bindModeSwitch } from '../gen-mode.js';
 import { state, resetProject } from '../store.js';
 import { railbar, topbar, goChapter, goProjects, emptyProjectHTML, checkConsistency, resplitBannerHTML, onResplit } from '../shell.js';
-
-const GENDER_LABEL = { male: '男声', female: '女声', unknown: '中性', other: '其他' };
 
 let characters = [];
 let voices = [];
@@ -128,7 +127,7 @@ function voiceCard(voice) {
         <div style="min-width:0">
           <div style="font-size:13px;color:var(--text);font-weight:600">${esc(voice.name || '未命名音色')}</div>
           <div style="font-size:11px;color:var(--text-4)">
-            ${esc(GENDER_LABEL[voice.gender] || '未指定')} ·
+            ${esc(labelOf('voice_gender', voice.gender, '未指定'))} ·
             ${variant?.reference?.duration_ms ? fmtDuration(variant.reference.duration_ms) : '无参考音'} ·
             已用于 ${used} 个角色
           </div>
@@ -160,7 +159,7 @@ function builtinRows() {
       (item) => `
       <div class="summary-line" data-builtin="${esc(item.key)}">
         <span>${esc(item.name)} <span style="color:var(--text-4);font-size:11px">${
-          GENDER_LABEL[item.gender] || ''
+          labelOf('voice_gender', item.gender, '未指定')
         } · ${item.duration_ms ? fmtDuration(item.duration_ms) : ''}</span></span>
         <span class="right" style="display:flex;gap:6px;align-items:center">
           <span class="badge ${item.present ? 'ok' : 'mute'}"
@@ -219,7 +218,7 @@ function mainHTML() {
             ${['all', 'male', 'female', 'unknown']
               .map(
                 (key) => `<button class="chip sm ${genderFilter === key ? 'on' : ''}" data-gender="${key}"
-                  title="按性别筛选音色池">${key === 'all' ? '全部' : GENDER_LABEL[key]}<span class="n">${genderCounts[key]}</span></button>`
+                  title="按性别筛选音色池">${key === 'all' ? '全部' : esc(labelOf('voice_gender', key, '其他'))}<span class="n">${genderCounts[key]}</span></button>`
               )
               .join('')}
           </div>
@@ -307,7 +306,7 @@ function openCompare() {
       (voice, index) => `
       <div class="summary-line" data-compare-row="${esc(voice.id)}">
         <span>候选 ${index + 1}：${esc(voice.name)} <span style="color:var(--text-4);font-size:11px">${
-          GENDER_LABEL[voice.gender] || ''
+          labelOf('voice_gender', voice.gender, '未指定')
         }</span></span>
         <span class="right"><button class="btn sm" data-act="play-candidate" data-candidate="${esc(voice.id)}">试听</button></span>
       </div>`
@@ -332,14 +331,6 @@ let designTimer = null;
 let designPanel = null;
 
 /** 候选批次状态文案 */
-const DESIGN_STATUS = {
-  running: '生成中',
-  ready: '已完成',
-  partial: '部分完成',
-  failed: '失败',
-  stopped: '已停止',
-};
-
 /**
  * 打开音色设计：按角色档案生成音色描述 → 抽卡候选 → 试听 → 采用并绑定。
  * 接口：preview / batches / batches/{id} / audio / select / retry / cancel / history。
@@ -435,7 +426,7 @@ function openVoiceDesign() {
     if (designPanel) {
       if (running) {
         designPanel.update({
-          stage: `${DESIGN_STATUS[meta.status] || '生成中'} ${done}/${total}`,
+          stage: `${labelOf('voice_design_status', meta.status, '生成中')} ${done}/${total}`,
           percent: total ? Math.round((done / total) * 100) : null,
           current: meta.current_index ? `正在生成第 ${meta.current_index} 个候选` : '候选中…',
         });
@@ -468,14 +459,14 @@ function openVoiceDesign() {
       return;
     }
     if (hintNode) {
-      hintNode.textContent = `${DESIGN_STATUS[meta.status] || meta.status || ''} ${done}/${total}${
+      hintNode.textContent = `${labelOf('voice_design_status', meta.status, '生成中')} ${done}/${total}${
         meta.current_index ? ` · 正在生成第 ${meta.current_index} 个` : ''
       }`;
     }
     resultHost.innerHTML = `
       <div class="summary-line"><span>批次 ${esc(batchId)}</span>
         <span class="right badge ${meta.status === 'ready' ? 'ok' : meta.status === 'failed' ? 'bad' : 'warn'}">
-          ${esc(DESIGN_STATUS[meta.status] || meta.status || '')}</span></div>
+          ${esc(labelOf('voice_design_status', meta.status, '生成中'))}</span></div>
       <div class="bar" style="margin:6px 0 10px"><span style="width:${
         total ? Math.round((done / total) * 100) : 0
       }%"></span></div>
@@ -715,7 +706,7 @@ function openVoiceDesign() {
                 <span style="min-width:0">${esc(batch.created_at || '')}
                   <span class="badge ${
                     batch.status === 'ready' ? 'ok' : batch.status === 'failed' ? 'bad' : 'mute'
-                  }" style="margin-left:6px">${esc(DESIGN_STATUS[batch.status] || batch.status || '')}</span>
+                  }" style="margin-left:6px">${esc(labelOf('voice_design_status', batch.status, '生成中'))}</span>
                   <span style="font-size:11px;color:var(--text-4);display:block;margin-top:2px">
                     ${Number(batch.done || 0)}/${Number(batch.total || 0)} 候选${
                       batch.adopted ? ' · 已采用' : ''

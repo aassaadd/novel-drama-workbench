@@ -21,6 +21,7 @@ import { renderLogs, leaveLogs } from './pages/logs.js';
 import { renderProjectSettings } from './pages/project-settings.js';
 import { renderExport, leaveExport } from './pages/export.js';
 import { decodePath } from './shell.js';
+import { bindEnumWarnings } from './enums.js';
 import { loadUIPrefs } from './store.js';
 
 const root = document.getElementById('app');
@@ -128,6 +129,7 @@ async function route() {
 window.addEventListener('hashchange', route);
 // 启动前恢复全局界面偏好（与工程无关，供画本编辑直接使用）
 loadUIPrefs();
+bindEnumWarnings();
 // 首次启动：没有 hash 时落到工程列表
 if (!location.hash) location.hash = '#/projects';
 else route();

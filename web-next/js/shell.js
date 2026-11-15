@@ -4,6 +4,7 @@
  */
 import { esc, icon, openDialog, closeDialog, charCount, toast, openMenu } from './dom.js';
 import { getJSON, postJSON, fileUrl } from './api.js';
+import { labelOf } from './enums.js';
 import { state, lastProject, rememberProject } from './store.js';
 
 /** 章节状态 → 目录圆环颜色 */
@@ -14,14 +15,10 @@ export function chapterDot(chapter) {
   return 'ok';
 }
 
-/** 行状态 → 中文标签 */
-export const STATE_LABEL = {
-  ready: '已配',
-  pending: '待配',
-  stale: '已过期',
-  failed: '失败',
-  unknown: '未识别',
-};
+/** 行状态 → 中文标签（唯一来源见 enums.js，未识别的值不会裸露英文） */
+export function stateLabel(name) {
+  return labelOf('line_state', name, '状态未知');
+}
 
 /** 行状态 → 徽标语义色 */
 export function stateClass(name) {
@@ -543,7 +540,7 @@ function chapterOf(chapterId) {
 
 /** 章节状态中文名 */
 function chapterStatusLabel(status) {
-  return { draft: '草稿', split: '已切分', ready: '已配音' }[status] || '未开始';
+  return labelOf('chapter_status', status, '未开始');
 }
 
 /** 绝对路径转工程内相对路径 */
@@ -876,9 +873,6 @@ document.addEventListener('change', (event) => {
 /** 全局搜索运行时：计时器、请求序号、可键盘选择的结果行、当前高亮 */
 const globalSearch = { timer: null, seq: 0, rows: [], active: -1, scope: 'all' };
 
-/** 台词行状态 → 中文标签 */
-const GS_STATE_LABEL = { ready: '已配', pending: '待配', stale: '已过期', failed: '失败', unknown: '未识别' };
-
 /**
  * 打开全局搜索（⌘/Ctrl + K）。
  * 跨工程搜索章节标题、正文与台词行；选中后直达章节或具体台词行。
@@ -1034,9 +1028,7 @@ function renderGlobalResults(data) {
             <span class="gs-text">${esc(item.text)}</span>
             <span class="gs-snippet">${esc(item.chapter_title || '')}${item.scene_title ? ` · ${esc(item.scene_title)}` : ''}</span>
           </span>
-          <span class="badge ${item.state === 'failed' ? 'bad' : item.state === 'stale' ? 'warn' : 'mute'}">${
-            GS_STATE_LABEL[item.state] || esc(item.state)
-          }</span>
+          <span class="badge ${stateClass(item.state) || 'mute'}">${esc(stateLabel(item.state))}</span>
         </button>`;
       }
     }

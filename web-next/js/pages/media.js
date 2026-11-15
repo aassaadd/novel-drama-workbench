@@ -4,27 +4,14 @@
  */
 import { esc, icon, toast, fmtDuration, openDialog, closeDialog } from '../dom.js';
 import { getJSON, postJSON, fileUrl } from '../api.js';
-import { labelOf } from '../enums.js';
+import { labelOf, ENUMS } from '../enums.js';
 import { openProgress } from '../progress.js';
 import { confirmLlm, llmErrorText } from '../llm.js';
 import { modeSwitchHTML, bindModeSwitch, getGenMode } from '../gen-mode.js';
 import { state, resetProject } from '../store.js';
 import { railbar, topbar, chapterCtx, goChapter, goProjects, emptyProjectHTML } from '../shell.js';
 
-const TABS = [
-  ['sfx', '音效'],
-  ['image', '配图'],
-  ['video', '视频'],
-  ['bgm', 'BGM'],
-];
-
-const STATUS_LABEL = {
-  ready: '已生成',
-  pending: '待生成',
-  running: '生成中',
-  failed: '失败',
-  stale: '已过期',
-};
+const TABS = ENUMS.media_tab.options.map(([value]) => value);
 
 let payload = { sfx: [], image: [], video: [] };
 /** 章节 BGM 数据（cue / 生成记录 / 计划 / 档位） */
@@ -35,8 +22,6 @@ let keyword = '';
 /** 浏览形态：list 列表 / grid 网格（参考素材库右上角切换） */
 let layout = 'list';
 let bound = false;
-
-const TAB_LABEL = { sfx: '音效', image: '配图', video: '视频', bgm: 'BGM' };
 
 /** 当前 tab 的条目 */
 function rowsOf() {
@@ -101,7 +86,7 @@ function rowHTML(item) {
       </span>
       <span class="right" style="display:flex;gap:6px;align-items:center;flex:0 0 auto">
         ${mismatch}
-        <span class="badge ${badgeClass(item.status)}">${esc(STATUS_LABEL[item.status] || item.status)}</span>
+        <span class="badge ${badgeClass(item.status)}">${esc(labelOf('asset_status', item.status, '状态未知'))}</span>
         ${actions.join('')}
       </span>
     </div>`;
@@ -125,7 +110,7 @@ function cardHTML(item) {
       <div style="font-size:12px;color:var(--text);min-height:32px">${esc(item.prompt || '(无提示词)')}</div>
       <div style="font-size:10.5px;color:var(--text-4)">${esc(metaOf(item))}</div>
       <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
-        <span class="badge ${badgeClass(item.status)}">${esc(STATUS_LABEL[item.status] || item.status)}</span>
+        <span class="badge ${badgeClass(item.status)}">${esc(labelOf('asset_status', item.status, '状态未知'))}</span>
         ${
           ready && tab === 'sfx'
             ? `<button class="btn sm" data-act="play" data-asset="${esc(item.asset_id)}" title="试听这段音效">试听</button>`
@@ -273,8 +258,8 @@ function bodyHTML() {
   const rows = visibleRows();
   if (!rows.length) {
     return rowsOf().length === 0
-      ? `<div class="empty"><b>本章还没有${TAB_LABEL[tab]}</b><span>切分台词后，${TAB_LABEL[tab]}会按场景出现在这里</span></div>`
-      : `<div class="empty"><b>没有匹配的${TAB_LABEL[tab]}</b><span>换个筛选条件或搜索词</span></div>`;
+      ? `<div class="empty"><b>本章还没有${labelOf('media_tab', tab, '素材')}</b><span>切分台词后，${labelOf('media_tab', tab, '素材')}会按场景出现在这里</span></div>`
+      : `<div class="empty"><b>没有匹配的${labelOf('media_tab', tab, '素材')}</b><span>换个筛选条件或搜索词</span></div>`;
   }
   return layout === 'grid'
     ? `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:10px">${rows
@@ -287,7 +272,7 @@ function bodyHTML() {
 function mainHTML() {
   const chapter = state.chapters.find((item) => item.id === state.chapterId);
   const counts = Object.fromEntries(
-    TABS.map(([key]) => [key, key === 'bgm' ? (bgm?.records || []).length : (payload[key] || []).length])
+    TABS.map((key) => [key, key === 'bgm' ? (bgm?.records || []).length : (payload[key] || []).length])
   );
   const statusCounts = { all: rowsOf().length };
   for (const key of ['ready', 'pending', 'running', 'failed', 'stale']) {
@@ -305,7 +290,7 @@ function mainHTML() {
           tab === 'bgm'
             ? ''
             : `<button class="btn" data-act="run-kind" title="生成前可先选择只补缺失或全部重生成">
-                 ${icon('spark')} 生成本章${TAB_LABEL[tab]}</button>`
+                 ${icon('spark')} 生成本章${labelOf('media_tab', tab, '素材')}</button>`
         }
         <button class="btn" data-act="refresh" title="重新读取本章素材与 BGM">${icon('refresh')} 刷新</button>
         <button class="btn" data-act="reveal" title="在访达中定位工程目录">${icon('folder')} 在访达中打开工程</button>
@@ -313,8 +298,12 @@ function mainHTML() {
     </div>
     <div class="ed-filters" style="height:44px">
       ${TABS.map(
-        ([key, label]) =>
-          `<button class="chip ${tab === key ? 'on' : ''}" data-tab="${key}" title="查看本章${label}">${label}<span class="n">${counts[key]}</span></button>`
+        (key) =>
+          `<button class="chip ${tab === key ? 'on' : ''}" data-tab="${key}" title="查看本章${labelOf(
+            'media_tab',
+            key,
+            '素材'
+          )}">${labelOf('media_tab', key, '素材')}<span class="n">${counts[key]}</span></button>`
       ).join('')}
       <div class="grow"></div>
       ${
@@ -385,7 +374,7 @@ async function loadBgm() {
  * @param {HTMLElement} button 入口按钮（用于忙碌态与结束后恢复文案）
  */
 function openRunKindDialog(kind, button) {
-  const label = TAB_LABEL[kind] || kind;
+  const label = labelOf('media_tab', kind, '素材');
   const key = `media.${kind}`;
   const mask = openDialog({
     title: `生成本章${label}`,
@@ -425,7 +414,7 @@ async function runMedia(kind, force, button) {
     }
   }
   const oldText = button.textContent;
-  const label = TAB_LABEL[kind] || kind;
+  const label = labelOf('media_tab', kind, '素材');
   button.disabled = true;
   button.textContent = '生成中…';
   const panel = openProgress({

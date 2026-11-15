@@ -5,22 +5,15 @@
  */
 import { esc, icon, toast, openDialog, closeDialog } from '../dom.js';
 import { getJSON, patchJSON, postJSON, fileUrl, streamJSON } from '../api.js';
-import { selectHTML, labelOf } from '../enums.js';
+import { selectHTML, labelOf, isEnumValue, ENUMS } from '../enums.js';
 import { openProgress } from '../progress.js';
 import { confirmLlm, llmErrorText } from '../llm.js';
 import { modeSwitchHTML, bindModeSwitch } from '../gen-mode.js';
 import { state, resetProject } from '../store.js';
 import { railbar, topbar, goChapter, goProjects } from '../shell.js';
 
-const ROLE_LABEL = {
-  narrator: '旁白',
-  protagonist: '主角',
-  antagonist: '反派',
-  supporting: '配角',
-  minor: '群演',
-};
-
-const ROLE_ORDER = ['narrator', 'protagonist', 'antagonist', 'supporting', 'minor'];
+/** 角色定位顺序取自枚举表，避免和下拉选项脱节 */
+const ROLE_ORDER = ENUMS.role.options.map(([value]) => value);
 
 /**
  * 一致性规则矩阵：每条规则对应后端 check_cast 的一组 finding code。
@@ -163,10 +156,10 @@ function listHTML() {
       .map(
         (item) => `
       <div class="chap-row ${item.id === selectedId ? 'on' : ''}" data-chara="${esc(item.id)}"
-           title="${esc(item.name)} · ${esc(ROLE_LABEL[item.role] || item.role || '')}${hasVoice(item) ? '' : ' · 缺音色'}">
+           title="${esc(item.name)} · ${esc(labelOf('role', item.role, '角色'))}${hasVoice(item) ? '' : ' · 缺音色'}">
         <span class="cn">${esc(item.name)}</span>
         <span class="dot ${hasVoice(item) ? 'ok' : 'warn'}"></span>
-        <span class="cw">${esc(ROLE_LABEL[item.role] || item.role || '')}</span>
+        <span class="cw">${esc(labelOf('role', item.role, '角色'))}</span>
       </div>`
       )
       .join('');
@@ -198,8 +191,8 @@ function listHTML() {
           ${['all', ...ROLE_ORDER]
             .map(
               (role) => `<button class="chip ${roleFilter === role ? 'on' : ''}" data-role="${role}"
-                title="${role === 'all' ? `显示全部 ${characters.length} 个角色` : `只看${ROLE_LABEL[role]}`}">
-                ${role === 'all' ? '全部' : ROLE_LABEL[role]}</button>`
+                title="${role === 'all' ? `显示全部 ${characters.length} 个角色` : `只看${labelOf('role', role, '角色')}`}">
+                ${role === 'all' ? '全部' : esc(labelOf('role', role, '角色'))}</button>`
             )
             .join('')}
         </div>
@@ -257,7 +250,11 @@ function pendingCastHTML() {
 /** 说话风格（只读展示，避免与档案字段重复编辑） */
 function speechLine(item) {
   const style = item.speech_style || {};
-  const parts = [style.tempo && `语速 ${style.tempo}`, style.pitch && `音高 ${style.pitch}`, style.accent]
+  const parts = [
+    style.tempo && `语速 ${labelOf('speech_tempo', style.tempo, '未填写')}`,
+    style.pitch && `音高 ${labelOf('speech_pitch', style.pitch, '未填写')}`,
+    style.accent,
+  ]
     .filter(Boolean)
     .join(' · ');
   return parts || '未填写';
@@ -594,7 +591,7 @@ function profileHTML() {
   return `
     <div class="page-head">
       <div class="ph">
-        <div class="eyebrow"><span class="ln"></span>${esc(ROLE_LABEL[item.role] || item.role || '角色')}</div>
+        <div class="eyebrow"><span class="ln"></span>${esc(labelOf('role', item.role, '角色'))}</div>
         <h1 class="page-title">${esc(item.name)}</h1>
         <div class="page-sub">${esc(voiceLine(item))} · ${esc(speechLine(item))} · ${esc(appearanceLine)}</div>
       </div>
@@ -664,8 +661,7 @@ function profileHTML() {
               id: 'ch-age',
               current: item.age_range || '',
               emptyLabel: '未指定',
-              extra: [item.age_range || ''],
-              title: '用于音色推荐；旧工程里的自定义区间会保留为可选项',
+              title: '用于音色推荐，只能从档位中选择；旧工程的自由文本会提示重新选择',
             })}</div>
           <div class="field"><label>性格（逗号分隔，自由填写）</label>
             <input class="input" data-free="1" id="ch-personality" value="${esc((item.personality || []).join('，'))}"
@@ -682,13 +678,19 @@ function profileHTML() {
               ((item.state || {}).knowledge || []).join('，')
             )}" title="角色当前知道的关键事实；生成时会限制角色不能说出未知信息" /></div>
           <div class="field"><label>语速</label>
-            <input class="input" data-free="1" id="ch-speech-tempo" value="${esc(
-              (item.speech_style || {}).tempo || ''
-            )}" placeholder="如：偏慢，常停顿" title="直接写进提示词的口吻约束" /></div>
+            ${selectHTML('speech_tempo', {
+              id: 'ch-speech-tempo',
+              current: (item.speech_style || {}).tempo || '',
+              emptyLabel: '未指定',
+              title: '写作口吻约束：慢 / 中速 / 快，只能从列表选择',
+            })}</div>
           <div class="field"><label>音高 / 音色</label>
-            <input class="input" data-free="1" id="ch-speech-pitch" value="${esc(
-              (item.speech_style || {}).pitch || ''
-            )}" placeholder="如：低沉沙哑" title="直接写进提示词的口吻约束" /></div>
+            ${selectHTML('speech_pitch', {
+              id: 'ch-speech-pitch',
+              current: (item.speech_style || {}).pitch || '',
+              emptyLabel: '未指定',
+              title: '写作口吻约束：偏低 / 中等 / 偏高，只能从列表选择',
+            })}</div>
           <div class="field"><label>口音 / 用词习惯</label>
             <input class="input" data-free="1" id="ch-speech-accent" value="${esc(
               (item.speech_style || {}).accent || ''
@@ -767,6 +769,7 @@ function repaint(ctxOnly = false) {
 
 /** 把表单写回角色对象（aliases/personality 按 CLI 的逗号分隔格式传） */
 function collectForm(item) {
+  assertEnumsPicked();
   const split = (value) =>
     (value || '')
       .split(/[,，、;；]/)
@@ -793,6 +796,21 @@ function collectForm(item) {
     negative_prompt: document.getElementById('ch-negative')?.value || '',
   };
   return fields;
+}
+
+/**
+ * 保存前检查枚举下拉：历史非法值必须重新选择，避免把旧英文值再写回去。
+ * @throws {Error} 存在未修正的枚举字段
+ */
+function assertEnumsPicked() {
+  const ids = ['ch-role', 'ch-gender', 'ch-age', 'ch-speech-tempo', 'ch-speech-pitch'];
+  const broken = ids
+    .map((id) => document.getElementById(id))
+    .filter((node) => node && node.value && !isEnumValue(node.dataset.enum, node.value))
+    .map((node) => ENUMS[node.dataset.enum]?.label || node.dataset.enum);
+  if (broken.length) {
+    throw new Error(`请先重新选择：${[...new Set(broken)].join('、')}（原值不是有效选项）`);
+  }
 }
 
 /** 保存当前角色（silent=true 时不弹 toast，用于自动保存） */
@@ -941,7 +959,7 @@ function mergeCharacter() {
   const targets = characters.filter((row) => row.id !== item.id && row.role !== 'narrator');
   if (!targets.length) return toast('没有可合并的其它角色，请先新增一个目标角色', 'warn');
   const options = targets
-    .map((row) => `<option value="${esc(row.id)}">${esc(row.name)} · ${esc(ROLE_LABEL[row.role] || row.role || '')}</option>`)
+    .map((row) => `<option value="${esc(row.id)}">${esc(row.name)} · ${esc(labelOf('role', row.role, '角色'))}</option>`)
     .join('');
   const mask = openDialog({
     title: `合并「${item.name}」到已有角色`,
@@ -1353,20 +1371,8 @@ async function openRelationGraph() {
   }
 }
 
-/** 形象图类型（顺序即展示顺序） */
-const IMAGE_KINDS = [
-  ['fullbody', '全身像'],
-  ['closeup', '特写'],
-  ['turnaround', '三视图'],
-];
-/** 自动编排动作的展示文案 */
-const AUTOFILL_ACTION = {
-  create: '新建',
-  fill: '补齐',
-  keep: '保持',
-  manual: '待人工',
-};
-
+/** 形象图类型（顺序与中文名统一取自 enums.js） */
+const IMAGE_KINDS = ENUMS.image_kind.options.map(([value]) => value);
 /**
  * 角色形象卡：三类形象图缩略与生成入口。
  * 图片地址走 /api/ui/file，路径来自 characters.json 的 image_assets。
@@ -1374,8 +1380,9 @@ const AUTOFILL_ACTION = {
  */
 function imageCardHTML(item) {
   const assets = item.image_assets || {};
-  const cells = IMAGE_KINDS.map(([kind, label]) => {
+  const cells = IMAGE_KINDS.map((kind) => {
     const rel = assets[kind];
+    const label = labelOf('image_kind', kind, '形象图');
     return `
       <div style="display:flex;flex-direction:column;gap:6px">
         <div style="height:132px;border-radius:6px;overflow:hidden;background:var(--bg-2);
@@ -1410,8 +1417,9 @@ function imageCardHTML(item) {
 /** 形象图弹窗里的缩略网格 */
 function characterImageBodyHTML(item) {
   const assets = item.image_assets || {};
-  const cells = IMAGE_KINDS.map(([kind, label]) => {
+  const cells = IMAGE_KINDS.map((kind) => {
     const rel = assets[kind];
+    const label = labelOf('image_kind', kind, '形象图');
     return `
       <div style="display:flex;flex-direction:column;gap:6px">
         <div style="height:240px;border-radius:6px;overflow:hidden;background:var(--bg-2);
@@ -1482,7 +1490,7 @@ async function runCharacterImage(mask, kind, modeOf = () => 'regen') {
   const item = current();
   if (!item || !kind) return;
   const mode = modeOf();
-  const label = (IMAGE_KINDS.find(([key]) => key === kind) || [kind, kind])[1];
+  const label = labelOf('image_kind', kind, '形象图');
   // 与 characterImageBodyHTML 一致：characters.json 的 image_assets[kind] 即该类形象图
   const existed = Boolean((item.image_assets || {})[kind]);
   if (mode === 'fill' && existed) {
@@ -1728,7 +1736,7 @@ function openAiGenerate() {
             <span style="min-width:0">
               <b>${esc(row.name || '未命名')}</b>
               <span class="badge mute" style="margin-left:6px">${esc(
-                ROLE_LABEL[row.role] || row.role || '角色'
+                labelOf('role', row.role, '角色')
               )}</span>
               <div style="font-size:11.5px;color:var(--text-3);margin-top:2px">${esc(
                 row.one_line || row.background || row.personality || ''
@@ -1736,7 +1744,7 @@ function openAiGenerate() {
             </span>
           </span>
           <span class="right hint">${esc(
-            [labelOf('gender', row.gender, ''), row.age_range].filter(Boolean).join(' · ')
+            [labelOf('gender', row.gender, ''), labelOf('age_range', row.age_range, '')].filter(Boolean).join(' · ')
           )}</span>
         </div>`
           )
@@ -1924,7 +1932,7 @@ async function openAutofill() {
         <span style="min-width:0">
           <b>${esc(item.label || item.key || '')}</b>
           <span class="badge ${badge[item.action] || 'mute'}" style="margin-left:6px">${
-            AUTOFILL_ACTION[item.action] || item.action || ''
+            labelOf('cast_action', item.action, '待处理')
           }</span>
           <div style="font-size:11.5px;color:var(--text-3);margin-top:2px">
             ${esc(item.proposed_name || (item.action === 'manual' ? '需要人工指定' : '保持现状'))}

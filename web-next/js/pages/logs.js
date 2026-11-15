@@ -9,6 +9,7 @@
  */
 import { esc, icon, toast, openDialog, closeDialog, fmtBytes, fmtDuration } from '../dom.js';
 import { getJSON, postJSON } from '../api.js';
+import { labelOf } from '../enums.js';
 import { railbar, topbar, goProjects } from '../shell.js';
 
 /** 列表与筛选状态（模块级，切页返回时保留筛选条件） */
@@ -35,8 +36,6 @@ let copyTexts = [];
 let currentRecord = null;
 
 /** 类型徽标 */
-const KIND_LABEL = { op: '操作', llm: 'LLM 调用' };
-
 /** 状态徽标语义色 */
 function statusClass(status) {
   if (status === 'ok') return 'ok';
@@ -145,12 +144,10 @@ function rowHTML(item) {
   return `
     <div class="lg-row" data-act="lg-row" data-file="${esc(item.file)}" data-line="${item.line}">
       <span class="lg-time" title="${esc(item.ts || '')}">${esc(shortTime(item.ts))}</span>
-      <span><span class="badge ${kindClass}">${esc(KIND_LABEL[item.kind] || item.kind || '')}</span></span>
+      <span><span class="badge ${kindClass}">${esc(labelOf('log_kind', item.kind, '日志'))}</span></span>
       <span style="min-width:0">
         <span class="lg-label">${esc(item.label || item.action || '')}
-          <span class="badge ${statusClass(item.status)}">${
-            item.status === 'ok' ? '成功' : item.status === 'error' ? '失败' : '中断'
-          }</span>
+          <span class="badge ${statusClass(item.status)}">${esc(labelOf('log_status', item.status, '状态未知'))}</span>
           ${item.project ? `<span class="lg-proj" title="${esc(item.project)}">${esc(projectName(item.project))}</span>` : ''}
         </span>
         ${sub}
@@ -350,7 +347,7 @@ function llmDetailHTML(detail) {
   const promptBody = [
     detail.system ? preHTML(detail.system, { title: `system 提示词（${detail.system.length} 字）` }) : '',
     ...(detail.messages || []).map((msg, index) =>
-      preHTML(msg.content || '', { title: `${msg.role || 'user'} 消息 #${index + 1}（${String(msg.content || '').length} 字）` })
+      preHTML(msg.content || '', { title: `${labelOf('llm_role', msg.role, '用户')}消息 #${index + 1}（${String(msg.content || '').length} 字）` })
     ),
     (detail.tools || []).length
       ? preHTML(JSON.stringify(detail.tools, null, 2), { title: `工具定义（${detail.tools.length} 个）`, open: false, lang: 'mono' })
@@ -438,10 +435,8 @@ function renderDetail(record) {
   const isLlm = record.kind === 'llm';
   const head = `
     <div class="lg-detail-head">
-      <span class="badge ${record.kind === 'llm' ? 'run' : 'mute'}">${esc(KIND_LABEL[record.kind] || record.kind)}</span>
-      <span class="badge ${statusClass(record.status)}">${
-        record.status === 'ok' ? '成功' : record.status === 'error' ? '失败' : '中断'
-      }</span>
+      <span class="badge ${record.kind === 'llm' ? 'run' : 'mute'}">${esc(labelOf('log_kind', record.kind, '日志'))}</span>
+      <span class="badge ${statusClass(record.status)}">${esc(labelOf('log_status', record.status, '状态未知'))}</span>
       <b>${esc(record.label || record.action || '')}</b>
       <span class="mono hint">${esc(record.ts || '')}</span>
       <span class="hint">${esc(durationText(record.duration_ms))}</span>

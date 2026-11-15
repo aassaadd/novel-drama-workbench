@@ -9,7 +9,7 @@
 import { esc, fmtClock, icon, toast, openDialog, closeDialog, reuseListHTML } from '../dom.js';
 import { getJSON, postJSON, streamJSON } from '../api.js';
 import { confirmLlm, fetchLlmPlan, llmErrorText } from '../llm.js';
-import { ENUMS, selectHTML } from '../enums.js';
+import { labelOf, ENUMS, selectHTML } from '../enums.js';
 import { openProgress, watchProgress } from '../progress.js';
 import { modeSwitchHTML, bindModeSwitch } from '../gen-mode.js';
 import { state } from '../store.js';
@@ -1726,15 +1726,6 @@ function updatesCardHTML(chapter) {
 function consistencyCardHTML(chapter) {
   const record = cache.consistencyChapter === chapter.id ? cache.consistency : null;
   const issues = record?.issues || [];
-  const levelLabel = { high: '高', medium: '中', low: '低' };
-  const kindLabel = {
-    speech: '口吻',
-    knowledge: '已知信息',
-    relation: '关系',
-    unplanned: '计划外',
-    pov: '视角',
-    other: '其它',
-  };
   return `
     <div class="card" id="novel-consistency-card">
       <div class="card-head">
@@ -1751,8 +1742,8 @@ function consistencyCardHTML(chapter) {
                 .map(
                   (item) => `<div class="summary-line">
                     <span class="badge ${item.level === 'high' ? 'bad' : item.level === 'medium' ? 'warn' : 'mute'}">${
-                      levelLabel[item.level] || '中'
-                    } · ${kindLabel[item.kind] || '其它'}</span>
+                      labelOf('issue_level', item.level, '中')
+                    } · ${labelOf('issue_kind', item.kind, '其它')}</span>
                     <span style="flex:1;margin-left:8px">${esc(item.message)}</span>
                     ${
                       item.character_id
@@ -1860,7 +1851,7 @@ function openBeatCastDialog(index) {
           .map(
             (item) => `<label class="checkline"><input type="checkbox" data-cast-pick="${esc(item.id)}" ${
               selected.has(item.id) ? 'checked' : ''
-            } /> ${esc(item.name)}<span class="hint" style="margin-left:6px">${esc(item.role || '')}</span></label>`
+            } /> ${esc(item.name)}<span class="hint" style="margin-left:6px">${esc(labelOf('role', item.role, '角色'))}</span></label>`
           )
           .join('') || '<div class="hint">还没有角色：请先去角色页生成人物。</div>'}
       </div>
@@ -3402,7 +3393,7 @@ function openSettingPreview(section, label, fields) {
     premise: ['logline', 'theme', 'core_conflict', 'ending_intent', 'target_audience', 'target_length', 'target_words'],
     style: ['tone', 'pov', 'tense', 'prose_style', 'forbidden', 'visual_style'],
   }[section] || [];
-  const labelOf = {
+  const fieldLabels = {
     logline: '一句话梗概',
     theme: '主题',
     core_conflict: '核心冲突',
@@ -3423,7 +3414,7 @@ function openSettingPreview(section, label, fields) {
   const rows = keys
     .map((key) => {
       const value = fields[key];
-      const textLabel = esc(ENUMS[key]?.label || labelOf[key] || key);
+      const textLabel = esc(ENUMS[key]?.label || fieldLabels[key] || key);
       if (ENUMS[key]) {
         return `
       <div class="field"><label>${textLabel}</label>
@@ -3624,14 +3615,6 @@ async function saveBody() {
   toast(`正文已保存（${Number(result?.word_count || 0)} 字）`, 'ok');
 }
 
-/** 视角模式中文名（与后端 POV_LABELS 对齐） */
-const POV_MODE_LABELS = {
-  third_limited: '第三人称限知',
-  third_omniscient: '全知视角',
-  first_person: '第一人称',
-  second_person: '第二人称',
-};
-
 /** 正文生成默认参数缓存（一次会话内复用） */
 let generationDefaultsCache = null;
 
@@ -3749,7 +3732,7 @@ function globalOmniscient() {
 function povStatusOf(binding, chapter) {
   const mode = String(binding?.pov_mode || chapter?.pov_mode || cache.setting?.style?.pov || 'third_limited');
   if (binding?.pov?.name) {
-    return { ok: true, text: `本章视角：${binding.pov.name}（${POV_MODE_LABELS[mode] || mode}）` };
+    return { ok: true, text: `本章视角：${binding.pov.name}（${labelOf('pov', mode, '未知视角')}）` };
   }
   if (mode === 'third_omniscient') {
     const explicit = Boolean(chapter?.pov_mode);
@@ -4353,7 +4336,7 @@ async function runGenerate(body, hadBody = false, options = {}) {
                 ? '补写完成'
                 : '正文生成完成';
         panel.finish({
-          message: `${modeLabel}：${words} 字 · 节拍 ${beats}${result.status ? ` · ${result.status}` : ''}`,
+          message: `${modeLabel}：${words} 字 · 节拍 ${beats}${result.status ? ` · ${labelOf('chapter_status', result.status, '状态未知')}` : ''}`,
           detail: [
             options.resumeNote ? `自动续跑：${options.resumeNote}` : '',
             options.note || '',

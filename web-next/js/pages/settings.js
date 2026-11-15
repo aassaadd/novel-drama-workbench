@@ -4,6 +4,7 @@
  */
 import { esc, icon, toast, openDialog, closeDialog, fmtBytes } from '../dom.js';
 import { getJSON, postJSON } from '../api.js';
+import { labelOf } from '../enums.js';
 import { state, saveUIPrefs } from '../store.js';
 import { railbar, topbar, goProjects, openShortcuts } from '../shell.js';
 
@@ -812,7 +813,7 @@ function applyThinkingView() {
     badge.title = '全局总开关关闭时，所有调用点都不会思考';
   } else {
     badge.className = 'badge ok';
-    badge.textContent = `全局开启${global.effort ? ` · 强度 ${global.effort}` : ''}`;
+    badge.textContent = `全局开启${global.effort ? ` · 强度 ${labelOf('thinking_effort', global.effort, '中')}` : ''}`;
     badge.title = '思考强度统一跟随连接配置，不按调用点分档';
   }
 }

@@ -8,6 +8,7 @@
  * 不整页重绘，避免任务列表闪动和丢失滚动位置。离开页面即停轮询。
  */
 import { esc, icon, toast, openDialog, closeDialog } from '../dom.js';
+import { labelOf, ENUMS } from '../enums.js';
 import { getJSON, postJSON } from '../api.js';
 import { openProgress } from '../progress.js';
 import { confirmLlm, llmErrorText } from '../llm.js';
@@ -15,69 +16,11 @@ import { modeSwitchHTML, bindModeSwitch, getGenMode } from '../gen-mode.js';
 import { state, resetProject } from '../store.js';
 import { railbar, topbar, emptyProjectHTML, goProjects } from '../shell.js';
 
-const QUEUE_LABEL = {
-  tts: '配音',
-  sfx: '音效',
-  image: '配图',
-  video: '视频',
-  render: '渲染',
-  chapter: '章节正文',
-  act: '整幕正文',
-  'chapter.continue': '正文续写',
-  world: '世界观',
-  outline: '大纲',
-  setting: '写作设定',
-  character: '角色',
-  'character.desc': '角色描述',
-  script: '导演标注',
-  voice: '音色',
-  'voice.fill': '补齐音色',
-  produce: '全链路编排',
-};
-
-const STATUS_LABEL = {
-  queued: '排队',
-  running: '运行中',
-  succeeded: '成功',
-  partial: '部分完成',
-  failed: '失败',
-  canceled: '已取消',
-  interrupted: '已中断',
-  pending: '待生成',
-  ready: '就绪',
-};
-
-/** 全链路阶段（与 `ndw produce` 的 STAGES 一致） */
-const PRODUCE_STAGES = [
-  ['setting', '设定库'],
-  ['outline', '大纲'],
-  ['chapter', '章节正文'],
-  ['scenes', '场景切分'],
-  ['lines', '台词切分'],
-  ['script', '导演标注'],
-  ['tts', '配音合成'],
-  ['sfx', '音效'],
-  ['image', '配图'],
-  ['video', '视频位'],
-  ['timeline', '时间轴'],
-  ['concat', '配音拼接'],
-  ['mix', '混音'],
-  ['mux', '混流'],
-  ['export', '导出'],
-];
-
-const PRODUCE_STATUS = {
-  pending: '待跑',
-  running: '运行中',
-  succeeded: '成功',
-  failed: '失败',
-  skipped: '跳过',
-};
+/** 全链路阶段顺序与中文名都取自 enums.js，避免和后端 STAGES 脱节 */
+const PRODUCE_STAGES = ENUMS.produce_stage.options.map(([key]) => key);
 
 /** 工程级阶段：不需要章节，整本工程只跑一次（与后端 PROJECT_STAGES 一致） */
 const PROJECT_STAGES = new Set(['setting', 'outline']);
-/** 阶段中文名 */
-const PRODUCE_LABEL = Object.fromEntries(PRODUCE_STAGES);
 
 /**
  * 阶段区间（含两端）内的阶段 key 列表。
@@ -86,7 +29,7 @@ const PRODUCE_LABEL = Object.fromEntries(PRODUCE_STAGES);
  * @returns {string[]} 阶段 key
  */
 function stageRange(from, to) {
-  const order = PRODUCE_STAGES.map(([key]) => key);
+  const order = PRODUCE_STAGES.slice();
   const start = Math.max(0, order.indexOf(from));
   const end = order.indexOf(to);
   return end < start ? [] : order.slice(start, end + 1);
@@ -155,19 +98,20 @@ function produceHTML() {
   const run = produceRun;
   const options = (selected) =>
     PRODUCE_STAGES.map(
-      ([key, label]) => `<option value="${key}" ${key === selected ? 'selected' : ''}>${label}</option>`
+      (key) =>
+        `<option value="${key}" ${key === selected ? 'selected' : ''}>${labelOf('produce_stage', key, '阶段')}</option>`
     ).join('');
   const stages = run?.stages || [];
   const doneCount = stages.filter((item) => ['succeeded', 'skipped'].includes(item.status)).length;
   const rows = stages
     .map((item) => {
-      const status = PRODUCE_STATUS[item.status] || item.status || '';
+      const status = labelOf('produce_status', item.status, '状态未知');
       const ok = item.status === 'succeeded';
       const bad = item.status === 'failed';
       const skip = item.status === 'skipped';
       return `
         <tr>
-          <td>${esc(item.label || item.stage || '')}</td>
+          <td>${esc(item.label || labelOf('produce_stage', item.stage, '阶段'))}</td>
           <td><span class="badge ${ok ? 'ok' : bad ? 'bad' : skip ? 'mute' : item.status === 'running' ? 'run' : 'mute'}">${esc(status)}</span></td>
           <td class="mono">${(item.artifacts || []).length}</td>
           <td style="color:${bad ? 'var(--bad)' : 'var(--text-3)'};font-size:11.5px">${esc(
@@ -182,7 +126,7 @@ function produceHTML() {
         <div class="right">${
           run
             ? `<span class="badge ${run.status === 'succeeded' ? 'ok' : run.status === 'failed' ? 'bad' : 'run'}">
-                 ${esc(PRODUCE_STATUS[run.status] || '未识别')} · ${doneCount}/${stages.length}${
+                 ${esc(labelOf('produce_status', run.status, '未识别'))} · ${doneCount}/${stages.length}${
                    run.scope === 'book'
                      ? ` · 全书 ${(run.chapters || []).length} 章`
                      : run.scope === 'chapter'
@@ -372,10 +316,10 @@ function queueHTML() {
                       // 只有界面发起、后端能停的任务才给停止按钮（GPU 队列任务不在本进程）
                       const stoppable = Boolean(item.ui) && ['running', 'queued'].includes(item.status);
                       return `<tr>
-                        <td>${esc(QUEUE_LABEL[item.kind] || item.kind || '')}</td>
+                        <td>${esc(labelOf('job_kind', item.kind, '任务'))}</td>
                         <td title="${esc(targetText(item))}">${esc(targetText(item))}</td>
                         <td><span class="badge ${badgeClass(item.status)}">${esc(
-                          STATUS_LABEL[item.status] || item.status
+                          labelOf('job_status', item.status, '状态未知')
                         )}</span></td>
                         <td style="font-size:11.5px;color:var(--text-3)">${esc(progressText(item))}</td>
                         <td class="mono">${Number(item.attempts || 0)}</td>
@@ -583,7 +527,7 @@ async function refresh({ silent = true } = {}) {
  */
 async function stopJob(jobId, button) {
   const item = queue.find((row) => row.id === jobId) || {};
-  const kind = QUEUE_LABEL[item.kind] || item.kind || '任务';
+  const kind = labelOf('job_kind', item.kind, '任务');
   const info = item.progress || {};
   const progressLabel = `${typeof info.percent === 'number' ? `${Math.round(info.percent)}% · ` : ''}${
     info.current || '—'
@@ -704,7 +648,7 @@ async function onRootClick(event) {
     const needChapterStages = stageRange(from, to).filter((key) => !PROJECT_STAGES.has(key));
     if (needChapterStages.length && !state.chapters.length) {
       return toast(
-        `所选区间包含需要章节的阶段：${needChapterStages.map((key) => PRODUCE_LABEL[key] || key).join('、')}。` +
+        `所选区间包含需要章节的阶段：${needChapterStages.map((key) => labelOf('produce_stage', key, '阶段')).join('、')}。` +
           '工程还没有章节：请先落地章节或导入正文，或只选「设定库 → 大纲」等工程级阶段',
         'warn',
         5600
@@ -715,7 +659,7 @@ async function onRootClick(event) {
     const regen = mode === 'regen';
     const force = regen;
     const noResume = regen;
-    const order = PRODUCE_STAGES.map(([key]) => key);
+    const order = PRODUCE_STAGES.slice();
     if (order.indexOf(from) > order.indexOf(to)) {
       return toast('「从」阶段必须排在「到」阶段之前', 'warn');
     }
@@ -754,13 +698,12 @@ async function onRootClick(event) {
  * @param {'fill'|'regen'} [mode] fill 只补缺失阶段；regen 强制重跑全部
  */
 function watchProduceProgress(from, to, mode = 'fill') {
-  const order = PRODUCE_STAGES.map(([key]) => key);
-  const labelOf = (key) => PRODUCE_STAGES.find(([item]) => item === key)?.[1] || key;
+  const order = PRODUCE_STAGES.slice();
   const scope = order.slice(Math.max(0, order.indexOf(from)), order.indexOf(to) + 1);
   const regen = mode === 'regen';
   const panel = openProgress({
     title: regen ? '正在强制重跑全链路编排…' : '正在补齐缺失阶段的编排…',
-    hint: `${labelOf(from)} → ${labelOf(to)}${regen ? ' · 忽略已有产物' : ' · 已完成阶段会跳过'}`,
+    hint: `${labelOf('produce_stage', from, '阶段')} → ${labelOf('produce_stage', to, '阶段')}${regen ? ' · 忽略已有产物' : ' · 已完成阶段会跳过'}`,
     stage: '后台进程已启动，正在读取编排记录…',
   });
   panel.update({ percent: 0 });
@@ -820,7 +763,7 @@ function watchProduceProgress(from, to, mode = 'fill') {
         if (run.status === 'running') {
           const nextKey = scope.find((key) => !finishedKeys.includes(key));
           panel.update({
-            stage: nextKey ? `正在执行：${labelOf(nextKey)}` : '正在收尾…',
+            stage: nextKey ? `正在执行：${labelOf('produce_stage', nextKey, '阶段')}` : '正在收尾…',
             percent: Math.round((done / total) * 100),
             current: `已完成 ${done}/${total} 个阶段${failed ? ` · 失败 ${failed}` : ''}`,
           });
@@ -837,7 +780,7 @@ function watchProduceProgress(from, to, mode = 'fill') {
           } else {
             const lastStage = stages[stages.length - 1];
             panel.note(
-              lastStage ? `最后一个阶段：${lastStage.label || labelOf(lastStage.stage)}` : ''
+              lastStage ? `最后一个阶段：${lastStage.label || labelOf('produce_stage', lastStage.stage, '阶段')}` : ''
             );
             panel.finish({
               message: `编排完成：${done}/${total} 个阶段`,

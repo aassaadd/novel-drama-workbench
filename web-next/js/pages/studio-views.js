@@ -7,7 +7,8 @@
 import { esc, icon, toast, openDialog, closeDialog, openMenu, fmtClock, fmtDuration, charCount } from '../dom.js';
 import { getJSON, postJSON, fileUrl } from '../api.js';
 import { state, audioOf, toneFor } from '../store.js';
-import { STATE_LABEL, stateClass } from '../shell.js';
+import { labelOf } from '../enums.js';
+import { stateLabel, stateClass } from '../shell.js';
 
 /**
  * 顶栏四个一级视图：画本 / 录音 / 后期 / 对轨。
@@ -15,10 +16,10 @@ import { STATE_LABEL, stateClass } from '../shell.js';
  * 图标刻意避开左侧导航：画本不用 chapter（目录），后期不用 audio（音色）。
  */
 export const VIEW_META = [
-  { key: 'script', label: '画本', title: '画本编辑视图', icon: 'pen' },
-  { key: 'record', label: '录音', title: '录音视图', icon: 'mic' },
-  { key: 'post', label: '后期', title: '后期制作视图', icon: 'wave' },
-  { key: 'align', label: '对轨', title: '智能对轨视图', icon: 'align' },
+  { key: 'script', label: labelOf('view_key', 'script', '画本'), title: '画本编辑视图', icon: 'pen' },
+  { key: 'record', label: labelOf('view_key', 'record', '录音'), title: '录音视图', icon: 'mic' },
+  { key: 'post', label: labelOf('view_key', 'post', '后期'), title: '后期制作视图', icon: 'wave' },
+  { key: 'align', label: labelOf('view_key', 'align', '对轨'), title: '智能对轨视图', icon: 'align' },
 ];
 
 /**
@@ -143,7 +144,6 @@ async function loadTimeline(force = false) {
 }
 
 /** 轨道中文名 */
-const TRACK_LABEL = { voice: '配音', sfx: '音效', music: '音乐', video: '视频', image: '画面' };
 
 // ---------------- 录音视图 ----------------
 
@@ -179,7 +179,7 @@ function recordRowHTML(row) {
       <span class="rec-no mono">${esc(row.ordinal ?? row.index ?? '')}</span>
       <span class="rec-spk">
         <b>${esc(row.speaker || '未知')}</b>
-        <span>${esc(row.kind === 'narration' ? '旁白' : row.kind === 'inner_monologue' ? '内心独白' : '对白')}${
+        <span>${esc(labelOf('line_kind', row.kind, '对白'))}${
           row.scene_ordinal ? ` · 第 ${row.scene_ordinal} 场` : ''
         }</span>
       </span>
@@ -192,7 +192,7 @@ function recordRowHTML(row) {
         }
         <span class="rec-dur mono">${esc(duration || '—')}</span>
       </span>
-      <span class="st-row ${stateClass(row.state)}">${STATE_LABEL[row.state] || row.state}</span>
+      <span class="st-row ${stateClass(row.state)}">${esc(stateLabel(row.state))}</span>
       <span class="rec-act">
         <button class="btn icon sm" data-vact="rec-play" ${audio ? '' : 'disabled'}
                 title="${audio ? (playing ? '暂停试听' : '试听这一行') : '还没有音频'}">
@@ -1244,7 +1244,7 @@ function postTrackHTML(track, total) {
   return `
     <div class="post-track">
       <div class="post-tname">
-        <div class="tname-row"><b>${esc(track.name || TRACK_LABEL[kind] || kind)}</b>
+        <div class="tname-row"><b>${esc(track.name || labelOf('track_kind', kind, '轨道'))}</b>
           <button class="post-ctl solo ${soloed ? 'on' : ''}" data-vact="post-solo" data-track="${esc(key)}"
             title="${soloed ? '取消独奏' : '独奏这条轨道'}">S</button>
           <button class="post-ctl mute ${muted ? 'on' : ''}" data-vact="post-mute" data-track="${esc(key)}"
@@ -1252,7 +1252,7 @@ function postTrackHTML(track, total) {
         </div>
         <div class="post-vol-row" title="轨道音量（-24dB ~ +6dB）">
           <input class="post-vol" type="range" min="-24" max="6" step="1" value="${volume}"
-            aria-label="轨道音量：${esc(track.name || TRACK_LABEL[kind] || kind)}"
+            aria-label="轨道音量：${esc(track.name || labelOf('track_kind', kind, '轨道'))}"
             data-vact="post-volume" data-track="${esc(key)}" />
           <span class="mono vol-val">${volume > 0 ? '+' : ''}${volume}dB</span>
         </div>
@@ -1407,7 +1407,7 @@ function postInnerHTML() {
   const tracks = postTracks(data);
   const warnings = (data.warnings || []).length;
   const counts = tracks.map(
-    (track) => `${track.speaker || TRACK_LABEL[track.kind] || track.kind} ${(track.items || []).length}`
+    (track) => `${track.speaker || labelOf('track_kind', track.kind, '轨道')} ${(track.items || []).length}`
   );
   const step = tickStep(total, ui.post.zoom);
   const ticks = [];
@@ -1452,9 +1452,9 @@ function postInnerHTML() {
       <div style="flex:1"></div>
       <span class="hint">${
         ui.post.soloed.size
-          ? `独奏：${[...ui.post.soloed].map((kind) => TRACK_LABEL[kind] || kind).join('、')}；`
+          ? `独奏：${[...ui.post.soloed].map((kind) => labelOf('track_kind', kind, '轨道')).join('、')}；`
           : ui.post.muted.size
-            ? `已静音：${[...ui.post.muted].map((kind) => TRACK_LABEL[kind] || kind).join('、')}；`
+            ? `已静音：${[...ui.post.muted].map((kind) => labelOf('track_kind', kind, '轨道')).join('、')}；`
             : ''
       }S 独奏 · M 静音 · 滑杆调轨道音量；吸附 ${ui.post.snap ? '开' : '关'} · 联动 ${
         ui.post.linked ? '开' : '关'
@@ -1804,7 +1804,7 @@ function postPanelHTML() {
         ${tracks
           .map(
             (track) => `<div class="summary-line"><span>${esc(
-              track.name || TRACK_LABEL[track.kind] || track.kind
+              track.name || labelOf('track_kind', track.kind, '轨道')
             )}</span><span class="right mono">${(track.items || []).length} 段</span></div>`
           )
           .join('')}
