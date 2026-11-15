@@ -258,7 +258,7 @@
 | 批次 | 范围 | 状态 |
 | --- | --- | --- |
 | A | `line_query`（台词表/单行 diff）、`tts_plan`（批量预演/单章规划）、`production/timeline`、`media_ops.export_chapter`、`story/chapters` 的过期汇总与 facets | 已完成 |
-| B | `adapters/media/*`（timeline_builder / export / jianying / runner）改为由 application 传场景 | 待做 |
+| B | `adapters/media/*`（timeline_builder / export / jianying / runner）改为由 application 传场景 | 已完成（runner.plan_media 改入参；其余三个本就只接收 chapter） |
 | C | `adapters/persistence/voice_cast` 的读点（写点留步骤 3） | 待做 |
 | D | 其余 interface 读模型（media / sfx / voice tools / blockers / align / config） | 待做 |
 | E | `application/story`、`application/cast`、`support/llm_plan` 等场景统计读点 | 待做 |

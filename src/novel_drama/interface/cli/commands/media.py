@@ -40,6 +40,7 @@ from novel_drama.composition import (
     summarize_timeline,
     templates_dir,
 )
+from novel_drama.application.production.lines_source import chapter_view
 from novel_drama.infrastructure.config import AppConfig
 from novel_drama.interface.cli.commands.sfx import cmd_sfx_generate, cmd_sfx_providers
 
@@ -55,7 +56,7 @@ from ..common import (
 def cmd_media(args, config: AppConfig) -> int:
     """音效/配图/视频：plan 规划，run 入队；--dry-run 只出调用计划并报未实现。"""
     store = _resolve_store(args, config)
-    chapter = store.load_chapter(args.chapter)
+    chapter = chapter_view(store, store.load_chapter(args.chapter))
     kind = args.media_kind
     if args.action == "plan":
         if kind == "sfx":
@@ -76,7 +77,7 @@ def cmd_media(args, config: AppConfig) -> int:
 
     adapter = config.adapters.get("comfyui", "local") if kind != "sfx" else config.adapters.get("sfx", "placeholder")
     if getattr(args, "dry_run", False) and kind in ("image", "video"):
-        rows = plan_media(store, config, args.chapter, kind)
+        rows = plan_media(store, config, chapter, kind)
         lines = [f"[plan] {kind} 共 {len(rows)} 条（dry-run，未提交任何任务）"]
         for row in rows:
             size = f"{row['width']}×{row['height']}" if row.get("width") and row.get("height") else "-"

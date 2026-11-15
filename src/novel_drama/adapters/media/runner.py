@@ -839,13 +839,15 @@ def _run_comfy(
     return stats
 
 
-def plan_media(store: ProjectStore, config: AppConfig, chapter_id: str, kind: str) -> list[dict]:
+def plan_media(store: ProjectStore, config: AppConfig, chapter: dict, kind: str) -> list[dict]:
     """Dry-run：列出每条媒体将使用的模板、画幅、宽高与 seed，不提交。
+
+    章节由调用方（application/interface）读入并派生后传入，适配器不回读工程结构。
 
     参数:
         store: 工程。
         config: 本机配置。
-        chapter_id: 章节 ID。
+        chapter: 章节 dict（含场景与媒体条目）。
         kind: image / video。
 
     返回:
@@ -857,7 +859,6 @@ def plan_media(store: ProjectStore, config: AppConfig, chapter_id: str, kind: st
     """
     if kind not in ("image", "video"):
         raise ValueError(f"plan_media 只支持 image/video，收到 {kind}")
-    chapter = store.load_chapter(chapter_id)
     settings = store.settings()
     provider = _provider(config, kind)
     manifest = None
