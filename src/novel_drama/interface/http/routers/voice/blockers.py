@@ -283,7 +283,7 @@ def _pid_alive(pid: int) -> bool:
 
 
 def _cli_process(pid: int) -> str:
-    """返回 pid 对应的命令行；不是本工程配音 CLI 时返回空串。
+    """返回 pid 对应的配音入口；不是本工程配音进程时返回空串。
 
     说明:
         进程退出后若父进程未 wait，会成为僵尸并被 `os.kill(pid, 0)` 当成存活；
@@ -307,6 +307,11 @@ def _cli_process(pid: int) -> str:
     except (OSError, subprocess.SubprocessError):
         return ""
     command = (result.stdout or "").strip()
+    # 新版走应用入口；升级前启动的进程仍是 novel_drama.cli 子进程，一并识别
+    if "novel_drama.application.production.tts_batch_run" in command:
+        return "batch"
+    if "novel_drama.application.production.tts_run" in command:
+        return "run"
     if "novel_drama.cli" not in command:
         return ""
     if "tts batch" in command:

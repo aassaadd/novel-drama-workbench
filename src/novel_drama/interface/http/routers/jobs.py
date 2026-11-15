@@ -5,7 +5,6 @@ from __future__ import annotations
 import os
 import signal
 import subprocess
-import sys
 import tempfile
 import threading
 import time
@@ -27,6 +26,7 @@ from novel_drama.composition import ProjectStore, QueueStore
 from novel_drama.infrastructure.config import load_config
 from novel_drama.interface.http import use_cases
 from novel_drama.interface.http.deps import store_for
+from novel_drama.interface.http.executor import spawn_application
 from novel_drama.interface.http.routers.common import (
     _ACTIVE_TTS_PROJECTS,
     _is_tts_process,
@@ -389,25 +389,19 @@ def register_jobs_routes(app, project_root: str | None = None, config_path: str 
         log_dir.mkdir(parents=True, exist_ok=True)
         since = now_iso()
         log_path = log_dir / f"web-tts-{since.replace(':', '').replace('-', '')}.log"
-        src_dir = Path(__file__).resolve().parents[2]
-        env = dict(os.environ)
-        env["PYTHONPATH"] = str(src_dir) + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
-        argv = [sys.executable, "-m", "novel_drama.cli", "--project", path]
-        if config_path:
-            argv += ["--config", config_path]
-        argv += ["tts", "run", "--chapter", chapter, "--wait"]
-        if mode == "regenerate":
-            argv += ["--scope", "chapter", "--force"]
-        with log_path.open("wb") as log:
-            process = subprocess.Popen(
-                argv,
-                cwd=str(src_dir),
-                stdin=subprocess.DEVNULL,
-                stdout=log,
-                stderr=subprocess.STDOUT,
-                env=env,
-                start_new_session=True,
-            )
+        process = spawn_application(
+            "novel_drama.application.production.tts_run:run_chapter_entry",
+            {
+                "project_root": path,
+                "config_path": config_path,
+                "chapter_id": chapter,
+                # regenerate：整章连同已就绪行一起重跑；continue：只补未生成/过期/失败
+                "scope": "chapter" if mode == "regenerate" else None,
+                "force": mode == "regenerate",
+                "wait": True,
+            },
+            log_path,
+        )
         # 记录后台进程 pid，供「停止生成」终止（进程组由 start_new_session 独立出来）
         pid_file = store.root / ".ndw" / "web-tts.pid"
         pid_file.write_text(str(process.pid), encoding="utf-8")
@@ -504,25 +498,8 @@ def register_jobs_routes(app, project_root: str | None = None, config_path: str 
                 },
             )
 
-        argv = ["--project", path]
-        if config_path:
-            argv += ["--config", config_path]
-        argv += ["produce"]
-        if chapter and need_chapters:
-            argv += ["--chapter", chapter]
-        argv += ["--from", from_stage, "--to", to_stage]
-        if body.get("force"):
-            argv.append("--force")
-        if body.get("keep_going"):
-            argv.append("--keep-going")
-        if body.get("no_resume"):
-            argv.append("--no-resume")
-
         log_dir = store.root / ".ndw" / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
-        src_dir = Path(__file__).resolve().parents[2]
-        env = dict(os.environ)
-        env["PYTHONPATH"] = str(src_dir) + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
 
         from novel_drama.orchestration import produce as produce_mod
 
@@ -543,16 +520,20 @@ def register_jobs_routes(app, project_root: str | None = None, config_path: str 
         os.close(log_fd)
         log_path = Path(log_name)
         try:
-            with log_path.open("wb") as log:
-                process = subprocess.Popen(
-                    [sys.executable, "-u", "-m", "novel_drama.cli", *argv],
-                    cwd=str(src_dir),
-                    stdin=subprocess.DEVNULL,
-                    stdout=log,
-                    stderr=subprocess.STDOUT,
-                    env=env,
-                    start_new_session=True,
-                )
+            process = spawn_application(
+                "novel_drama.application.production.produce_run:run_produce_entry",
+                {
+                    "project_root": path,
+                    "config_path": config_path,
+                    "chapter_id": chapter if chapter and need_chapters else "",
+                    "from_stage": from_stage,
+                    "to_stage": to_stage,
+                    "resume": not bool(body.get("no_resume")),
+                    "force": bool(body.get("force")),
+                    "keep_going": bool(body.get("keep_going")),
+                },
+                log_path,
+            )
         except OSError as exc:
             job.fail(f"编排进程启动失败：{exc}")
             raise HTTPException(

@@ -1,8 +1,8 @@
 """配音页的补充能力：单行重录 / 版本对比 / Casting 试听 / 整本批量。
 
 这些接口不重写业务规则：
-- 重录仍然走 `tts run --force --scope selected --line`，只把 revision 先加一，保证旧音频不被覆盖；
-- 批量仍然走 `tts batch --all-chapters`，进度由 CLI 写进度文件，页面只读不推算；
+- 重录仍然走应用层 `tts_run`（selected + force），只把 revision 先加一，保证旧音频不被覆盖；
+- 批量仍然走应用层 `tts_batch_run`，进度由后台进程写进度文件，页面只读不推算；
 - Casting 试听直接调用 TtsService，产物只落在 `.ndw/cast_previews/`，不写章节、不入队、不进时间轴。
 """
 
@@ -12,7 +12,6 @@ import json
 import os
 import re
 import subprocess
-import sys
 import tempfile
 import threading
 import time
@@ -31,6 +30,7 @@ from novel_drama.composition import (
 )
 from novel_drama.infrastructure.config import load_config
 from novel_drama.interface.http import use_cases
+from novel_drama.interface.http.executor import spawn_application
 from novel_drama.tts import TtsService
 
 #: 单行重录串行锁：同一时间只允许一个重录，避免两个进程同时改同一章
@@ -276,32 +276,6 @@ def _error_text(error: dict | None, fallback: str = "") -> str:
     return f"合成失败（{code or '未知错误'}）：{message}"
 
 
-def _spawn(argv: list[str], cwd: Path, log_path: Path) -> subprocess.Popen:
-    """以独立进程组启动一个 CLI 子进程。
-
-    参数:
-        argv: 完整命令行（含 python 解释器）。
-        cwd: 工作目录（仓库 src 目录，保证能 import novel_drama）。
-        log_path: 标准输出/错误写入的日志文件。
-
-    返回:
-        Popen 实例。
-    """
-    env = dict(os.environ)
-    env["PYTHONPATH"] = str(cwd) + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    with log_path.open("wb") as log:
-        return subprocess.Popen(
-            argv,
-            cwd=str(cwd),
-            stdin=subprocess.DEVNULL,
-            stdout=log,
-            stderr=subprocess.STDOUT,
-            env=env,
-            start_new_session=True,
-        )
-
-
 def _pid_alive(pid: int) -> bool:
     """判断 pid 是否仍存活（只做存在性检查，不判断身份）。
 
@@ -321,7 +295,7 @@ def _pid_alive(pid: int) -> bool:
 
 
 def _cli_process(pid: int) -> str:
-    """返回 pid 对应的命令行；不是本工程配音 CLI 时返回空串。
+    """返回 pid 对应的配音入口；不是本工程配音进程时返回空串。
 
     说明:
         进程退出后若父进程未 wait，会成为僵尸并被 `os.kill(pid, 0)` 当成存活；
@@ -345,6 +319,11 @@ def _cli_process(pid: int) -> str:
     except (OSError, subprocess.SubprocessError):
         return ""
     command = (result.stdout or "").strip()
+    # 新版走应用入口；升级前启动的进程仍是 novel_drama.cli 子进程，一并识别
+    if "novel_drama.application.production.tts_batch_run" in command:
+        return "batch"
+    if "novel_drama.application.production.tts_run" in command:
+        return "run"
     if "novel_drama.cli" not in command:
         return ""
     if "tts batch" in command:
@@ -521,24 +500,20 @@ def register_voice_tools_routes(app, config_path: str | None = None) -> None:
 
             log_dir = store.root / ".ndw" / "logs"
             log_path = log_dir / f"rerun-{line_id}-{int(time.time())}.log"
-            src_dir = Path(__file__).resolve().parents[2]
-            argv = [sys.executable, "-m", "novel_drama.cli", "--project", str(store.root)]
-            if config_path:
-                argv += ["--config", config_path]
-            argv += [
-                "tts",
-                "run",
-                "--chapter",
-                chapter_id,
-                "--force",
-                "--scope",
-                "selected",
-                "--line",
-                line_id,
-                "--wait",
-            ]
             pid_file = store.root / ".ndw" / RERUN_PID_NAME
-            process = _spawn(argv, src_dir, log_path)
+            process = spawn_application(
+                "novel_drama.application.production.tts_run:run_chapter_entry",
+                {
+                    "project_root": str(store.root),
+                    "config_path": config_path,
+                    "chapter_id": chapter_id,
+                    "scope": "selected",
+                    "line_ids": [line_id],
+                    "force": True,
+                    "wait": True,
+                },
+                log_path,
+            )
             pid_file.parent.mkdir(parents=True, exist_ok=True)
             pid_file.write_text(str(process.pid), encoding="utf-8")
             try:
@@ -1180,20 +1155,21 @@ def register_voice_tools_routes(app, config_path: str | None = None) -> None:
             progress_file.unlink(missing_ok=True)
         log_dir = store.root / ".ndw" / "logs"
         log_path = log_dir / f"batch-all-{int(time.time())}.log"
-        src_dir = Path(__file__).resolve().parents[2]
-        argv = [sys.executable, "-m", "novel_drama.cli", "--project", str(store.root)]
-        if config_path:
-            argv += ["--config", config_path]
-        argv += ["tts", "batch"]
-        argv += ["--all-chapters"] if scope == "all" else ["--chapter", str(chapter)]
-        if skip_unknown:
-            # 说话人未识别的行保持原样，只配能解析的行
-            argv += ["--skip-unknown-speakers"]
         batch_size = body.get("batch_size")
-        if batch_size:
-            argv += ["--batch-size", str(int(batch_size))]
-        argv += ["--progress-file", str(progress_file)]
-        process = _spawn(argv, src_dir, log_path)
+        process = spawn_application(
+            "novel_drama.application.production.tts_batch_run:run_batch_entry",
+            {
+                "project_root": str(store.root),
+                "config_path": config_path,
+                "chapter_id": None if scope == "all" else (str(chapter) if chapter else None),
+                "all_chapters": scope == "all",
+                # 说话人未识别的行保持原样，只配能解析的行
+                "skip_unknown": skip_unknown,
+                "batch_size": int(batch_size) if batch_size else None,
+                "progress_file": str(progress_file),
+            },
+            log_path,
+        )
         pid_file.parent.mkdir(parents=True, exist_ok=True)
         pid_file.write_text(str(process.pid), encoding="utf-8")
         (store.root / ".ndw" / "tts_batch_meta.json").write_text(

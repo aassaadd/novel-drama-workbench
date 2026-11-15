@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import os
-import re
 import signal
 import subprocess
 import threading
@@ -14,7 +13,6 @@ from fastapi import HTTPException
 
 from novel_drama.application.production.job_tracker import UiJob
 from novel_drama.composition import ProjectStore, QueueStore
-from novel_drama.interface.http.cli_bridge import fail_body
 from novel_drama.models.ids import now_iso
 
 logger = logging.getLogger(__name__)
@@ -50,40 +48,13 @@ def _require(body: dict, usage: str, **labels: str) -> None:
             },
         )
 
-def _business_error(result):
-    """把新接口的 CLI 失败结果转成中文说明 + 分级状态码。
-
-    参数:
-        result: `actions.CliResult`。
-
-    返回:
-        带 detail 的 HTTPException（409 引用冲突 / 404 不存在 / 422 校验失败）。
-
-    异常:
-        无。
-    """
-    body = fail_body(result)
-    payload = result.payload if isinstance(result.payload, dict) else {}
-    raw_message = str(payload.get("message") or body.get("message") or "")
-    message = re.sub(r"^\[[A-Z_]+\]\s*", "", raw_message)
-    body = {**body, "message": message}
-    if result.code == 1:
-        detail = dict(body)
-        if payload.get("chapters"):
-            detail["chapters"] = payload["chapters"]
-        return HTTPException(status_code=409, detail=detail)
-    if result.code == 4 and "不存在" in message:
-        return HTTPException(status_code=404, detail=body)
-    if result.code in (5, 6):
-        return HTTPException(status_code=422, detail=body)
-    return HTTPException(status_code=result.status, detail=body)
-
 def _is_tts_process(pid: int) -> bool:
     """判断 pid 是否为本工程启动的配音消费进程。
 
     说明:
         pid 文件可能在进程自然退出后残留；系统复用 pid 时直接 killpg 会误杀无关进程，
-        因此先用 ps 确认命令行里确实是 `novel_drama.cli ... tts run` 或 `tts batch`。
+        因此先用 ps 确认命令行里确实是配音消费入口（应用层 `tts_run` / `tts_batch_run`
+        子进程，或升级前启动的 `novel_drama.cli ... tts run / tts batch`）。
 
     参数:
         pid: 待确认的进程号。
@@ -101,6 +72,10 @@ def _is_tts_process(pid: int) -> bool:
     except (OSError, subprocess.SubprocessError):
         return False
     command = (result.stdout or "").strip()
+    if "novel_drama.application.production.tts_run" in command:
+        return True
+    if "novel_drama.application.production.tts_batch_run" in command:
+        return True
     return "novel_drama.cli" in command and ("tts run" in command or "tts batch" in command)
 
 def _resolve_voice_binding(binding: dict | None, index: dict) -> str | None:
@@ -123,38 +98,6 @@ def _resolve_voice_binding(binding: dict | None, index: dict) -> str | None:
         if resolved:
             return resolved
     return None
-
-def _respond(result):
-    """把 CLI 结果转成 HTTP 响应。
-
-    参数:
-        result: `actions.CliResult`。
-
-    返回:
-        CLI 的 JSON 负载。
-
-    异常:
-        HTTPException: CLI 退出码非 0 时按映射返回状态码与中文说明。
-    """
-    if result.code != 0:
-        raise HTTPException(status_code=result.status, detail=fail_body(result))
-    return result.payload if result.payload is not None else {"text": result.text}
-
-def _respond_business(result):
-    """成功返回 JSON 负载，失败按业务语义映射状态码。
-
-    参数:
-        result: `actions.CliResult`。
-
-    返回:
-        CLI 的 JSON 负载。
-
-    异常:
-        HTTPException: 退出码非 0。
-    """
-    if result.code != 0:
-        raise _business_error(result)
-    return result.payload if result.payload is not None else {"text": result.text}
 
 def _stop_tts_project(path: str) -> dict:
     """终止某工程的后台配音批次，并把未完成任务标记为已取消。

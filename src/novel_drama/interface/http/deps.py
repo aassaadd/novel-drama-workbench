@@ -1,11 +1,10 @@
-"""HTTP 接口层公共依赖：工程定位与 CLI 结果转响应。"""
+"""HTTP 接口层公共依赖：按请求定位工程。"""
 
 from __future__ import annotations
 
 from fastapi import HTTPException
 
 from novel_drama.composition import ProjectStore
-from novel_drama.interface.http.cli_bridge import run
 
 
 def store_for(project_root: str | None):
@@ -39,18 +38,3 @@ def store_for(project_root: str | None):
         return store
 
     return _store
-
-
-def run_cli(config_path: str | None, *argv: str):
-    """按 `serve --config` 的同一份配置执行 CLI。
-
-    参数:
-        config_path: 本机配置文件路径（可空）。
-        argv: 不含 `--config` 的参数串。
-
-    返回:
-        `actions.CliResult`。
-    """
-    if config_path and "--config" not in argv:
-        return run("--config", config_path, *argv)
-    return run(*argv)
