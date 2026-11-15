@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 import shutil
@@ -24,6 +25,9 @@ from fastapi import HTTPException
 
 from .. import __version__
 from ..adapters.base import AdapterError
+from ..adapters.persistence import ProjectStore, list_workspaces
+from ..adapters.persistence.project_store import WORKSPACE_INDEX
+from ..adapters.persistence.queue_store import QueueStore
 from ..adapters.writing import OmlxWritingAdapter
 from ..application.cast.character_crud import (
     UPDATE_FIELDS,
@@ -51,13 +55,10 @@ from ..application.story.settings_edit import apply_section, set_scalars
 from ..application.story.summarize_chapter import apply_summary, summarize_chapter
 from ..application.story.world_crud import remove_world, upsert_worlds
 from ..cli_line import chapter_consistency
-from ..config import DEFAULT_UI_CONFIG_PATH, load_config
+from ..infrastructure.config import DEFAULT_UI_CONFIG_PATH, load_config
 from ..media import comfy_media
 from ..media.references import collect_references
 from ..models.ids import now_iso
-from ..store import ProjectStore, list_workspaces
-from ..store.project_store import WORKSPACE_INDEX
-from ..store.queue_store import QueueStore
 from . import use_cases
 from .actions import fail_body, run
 from .align_api import register_align_routes
@@ -982,7 +983,7 @@ def _export_preflight(store: ProjectStore, chapter_id: str) -> dict:
         `{ok, issues, lines_total, ready, missing, missing_total, timeline_exists}`；
         issues 为 `{code, level, message, line_id?}`，level=error 表示建议先修。
     """
-    from ..store.voice_cast import check_cast
+    from ..adapters.persistence.voice_cast import check_cast
 
     chapter = store.load_chapter(chapter_id)
     characters = {item["id"]: item for item in store.load_characters().get("characters") or []}
@@ -1650,8 +1651,8 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         result = {"ok": True, "chapter_id": chapter_id, "outline_removed": False, "warnings": []}
         # 已落章通常也在大纲里：一并删除，避免章节列表删掉后大纲还留着悬空引用
         try:
+            from ..adapters.persistence.settings_store import SettingsStore
             from ..application.story.outline_edit import delete_outline_chapter
-            from ..store.settings_store import SettingsStore
 
             settings_store = SettingsStore(store.root)
             if settings_store.exists():
@@ -3851,7 +3852,7 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         返回:
             `{level, findings: [...], stats: {...}}`。
         """
-        from ..store.voice_cast import check_cast
+        from ..adapters.persistence.voice_cast import check_cast
 
         store = _store(path)
         return check_cast(store, chapter)
@@ -3866,7 +3867,10 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         返回:
             `{cast, chapters, voices, stock_slots, errors, plan}`。
         """
-        from ..store.voice_cast import narrator_plan, validate_cast_config
+        from ..adapters.persistence.voice_cast import (
+            narrator_plan,
+            validate_cast_config,
+        )
 
         store = _store(path)
         project = store.load_project()
@@ -3926,7 +3930,7 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         返回:
             `{chapter, rows, voices}`；rows 含 mode / inherited / override / effective。
         """
-        from ..store.voice_cast import chapter_override_rows
+        from ..adapters.persistence.voice_cast import chapter_override_rows
 
         try:
             return chapter_override_rows(_store(path), chapter)
@@ -3944,7 +3948,10 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         返回:
             `{ok, chapter, rows, voices}`。
         """
-        from ..store.voice_cast import clear_chapter_overrides, set_chapter_override
+        from ..adapters.persistence.voice_cast import (
+            clear_chapter_overrides,
+            set_chapter_override,
+        )
 
         chapter_id = str(body.get("chapter") or "").strip()
         if not chapter_id:
@@ -3977,7 +3984,7 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         返回:
             `{character, chapters: [{id, index, title, overridable, mode, override, inherited, effective}], voices}`。
         """
-        from ..store.voice_cast import chapter_override_rows
+        from ..adapters.persistence.voice_cast import chapter_override_rows
 
         store = _store(path)
         rows: list[dict] = []
@@ -4382,7 +4389,7 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         返回:
             `{ok, errors, check?, plan?}`。
         """
-        from ..store.voice_cast import (
+        from ..adapters.persistence.voice_cast import (
             check_cast,
             narrator_plan,
             normalize_cast,
@@ -4699,7 +4706,7 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
                     }
                 )
         # 计划出场：只读设定库节拍，不落盘
-        from ..store.settings_store import SettingsStore
+        from ..adapters.persistence.settings_store import SettingsStore
 
         bible = SettingsStore(store.root).ensure()
         title_by_id = {item.get("id"): item.get("title") for item in store.list_chapters()}
@@ -4806,7 +4813,7 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
             `{arcs: [{chapter_id, index, title, character_id, name, from_state, to_state, note}]}`。
         """
         store = _store(path)
-        from ..store.settings_store import SettingsStore
+        from ..adapters.persistence.settings_store import SettingsStore
 
         bible = SettingsStore(store.root).ensure()
         name_by_id = {
@@ -5019,7 +5026,7 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         返回:
             大纲章节列表；没有设定库时返回空列表。
         """
-        from ..store.settings_store import SettingsStore
+        from ..adapters.persistence.settings_store import SettingsStore
 
         settings = SettingsStore(store.root)
         if not settings.exists():
@@ -5161,7 +5168,7 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         """
         from fastapi.responses import FileResponse
 
-        from ..store import find_variant, find_voice, variant_ref
+        from ..adapters.persistence import find_variant, find_voice, variant_ref
 
         store = _store(path)
         voice = find_voice(store.load_voices(), voice_id)
@@ -5970,7 +5977,7 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         arcs = body.get("arcs")
         if not chapter_id or not isinstance(arcs, list):
             raise HTTPException(status_code=400, detail={"code": 2, "message": "缺少 chapter 或 arcs 参数"})
-        from ..store.settings_store import SettingsStore
+        from ..adapters.persistence.settings_store import SettingsStore
 
         settings = SettingsStore(store.root)
         bible = settings.ensure()

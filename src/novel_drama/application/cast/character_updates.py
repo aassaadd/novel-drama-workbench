@@ -13,10 +13,10 @@ import re
 from pathlib import Path
 
 from ...adapters.base import Message, TextGenRequest
-from ...config import AppConfig, resolve_temperature
+from ...adapters.persistence import ProjectStore
+from ...adapters.persistence.settings_store import SettingsStore
+from ...infrastructure.config import AppConfig, resolve_temperature
 from ...models.ids import now_iso
-from ...store import ProjectStore
-from ...store.settings_store import SettingsStore
 from ..story.outline_bind import chapter_binding
 from ..support.llm_calls import build_writing_adapter
 

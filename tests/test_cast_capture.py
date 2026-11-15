@@ -12,6 +12,8 @@ from pathlib import Path
 
 import pytest
 
+from novel_drama.adapters.persistence import ProjectStore
+from novel_drama.adapters.persistence.settings_store import SettingsStore
 from novel_drama.application.cast.capture_cast import (
     capture_chapter_cast,
     cast_capture_plan,
@@ -29,10 +31,8 @@ from novel_drama.application.story.generate_outline import (
     generate_outline as generate_outline,
 )
 from novel_drama.application.story.summarize_chapter import apply_summary
-from novel_drama.config import load_config
+from novel_drama.infrastructure.config import load_config
 from novel_drama.models import entities
-from novel_drama.store import ProjectStore
-from novel_drama.store.settings_store import SettingsStore
 
 
 class CastAdapter:

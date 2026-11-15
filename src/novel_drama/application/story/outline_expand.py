@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 from ...adapters.base import AdapterError, ErrorCode
+from ...adapters.persistence import ProjectStore
+from ...adapters.persistence.settings_store import SettingsStore
 from ...application.cast.sync_cast import (
     load_pending,
 )
-from ...config import AppConfig
+from ...infrastructure.config import AppConfig
 from ...models.ids import now_iso
-from ...store import ProjectStore
-from ...store.settings_store import SettingsStore
 from ..support.llm_calls import (
     _characters_payload,
     _progress,
@@ -289,7 +289,7 @@ def expand_outline(
     ignored_character_refs = int(stats["dropped"])
     if binding == "auto":
         # 只给新增章节绑世界/POV，已合格的旧章节保持原绑定不动
-        from ...store.world_store import WorldStore
+        from ...adapters.persistence.world_store import WorldStore
 
         world_store = WorldStore(store.root)
         worlds = world_store.list_worlds() if world_store.exists() else []

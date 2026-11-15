@@ -7,9 +7,9 @@ from __future__ import annotations
 
 import re
 
+from ...adapters.persistence import ProjectStore
+from ...adapters.persistence.settings_store import SettingsStore
 from ...domain.shared.errors import PreconditionError
-from ...store import ProjectStore
-from ...store.settings_store import SettingsStore
 
 #: `setting set` 支持标量字段：解析参数名 → (设定库路径, 字段名)
 SCALAR_FIELDS = {

@@ -14,7 +14,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from novel_drama.adapters import build_adapters  # noqa: E402
-from novel_drama.config import load_config  # noqa: E402
+from novel_drama.adapters.persistence import ProjectStore, validate  # noqa: E402
+from novel_drama.infrastructure.config import load_config  # noqa: E402
 from novel_drama.media import build_timeline  # noqa: E402
 from novel_drama.models import entities  # noqa: E402
 from novel_drama.models.ids import new_id  # noqa: E402
@@ -24,7 +25,6 @@ from novel_drama.orchestration.pipeline import (  # noqa: E402
     split_chapter_scenes,
     split_scene_lines,
 )
-from novel_drama.store import ProjectStore, validate  # noqa: E402
 
 CHAPTER_TEXT = """沈砚推开门，屋里一片漆黑。
 

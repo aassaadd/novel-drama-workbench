@@ -17,8 +17,8 @@ import pytest
 
 from novel_drama.adapters.persistence.cast_store import CastRepository
 from novel_drama.adapters.persistence.chapter_store import ChapterRepository
+from novel_drama.adapters.persistence.project_store import ProjectStore
 from novel_drama.models.enum_check import EnumValueError
-from novel_drama.store.project_store import ProjectStore
 
 FIXTURES = Path(__file__).parent / "fixtures" / "domain"
 PROJECTS = [Path(item) for item in os.environ.get("NDW_GOLDEN_PROJECTS", "").split(":") if item]

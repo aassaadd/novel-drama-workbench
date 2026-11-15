@@ -22,7 +22,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from ..adapters.base import Message, TextGenRequest
-from ..config import AppConfig, resolve_temperature
+from ..infrastructure.config import AppConfig, resolve_temperature
 from ..models import entities
 from ..models.enums import AgeRange, SpeechPitch, SpeechTempo
 

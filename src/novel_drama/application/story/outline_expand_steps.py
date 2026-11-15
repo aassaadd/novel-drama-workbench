@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from ...adapters.base import Message, TextGenRequest
+from ...adapters.persistence import ProjectStore
+from ...adapters.persistence.settings_store import SettingsStore
 from ...application.cast.sync_cast import (
     apply_chapter_cast,
     cast_prompt_block,
@@ -10,8 +12,6 @@ from ...application.cast.sync_cast import (
     summarize_cast,
 )
 from ...models.ids import new_id
-from ...store import ProjectStore
-from ...store.settings_store import SettingsStore
 from ..support.llm_calls import (
     _generate_json,
     _progress,

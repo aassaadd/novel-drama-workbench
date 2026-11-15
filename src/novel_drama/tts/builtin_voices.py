@@ -148,7 +148,7 @@ def builtin_root(config) -> Path:
     返回:
         目录路径；相对路径按仓库根解析。
     """
-    from ..config import REPO_ROOT
+    from ..infrastructure.config import REPO_ROOT
 
     raw = config.get("tts.builtin_voices.root") if config is not None else None
     path = Path(str(raw or DEFAULT_ROOT)).expanduser()

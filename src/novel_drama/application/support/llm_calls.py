@@ -13,8 +13,8 @@ from ...adapters.base import (
     TextGenRequest,
 )
 from ...adapters.offline_writing import OfflineWritingAdapter
-from ...config import AppConfig
 from ...domain.production.rules.thinking_policy import collect_overrides, step_stage
+from ...infrastructure.config import AppConfig
 from ..story.setting_spec import CHOICE_ALIASES
 from .llm_schemas import _gen_tool
 

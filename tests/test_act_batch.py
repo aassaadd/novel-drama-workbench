@@ -18,16 +18,16 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from fastapi.testclient import TestClient
 
+from novel_drama.adapters.persistence import ProjectStore
+from novel_drama.adapters.persistence.settings_store import SettingsStore
 from novel_drama.application.story.act_batch import (
     ActBatchCanceled,
     generate_act_chapters,
 )
 from novel_drama.application.story.apply_outline import apply_outline
 from novel_drama.application.story.generate_outline import generate_outline
-from novel_drama.config import load_config
+from novel_drama.infrastructure.config import load_config
 from novel_drama.models import entities
-from novel_drama.store import ProjectStore
-from novel_drama.store.settings_store import SettingsStore
 from novel_drama.web.app import create_app
 
 

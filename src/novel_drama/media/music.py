@@ -17,12 +17,13 @@ import time
 from pathlib import Path
 
 from ..adapters.base import AdapterError, ErrorCode
-from ..config import AppConfig
+from ..adapters.persistence import ProjectStore
+from ..infrastructure.config import AppConfig
 from ..models.ids import now_iso
-from ..store import ProjectStore
 from .bgm import add_cue, load_cues, save_cues
 from .comfy_media import load_manifest, resolve_template, seed_for, templates_dir
-from .ffmpeg import probe_duration_ms, run as ffmpeg_run
+from .ffmpeg import probe_duration_ms
+from .ffmpeg import run as ffmpeg_run
 from .normalize import measure_loudness
 from .runner import _check_models, _comfy_gateway, _release_comfy, _submit_and_fetch
 

@@ -15,19 +15,27 @@ import json
 import os
 from pathlib import Path
 
-from ..config import AppConfig
-from ..media import concat_voice, export_bundle, plan_concat, plan_mix, plan_mux, render_mix, run_media
+from ..adapters.persistence import ProjectStore, validate
+from ..adapters.persistence.settings_store import SettingsStore
+from ..application.script.annotate import suggest_script
+from ..application.story.apply_outline import apply_outline
+from ..application.story.generate_chapter import generate_chapter
+from ..application.story.generate_outline import generate_outline
+from ..application.story.summarize_chapter import summarize_chapter
+from ..infrastructure.config import AppConfig
+from ..media import (
+    concat_voice,
+    export_bundle,
+    plan_concat,
+    plan_mix,
+    plan_mux,
+    render_mix,
+    run_media,
+)
 from ..media.comfy_media import load_manifest, templates_dir
 from ..media.mux import mux as run_mux
 from ..media.timeline_builder import build_timeline, summarize_timeline
 from ..models.ids import new_id, now_iso
-from ..store import ProjectStore, validate
-from ..store.settings_store import SettingsStore
-from ..application.story.apply_outline import apply_outline
-from ..application.story.generate_chapter import generate_chapter
-from ..application.story.generate_outline import generate_outline
-from ..application.script.annotate import suggest_script
-from ..application.story.summarize_chapter import summarize_chapter
 
 # 阶段顺序（也是依赖顺序）
 STAGES = (

@@ -20,7 +20,7 @@ from .cli_common import (
     PreconditionError,
     _emit,
 )
-from .config import AppConfig
+from .infrastructure.config import AppConfig
 from .media import comfy_media, comfy_models
 from .media.comfy_workflow import ComfyWorkflowError, convert_ui_workflow
 

@@ -21,8 +21,8 @@ from typing import Iterator
 
 from ..adapters import Adapters
 from ..adapters.base import AdapterError, ErrorCode
+from ..adapters.persistence import ProjectStore, QueueStore
 from ..models.ids import now_iso
-from ..store import ProjectStore, QueueStore
 from .jobs import execute_job, mark_success, record_failure
 
 

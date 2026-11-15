@@ -8,11 +8,11 @@ from ...adapters.base import (
     Message,
     TextGenRequest,
 )
+from ...adapters.persistence import ProjectStore
+from ...adapters.persistence.settings_store import SettingsStore
+from ...adapters.persistence.world_store import WorldStore
 from ...application.story.world import clean_world_entry
-from ...config import AppConfig, resolve_temperature
-from ...store import ProjectStore
-from ...store.settings_store import SettingsStore
-from ...store.world_store import WorldStore
+from ...infrastructure.config import AppConfig, resolve_temperature
 from ..cast.character_fields import _CHARACTER_DESC_RULES, _clean_character_entry
 from ..support.llm_calls import (
     _char_delta,

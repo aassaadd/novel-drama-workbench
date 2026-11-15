@@ -14,12 +14,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ..config import AppConfig
-from ..models.ids import now_iso
-from ..store import ProjectStore
-from ..store.settings_store import SettingsStore
-from ..store.world_store import WorldStore
+from ..adapters.persistence import ProjectStore
+from ..adapters.persistence.settings_store import SettingsStore
+from ..adapters.persistence.world_store import WorldStore
 from ..application.story.world import build_art_prompt
+from ..infrastructure.config import AppConfig
+from ..models.ids import now_iso
 from .comfy_media import resolve_aspect, seed_for
 from .generate import render_image
 

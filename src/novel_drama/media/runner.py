@@ -19,13 +19,13 @@ from pathlib import Path
 
 from ..adapters.base import AdapterError, ErrorCode
 from ..adapters.comfyui import LocalComfyGateway
+from ..adapters.persistence import ProjectStore
 from ..cleanup import remove_dir_quietly, remove_stale_temp_dirs
-from ..config import AppConfig
 from ..domain.story.rules.chapter_rules import bump_revision
+from ..infrastructure.config import AppConfig
 from ..models.ids import now_iso
 from ..orchestration.gpu_queue import GpuLock
 from ..sfx import SfxError
-from ..store import ProjectStore
 from . import comfy_models
 from .comfy_media import (
     build_prompt,
@@ -93,7 +93,7 @@ def _visual_style(store: ProjectStore) -> str:
     返回:
         风格词文本；未设置时返回空字符串。
     """
-    from ..store.settings_store import SettingsStore
+    from ..adapters.persistence.settings_store import SettingsStore
 
     bible = SettingsStore(store.root).load_or_none() or {}
     return str((bible.get("style") or {}).get("visual_style") or "").strip()

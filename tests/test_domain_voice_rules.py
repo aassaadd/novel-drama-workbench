@@ -16,13 +16,13 @@ from pathlib import Path
 
 import pytest
 
+from novel_drama.adapters.persistence import voice_cast as legacy
 from novel_drama.domain.speech.rules import narrators as domain_narrators
 from novel_drama.domain.speech.rules.voice_ladder import (
     profile_source_hash,
     resolve_voice,
 )
 from novel_drama.models import entities
-from novel_drama.store import voice_cast as legacy
 
 PROJECTS = [Path(item) for item in os.environ.get("NDW_GOLDEN_PROJECTS", "").split(":") if item]
 

@@ -9,6 +9,7 @@ import json
 import sys
 from pathlib import Path
 
+from .adapters.persistence import validate
 from .application.script.annotate import suggest_script
 from .application.story.apply_outline import apply_outline
 from .application.story.edit_chapter import edit_chapter, save_chapter_content
@@ -24,8 +25,7 @@ from .cli_common import (
     _emit,
     _resolve_store,
 )
-from .config import AppConfig
-from .store import validate
+from .infrastructure.config import AppConfig
 
 
 def _fmt_outline(acts: list[dict]) -> str:

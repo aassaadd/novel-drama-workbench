@@ -19,6 +19,8 @@ from pathlib import Path
 import pytest
 
 from novel_drama.adapters.offline_writing import OfflineWritingAdapter
+from novel_drama.adapters.persistence import ProjectStore
+from novel_drama.adapters.persistence.settings_store import SettingsStore
 from novel_drama.application.story import chapter_checkpoint as chapter_checkpoint
 from novel_drama.application.story.apply_outline import apply_outline as apply_outline
 from novel_drama.application.story.generate_chapter import (
@@ -29,10 +31,8 @@ from novel_drama.application.story.generate_outline import (
 )
 from novel_drama.application.story.recap import ROUND_SUMMARY_MARK
 from novel_drama.cancel import GenerationCanceled
-from novel_drama.config import load_config
+from novel_drama.infrastructure.config import load_config
 from novel_drama.models import entities
-from novel_drama.store import ProjectStore
-from novel_drama.store.settings_store import SettingsStore
 
 
 def _dedupe_sentences(text: str, prior: str = "") -> str:

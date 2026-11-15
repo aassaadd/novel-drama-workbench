@@ -22,7 +22,7 @@ import urllib.request
 from datetime import datetime
 from pathlib import Path
 
-from ..config import REPO_ROOT
+from ..infrastructure.config import REPO_ROOT
 
 #: 仓库内模型清单（提交入库，由 scan 生成/更新）
 MODELS_JSON = REPO_ROOT / "config" / "comfy" / "models.json"

@@ -16,8 +16,8 @@ import json
 import os
 from pathlib import Path
 
+from ...adapters.persistence import ProjectStore
 from ...models.ids import now_iso
-from ...store import ProjectStore
 
 #: 存档结构版本：字段不兼容时递增，旧版本按失效处理
 STATE_VERSION = 1

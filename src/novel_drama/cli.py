@@ -14,6 +14,13 @@ from pathlib import Path
 
 from . import __version__
 from .adapters import AdapterError, ErrorCode, build_adapters
+from .adapters.persistence import (
+    ProjectStore,
+    QueueStore,
+    SchemaValidationError,
+    list_workspaces,
+    validate,
+)
 from .application.cast.queries import character_list
 from .cli_cast import cmd_cast
 from .cli_chapter import (
@@ -94,7 +101,7 @@ from .cli_writing import (
     cmd_outline,
     cmd_script_suggest,
 )
-from .config import AppConfig, load_config
+from .infrastructure.config import AppConfig, load_config
 from .media import load_cues, plan_mix, render_mix, run_media
 from .media.runner import plan_media
 from .media.timeline_builder import build_timeline, summarize_timeline
@@ -107,13 +114,6 @@ from .orchestration.pipeline import (
     split_scene_lines,
 )
 from .orchestration.produce import STAGES as PRODUCE_STAGES
-from .store import (
-    ProjectStore,
-    QueueStore,
-    SchemaValidationError,
-    list_workspaces,
-    validate,
-)
 from .tts import line_state
 from .tts.errors import TtsError
 

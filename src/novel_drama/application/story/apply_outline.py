@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+from ...adapters.persistence import ProjectStore
+from ...adapters.persistence.settings_store import SettingsStore
 from ...domain.story.rules.chapter_rules import bump_revision
 from ...models import entities
 from ...models.ids import now_iso
-from ...store import ProjectStore
-from ...store.settings_store import SettingsStore
 
 
 def apply_outline(store: ProjectStore, dry_run: bool = False) -> dict:

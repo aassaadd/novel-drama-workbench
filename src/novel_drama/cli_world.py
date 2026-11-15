@@ -10,13 +10,13 @@ import json
 import sys
 from pathlib import Path
 
+from .adapters.persistence.world_store import WorldStore
 from .application.story.queries import world_list
 from .application.story.settings_generate import generate_worlds
 from .application.story.world_crud import remove_world, upsert_worlds
 from .cli_common import EXIT_OK, PreconditionError, _emit, _resolve_store
-from .config import AppConfig
+from .infrastructure.config import AppConfig
 from .media.art import render_world_cover
-from .store.world_store import WorldStore
 
 
 def _read_rows(path: str) -> list[dict]:

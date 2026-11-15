@@ -7,7 +7,7 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_CONFIG_PATH = REPO_ROOT / "config" / "config.yaml"
 # 页面「设置」写出的覆盖层：与手写的 config.yaml 分开存，避免页面保存时抹掉注释
 DEFAULT_UI_CONFIG_PATH = REPO_ROOT / "config" / "config.ui.yaml"

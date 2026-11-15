@@ -12,10 +12,10 @@ from ...adapters.base import (
     Message,
     TextGenRequest,
 )
-from ...config import AppConfig
+from ...adapters.persistence import ProjectStore
+from ...adapters.persistence.settings_store import SettingsStore
+from ...infrastructure.config import AppConfig
 from ...models.ids import new_id
-from ...store import ProjectStore
-from ...store.settings_store import SettingsStore
 from ...text.titles import strip_index_prefix
 from ..support.llm_calls import (
     _char_delta,

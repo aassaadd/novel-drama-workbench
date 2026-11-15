@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+from ...adapters.persistence import ProjectStore
+from ...adapters.persistence.settings_store import SettingsStore
+from ...adapters.persistence.world_store import WorldStore
 from ...models import entities
-from ...store import ProjectStore
-from ...store.settings_store import SettingsStore
-from ...store.world_store import WorldStore
 
 
 def bind_outline_context(bible: dict, worlds: list[dict], characters: list[dict]) -> dict:

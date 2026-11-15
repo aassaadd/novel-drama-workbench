@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import json
 
+from .adapters.persistence import ProjectStore
+from .adapters.persistence.settings_store import SettingsStore
 from .application.cast.character_crud import (
     chapter_references,
     outline_references,
@@ -34,8 +36,6 @@ from .domain.cast.rules.merge import (
 )
 from .domain.cast.rules.naming import alias_key, merge_aliases
 from .models import entities
-from .store import ProjectStore
-from .store.settings_store import SettingsStore
 
 
 def _find(table: dict, character_id: str) -> dict:

@@ -10,9 +10,9 @@ from __future__ import annotations
 import copy
 
 from ..adapters.base import not_implemented
+from ..adapters.persistence import ProjectStore
 from ..domain.story.rules.chapter_rules import bump_revision
 from ..models import entities
-from ..store import ProjectStore
 from ..text.splitter import split_lines, split_scenes
 from ..tts.line_state import resolve_line_state
 from .jobs import build_idempotency_key

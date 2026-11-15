@@ -9,10 +9,10 @@ from ...adapters.base import (
     Message,
     TextGenRequest,
 )
-from ...config import AppConfig, resolve_temperature
-from ...store import ProjectStore
-from ...store.settings_store import SettingsStore
-from ...store.world_store import WorldStore
+from ...adapters.persistence import ProjectStore
+from ...adapters.persistence.settings_store import SettingsStore
+from ...adapters.persistence.world_store import WorldStore
+from ...infrastructure.config import AppConfig, resolve_temperature
 from ..story.chapter_context import _bible_digest, _project_context
 from ..support.llm_calls import (
     _char_delta,

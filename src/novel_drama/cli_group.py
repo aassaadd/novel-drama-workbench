@@ -8,15 +8,15 @@ from __future__ import annotations
 
 import copy
 
-from .cli_common import EXIT_OK, _emit, _resolve_store
-from .domain.speech.rules.params import FP_FIELDS
-from .store.groups_store import (
+from .adapters.persistence.groups_store import (
     GroupsStore,
     apply_group,
     build_diff,
     covering_groups,
     detect,
 )
+from .cli_common import EXIT_OK, _emit, _resolve_store
+from .domain.speech.rules.params import FP_FIELDS
 from .tts import line_state
 
 

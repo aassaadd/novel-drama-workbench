@@ -7,12 +7,12 @@ from __future__ import annotations
 
 import json
 
+from ...adapters.persistence import ProjectStore
+from ...adapters.persistence.settings_store import SettingsStore
 from ...domain.shared.errors import PreconditionError
 from ...models import entities
 from ...models.enums import AgeRange, SpeechPitch, SpeechTempo, choices_text
 from ...models.ids import now_iso
-from ...store import ProjectStore
-from ...store.settings_store import SettingsStore
 
 #: 允许写入的角色定位（narrator 由系统保留）
 ROLE_CHOICES = ("protagonist", "antagonist", "supporting", "minor")

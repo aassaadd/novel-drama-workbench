@@ -14,11 +14,11 @@ from pathlib import Path
 
 import pytest
 
+from novel_drama.adapters.persistence.schema_validator import validate
 from novel_drama.domain.cast.entities.cast import Cast
 from novel_drama.domain.cast.entities.character import Character
 from novel_drama.domain.cast.value_objects.voice import Stock, VoiceBinding
 from novel_drama.domain.shared.errors import InvariantViolation
-from novel_drama.store.schema_validator import validate
 
 FIXTURES = Path(__file__).parent / "fixtures" / "domain"
 

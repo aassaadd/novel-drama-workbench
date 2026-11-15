@@ -28,7 +28,7 @@ import bisect
 import hashlib
 import re
 
-from ..config import load_config
+from ..infrastructure.config import load_config
 from ..models import new_id
 from ..models.entities import EMOTIONS, NARRATOR_ID, UNKNOWN_SPEAKER_ID
 from ..models.ids import now_iso

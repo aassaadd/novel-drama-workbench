@@ -5,9 +5,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..config import REPO_ROOT, AppConfig
 from ..domain.production.rules.thinking_policy import collect_overrides
-from .base import AdapterError, ComfyGateway, ErrorCode, SfxAdapter, TtsAdapter, WritingAdapter
+from ..infrastructure.config import REPO_ROOT, AppConfig
+from .base import (
+    AdapterError,
+    ComfyGateway,
+    ErrorCode,
+    SfxAdapter,
+    TtsAdapter,
+    WritingAdapter,
+)
 from .comfyui import LocalComfyGateway
 from .sfx import PlaceholderSfxAdapter
 from .tts import PlaceholderTtsAdapter, ProviderTtsAdapter

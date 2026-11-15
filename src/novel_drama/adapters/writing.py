@@ -24,9 +24,18 @@ import urllib.parse
 import urllib.request
 from typing import Iterator
 
-from .base import AdapterError, ErrorCode, HealthStatus, TextGenChunk, TextGenRequest, TextGenResult, Usage
-from ..domain.production.rules.watchdog import apply_context_limit, describe as describe_watchdog, watchdog_tokens
 from ..domain.production.rules.thinking_policy import resolve_thinking
+from ..domain.production.rules.watchdog import apply_context_limit, watchdog_tokens
+from ..domain.production.rules.watchdog import describe as describe_watchdog
+from .base import (
+    AdapterError,
+    ErrorCode,
+    HealthStatus,
+    TextGenChunk,
+    TextGenRequest,
+    TextGenResult,
+    Usage,
+)
 
 #: 日志：每次写作 LLM HTTP 调用记录地址、状态码、耗时与返回片段
 logger = logging.getLogger(__name__)

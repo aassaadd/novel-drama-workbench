@@ -5,9 +5,9 @@ from __future__ import annotations
 import json
 import sys
 
-from .config import AppConfig
+from .adapters.persistence import ProjectStore
 from .domain.shared.errors import PreconditionError, TaskFailedError
-from .store import ProjectStore
+from .infrastructure.config import AppConfig
 
 EXIT_OK = 0
 EXIT_REJECTED = 1
@@ -67,7 +67,7 @@ def cast_hint(store: ProjectStore, chapter_id: str | None = None) -> None:
     返回:
         无。
     """
-    from .store.voice_cast import check_cast
+    from .adapters.persistence.voice_cast import check_cast
 
     try:
         result = check_cast(store, chapter_id)

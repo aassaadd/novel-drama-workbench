@@ -24,6 +24,7 @@ from fastapi import HTTPException
 from fastapi.responses import StreamingResponse
 
 from ..adapters.base import AdapterError
+from ..adapters.persistence import ProjectStore
 from ..application.cast.character_plan import (
     generate_from_plan,
     load_plan,
@@ -44,9 +45,8 @@ from ..application.story.outline_expand import expand_outline
 from ..application.story.outline_hierarchical import generate_hierarchical_outline
 from ..application.story.settings_generate import generate_worlds
 from ..cancel import GenerationCanceled
-from ..config import load_config
+from ..infrastructure.config import load_config
 from ..oplog import set_llm_abort_reason
-from ..store import ProjectStore
 from .job_tracker import UiJob
 
 #: SSE 响应头：禁用缓存与反向代理缓冲，保证逐条到达浏览器
@@ -990,8 +990,8 @@ def register_stream_routes(app, config_path: str | None = None) -> None:
                 result["markup_path"] = str(out_path)
             # 有失败批次时不应用，避免把不完整的标注写入章节
             if body.get("apply") and not result.get("partial"):
+                from ..adapters.persistence.schema_validator import validate
                 from ..cli_voice import _apply_script_to_chapter
-                from ..store.schema_validator import validate
 
                 validate(result["script"], "director-script.schema.json")
                 store.save_script(result["script"])
@@ -1024,9 +1024,9 @@ def register_stream_routes(app, config_path: str | None = None) -> None:
         if not markup:
             raise HTTPException(status_code=400, detail="没有可写入的标注内容：请先生成预览")
 
+        from ..adapters.persistence.schema_validator import validate
         from ..cli_voice import _apply_script_to_chapter
         from ..director.markup import parse_markup
-        from ..store.schema_validator import validate
 
         chapter = store.load_chapter(chapter_id)
         characters = store.load_characters()["characters"]

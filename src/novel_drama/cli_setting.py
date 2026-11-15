@@ -11,6 +11,7 @@ import json
 import sys
 from pathlib import Path
 
+from .adapters.persistence.settings_store import SettingsStore
 from .application.story.queries import settings_view
 from .application.story.settings_edit import (
     SCALAR_FIELDS,
@@ -32,8 +33,7 @@ from .application.story.settings_generate import (
     polish_field,
 )
 from .cli_common import _emit, _resolve_store
-from .config import AppConfig
-from .store.settings_store import SettingsStore
+from .infrastructure.config import AppConfig
 
 
 def _fmt_bible(bible: dict) -> str:

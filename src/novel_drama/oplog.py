@@ -34,7 +34,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterator
 
-from .config import REPO_ROOT
+from .infrastructure.config import REPO_ROOT
 
 #: 记录类型：操作 / LLM 调用
 KIND_OP = "op"

@@ -19,7 +19,7 @@ import re
 from pathlib import Path
 
 from ..adapters.base import AdapterError, ErrorCode
-from ..config import REPO_ROOT, AppConfig
+from ..infrastructure.config import REPO_ROOT, AppConfig
 
 #: 模板目录缺省值（相对仓库根目录）
 DEFAULT_TEMPLATES_DIR = "config/comfy"

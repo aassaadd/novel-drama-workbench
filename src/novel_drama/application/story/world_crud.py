@@ -5,10 +5,10 @@ CLI（`world apply/remove`）与 Web 共用本模块。
 
 from __future__ import annotations
 
+from ...adapters.persistence import ProjectStore
+from ...adapters.persistence.settings_store import SettingsStore
+from ...adapters.persistence.world_store import WorldStore
 from ...domain.shared.errors import PreconditionError
-from ...store import ProjectStore
-from ...store.settings_store import SettingsStore
-from ...store.world_store import WorldStore
 from .world import clean_world_entry
 
 

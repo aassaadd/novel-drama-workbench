@@ -13,10 +13,10 @@ from ...adapters.base import (
     TextGenRequest,
     TextGenResult,
 )
+from ...adapters.persistence import ProjectStore
 from ...domain.production.rules.watchdog import describe as describe_watchdog
 from ...models.ids import now_iso
 from ...oplog import set_llm_call_reason
-from ...store import ProjectStore
 from .chapter_context import stream_text
 from .chapter_limits import MAX_LOCAL_CONTINUATIONS
 from .chapter_text import (

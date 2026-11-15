@@ -13,8 +13,8 @@ import json
 
 from ..adapters import Adapters
 from ..adapters.base import AdapterError, ErrorCode
+from ..adapters.persistence import ProjectStore
 from ..models.ids import now_iso
-from ..store import ProjectStore
 
 
 def build_idempotency_key(kind: str, target: dict, revision: int | str, adapter: str | None, params: dict | None = None) -> str:

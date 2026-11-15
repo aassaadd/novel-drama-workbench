@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from .cli_common import EXIT_OK, _emit, _resolve_store
-from .config import AppConfig
+from .infrastructure.config import AppConfig
 from .media.music import MODE_LABELS, render_bgm
 
 

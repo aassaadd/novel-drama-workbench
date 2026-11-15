@@ -7,6 +7,7 @@ import os
 import sys
 from pathlib import Path
 
+from .adapters.persistence import ProjectStore, validate
 from .cli_common import (
     EXIT_FAILED,
     EXIT_OK,
@@ -15,8 +16,7 @@ from .cli_common import (
     _resolve_store,
     _tts_service,
 )
-from .config import AppConfig
-from .media.comfy_media import load_manifest, templates_dir
+from .infrastructure.config import AppConfig
 from .media import (
     add_cue,
     build_schedule,
@@ -33,8 +33,8 @@ from .media import (
     sync_cues_from_plans,
     write_export,
 )
+from .media.comfy_media import load_manifest, templates_dir
 from .models.ids import now_iso
-from .store import ProjectStore, validate
 
 
 def _target_chapters(store: ProjectStore, args) -> list[str]:
@@ -176,7 +176,8 @@ def _planned_counts(
         `(counts, skipped_rows)`：counts 为 `[{chapter_id, title, rows}]` 用于进度条分母；
         skipped_rows 为因说话人未识别被排除的行（含场景/行号定位）。
     """
-    from .tts import line_state, reuse as reuse_plan
+    from .tts import line_state
+    from .tts import reuse as reuse_plan
     from .tts.batch import plan_batch
 
     line_ids, include_ready = _line_filter(store, chapters, args, config)
@@ -258,7 +259,7 @@ def _unknown_line_ids(store: ProjectStore, chapters: list[dict], args) -> set[st
     """
     if not getattr(args, "skip_unknown_speakers", False):
         return set()
-    from .store.voice_cast import unresolved_speaker_lines
+    from .adapters.persistence.voice_cast import unresolved_speaker_lines
 
     return {row["line_id"] for row in unresolved_speaker_lines(store, [chapter.get("id") for chapter in chapters])}
 
@@ -294,7 +295,7 @@ def cmd_tts_batch(args, config: AppConfig) -> int:
     # 说话人无法归属的行：显式跳过时不再参与合成，也不会因它们阻断整章
     skip_ids = _unknown_line_ids(store, chapters, args)
     if not getattr(args, "skip_cast_check", False):
-        from .store.voice_cast import check_cast
+        from .adapters.persistence.voice_cast import check_cast
 
         gate = check_cast(store, chapter_ids[0]) if len(chapter_ids) == 1 else check_cast(store)
         errors = [item for item in gate["findings"] if item["level"] == "error"]
@@ -308,7 +309,8 @@ def cmd_tts_batch(args, config: AppConfig) -> int:
             )
 
     if args.dry_run:
-        from .tts import line_state, reuse as reuse_plan
+        from .tts import line_state
+        from .tts import reuse as reuse_plan
         from .tts.batch import history_avg_ms_per_line
 
         service = _tts_service(args, config)
@@ -764,7 +766,7 @@ def cmd_export(args, config: AppConfig) -> int:
     chapter = store.load_chapter(args.chapter)
     characters = {item["id"]: item for item in store.load_characters()["characters"]}
     out_dir = Path(args.out_dir) if args.out_dir else store.root / "exports"
-    from .store.voice_cast import check_cast
+    from .adapters.persistence.voice_cast import check_cast
 
     cast_warnings = check_cast(store, chapter["id"])["findings"]
     if cast_warnings:

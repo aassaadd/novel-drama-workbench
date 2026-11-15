@@ -11,11 +11,11 @@ import hashlib
 import json
 import re
 
+from .adapters.persistence import check_cast, profile_source_hash
+from .adapters.persistence.settings_store import SettingsStore
 from .cli_common import EXIT_OK, EXIT_PRECONDITION, EXIT_REJECTED, _emit, _resolve_store
-from .config import AppConfig
+from .infrastructure.config import AppConfig
 from .models.ids import now_iso
-from .store import check_cast, profile_source_hash
-from .store.settings_store import SettingsStore
 
 
 def _slug(text: str) -> str:

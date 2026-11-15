@@ -9,8 +9,9 @@ from __future__ import annotations
 from fastapi import HTTPException
 
 from ..adapters.base import AdapterError, ErrorCode
+from ..adapters.persistence import ProjectStore
 from ..bgm.registry import build_providers, pick_provider
-from ..config import load_config
+from ..infrastructure.config import load_config
 from ..media.bgm import load_cues
 from ..media.music import (
     LONG_BED_SECONDS,
@@ -21,7 +22,6 @@ from ..media.music import (
     render_bgm,
     resolve_mode,
 )
-from ..store import ProjectStore
 
 #: ComfyUI / ACE-Step 的时长边界，与 `media.music` 的校验保持一致
 COMFY_MIN_SECONDS = 10

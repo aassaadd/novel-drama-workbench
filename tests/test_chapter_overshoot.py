@@ -115,7 +115,7 @@ def test_compress_keeps_every_beat(tmp_path: Path, monkeypatch: pytest.MonkeyPat
 
 def _beats(store, chapter_id: str) -> list[dict]:
     """从设定库大纲里取本章节拍。"""
-    from novel_drama.store.settings_store import SettingsStore
+    from novel_drama.adapters.persistence.settings_store import SettingsStore
 
     bible = SettingsStore(store.root).load()
     for act in (bible.get("outline") or {}).get("acts") or []:

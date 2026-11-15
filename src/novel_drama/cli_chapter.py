@@ -9,17 +9,17 @@ import json
 import re
 from pathlib import Path
 
-from .application.story.queries import chapter_detail, chapter_list
-from .cli_common import EXIT_OK, EXIT_REJECTED, _emit, _resolve_store
-from .config import AppConfig
-from .domain.story.rules.chapter_rules import bump_revision, count_words
-from .store.imports_store import (
+from .adapters.persistence.imports_store import (
     ImportsStore,
     compare_texts,
     digest,
     preview,
     split_paragraphs,
 )
+from .application.story.queries import chapter_detail, chapter_list
+from .cli_common import EXIT_OK, EXIT_REJECTED, _emit, _resolve_store
+from .domain.story.rules.chapter_rules import bump_revision, count_words
+from .infrastructure.config import AppConfig
 from .tts import line_state
 
 # ---------------- chapter ----------------

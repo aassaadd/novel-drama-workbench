@@ -24,19 +24,19 @@ from fastapi import HTTPException
 
 from ..adapters.comfyui import LocalComfyGateway
 from ..adapters.writing import OmlxWritingAdapter, last_llm_call
-from ..config import (
-    DEFAULT_UI_CONFIG_PATH,
-    _get_dotted,
-    load_config,
-    remove_ui_config,
-    save_ui_config,
-)
 from ..domain.production.rules.thinking_policy import (
     STAGE_CONFIG_PREFIX,
     resolve_thinking,
 )
 from ..domain.production.rules.thinking_policy import STAGES as THINKING_STAGES
 from ..domain.production.rules.token_budget import context_status
+from ..infrastructure.config import (
+    DEFAULT_UI_CONFIG_PATH,
+    _get_dotted,
+    load_config,
+    remove_ui_config,
+    save_ui_config,
+)
 from ..media import comfy_media, comfy_models
 from ..tts import model_store
 

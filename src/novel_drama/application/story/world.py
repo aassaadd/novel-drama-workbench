@@ -9,9 +9,9 @@ from __future__ import annotations
 import json
 import re
 
+from ...adapters.persistence.schema_validator import validate
+from ...adapters.persistence.world_store import WorldStore
 from ...models.ids import new_id
-from ...store.schema_validator import validate
-from ...store.world_store import WorldStore
 
 
 def _text(value) -> str:

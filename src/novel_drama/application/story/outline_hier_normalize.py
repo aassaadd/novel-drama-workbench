@@ -5,13 +5,13 @@ from __future__ import annotations
 import logging
 
 from ...adapters.base import AdapterError, ErrorCode
+from ...adapters.persistence import ProjectStore
+from ...adapters.persistence.world_store import WorldStore
 from ...application.cast.sync_cast import (
     apply_chapter_cast,
     normalize_cast,
     summarize_cast,
 )
-from ...store import ProjectStore
-from ...store.world_store import WorldStore
 from ...text.titles import strip_index_prefix
 from ..support.llm_calls import (
     _progress,

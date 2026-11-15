@@ -13,7 +13,7 @@ import os
 import re
 from pathlib import Path
 
-from ..models.ids import now_iso
+from ...models.ids import now_iso
 
 # 快照文件后缀
 _SUFFIX = ".txt"

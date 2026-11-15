@@ -20,7 +20,7 @@ from fastapi import HTTPException, Query
 from starlette.responses import Response
 
 from .. import oplog
-from ..config import load_config
+from ..infrastructure.config import load_config
 
 #: 需要记录日志的 HTTP 方法（只读 GET 不记）
 _MUTATING = {"POST", "PATCH", "PUT", "DELETE"}

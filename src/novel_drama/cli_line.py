@@ -8,8 +8,8 @@ from __future__ import annotations
 import copy
 
 from .cli_common import EXIT_OK, EXIT_REJECTED, _emit, _resolve_store, cast_hint
-from .config import AppConfig
 from .domain.story.rules.chapter_rules import bump_revision, count_words
+from .infrastructure.config import AppConfig
 from .models import entities
 from .models.ids import new_id
 from .orchestration.pipeline import split_chapter_scenes, split_scene_lines

@@ -17,7 +17,7 @@ from .application.cast.character_crud import (
 )
 from .application.cast.generate_characters import generate_characters
 from .cli_common import PreconditionError, _emit, _resolve_store, cast_hint
-from .config import AppConfig
+from .infrastructure.config import AppConfig
 from .media.art import render_character_sheet
 from .models import entities
 

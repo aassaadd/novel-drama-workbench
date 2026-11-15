@@ -17,7 +17,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from ..config import AppConfig
+from ..infrastructure.config import AppConfig
 from ..models import entities
 from . import voice_design
 

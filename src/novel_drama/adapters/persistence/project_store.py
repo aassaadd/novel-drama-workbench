@@ -8,16 +8,16 @@ import re
 import sys
 from pathlib import Path
 
-from ..domain.story.rules.chapter_rules import should_archive_version, version_id_of
-from ..models import entities
-from ..models.enum_check import (
+from ...domain.story.rules.chapter_rules import should_archive_version, version_id_of
+from ...models import entities
+from ...models.enum_check import (
     check_chapter,
     check_character_table,
     check_project,
     check_script,
     check_voice_table,
 )
-from ..models.ids import now_iso
+from ...models.ids import now_iso
 from .schema_validator import SchemaValidationError, validate
 
 WORKSPACE_INDEX = Path.home() / ".ndw" / "workspaces.json"

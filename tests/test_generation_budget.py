@@ -23,8 +23,8 @@ from novel_drama.adapters.writing import OmlxWritingAdapter
 from novel_drama.application.story.chapter_rounds import (
     _generate_validated as _generate_validated,
 )
-from novel_drama.config import load_config
 from novel_drama.domain.production.rules import token_budget as budgets
+from novel_drama.infrastructure.config import load_config
 
 
 def _write(path: Path, text: str) -> Path:
@@ -121,7 +121,7 @@ def test_output_budget_is_not_a_setting(tmp_path: Path, monkeypatch: pytest.Monk
     base = _write(tmp_path / "config.yaml", "omlx:\n  context_window: 65536\n")
     # 隔离真实页面覆盖层，避免本机 config.ui.yaml 里的上下文窗口干扰断言
     ui = tmp_path / "config.ui.yaml"
-    monkeypatch.setattr("novel_drama.config.DEFAULT_UI_CONFIG_PATH", ui)
+    monkeypatch.setattr("novel_drama.infrastructure.config.DEFAULT_UI_CONFIG_PATH", ui)
     monkeypatch.setattr(models_api, "DEFAULT_UI_CONFIG_PATH", ui)
     client = TestClient(create_app(config_path=str(base)))
 
@@ -161,7 +161,7 @@ def _generation_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
     base = _write(tmp_path / "config.yaml", "")
     ui = tmp_path / "config.ui.yaml"
-    monkeypatch.setattr("novel_drama.config.DEFAULT_UI_CONFIG_PATH", ui)
+    monkeypatch.setattr("novel_drama.infrastructure.config.DEFAULT_UI_CONFIG_PATH", ui)
     monkeypatch.setattr(models_api, "DEFAULT_UI_CONFIG_PATH", ui)
     return TestClient(create_app(config_path=str(base))), ui
 
@@ -381,7 +381,7 @@ def test_thinking_global_switch_off_disables_everything(
     base = _write(tmp_path / "config.yaml", "omlx:\n  enable_thinking: false\n")
     ui = tmp_path / "config.ui.yaml"
     ui.write_text("writing:\n  thinking:\n    stages:\n      outline_beats: true\n", encoding="utf-8")
-    monkeypatch.setattr("novel_drama.config.DEFAULT_UI_CONFIG_PATH", ui)
+    monkeypatch.setattr("novel_drama.infrastructure.config.DEFAULT_UI_CONFIG_PATH", ui)
     monkeypatch.setattr(models_api, "DEFAULT_UI_CONFIG_PATH", ui)
     client = TestClient(create_app(config_path=str(base)))
 
@@ -481,8 +481,8 @@ def test_stream_notices_cover_chapter_results() -> None:
 
 def test_legacy_project_max_tokens_is_rejected(tmp_path: Path) -> None:
     """旧工程带 settings.omlx.max_tokens 时直接报可读错误，不静默忽略。"""
-    from novel_drama.store.project_store import ProjectStore
-    from novel_drama.store.schema_validator import SchemaValidationError
+    from novel_drama.adapters.persistence.project_store import ProjectStore
+    from novel_drama.adapters.persistence.schema_validator import SchemaValidationError
 
     project = {
         "schema_version": 1,

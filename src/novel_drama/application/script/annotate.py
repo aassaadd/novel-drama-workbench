@@ -8,11 +8,11 @@ from ...adapters.base import (
     Message,
     TextGenRequest,
 )
-from ...config import AppConfig
+from ...adapters.persistence import ProjectStore
+from ...adapters.persistence.settings_store import SettingsStore
 from ...director.markup import parse_markup
+from ...infrastructure.config import AppConfig
 from ...models.ids import now_iso
-from ...store import ProjectStore
-from ...store.settings_store import SettingsStore
 from ..story.chapter_context import _project_context
 from ..story.chapter_rounds import (
     _script_work_load,

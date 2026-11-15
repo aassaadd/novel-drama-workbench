@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from ..models.ids import now_iso
+from ...models.ids import now_iso
 
 # 允许分组覆盖的字段（与 docs §8.1 一致；不开放 text/speaker_id，避免批量改错文本）
 GROUP_FIELDS: tuple[str, ...] = ("emotion", "emotion_intensity", "speed", "pause_after_ms")

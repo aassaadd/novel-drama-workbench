@@ -12,7 +12,7 @@ import os
 import uuid
 from pathlib import Path
 
-from ..models.ids import new_id, now_iso
+from ...models.ids import new_id, now_iso
 from .project_store import ProjectStore
 from .schema_validator import validate
 

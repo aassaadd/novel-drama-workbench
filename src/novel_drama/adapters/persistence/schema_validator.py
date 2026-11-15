@@ -10,7 +10,7 @@ try:  # 可选依赖：缺失时给出明确提示，不静默跳过
 except ImportError:  # pragma: no cover
     Draft202012Validator = None
 
-SCHEMA_DIR = Path(__file__).resolve().parents[3] / "schema"
+SCHEMA_DIR = Path(__file__).resolve().parents[4] / "schema"
 
 
 class SchemaValidationError(ValueError):

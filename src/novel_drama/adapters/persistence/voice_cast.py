@@ -9,14 +9,14 @@
 
 from __future__ import annotations
 
-from ..domain.speech.rules.narrators import effective_switches as _effective_switches
-from ..domain.speech.rules.narrators import narrator_persona as narrator_persona
-from ..domain.speech.rules.narrators import narrator_plan as narrator_plan
-from ..domain.speech.rules.voice_ladder import (
+from ...domain.speech.rules.narrators import effective_switches as _effective_switches
+from ...domain.speech.rules.narrators import narrator_persona as narrator_persona
+from ...domain.speech.rules.narrators import narrator_plan as narrator_plan
+from ...domain.speech.rules.voice_ladder import (
     profile_source_hash as profile_source_hash,
 )
-from ..domain.speech.rules.voice_ladder import resolve_voice as _domain_resolve_voice
-from ..models.entities import NARRATOR_ID, UNKNOWN_SPEAKER_ID
+from ...domain.speech.rules.voice_ladder import resolve_voice as _domain_resolve_voice
+from ...models.entities import NARRATOR_ID, UNKNOWN_SPEAKER_ID
 from .voice_store import find_voice, pick_variant, variant_ref
 
 # 解析优先级（10 级）与旁白人格展开已下沉到 `domain.speech.rules`；
@@ -838,7 +838,7 @@ def _check_bgm(store, chapters: list[dict], strict: bool) -> list[dict]:
     返回:
         findings 列表。
     """
-    from ..media.bgm import load_cues
+    from ...media.bgm import load_cues
 
     findings: list[dict] = []
     for chapter in chapters:

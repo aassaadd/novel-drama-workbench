@@ -31,7 +31,7 @@ def line_voice(store, characters_table: dict, line: dict, service, chapter: dict
     返回:
         `{"voice_id", "variant_id", "ref_audio", "ref_text", "source"}`。
     """
-    from ..store.voice_cast import resolve_cast_voice
+    from ..adapters.persistence.voice_cast import resolve_cast_voice
 
     resolved = resolve_cast_voice(store, characters_table, chapter or {}, line, voices=voices)
     if resolved.get("ref_audio"):

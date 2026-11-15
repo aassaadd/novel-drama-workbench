@@ -119,7 +119,7 @@ def live_line_ids(store) -> set[str]:
     返回:
         行 ID 集合；账号无队列文件时为空集合。
     """
-    from ..store import QueueStore
+    from ..adapters.persistence import QueueStore
 
     ids: set[str] = set()
     for job in QueueStore(store).load():

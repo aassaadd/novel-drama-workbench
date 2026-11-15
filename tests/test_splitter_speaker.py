@@ -12,9 +12,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from novel_drama.adapters.persistence.voice_cast import unresolved_speaker_lines  # noqa: E402
 from novel_drama.models.entities import UNKNOWN_SPEAKER_ID  # noqa: E402
 from novel_drama.orchestration.resplit import merge_manual_lines  # noqa: E402
-from novel_drama.store.voice_cast import unresolved_speaker_lines  # noqa: E402
 from novel_drama.text.splitter import _scene_candidates, split_lines  # noqa: E402
 
 CHARS = [

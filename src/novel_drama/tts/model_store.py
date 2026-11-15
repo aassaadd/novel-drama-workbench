@@ -341,7 +341,7 @@ def models_root(config) -> Path:
     返回:
         绝对路径；配置为相对路径时按仓库根解析。
     """
-    from ..config import REPO_ROOT
+    from ..infrastructure.config import REPO_ROOT
 
     raw = config.get("paths.models_root") or DEFAULT_MODELS_ROOT
     path = Path(str(raw)).expanduser()

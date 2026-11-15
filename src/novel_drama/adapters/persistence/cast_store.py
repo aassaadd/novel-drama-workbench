@@ -7,8 +7,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from novel_drama.adapters.persistence.project_store import ProjectStore
 from novel_drama.domain.cast.entities.cast import Cast
-from novel_drama.store.project_store import ProjectStore
 
 
 @dataclass

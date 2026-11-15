@@ -19,11 +19,17 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from ..config import AppConfig
+from ..adapters.persistence.voice_store import find_voice
+from ..infrastructure.config import AppConfig
 from ..models import entities
-from ..store.voice_store import find_voice
 from . import voice_casting, voice_design
-from .cast_autofill import _BAND_SLOT, _GENDER_LABEL, _SLOT_LABEL, _rank_for_group, _usage
+from .cast_autofill import (
+    _BAND_SLOT,
+    _GENDER_LABEL,
+    _SLOT_LABEL,
+    _rank_for_group,
+    _usage,
+)
 from .voice_batch import brief_text
 
 #: 可参与生成的性别；缺失或「未知」时标「需要人工」，不做猜测

@@ -14,10 +14,10 @@ from pathlib import Path
 
 import pytest
 
+from novel_drama.adapters.persistence.schema_validator import validate
 from novel_drama.domain.shared.errors import InvariantViolation
 from novel_drama.domain.shared.text import count_words
 from novel_drama.domain.story.entities.chapter import Chapter
-from novel_drama.store.schema_validator import validate
 
 FIXTURES = Path(__file__).parent / "fixtures" / "domain"
 REAL_SAMPLES = ["chapter_draft_real.json", "chapter_written_real.json", "chapter_scenes_real.json"]

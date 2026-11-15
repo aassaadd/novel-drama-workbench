@@ -8,14 +8,14 @@ from dataclasses import replace
 from pathlib import Path
 
 from ...adapters.base import AdapterError, ErrorCode, Message, TextGenRequest
+from ...adapters.persistence import ProjectStore
+from ...adapters.persistence.settings_store import SettingsStore
 from ...application.cast.sync_cast import (
     cast_prompt_block,
     load_pending,
 )
-from ...config import AppConfig
+from ...infrastructure.config import AppConfig
 from ...models.ids import new_id, now_iso
-from ...store import ProjectStore
-from ...store.settings_store import SettingsStore
 from ..support.llm_calls import (
     _characters_payload,
     _generate_json,

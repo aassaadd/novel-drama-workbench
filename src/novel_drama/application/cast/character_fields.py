@@ -146,7 +146,7 @@ def _clean_voice_profile(row) -> dict | None:
 
 def _attach_profile_source(character: dict, profile: dict) -> dict:
     """补齐音色描述的元数据（schema/summary/来源哈希/状态）。"""
-    from ...store.voice_cast import profile_source_hash
+    from ...adapters.persistence.voice_cast import profile_source_hash
 
     profile["schema"] = "voice_profile/1"
     profile.setdefault("summary", profile.get("voice_summary"))

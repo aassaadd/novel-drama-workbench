@@ -5,7 +5,7 @@ CLI 与 Web 共用同一份读模型，避免两边补字段的口径不一致�
 
 from __future__ import annotations
 
-from ...store import ProjectStore
+from ...adapters.persistence import ProjectStore
 
 
 def character_list(store: ProjectStore) -> list[dict]:

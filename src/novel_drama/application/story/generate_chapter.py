@@ -9,12 +9,12 @@ from ...adapters.base import (
     AdapterError,
     ErrorCode,
 )
+from ...adapters.persistence import ProjectStore
 from ...cancel import GenerationCanceled
-from ...config import AppConfig
 from ...domain.production.rules.token_budget import context_budget_tokens
 from ...domain.story.rules.chapter_rules import bump_revision
+from ...infrastructure.config import AppConfig
 from ...models.ids import now_iso
-from ...store import ProjectStore
 from ...text.context import POV_LABELS, ContextAssembler
 from ...text.dialogue import normalize_dialogue
 from . import chapter_checkpoint

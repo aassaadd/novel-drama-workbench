@@ -14,6 +14,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from novel_drama.adapters.persistence import ProjectStore
+from novel_drama.adapters.persistence.settings_store import SettingsStore
 from novel_drama.application.cast.character_crud import (
     character_refs,
     remove_character,
@@ -21,8 +23,6 @@ from novel_drama.application.cast.character_crud import (
 from novel_drama.domain.shared.errors import PreconditionError
 from novel_drama.models import entities
 from novel_drama.models.ids import new_id
-from novel_drama.store import ProjectStore
-from novel_drama.store.settings_store import SettingsStore
 
 
 class CharacterDeleteTest(unittest.TestCase):

@@ -5,16 +5,16 @@ from __future__ import annotations
 from dataclasses import replace
 
 from ...adapters.base import AdapterError, Message, TextGenRequest
+from ...adapters.persistence import ProjectStore
+from ...adapters.persistence.settings_store import SettingsStore
 from ...application.cast.sync_cast import (
     apply_chapter_cast,
     cast_prompt_block,
     load_pending,
     normalize_cast,
 )
-from ...config import AppConfig
+from ...infrastructure.config import AppConfig
 from ...models.ids import new_id
-from ...store import ProjectStore
-from ...store.settings_store import SettingsStore
 from ...text.titles import strip_index_prefix
 from ..support.llm_calls import (
     _characters_payload,

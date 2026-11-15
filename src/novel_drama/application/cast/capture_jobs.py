@@ -5,9 +5,9 @@ from __future__ import annotations
 import json
 import threading
 
+from ...adapters.persistence import ProjectStore
+from ...adapters.persistence.settings_store import SettingsStore
 from ...models.ids import new_id, now_iso
-from ...store import ProjectStore
-from ...store.settings_store import SettingsStore
 from .capture_cast import (
     _outline_acts,
     capture_chapter_cast,

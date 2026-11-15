@@ -8,8 +8,15 @@
 
 from __future__ import annotations
 
-from .cli_common import EXIT_FAILED, EXIT_OK, EXIT_PRECONDITION, EXIT_USAGE, PreconditionError, _emit
-from .config import AppConfig
+from .cli_common import (
+    EXIT_FAILED,
+    EXIT_OK,
+    EXIT_PRECONDITION,
+    EXIT_USAGE,
+    PreconditionError,
+    _emit,
+)
+from .infrastructure.config import AppConfig
 from .tts import model_store
 
 

@@ -7,12 +7,12 @@
 from __future__ import annotations
 
 from ...adapters.base import AdapterError, ErrorCode, Message, TextGenRequest
+from ...adapters.persistence import ProjectStore
+from ...adapters.persistence.settings_store import SettingsStore
 from ...application.story.edit_chapter import _split_text_chunks
-from ...config import AppConfig
 from ...domain.story.rules.chapter_rules import bump_revision
+from ...infrastructure.config import AppConfig
 from ...models.ids import new_id
-from ...store import ProjectStore
-from ...store.settings_store import SettingsStore
 from ...text.context import POV_LABELS
 from ..support.llm_calls import _extract_json_object
 from .chapter_context import build_chapter_context

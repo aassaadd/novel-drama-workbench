@@ -5,9 +5,9 @@ CLI 与 Web 共用同一份读模型，保证终端与页面看到的字段完�
 
 from __future__ import annotations
 
-from ...store import ProjectStore
-from ...store.settings_store import SettingsStore
-from ...store.world_store import WorldStore
+from ...adapters.persistence import ProjectStore
+from ...adapters.persistence.settings_store import SettingsStore
+from ...adapters.persistence.world_store import WorldStore
 from .outline_validate import check_golden_three
 
 

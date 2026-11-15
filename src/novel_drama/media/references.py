@@ -8,8 +8,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from ..adapters.persistence import ProjectStore, SettingsStore, WorldStore
 from ..models.entities import NARRATOR_ID, UNKNOWN_SPEAKER_ID
-from ..store import ProjectStore, SettingsStore, WorldStore
 
 #: 参考图默认配置（`comfyui.references` 缺失时逐项回退）
 DEFAULT_OPTIONS = {"enabled": True, "max_count": 4, "auto_fill": True, "use_world_cover": True}

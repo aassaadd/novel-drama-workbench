@@ -13,10 +13,23 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
-from ..config import AppConfig
-from ..store import ProjectStore
-from .comfy_media import build_prompt, load_manifest, resolve_aspect, resolve_template, seed_for, templates_dir
-from .runner import _check_models, _comfy_gateway, _provider, _release_comfy, _submit_and_fetch
+from ..adapters.persistence import ProjectStore
+from ..infrastructure.config import AppConfig
+from .comfy_media import (
+    build_prompt,
+    load_manifest,
+    resolve_aspect,
+    resolve_template,
+    seed_for,
+    templates_dir,
+)
+from .runner import (
+    _check_models,
+    _comfy_gateway,
+    _provider,
+    _release_comfy,
+    _submit_and_fetch,
+)
 
 
 def render_image_via_comfy(

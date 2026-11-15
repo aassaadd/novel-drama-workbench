@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from fastapi import HTTPException
 
+from ..adapters.persistence import ProjectStore
 from ..application.story.outline_edit import (
     act_delete_impact,
     chapter_delete_impact,
@@ -16,7 +17,6 @@ from ..application.story.outline_edit import (
     delete_outline_chapter,
     update_outline_text,
 )
-from ..store import ProjectStore
 
 
 def _store(path: str | None) -> ProjectStore:

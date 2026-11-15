@@ -23,7 +23,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from novel_drama.config import load_config
+from novel_drama.infrastructure.config import load_config
 from novel_drama.tts import TtsService
 from novel_drama.tts.service import split_text
 

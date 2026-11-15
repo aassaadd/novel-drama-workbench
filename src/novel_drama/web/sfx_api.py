@@ -13,11 +13,11 @@ from datetime import datetime
 
 from fastapi import HTTPException
 
-from ..config import load_config
+from ..adapters.persistence.project_store import ProjectStore
 from ..domain.story.rules.chapter_rules import bump_revision
+from ..infrastructure.config import load_config
 from ..media.sfx import generate_sfx_item, get_provider, sfx_engine
 from ..sfx import SfxError
-from ..store.project_store import ProjectStore
 
 #: 已完成任务保留数量（页面只关心最近一次）
 _MAX_JOBS = 30

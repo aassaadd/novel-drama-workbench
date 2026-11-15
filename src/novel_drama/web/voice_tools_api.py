@@ -21,9 +21,9 @@ from pathlib import Path
 
 from fastapi import HTTPException, Request
 
-from ..config import load_config
-from ..store import ProjectStore
-from ..store.queue_store import QueueStore
+from ..adapters.persistence import ProjectStore
+from ..adapters.persistence.queue_store import QueueStore
+from ..infrastructure.config import load_config
 from .actions import fail_body, run
 
 #: 单行重录串行锁：同一时间只允许一个重录，避免两个进程同时改同一章
@@ -1177,7 +1177,7 @@ def register_voice_tools_routes(app, config_path: str | None = None) -> None:
             HTTPException 400: 角色没有台词，或候选音色没有可用参考音频。
             HTTPException 500: 合成失败（中文原因）。
         """
-        from ..store.voice_store import (
+        from ..adapters.persistence.voice_store import (
             find_voice,
             pick_variant,
             resolve_for_character,

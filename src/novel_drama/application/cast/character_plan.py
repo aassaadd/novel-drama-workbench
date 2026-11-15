@@ -16,11 +16,11 @@ import math
 from pathlib import Path
 
 from ...adapters.base import Message, TextGenRequest
-from ...config import AppConfig, resolve_temperature
+from ...adapters.persistence import ProjectStore
+from ...adapters.persistence.settings_store import SettingsStore
+from ...adapters.persistence.world_store import WorldStore
+from ...infrastructure.config import AppConfig, resolve_temperature
 from ...models.ids import now_iso
-from ...store import ProjectStore
-from ...store.settings_store import SettingsStore
-from ...store.world_store import WorldStore
 from ..story.chapter_context import _project_context
 from ..support.llm_calls import _generate_json, _progress, build_writing_adapter
 from .character_fields import (

@@ -15,8 +15,8 @@ from pathlib import Path
 
 from fastapi import HTTPException, Request
 
+from ..adapters.persistence import ProjectStore
 from ..models.ids import now_iso
-from ..store import ProjectStore
 
 #: 允许上传的音频后缀
 ALLOWED_SUFFIX = {".mp3", ".wav", ".m4a"}

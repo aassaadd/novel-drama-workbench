@@ -6,8 +6,8 @@
 
 from __future__ import annotations
 
-from .application.story.continue_outline import continue_outline
 from .application.story.continue_chapter import continue_chapter
+from .application.story.continue_outline import continue_outline
 from .cli_common import (
     EXIT_OK,
     PreconditionError,
@@ -15,7 +15,7 @@ from .cli_common import (
     _emit,
     _resolve_store,
 )
-from .config import AppConfig
+from .infrastructure.config import AppConfig
 
 
 def cmd_chapter_continue(args, config: AppConfig) -> int:

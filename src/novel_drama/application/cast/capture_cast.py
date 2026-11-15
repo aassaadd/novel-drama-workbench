@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from ...adapters.base import Message, TextGenRequest
+from ...adapters.persistence import ProjectStore
+from ...adapters.persistence.settings_store import SettingsStore
 from ...application.cast.sync_cast import (
     _norm,
     apply_chapter_cast,
@@ -12,8 +14,6 @@ from ...application.cast.sync_cast import (
     normalize_cast,
 )
 from ...models.ids import now_iso
-from ...store import ProjectStore
-from ...store.settings_store import SettingsStore
 from ..support.llm_calls import _progress, build_writing_adapter
 
 #: 补跑一次角色识别的预估耗时（秒/章），只用于弹窗里的如实提示

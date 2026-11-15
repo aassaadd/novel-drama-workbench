@@ -11,10 +11,10 @@ from ...adapters.base import (
     Message,
     TextGenRequest,
 )
-from ...config import AppConfig, resolve_temperature
+from ...adapters.persistence import ProjectStore
 from ...domain.story.rules.chapter_rules import bump_revision
+from ...infrastructure.config import AppConfig, resolve_temperature
 from ...models.ids import now_iso
-from ...store import ProjectStore
 from ...text.dialogue import normalize_dialogue
 from . import chapter_checkpoint
 from .chapter_context import build_chapter_context

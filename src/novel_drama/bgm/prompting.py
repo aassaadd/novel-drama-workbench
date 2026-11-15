@@ -15,7 +15,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from ..config import resolve_temperature
+from ..infrastructure.config import resolve_temperature
 from .types import BAD_REQUEST, BgmError
 
 #: 含中日韩统一表意文字即视为中文输入

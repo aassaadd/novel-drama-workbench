@@ -19,9 +19,9 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+from ..adapters.persistence.voice_cast import cast_config
+from ..adapters.persistence.voice_store import pick_variant
 from ..models import entities
-from ..store.voice_cast import cast_config
-from ..store.voice_store import pick_variant
 from .voice_casting import _score, age_band
 
 #: 年龄段 → 音色池槽位后缀（与页面默认 6 个槽位一致）

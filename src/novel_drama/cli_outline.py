@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import re
 
+from .adapters.persistence.settings_store import SettingsStore
+from .adapters.persistence.world_store import WorldStore
 from .application.story.queries import golden_check
 from .cli_common import EXIT_FAILED, _emit, _resolve_store
-from .config import AppConfig
-from .store.settings_store import SettingsStore
-from .store.world_store import WorldStore
+from .infrastructure.config import AppConfig
 
 
 def cmd_outline_check(args, config: AppConfig) -> int:

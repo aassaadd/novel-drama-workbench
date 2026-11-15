@@ -6,16 +6,16 @@ import json
 from dataclasses import replace
 
 from ...adapters.base import AdapterError, Message
+from ...adapters.persistence import ProjectStore
 from ...application.story.edit_chapter import (
     INSTRUCTION_LIMIT,
     STALE_WARNING,
     _usage_payload,
 )
-from ...config import AppConfig
 from ...domain.production.rules.token_budget import context_budget_tokens
 from ...domain.story.rules.chapter_rules import bump_revision
+from ...infrastructure.config import AppConfig
 from ...models.ids import new_id, now_iso
-from ...store import ProjectStore
 from ...text.context import ContextAssembler
 from ...text.dialogue import normalize_dialogue
 from .chapter_context import build_chapter_context, stream_text
