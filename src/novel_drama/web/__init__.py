@@ -1,1 +1,1 @@
-"""展示层遗留模块：Web 调 CLI 的动作封装与页面用例（HTTP 路由已迁至 `interface/http`）。"""
+"""展示层遗留模块：仅剩页面用例 `use_cases.py`（CLI 通道已迁至 `interface/http/cli_bridge.py`）。"""

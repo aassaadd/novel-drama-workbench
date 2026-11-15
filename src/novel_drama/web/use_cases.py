@@ -19,7 +19,7 @@ from ..tts.errors import TtsError
 
 T = TypeVar("T")
 
-#: 退出码 → HTTP 状态码（与 `web/actions.py` 的 EXIT_TO_STATUS 同源）
+#: 退出码 → HTTP 状态码（与 `interface/http/cli_bridge.py` 的 EXIT_TO_STATUS 同源）
 EXIT_TO_STATUS: dict[int, int] = {
     0: 200,
     1: 409,

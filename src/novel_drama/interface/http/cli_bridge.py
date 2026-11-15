@@ -1,4 +1,4 @@
-"""Web 层调用 CLI 的唯一通道。
+"""HTTP 接口层调用 CLI 的唯一通道。
 
 界面不重写任何业务判定：每一个读写动作都拼成一条 CLI 命令，走 `cli.main`，
 因此「状态怎么算、什么时候算过期、退出码是什么」在界面与终端里天然一致。
@@ -107,7 +107,7 @@ def _run_inline(args: list[str]) -> CliResult:
     返回:
         CliResult。
     """
-    from ..cli import main
+    from novel_drama.cli import main
 
     out, err = io.StringIO(), io.StringIO()
     with _RUN_LOCK:
@@ -135,7 +135,7 @@ def _record_cli(args: list[str], result: CliResult, started: float) -> None:
         无。
     """
     try:
-        from ..adapters import observability
+        from novel_drama.composition import observability
 
         observability.record_cli(
             argv=args,
@@ -201,7 +201,7 @@ def _run_process(args: list[str]) -> CliResult:
     env.setdefault("PYTHONIOENCODING", "utf-8")
     # 把 trace / 工程 / 操作名透传给子进程：子进程里的 LLM 调用日志归到同一次操作
     try:
-        from ..adapters import observability
+        from novel_drama.composition import observability
 
         ctx = observability.current_trace()
         env["NDW_LOG_TRACE"] = str(ctx.get("trace_id") or "")

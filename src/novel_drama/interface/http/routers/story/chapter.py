@@ -229,7 +229,7 @@ def register_story_chapter_routes(app, project_root: str | None = None, config_p
         异常:
             HTTPException 500: 混音失败。
         """
-        from novel_drama.web.actions import run
+        from novel_drama.interface.http.cli_bridge import run
 
         store = _store(body.get("path"))
         chapter_id = body.get("chapter") or ""

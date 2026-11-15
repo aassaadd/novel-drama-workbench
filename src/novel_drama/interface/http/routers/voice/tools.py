@@ -23,7 +23,7 @@ from fastapi import HTTPException, Request
 
 from novel_drama.composition import ProjectStore, QueueStore
 from novel_drama.infrastructure.config import load_config
-from novel_drama.web.actions import fail_body, run
+from novel_drama.interface.http.cli_bridge import fail_body, run
 
 #: 单行重录串行锁：同一时间只允许一个重录，避免两个进程同时改同一章
 _RERUN_LOCK = threading.Lock()

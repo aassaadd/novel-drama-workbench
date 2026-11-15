@@ -424,7 +424,7 @@ def register_align_routes(app, config_path: str | None = None) -> None:
 
         if task["status"] == "ready" and config_path is not None:
             # 已有时间轴时重建，让新写入的录音立刻进入时间轴
-            from novel_drama.web.actions import run
+            from novel_drama.interface.http.cli_bridge import run
 
             for chapter in chapters:
                 if store.timeline_path(chapter["id"]).exists():

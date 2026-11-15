@@ -5,7 +5,7 @@ from __future__ import annotations
 from fastapi import HTTPException
 
 from novel_drama.composition import ProjectStore
-from novel_drama.web.actions import run
+from novel_drama.interface.http.cli_bridge import run
 
 
 def store_for(project_root: str | None):

@@ -14,8 +14,8 @@ from fastapi import HTTPException
 
 from novel_drama.application.production.job_tracker import UiJob
 from novel_drama.composition import ProjectStore, QueueStore
+from novel_drama.interface.http.cli_bridge import fail_body
 from novel_drama.models.ids import now_iso
-from novel_drama.web.actions import fail_body
 
 logger = logging.getLogger(__name__)
 
