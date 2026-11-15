@@ -18,6 +18,7 @@ from ...composition import (
     write_export,
 )
 from ...domain.shared.errors import PreconditionError
+from .lines_source import chapter_view
 from .timeline import silence_events
 
 
@@ -93,7 +94,7 @@ def export_chapter(
     if not path.exists():
         raise PreconditionError("时间轴不存在，先执行 ndw timeline build")
     timeline = json.loads(path.read_text(encoding="utf-8"))
-    chapter = store.load_chapter(chapter_id)
+    chapter = chapter_view(store, store.load_chapter(chapter_id))
     characters = {item["id"]: item for item in store.load_characters()["characters"]}
     target_dir = Path(out_dir) if out_dir else store.root / "exports"
     # 静音事件只从导演脚本派生，缺失脚本时为空列表

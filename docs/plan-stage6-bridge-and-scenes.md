@@ -248,3 +248,20 @@
 闸门结果：tt1（25 章，1 章有场景 / 6 场景 / 256 行）、turn_ui_check（0 章）、ndw_annotate_check（1 章 / 2 场景 / 6 行）全部 round-trip 逐字段相等，`script_from_scenes` 二次调用完全一致；另用合成数据覆盖空标题场景、`tts ready/failed`、行锚点、`confidence`、`paralinguistic`、`voice`、`bgm`、音效/关键图产物，同样全等。`pytest` 253 passed / 10 skipped，分层检查 233 文件 0 违规。
 
 说明：引导出的台本行刻意不带 `tts`（生产态归场景投影），当前 `director-script.schema.json` 仍强制该字段，落盘要等步骤 2 改 schema；步骤 1 不写盘，故无影响。
+
+#### 9.1 adapter 读点口径（2026-11-16 确认）
+
+`adapters/**` 不能依赖 application，「adapter 自己读 scenes」改成「application 派生好再传参」：只改函数入参签名，不改依赖方向。已写入 `docs/architecture-domain-model.md` §5.3 第 7 条，后续新增 adapter 一律遵守。
+
+#### 9.2 读点迁移批次
+
+| 批次 | 范围 | 状态 |
+| --- | --- | --- |
+| A | `line_query`（台词表/单行 diff）、`tts_plan`（批量预演/单章规划）、`production/timeline`、`media_ops.export_chapter`、`story/chapters` 的过期汇总与 facets | 已完成 |
+| B | `adapters/media/*`（timeline_builder / export / jianying / runner）改为由 application 传场景 | 待做 |
+| C | `adapters/persistence/voice_cast` 的读点（写点留步骤 3） | 待做 |
+| D | 其余 interface 读模型（media / sfx / voice tools / blockers / align / config） | 待做 |
+| E | `application/story`、`application/cast`、`support/llm_plan` 等场景统计读点 | 待做 |
+
+批次 A 验证（同一份 tt1 副本、`chp_01M7CY5ZD243JZHJXJJAMM6Y0E`，25 章中唯一有场景的一章）：
+`line list --json`、`tts plan --json`、`timeline build --dry-run --json` 在 `NDW_LINES_SOURCE=scenes` 与 `script` 下 stdout 归一化后逐字节一致；`export --format srt` 的 `.srt` / `.schedule.tsv` / `.manifest.json` 逐字节一致；`line diff` 返回码与输出一致。`pytest` 253 passed / 10 skipped，分层 233 文件 0 违规。

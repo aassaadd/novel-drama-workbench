@@ -10,6 +10,7 @@ from ...adapters.persistence import ProjectStore
 from ...tts import TtsService, line_state
 from ...tts import reuse as reuse_plan
 from ...tts.batch import history_avg_ms_per_line, plan_batch
+from .lines_source import chapter_view
 
 #: 影响清单最多返回多少条，避免整本工程一次返回过大
 _ITEM_LIMIT = 300
@@ -65,7 +66,7 @@ def plan_batch_preview(
     skip_ids = set(skip_ids or ())
     # None 表示「不按行过滤」；空列表会被 plan_batch 理解成「一行都不要」
     line_ids = list(line_ids) if line_ids else None
-    chapters = [store.load_chapter(chapter_id) for chapter_id in chapter_ids]
+    chapters = [chapter_view(store, store.load_chapter(chapter_id)) for chapter_id in chapter_ids]
     service = TtsService(config, store.root if store.exists() else None)
     try:
         avg_ms = history_avg_ms_per_line(store.root)
@@ -296,7 +297,7 @@ def plan_chapter(
 
     from ...orchestration.pipeline import build_tts_jobs
 
-    chapter = store.load_chapter(chapter_id)
+    chapter = chapter_view(store, store.load_chapter(chapter_id))
     characters = store.load_characters()["characters"]
     adapter = config.adapters.get("tts", "placeholder")
     snapshots = line_state.load_snapshots(store.root, chapter)

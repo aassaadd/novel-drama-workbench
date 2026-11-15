@@ -346,6 +346,29 @@ def read_scenes(store: ProjectStore | None, chapter: dict) -> list[dict]:
     return list(chapter.get("scenes") or [])
 
 
+def chapter_view(store: ProjectStore | None, chapter: dict) -> dict:
+    """返回用于读取的章节视图（adapter 与展示层只认这一份场景数据）。
+
+    `NDW_LINES_SOURCE=scenes`（默认）时原样返回入参章节，行为与改造前完全一致；
+    切到 `script` 时返回浅拷贝，`scenes` 换成由台本派生的场景，其余字段共享。
+
+    约定：视图只用于读路径，调用方不得把视图回写章节（内容写点统一走步骤 3 的
+    `save_lines`）；写路径在步骤 3 之前继续直接使用 `store.load_chapter`。
+
+    参数:
+        store: 工程，可为空（只做纯换算时不必传）。
+        chapter: 从工程读出的章节 dict。
+
+    返回:
+        章节 dict；默认源下与入参是同一对象。
+    """
+    if lines_source() != "script":
+        return chapter
+    view = dict(chapter)
+    view["scenes"] = read_scenes(store, chapter)
+    return view
+
+
 def read_line(store: ProjectStore | None, chapter: dict, line_id: str) -> tuple[dict, dict]:
     """统一读入口：按行 ID 定位台词行。
 

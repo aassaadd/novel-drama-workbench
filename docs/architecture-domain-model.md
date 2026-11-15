@@ -805,6 +805,7 @@ interface ──> application ──> domain
 4. **禁止 application 直接 `open()` 工程文件**：一律经 `adapters/persistence` 的仓储。
 5. **异常翻译只在接口层**：领域抛 `InvariantViolation`，应用层抛 `UseCaseError(code, message)`，接口层映射 HTTP 码 / CLI 退出码（沿用现有 0~6 语义）。
 6. 单文件 ≤1 500 行；超过即拆，且拆分按「一个聚合 / 一个用例」而不是按「工具函数 / 私有 helper」。
+7. **章节场景数据的读取归属**（阶段 6-3 起）：`chapter.scenes` 的唯一读入口是 `application/production/lines_source.py`（`read_scenes` / `chapter_view`）。`adapters/**` **不得自行读取** `chapter["scenes"]` 或调用 `load_chapter` 后遍历场景/台词——需要场景数据的适配器一律由 application 先派生好，再作为入参传入（只改函数签名，不改依赖方向）。适配器只负责「拿数据产出产物」，不回读工程结构。写点统一走步骤 3 的 `save_lines`，读路径拿到的派生视图不得回写章节。
 
 ---
 

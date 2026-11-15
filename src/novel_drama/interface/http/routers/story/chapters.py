@@ -5,6 +5,7 @@ from __future__ import annotations
 from fastapi import HTTPException, Query
 
 from novel_drama.application.production.line_query import chapter_lines
+from novel_drama.application.production.lines_source import chapter_view
 from novel_drama.application.story.queries import (
     chapter_list,
 )
@@ -108,7 +109,7 @@ def register_story_chapters_routes(app, project_root: str | None = None, config_
         payload = use_cases.call(
             lambda: chapter_lines(store, chapter, load_config(config_path))
         )
-        data = store.load_chapter(chapter)
+        data = chapter_view(store, store.load_chapter(chapter))
         scene_titles = {
             str(scene.get("id")): str(scene.get("title") or f"场景 {int(scene.get('index') or 0) + 1}")
             for scene in data.get("scenes") or []
@@ -168,7 +169,7 @@ def register_story_chapters_routes(app, project_root: str | None = None, config_
         scene_seen: list[str] = []
         per_chapter: dict[str, dict] = {}
         for meta in store.list_chapters():
-            chapter = store.load_chapter(meta["id"])
+            chapter = chapter_view(store, store.load_chapter(meta["id"]))
             chapter_id = meta["id"]
             lines = [line for scene in chapter.get("scenes") or [] for line in scene.get("lines") or []]
             snapshots = line_state.load_snapshots(store.root, chapter)

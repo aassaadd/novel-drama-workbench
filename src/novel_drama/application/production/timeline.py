@@ -10,6 +10,7 @@ import json
 from ...adapters.media.timeline_builder import build_timeline
 from ...adapters.persistence import ProjectStore, validate
 from ...models.ids import now_iso
+from .lines_source import chapter_view
 
 
 def silence_events(store: ProjectStore, chapter_id: str) -> list[dict]:
@@ -47,7 +48,7 @@ def build_chapter_timeline(store: ProjectStore, chapter_id: str, dry_run: bool =
         FileNotFoundError: 章节不存在。
         SchemaValidationError: 时间轴不符合 schema（仅写盘前校验）。
     """
-    chapter = store.load_chapter(chapter_id)
+    chapter = chapter_view(store, store.load_chapter(chapter_id))
     path = store.timeline_path(chapter_id)
     existing = json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
     timeline = build_timeline(

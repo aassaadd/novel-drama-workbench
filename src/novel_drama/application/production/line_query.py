@@ -9,6 +9,7 @@ from __future__ import annotations
 from ...adapters.persistence import ProjectStore
 from ...models import entities
 from ...tts import line_state
+from .lines_source import chapter_view, lines_source
 
 
 def normalize_chapter_indexes(store: ProjectStore, chapter: dict) -> bool:
@@ -107,7 +108,11 @@ def chapter_lines(
         FileNotFoundError: 章节不存在。
     """
     chapter = store.load_chapter(chapter_id)
-    normalize_chapter_indexes(store, chapter)
+    if lines_source() == "script":
+        # 台本源下 scenes 是派生视图，不能在读路径回写序号
+        chapter = chapter_view(store, chapter)
+    else:
+        normalize_chapter_indexes(store, chapter)
     ordinals = ordinal_map(chapter)
     characters = {item["id"]: item for item in store.load_characters()["characters"]}
     snapshots = line_state.load_snapshots(store.root, chapter)
@@ -182,7 +187,7 @@ def line_diff(store: ProjectStore, chapter_id: str, line_id: str, config) -> dic
         FileNotFoundError: 章节不存在。
         ValueError: 行 ID 不在本章内。
     """
-    chapter = store.load_chapter(chapter_id)
+    chapter = chapter_view(store, store.load_chapter(chapter_id))
     _, line = find_line(store, chapter, line_id)
     snapshot = line_state.snapshot_for_line(store.root, line)
     if snapshot is None:
