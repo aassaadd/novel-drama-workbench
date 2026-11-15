@@ -12,7 +12,7 @@
 
 from __future__ import annotations
 
-from ...adapters.base import AdapterError
+from ...adapters.errors import AdapterError
 from ...adapters.persistence import ProjectStore
 from ...adapters.persistence.settings_store import SettingsStore
 from ...cancel import GenerationCanceled

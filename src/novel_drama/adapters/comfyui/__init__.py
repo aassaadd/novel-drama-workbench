@@ -24,13 +24,11 @@ import urllib.request
 import uuid
 from pathlib import Path
 
-from .base import (
-    AdapterError,
+from ..errors import AdapterError, ErrorCode, HealthStatus
+from .contracts import (
     ComfyArtifact,
     ComfyJobStatus,
     ComfySubmitResult,
-    ErrorCode,
-    HealthStatus,
     WorkflowTemplate,
 )
 

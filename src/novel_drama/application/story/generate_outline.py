@@ -6,12 +6,8 @@ import logging
 import math
 import re
 
-from ...adapters.base import (
-    AdapterError,
-    ErrorCode,
-    Message,
-    TextGenRequest,
-)
+from ...adapters.errors import AdapterError, ErrorCode
+from ...adapters.llm.contracts import Message, TextGenRequest
 from ...adapters.persistence import ProjectStore
 from ...adapters.persistence.settings_store import SettingsStore
 from ...infrastructure.config import AppConfig

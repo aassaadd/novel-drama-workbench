@@ -17,7 +17,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from novel_drama.adapters.offline_writing import OfflineWritingAdapter
+from novel_drama.adapters.llm import OfflineWritingAdapter
 from novel_drama.adapters.persistence import ProjectStore
 from novel_drama.adapters.persistence.settings_store import SettingsStore
 from novel_drama.application.cast.sync_cast import apply_chapter_cast

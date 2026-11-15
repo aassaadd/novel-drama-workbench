@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from novel_drama.adapters.offline_writing import OfflineWritingAdapter
+from novel_drama.adapters.llm import OfflineWritingAdapter
 from novel_drama.adapters.persistence import ProjectStore
 from novel_drama.adapters.persistence.settings_store import SettingsStore
 from novel_drama.application.story import chapter_checkpoint as chapter_checkpoint

@@ -23,7 +23,7 @@ from test_chapter_resume import (
     _project,
 )
 
-from novel_drama.adapters.base import AdapterError
+from novel_drama.adapters.errors import AdapterError
 from novel_drama.application.story import chapter_checkpoint as chapter_checkpoint
 from novel_drama.application.story.chapter_limits import (
     OVERSHOOT_ACTION_RATIO,

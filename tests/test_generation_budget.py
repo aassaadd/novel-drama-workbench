@@ -12,14 +12,9 @@ from queue import Queue
 
 import pytest
 
-from novel_drama.adapters.base import (
-    AdapterError,
-    ErrorCode,
-    Message,
-    TextGenRequest,
-    TextGenResult,
-)
-from novel_drama.adapters.writing import OmlxWritingAdapter
+from novel_drama.adapters.errors import AdapterError, ErrorCode
+from novel_drama.adapters.llm import OmlxWritingAdapter
+from novel_drama.adapters.llm.contracts import Message, TextGenRequest, TextGenResult
 from novel_drama.application.story.chapter_rounds import (
     _generate_validated as _generate_validated,
 )

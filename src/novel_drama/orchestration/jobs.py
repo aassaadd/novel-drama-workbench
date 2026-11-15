@@ -12,7 +12,7 @@ import hashlib
 import json
 
 from ..adapters import Adapters
-from ..adapters.base import AdapterError, ErrorCode
+from ..adapters.errors import AdapterError, ErrorCode
 from ..adapters.persistence import ProjectStore
 from ..models.ids import now_iso
 

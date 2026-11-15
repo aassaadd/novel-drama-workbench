@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from fastapi import HTTPException
 
-from ..adapters.base import AdapterError, ErrorCode
+from ..adapters.errors import AdapterError, ErrorCode
 from ..adapters.persistence import ProjectStore
 from ..bgm.registry import build_providers, pick_provider
 from ..infrastructure.config import load_config

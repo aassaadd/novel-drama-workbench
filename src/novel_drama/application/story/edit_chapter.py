@@ -10,7 +10,8 @@ from __future__ import annotations
 import re
 from dataclasses import replace
 
-from ...adapters.base import AdapterError, ErrorCode, Message
+from ...adapters.errors import AdapterError, ErrorCode
+from ...adapters.llm.contracts import Message
 from ...adapters.persistence import ProjectStore
 from ...domain.production.rules.token_budget import context_budget_tokens
 from ...domain.story.rules.chapter_rules import bump_revision, count_words

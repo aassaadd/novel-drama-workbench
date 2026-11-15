@@ -302,8 +302,8 @@ def _llm_rewrite(prompt: str, duration_s: float, settings: dict) -> str:
     异常:
         Exception: 网络/协议/内容不合格都直接抛出，由上层决定降级。
     """
-    from ..adapters.base import Message, TextGenRequest
-    from ..adapters.writing import OmlxWritingAdapter
+    from ..adapters.llm import OmlxWritingAdapter
+    from ..adapters.llm.contracts import Message, TextGenRequest
 
     adapter = OmlxWritingAdapter(settings)
     request = TextGenRequest(

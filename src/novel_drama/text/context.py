@@ -11,7 +11,7 @@
 
 from __future__ import annotations
 
-from ..adapters.base import Message, TextGenRequest
+from ..adapters.llm.contracts import Message, TextGenRequest
 from ..models.entities import NARRATOR_ID
 from ..models.enums import SpeechPitch, SpeechTempo
 

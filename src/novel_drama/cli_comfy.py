@@ -10,8 +10,8 @@ import os
 import shutil
 from pathlib import Path
 
-from .adapters.base import AdapterError
 from .adapters.comfyui import LocalComfyGateway
+from .adapters.errors import AdapterError
 from .cli_common import (
     EXIT_FAILED,
     EXIT_NOT_IMPLEMENTED,

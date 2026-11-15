@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ...adapters.base import Message, TextGenRequest
+from ...adapters.llm.contracts import Message, TextGenRequest
 from ...adapters.persistence import ProjectStore
 from ...adapters.persistence.settings_store import SettingsStore
 from ...application.cast.sync_cast import (

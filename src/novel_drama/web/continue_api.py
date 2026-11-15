@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from fastapi import HTTPException
 
-from ..adapters.base import AdapterError
+from ..adapters.errors import AdapterError
 from ..adapters.persistence import ProjectStore
 from ..application.story.continue_chapter import continue_chapter, load_continue_draft
 from ..application.story.continue_outline import continue_outline

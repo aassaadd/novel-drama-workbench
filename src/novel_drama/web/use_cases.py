@@ -12,7 +12,7 @@ from typing import Callable, TypeVar
 
 from fastapi import HTTPException
 
-from ..adapters.base import AdapterError, ErrorCode
+from ..adapters.errors import AdapterError, ErrorCode
 from ..adapters.persistence import SchemaValidationError
 from ..cli_common import PreconditionError, TaskFailedError
 from ..tts.errors import TtsError

@@ -6,13 +6,8 @@ import json
 import logging
 from dataclasses import replace
 
-from ...adapters.base import (
-    AdapterError,
-    ErrorCode,
-    Message,
-    TextGenRequest,
-    TextGenResult,
-)
+from ...adapters.errors import AdapterError, ErrorCode
+from ...adapters.llm.contracts import Message, TextGenRequest, TextGenResult
 from ...adapters.persistence import ProjectStore
 from ...domain.production.rules.watchdog import describe as describe_watchdog
 from ...models.ids import now_iso

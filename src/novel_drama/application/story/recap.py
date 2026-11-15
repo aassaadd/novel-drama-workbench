@@ -14,7 +14,8 @@
 
 from __future__ import annotations
 
-from ...adapters.base import AdapterError, ErrorCode, Message, TextGenRequest
+from ...adapters.errors import AdapterError, ErrorCode
+from ...adapters.llm.contracts import Message, TextGenRequest
 from ...adapters.persistence import ProjectStore
 from ...infrastructure.config import AppConfig
 from ...models.ids import now_iso

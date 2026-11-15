@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from ...adapters.base import AdapterError, Message, TextGenRequest
+from ...adapters.errors import AdapterError
+from ...adapters.llm.contracts import Message, TextGenRequest
 from ...adapters.persistence import ProjectStore
 from ...adapters.persistence.settings_store import SettingsStore
 from ...application.cast.sync_cast import (

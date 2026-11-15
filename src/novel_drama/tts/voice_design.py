@@ -21,7 +21,7 @@ import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from ..adapters.base import Message, TextGenRequest
+from ..adapters.llm.contracts import Message, TextGenRequest
 from ..infrastructure.config import AppConfig, resolve_temperature
 from ..models import entities
 from ..models.enums import AgeRange, SpeechPitch, SpeechTempo

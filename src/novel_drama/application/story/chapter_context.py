@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-from ...adapters.base import (
-    TextGenRequest,
-    TextGenResult,
-)
+from ...adapters.llm.contracts import TextGenRequest, TextGenResult
 from ...adapters.persistence import ProjectStore
 from ...adapters.persistence.settings_store import SettingsStore
 from ...adapters.persistence.world_store import WorldStore

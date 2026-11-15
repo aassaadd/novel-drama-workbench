@@ -5,12 +5,8 @@ from __future__ import annotations
 import logging
 from dataclasses import replace
 
-from ...adapters.base import (
-    AdapterError,
-    ErrorCode,
-    Message,
-    TextGenRequest,
-)
+from ...adapters.errors import AdapterError, ErrorCode
+from ...adapters.llm.contracts import Message, TextGenRequest
 from ...adapters.persistence import ProjectStore
 from ...domain.story.rules.chapter_rules import bump_revision
 from ...infrastructure.config import AppConfig, resolve_temperature

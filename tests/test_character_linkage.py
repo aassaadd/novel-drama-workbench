@@ -14,7 +14,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from novel_drama.adapters.base import AdapterError
+from novel_drama.adapters.errors import AdapterError
 from novel_drama.adapters.persistence import ProjectStore
 from novel_drama.adapters.persistence.settings_store import SettingsStore
 from novel_drama.application.cast.character_crud import (

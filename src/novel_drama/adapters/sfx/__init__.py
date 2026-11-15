@@ -8,7 +8,8 @@
 
 from __future__ import annotations
 
-from .base import HealthStatus, SfxCandidate, SfxRequest, SfxResult, not_implemented
+from ..errors import HealthStatus, not_implemented
+from .contracts import SfxCandidate, SfxRequest, SfxResult
 
 
 class PlaceholderSfxAdapter:

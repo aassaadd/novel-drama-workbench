@@ -78,7 +78,7 @@ def concat_voice(plan: dict, binary: str = "ffmpeg", probe_binary: str = "ffprob
         AdapterError(UNAVAILABLE): ffmpeg 缺失或输入全部不可用。
     """
     if not binary_available(binary):
-        from ..adapters.base import AdapterError, ErrorCode
+        from ..adapters.errors import AdapterError, ErrorCode
 
         raise AdapterError(ErrorCode.UNAVAILABLE, f"未找到 {binary}，请先安装 ffmpeg（macOS: brew install ffmpeg）")
 

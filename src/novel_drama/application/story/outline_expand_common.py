@@ -6,7 +6,8 @@ import copy
 from collections import Counter
 from dataclasses import replace
 
-from ...adapters.base import AdapterError, ErrorCode, Message, TextGenRequest
+from ...adapters.errors import AdapterError, ErrorCode
+from ...adapters.llm.contracts import Message, TextGenRequest
 from ...adapters.persistence import ProjectStore
 from ...text.titles import strip_index_prefix
 from ..support.llm_calls import (

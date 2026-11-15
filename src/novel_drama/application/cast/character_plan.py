@@ -15,7 +15,7 @@ import json
 import math
 from pathlib import Path
 
-from ...adapters.base import Message, TextGenRequest
+from ...adapters.llm.contracts import Message, TextGenRequest
 from ...adapters.persistence import ProjectStore
 from ...adapters.persistence.settings_store import SettingsStore
 from ...adapters.persistence.world_store import WorldStore

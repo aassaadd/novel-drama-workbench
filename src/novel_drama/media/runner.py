@@ -17,8 +17,8 @@ import shutil
 import time
 from pathlib import Path
 
-from ..adapters.base import AdapterError, ErrorCode
 from ..adapters.comfyui import LocalComfyGateway
+from ..adapters.errors import AdapterError, ErrorCode
 from ..adapters.persistence import ProjectStore
 from ..cleanup import remove_dir_quietly, remove_stale_temp_dirs
 from ..domain.story.rules.chapter_rules import bump_revision

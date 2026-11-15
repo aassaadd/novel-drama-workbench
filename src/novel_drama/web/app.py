@@ -24,11 +24,11 @@ from pathlib import Path
 from fastapi import HTTPException
 
 from .. import __version__
-from ..adapters.base import AdapterError
+from ..adapters.errors import AdapterError
+from ..adapters.llm import OmlxWritingAdapter
 from ..adapters.persistence import ProjectStore, list_workspaces
 from ..adapters.persistence.project_store import WORKSPACE_INDEX
 from ..adapters.persistence.queue_store import QueueStore
-from ..adapters.writing import OmlxWritingAdapter
 from ..application.cast.character_crud import (
     UPDATE_FIELDS,
     append_characters,

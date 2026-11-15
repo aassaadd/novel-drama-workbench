@@ -7,18 +7,14 @@ from pathlib import Path
 
 from ..domain.production.rules.thinking_policy import collect_overrides
 from ..infrastructure.config import REPO_ROOT, AppConfig
-from .base import (
-    AdapterError,
-    ComfyGateway,
-    ErrorCode,
-    SfxAdapter,
-    TtsAdapter,
-    WritingAdapter,
-)
 from .comfyui import LocalComfyGateway
+from .comfyui.contracts import ComfyGateway
+from .errors import AdapterError, ErrorCode
+from .llm import OmlxWritingAdapter, WritingAdapter
 from .sfx import PlaceholderSfxAdapter
+from .sfx.contracts import SfxAdapter
 from .tts import PlaceholderTtsAdapter, ProviderTtsAdapter
-from .writing import OmlxWritingAdapter
+from .tts.contracts import TtsAdapter
 
 __all__ = [
     "AdapterError",

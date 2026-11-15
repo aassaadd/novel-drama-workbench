@@ -23,7 +23,7 @@ import time
 from fastapi import HTTPException
 from fastapi.responses import StreamingResponse
 
-from ..adapters.base import AdapterError
+from ..adapters.errors import AdapterError
 from ..adapters.persistence import ProjectStore
 from ..application.cast.character_plan import (
     generate_from_plan,

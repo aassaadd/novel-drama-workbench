@@ -233,7 +233,7 @@ def render_mix(
         {outputs, stems, mix, normalized, peak_rss_mb, elapsed_ms}。
     """
     if not binary_available(binary):
-        from ..adapters.base import AdapterError, ErrorCode
+        from ..adapters.errors import AdapterError, ErrorCode
 
         raise AdapterError(ErrorCode.UNAVAILABLE, f"未找到 {binary}，请先安装 ffmpeg（macOS: brew install ffmpeg）")
 

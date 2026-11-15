@@ -16,7 +16,7 @@ import re
 import time
 from pathlib import Path
 
-from ..adapters.base import AdapterError, ErrorCode
+from ..adapters.errors import AdapterError, ErrorCode
 from ..adapters.persistence import ProjectStore
 from ..infrastructure.config import AppConfig
 from ..models.ids import now_iso

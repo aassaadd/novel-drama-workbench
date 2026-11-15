@@ -18,7 +18,7 @@ import json
 import re
 from pathlib import Path
 
-from ..adapters.base import AdapterError, ErrorCode
+from ..adapters.errors import AdapterError, ErrorCode
 from ..infrastructure.config import REPO_ROOT, AppConfig
 
 #: 模板目录缺省值（相对仓库根目录）

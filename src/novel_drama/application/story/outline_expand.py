@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ...adapters.base import AdapterError, ErrorCode
+from ...adapters.errors import AdapterError, ErrorCode
 from ...adapters.persistence import ProjectStore
 from ...adapters.persistence.settings_store import SettingsStore
 from ...application.cast.sync_cast import (

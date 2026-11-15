@@ -1097,7 +1097,7 @@ def install_llm_hooks() -> None:
         无。
     """
     try:
-        from .adapters.writing import OmlxWritingAdapter
+        from .adapters.llm import OmlxWritingAdapter
     except Exception:  # noqa: BLE001 - 适配器缺失时静默跳过
         return
     if getattr(OmlxWritingAdapter, "_ndw_log_hooked", False):

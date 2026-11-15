@@ -8,15 +8,8 @@
 
 from __future__ import annotations
 
-from .base import (
-    AdapterError,
-    ErrorCode,
-    HealthStatus,
-    TtsRequest,
-    TtsResult,
-    Voice,
-    not_implemented,
-)
+from ..errors import AdapterError, ErrorCode, HealthStatus, not_implemented
+from .contracts import TtsRequest, TtsResult, Voice
 
 # TTS 错误码 → 适配层错误码
 _ERROR_MAP = {

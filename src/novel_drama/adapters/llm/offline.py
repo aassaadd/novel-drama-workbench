@@ -18,7 +18,8 @@ import random
 import re
 from typing import Iterator
 
-from .base import HealthStatus, TextGenChunk, TextGenRequest, TextGenResult, Usage
+from ..errors import HealthStatus
+from .contracts import TextGenChunk, TextGenRequest, TextGenResult, Usage
 
 # 幕标题模板（按序号循环使用，避免生成重复标题）
 ACT_TITLES = ("起", "承", "转", "合", "余波", "回响")

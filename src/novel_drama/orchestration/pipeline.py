@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import copy
 
-from ..adapters.base import not_implemented
+from ..adapters.errors import not_implemented
 from ..adapters.persistence import ProjectStore
 from ..domain.story.rules.chapter_rules import bump_revision
 from ..models import entities

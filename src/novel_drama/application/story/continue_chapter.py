@@ -5,7 +5,8 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 
-from ...adapters.base import AdapterError, Message
+from ...adapters.errors import AdapterError
+from ...adapters.llm.contracts import Message
 from ...adapters.persistence import ProjectStore
 from ...application.story.edit_chapter import (
     INSTRUCTION_LIMIT,

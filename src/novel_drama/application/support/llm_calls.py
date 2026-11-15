@@ -7,12 +7,9 @@ import json
 import re
 from dataclasses import replace
 
-from ...adapters.base import (
-    AdapterError,
-    ErrorCode,
-    TextGenRequest,
-)
-from ...adapters.offline_writing import OfflineWritingAdapter
+from ...adapters.errors import AdapterError, ErrorCode
+from ...adapters.llm import OfflineWritingAdapter
+from ...adapters.llm.contracts import TextGenRequest
 from ...domain.production.rules.thinking_policy import collect_overrides, step_stage
 from ...infrastructure.config import AppConfig
 from ..story.setting_spec import CHOICE_ALIASES
@@ -44,7 +41,7 @@ def build_writing_adapter(config: AppConfig, settings: dict | None = None):
     if name in ("offline", "offline-writing"):
         return OfflineWritingAdapter(config.get("writing.offline") or settings or {})
     if name == "omlx":
-        from ...adapters.writing import OmlxWritingAdapter
+        from ...adapters.llm import OmlxWritingAdapter
 
         # 思考：全局开关 + 强度 + 设置页按调用点覆盖（没有覆盖项即系统自动）
         settings = dict(config.get("omlx") or {})

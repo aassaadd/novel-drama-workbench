@@ -25,12 +25,8 @@ from test_chapter_resume import (
     _project,
 )
 
-from novel_drama.adapters.base import (
-    AdapterError,
-    Message,
-    TextGenRequest,
-    TextGenResult,
-)
+from novel_drama.adapters.errors import AdapterError
+from novel_drama.adapters.llm.contracts import Message, TextGenRequest, TextGenResult
 from novel_drama.application.story import chapter_checkpoint as chapter_checkpoint
 from novel_drama.application.story.chapter_rounds import (
     _generate_validated as _generate_validated,
