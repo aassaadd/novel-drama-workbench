@@ -11,29 +11,30 @@ import json
 import sys
 from pathlib import Path
 
-from .adapters.persistence.settings_store import SettingsStore
-from .application.story.queries import settings_view
-from .application.story.settings_edit import (
+from novel_drama.application.story.queries import settings_view
+from novel_drama.application.story.settings_edit import (
     SCALAR_FIELDS,
     apply_section,
     set_scalars,
 )
-from .application.story.settings_edit import (
+from novel_drama.application.story.settings_edit import (
     apply_polished as _apply_polished,
 )
-from .application.story.settings_edit import (
+from novel_drama.application.story.settings_edit import (
     merge_section as _merge_section,
 )
-from .application.story.settings_edit import (
+from novel_drama.application.story.settings_edit import (
     read_field_value as _read_field_value,
 )
-from .application.story.settings_generate import (
+from novel_drama.application.story.settings_generate import (
     generate_section,
     generate_settings,
     polish_field,
 )
-from .cli_common import _emit, _resolve_store
-from .infrastructure.config import AppConfig
+from novel_drama.composition import SettingsStore
+from novel_drama.infrastructure.config import AppConfig
+
+from ..common import _emit, _resolve_store
 
 
 def _fmt_bible(bible: dict) -> str:

@@ -8,11 +8,12 @@ import re
 import time
 from pathlib import Path
 
-from .cli_common import EXIT_OK, _emit, _resolve_store
-from .infrastructure.config import AppConfig
-from .sfx.prompting import finalize_prompt, rewrite_prompt
-from .sfx.registry import build_providers, pick_provider
-from .sfx.types import SfxRequest
+from novel_drama.infrastructure.config import AppConfig
+from novel_drama.sfx.prompting import finalize_prompt, rewrite_prompt
+from novel_drama.sfx.registry import build_providers, pick_provider
+from novel_drama.sfx.types import SfxRequest
+
+from ..common import EXIT_OK, _emit, _resolve_store
 
 #: 音效文件落盘的工程内目录
 SFX_DIR = Path("assets/audio/sfx")

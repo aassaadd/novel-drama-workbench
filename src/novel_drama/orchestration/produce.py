@@ -259,7 +259,7 @@ def _stage_lines(ctx: dict) -> list[dict]:
 
 def _stage_script(ctx: dict) -> list[dict]:
     """生成导演标注并物化到场景（已有脚本时跳过）。"""
-    from ..cli_voice import _apply_script_to_chapter
+    from ..interface.cli.commands.voice import _apply_script_to_chapter
 
     store = ctx["store"]
     path = store.script_path(ctx["chapter_id"])
@@ -282,7 +282,7 @@ def _stage_script(ctx: dict) -> list[dict]:
 
 def _stage_tts(ctx: dict) -> list[dict]:
     """批量配音（只补未就绪行）。"""
-    from ..cli_common import _tts_service
+    from ..interface.cli.common import _tts_service
     from ..tts.batch import run_chapters
 
     store = ctx["store"]
@@ -340,7 +340,7 @@ def _timeline_state(store: ProjectStore, chapter_id: str) -> dict:
     返回:
         时间轴 dict。
     """
-    from ..cli_media import _silence_events
+    from ..interface.cli.commands.media import _silence_events
 
     path = store.timeline_path(chapter_id)
     chapter = store.load_chapter(chapter_id)
@@ -406,7 +406,7 @@ def _stage_mux(ctx: dict) -> tuple[list[dict], str]:
 
 def _stage_export(ctx: dict) -> tuple[list[dict], str]:
     """导出交付包。"""
-    from ..cli_media import _silence_events
+    from ..interface.cli.commands.media import _silence_events
 
     store = ctx["store"]
     chapter = store.load_chapter(ctx["chapter_id"])

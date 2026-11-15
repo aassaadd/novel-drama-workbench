@@ -25,23 +25,85 @@ from .adapters.persistence import (
     validate,
 )
 from .application.cast.queries import character_list
-from .cli_cast import cmd_cast
-from .cli_chapter import (
+from .infrastructure.config import AppConfig, load_config
+from .interface.cli.commands.cast import cmd_cast
+from .interface.cli.commands.chapter import (
     cmd_chapter_add,
     cmd_chapter_import,
     cmd_chapter_list,
     cmd_chapter_show,
     cmd_chapter_source,
 )
-from .cli_character import (
+from .interface.cli.commands.character import (
     cmd_character_apply,
     cmd_character_generate,
     cmd_character_image,
     cmd_character_remove,
     cmd_character_update,
 )
-from .cli_comfy import cmd_comfy
-from .cli_common import (
+from .interface.cli.commands.comfy import cmd_comfy
+from .interface.cli.commands.continuation import (
+    cmd_chapter_continue,
+    cmd_outline_continue,
+)
+from .interface.cli.commands.group import (
+    cmd_group_apply,
+    cmd_group_diff,
+    cmd_group_list,
+)
+from .interface.cli.commands.line import (
+    cmd_line_diff,
+    cmd_line_edit,
+    cmd_line_list,
+    cmd_line_merge,
+    cmd_line_merge_narration,
+    cmd_line_revert,
+    cmd_line_set,
+    cmd_line_split,
+    cmd_line_split_at,
+    cmd_scene_split,
+)
+from .interface.cli.commands.media import (
+    cmd_bgm,
+    cmd_concat,
+    cmd_export,
+    cmd_mux,
+    cmd_timeline,
+    cmd_tts_batch,
+)
+from .interface.cli.commands.models import (
+    cmd_models_import,
+    cmd_models_install,
+    cmd_models_list,
+    cmd_models_verify,
+)
+from .interface.cli.commands.music import cmd_bgm_generate
+from .interface.cli.commands.outline import cmd_outline_bind, cmd_outline_check
+from .interface.cli.commands.produce import cmd_produce, cmd_run_show
+from .interface.cli.commands.setting import cmd_setting
+from .interface.cli.commands.sfx import cmd_sfx_generate, cmd_sfx_providers
+from .interface.cli.commands.voice import (
+    cmd_script,
+    cmd_voice,
+    cmd_voice_builtin,
+    cmd_voice_design,
+)
+from .interface.cli.commands.world import (
+    cmd_world_apply,
+    cmd_world_generate,
+    cmd_world_image,
+    cmd_world_list,
+    cmd_world_remove,
+)
+from .interface.cli.commands.writing import (
+    cmd_chapter_edit,
+    cmd_chapter_generate,
+    cmd_chapter_save,
+    cmd_chapter_summarize,
+    cmd_outline,
+    cmd_script_suggest,
+)
+from .interface.cli.common import (
     EXIT_FAILED,
     EXIT_NOT_IMPLEMENTED,
     EXIT_OK,
@@ -55,56 +117,6 @@ from .cli_common import (
     _resolve_store,
     _tts_service,
 )
-from .cli_continue import cmd_chapter_continue, cmd_outline_continue
-from .cli_group import cmd_group_apply, cmd_group_diff, cmd_group_list
-from .cli_line import (
-    cmd_line_diff,
-    cmd_line_edit,
-    cmd_line_list,
-    cmd_line_merge,
-    cmd_line_merge_narration,
-    cmd_line_revert,
-    cmd_line_set,
-    cmd_line_split,
-    cmd_line_split_at,
-    cmd_scene_split,
-)
-from .cli_media import (
-    cmd_bgm,
-    cmd_concat,
-    cmd_export,
-    cmd_mux,
-    cmd_timeline,
-    cmd_tts_batch,
-)
-from .cli_models import (
-    cmd_models_import,
-    cmd_models_install,
-    cmd_models_list,
-    cmd_models_verify,
-)
-from .cli_music import cmd_bgm_generate
-from .cli_outline import cmd_outline_bind, cmd_outline_check
-from .cli_produce import cmd_produce, cmd_run_show
-from .cli_setting import cmd_setting
-from .cli_sfx import cmd_sfx_generate, cmd_sfx_providers
-from .cli_voice import cmd_script, cmd_voice, cmd_voice_builtin, cmd_voice_design
-from .cli_world import (
-    cmd_world_apply,
-    cmd_world_generate,
-    cmd_world_image,
-    cmd_world_list,
-    cmd_world_remove,
-)
-from .cli_writing import (
-    cmd_chapter_edit,
-    cmd_chapter_generate,
-    cmd_chapter_save,
-    cmd_chapter_summarize,
-    cmd_outline,
-    cmd_script_suggest,
-)
-from .infrastructure.config import AppConfig, load_config
 from .models import entities
 from .models.ids import now_iso
 from .orchestration import GpuQueue

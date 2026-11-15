@@ -10,12 +10,17 @@ import os
 import shutil
 from pathlib import Path
 
-from .adapters.comfyui import LocalComfyGateway
-from .adapters.comfyui import media as comfy_media
-from .adapters.comfyui import models as comfy_models
-from .adapters.comfyui.workflow import ComfyWorkflowError, convert_ui_workflow
-from .adapters.errors import AdapterError
-from .cli_common import (
+from novel_drama.composition import (
+    AdapterError,
+    ComfyWorkflowError,
+    LocalComfyGateway,
+    comfy_media,
+    comfy_models,
+    convert_ui_workflow,
+)
+from novel_drama.infrastructure.config import AppConfig
+
+from ..common import (
     EXIT_FAILED,
     EXIT_NOT_IMPLEMENTED,
     EXIT_OK,
@@ -23,7 +28,6 @@ from .cli_common import (
     PreconditionError,
     _emit,
 )
-from .infrastructure.config import AppConfig
 
 #: 导入模板时必须出现的占位符（按用途）
 _IMPORT_REQUIRED = {

@@ -9,17 +9,18 @@ import json
 import sys
 from pathlib import Path
 
-from .adapters.media.art import render_character_sheet
-from .application.cast.character_crud import (
+from novel_drama.application.cast.character_crud import (
     UPDATE_FIELDS,
     append_characters,
     remove_character,
     update_character,
 )
-from .application.cast.generate_characters import generate_characters
-from .cli_common import PreconditionError, _emit, _resolve_store, cast_hint
-from .infrastructure.config import AppConfig
-from .models import entities
+from novel_drama.application.cast.generate_characters import generate_characters
+from novel_drama.composition import render_character_sheet
+from novel_drama.infrastructure.config import AppConfig
+from novel_drama.models import entities
+
+from ..common import PreconditionError, _emit, _resolve_store, cast_hint
 
 
 def _load_rows(args) -> list[dict]:

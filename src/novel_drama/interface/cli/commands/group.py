@@ -8,16 +8,17 @@ from __future__ import annotations
 
 import copy
 
-from .adapters.persistence.groups_store import (
+from novel_drama.composition import (
     GroupsStore,
     apply_group,
     build_diff,
     covering_groups,
     detect,
 )
-from .cli_common import EXIT_OK, _emit, _resolve_store
-from .domain.speech.rules.params import FP_FIELDS
-from .tts import line_state
+from novel_drama.domain.speech.rules.params import FP_FIELDS
+from novel_drama.tts import line_state
+
+from ..common import EXIT_OK, _emit, _resolve_store
 
 
 def _derive_states(store, config, chapter: dict) -> dict[str, str]:

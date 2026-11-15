@@ -7,8 +7,8 @@ import os
 import sys
 from pathlib import Path
 
-from .adapters.comfyui.media import load_manifest, templates_dir
-from .adapters.media import (
+from novel_drama.composition import (
+    ProjectStore,
     add_cue,
     build_schedule,
     build_timeline,
@@ -16,16 +16,21 @@ from .adapters.media import (
     format_schedule_tsv,
     import_asset,
     load_cues,
+    load_manifest,
     normalize_audio,
     plan_concat,
     plan_mix,
     plan_mux,
     summarize_timeline,
     sync_cues_from_plans,
+    templates_dir,
+    validate,
     write_export,
 )
-from .adapters.persistence import ProjectStore, validate
-from .cli_common import (
+from novel_drama.infrastructure.config import AppConfig
+from novel_drama.models.ids import now_iso
+
+from ..common import (
     EXIT_FAILED,
     EXIT_OK,
     PreconditionError,
@@ -33,8 +38,6 @@ from .cli_common import (
     _resolve_store,
     _tts_service,
 )
-from .infrastructure.config import AppConfig
-from .models.ids import now_iso
 
 
 def _target_chapters(store: ProjectStore, args) -> list[str]:
@@ -104,7 +107,7 @@ def _line_filter(store: ProjectStore, chapters: list[dict], args, config) -> tup
     异常:
         ValueError: 状态名非法或行 ID 不存在（CLI 转成退出码 2）。
     """
-    from .tts import line_state
+    from novel_drama.tts import line_state
 
     statuses = line_state.parse_states(getattr(args, "status", None))
     line_ids = list(getattr(args, "line", None) or [])
@@ -176,9 +179,9 @@ def _planned_counts(
         `(counts, skipped_rows)`：counts 为 `[{chapter_id, title, rows}]` 用于进度条分母；
         skipped_rows 为因说话人未识别被排除的行（含场景/行号定位）。
     """
-    from .tts import line_state
-    from .tts import reuse as reuse_plan
-    from .tts.batch import plan_batch
+    from novel_drama.tts import line_state
+    from novel_drama.tts import reuse as reuse_plan
+    from novel_drama.tts.batch import plan_batch
 
     line_ids, include_ready = _line_filter(store, chapters, args, config)
     skip_ids = _unknown_line_ids(store, chapters, args)
@@ -259,7 +262,7 @@ def _unknown_line_ids(store: ProjectStore, chapters: list[dict], args) -> set[st
     """
     if not getattr(args, "skip_unknown_speakers", False):
         return set()
-    from .adapters.persistence.voice_cast import unresolved_speaker_lines
+    from novel_drama.composition import unresolved_speaker_lines
 
     return {row["line_id"] for row in unresolved_speaker_lines(store, [chapter.get("id") for chapter in chapters])}
 
@@ -285,7 +288,7 @@ def _write_progress(path: str | None, payload: dict) -> None:
 
 def cmd_tts_batch(args, config: AppConfig) -> int:
     """行级批量合成：单并发、可控批次、失败逐行记录不中断；支持跨章节与断点续跑。"""
-    from .tts.batch import history_avg_ms_per_line, plan_batch, run_chapters
+    from novel_drama.tts.batch import history_avg_ms_per_line, plan_batch, run_chapters
 
     store = _resolve_store(args, config)
     chapter_ids = _target_chapters(store, args)
@@ -295,7 +298,7 @@ def cmd_tts_batch(args, config: AppConfig) -> int:
     # 说话人无法归属的行：显式跳过时不再参与合成，也不会因它们阻断整章
     skip_ids = _unknown_line_ids(store, chapters, args)
     if not getattr(args, "skip_cast_check", False):
-        from .adapters.persistence.voice_cast import check_cast
+        from novel_drama.composition import check_cast
 
         gate = check_cast(store, chapter_ids[0]) if len(chapter_ids) == 1 else check_cast(store)
         errors = [item for item in gate["findings"] if item["level"] == "error"]
@@ -309,9 +312,9 @@ def cmd_tts_batch(args, config: AppConfig) -> int:
             )
 
     if args.dry_run:
-        from .tts import line_state
-        from .tts import reuse as reuse_plan
-        from .tts.batch import history_avg_ms_per_line
+        from novel_drama.tts import line_state
+        from novel_drama.tts import reuse as reuse_plan
+        from novel_drama.tts.batch import history_avg_ms_per_line
 
         service = _tts_service(args, config)
         avg_ms = history_avg_ms_per_line(store.root)
@@ -695,7 +698,7 @@ def cmd_mux(args, config: AppConfig) -> int:
     if plan["blockers"]:
         raise PreconditionError("；".join(plan["blockers"]))
 
-    from .adapters.media import mux as run_mux
+    from novel_drama.composition import mux as run_mux
 
     result = run_mux(plan)
     _emit(
@@ -766,7 +769,7 @@ def cmd_export(args, config: AppConfig) -> int:
     chapter = store.load_chapter(args.chapter)
     characters = {item["id"]: item for item in store.load_characters()["characters"]}
     out_dir = Path(args.out_dir) if args.out_dir else store.root / "exports"
-    from .adapters.persistence.voice_cast import check_cast
+    from novel_drama.composition import check_cast
 
     cast_warnings = check_cast(store, chapter["id"])["findings"]
     if cast_warnings:
@@ -774,7 +777,7 @@ def cmd_export(args, config: AppConfig) -> int:
         print(f"[warn] 音色/BGM 编排提示 {len(cast_warnings)} 条：{detail}", file=sys.stderr)
     silences = _silence_events(store, chapter["id"])
     if getattr(args, "format", "srt") == "jianying":
-        from .adapters.media import JianyingExportError, export_jianying
+        from novel_drama.composition import JianyingExportError, export_jianying
 
         try:
             result = export_jianying(
@@ -815,7 +818,7 @@ def cmd_export(args, config: AppConfig) -> int:
         _emit(args, "\n".join(lines), result)
         return EXIT_OK
     if getattr(args, "format", "srt") == "bundle":
-        from .adapters.media import export_bundle
+        from novel_drama.composition import export_bundle
 
         result = export_bundle(
             store,
@@ -865,7 +868,7 @@ def cmd_bgm(args, config: AppConfig) -> int:
         _emit(args, f"已加入 BGM cue: {cue['id']}  {cue['asset_id']}  start={cue['start_ms']}ms  gain={cue['gain_db']}dB", cue)
         return EXIT_OK
     if args.action == "clear":
-        from .adapters.media import save_cues
+        from novel_drama.composition import save_cues
 
         save_cues(store.root, args.chapter, [])
         _emit(args, f"已清空 {args.chapter} 的 BGM cue", {"chapter": args.chapter})

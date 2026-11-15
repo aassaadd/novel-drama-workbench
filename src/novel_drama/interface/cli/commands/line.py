@@ -7,14 +7,15 @@ from __future__ import annotations
 
 import copy
 
-from .cli_common import EXIT_OK, EXIT_REJECTED, _emit, _resolve_store, cast_hint
-from .domain.story.rules.chapter_rules import bump_revision, count_words
-from .infrastructure.config import AppConfig
-from .models import entities
-from .models.ids import new_id
-from .orchestration.pipeline import split_chapter_scenes, split_scene_lines
-from .orchestration.resplit import analyze_line_split, analyze_scene_split
-from .tts import line_state
+from novel_drama.domain.story.rules.chapter_rules import bump_revision, count_words
+from novel_drama.infrastructure.config import AppConfig
+from novel_drama.models import entities
+from novel_drama.models.ids import new_id
+from novel_drama.orchestration.pipeline import split_chapter_scenes, split_scene_lines
+from novel_drama.orchestration.resplit import analyze_line_split, analyze_scene_split
+from novel_drama.tts import line_state
+
+from ..common import EXIT_OK, EXIT_REJECTED, _emit, _resolve_store, cast_hint
 
 # 正文与切分数据对不上时的统一提示：宁可拒绝写盘，也不静默改到错误位置
 _CONTENT_MISMATCH = "正文已变更，请先重新切分"

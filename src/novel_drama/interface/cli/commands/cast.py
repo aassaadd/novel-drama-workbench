@@ -11,11 +11,11 @@ import hashlib
 import json
 import re
 
-from .adapters.persistence import check_cast, profile_source_hash
-from .adapters.persistence.settings_store import SettingsStore
-from .cli_common import EXIT_OK, EXIT_PRECONDITION, EXIT_REJECTED, _emit, _resolve_store
-from .infrastructure.config import AppConfig
-from .models.ids import now_iso
+from novel_drama.composition import SettingsStore, check_cast, profile_source_hash
+from novel_drama.infrastructure.config import AppConfig
+from novel_drama.models.ids import now_iso
+
+from ..common import EXIT_OK, EXIT_PRECONDITION, EXIT_REJECTED, _emit, _resolve_store
 
 
 def _slug(text: str) -> str:
@@ -67,8 +67,8 @@ def _cmd_backfill(args, store, config: AppConfig) -> int:
     changed = 0
 
     if want_profiles:
-        from .application.support.llm_calls import build_writing_adapter
-        from .tts.voice_design import build_profile
+        from novel_drama.application.support.llm_calls import build_writing_adapter
+        from novel_drama.tts.voice_design import build_profile
 
         adapter = build_writing_adapter(config, SettingsStore(store.root).load_or_none() or {})
         for character in table.get("characters") or []:
@@ -166,7 +166,7 @@ def _cmd_fill_descriptions(args, store, config: AppConfig) -> int:
     返回:
         进程退出码：全部成功为 0，存在失败为 1，便于重试时判断。
     """
-    from .application.cast.character_plan import fill_character_descriptions
+    from novel_drama.application.cast.character_plan import fill_character_descriptions
 
     result = fill_character_descriptions(store, config, names=getattr(args, "name", None))
     if getattr(args, "json", False):

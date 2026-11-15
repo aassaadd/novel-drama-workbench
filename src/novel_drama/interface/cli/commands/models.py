@@ -8,7 +8,10 @@
 
 from __future__ import annotations
 
-from .cli_common import (
+from novel_drama.infrastructure.config import AppConfig
+from novel_drama.tts import model_store
+
+from ..common import (
     EXIT_FAILED,
     EXIT_OK,
     EXIT_PRECONDITION,
@@ -16,8 +19,6 @@ from .cli_common import (
     PreconditionError,
     _emit,
 )
-from .infrastructure.config import AppConfig
-from .tts import model_store
 
 
 def _human_size(num: int) -> str:

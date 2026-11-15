@@ -6,16 +6,17 @@
 
 from __future__ import annotations
 
-from .application.story.continue_chapter import continue_chapter
-from .application.story.continue_outline import continue_outline
-from .cli_common import (
+from novel_drama.application.story.continue_chapter import continue_chapter
+from novel_drama.application.story.continue_outline import continue_outline
+from novel_drama.infrastructure.config import AppConfig
+
+from ..common import (
     EXIT_OK,
     PreconditionError,
     TaskFailedError,
     _emit,
     _resolve_store,
 )
-from .infrastructure.config import AppConfig
 
 
 def cmd_chapter_continue(args, config: AppConfig) -> int:

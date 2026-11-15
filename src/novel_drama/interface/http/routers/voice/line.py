@@ -6,7 +6,7 @@ import logging
 
 from fastapi import HTTPException, Query
 
-from novel_drama.cli_line import chapter_consistency
+from novel_drama.interface.cli.commands.line import chapter_consistency
 
 logger = logging.getLogger(__name__)
 

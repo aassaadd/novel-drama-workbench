@@ -14,7 +14,7 @@ from fastapi import HTTPException
 
 from ..adapters.errors import AdapterError, ErrorCode
 from ..adapters.persistence import SchemaValidationError
-from ..cli_common import PreconditionError, TaskFailedError
+from ..interface.cli.common import PreconditionError, TaskFailedError
 from ..tts.errors import TtsError
 
 T = TypeVar("T")

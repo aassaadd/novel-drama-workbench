@@ -9,23 +9,27 @@ import json
 import sys
 from pathlib import Path
 
-from .adapters.persistence import validate
-from .application.script.annotate import suggest_script
-from .application.story.apply_outline import apply_outline
-from .application.story.edit_chapter import edit_chapter, save_chapter_content
-from .application.story.generate_chapter import generate_chapter
-from .application.story.generate_outline import generate_outline
-from .application.story.outline_bind import validate_chapter_binding
-from .application.story.queries import outline_view
-from .application.story.summarize_chapter import summarize_chapter
-from .cli_common import (
+from novel_drama.application.script.annotate import suggest_script
+from novel_drama.application.story.apply_outline import apply_outline
+from novel_drama.application.story.edit_chapter import (
+    edit_chapter,
+    save_chapter_content,
+)
+from novel_drama.application.story.generate_chapter import generate_chapter
+from novel_drama.application.story.generate_outline import generate_outline
+from novel_drama.application.story.outline_bind import validate_chapter_binding
+from novel_drama.application.story.queries import outline_view
+from novel_drama.application.story.summarize_chapter import summarize_chapter
+from novel_drama.composition import validate
+from novel_drama.infrastructure.config import AppConfig
+
+from ..common import (
     EXIT_OK,
     PreconditionError,
     TaskFailedError,
     _emit,
     _resolve_store,
 )
-from .infrastructure.config import AppConfig
 
 
 def _fmt_outline(acts: list[dict]) -> str:
@@ -382,7 +386,7 @@ def cmd_script_suggest(args, config: AppConfig) -> int:
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(markup + "\n", encoding="utf-8")
 
-    from .director.markup import INFO_PREFIX
+    from novel_drama.director.markup import INFO_PREFIX
 
     warnings = result["warnings"]
     hard = [item for item in warnings if not item.startswith(INFO_PREFIX)]
@@ -411,7 +415,7 @@ def cmd_script_suggest(args, config: AppConfig) -> int:
             script = result["script"]
             validate(script, "director-script.schema.json")
             store.save_script(script)
-            from .cli_voice import _apply_script_to_chapter
+            from .voice import _apply_script_to_chapter
 
             chapter = store.load_chapter(chapter_id)
             summary = _apply_script_to_chapter(store, chapter, script)
@@ -438,7 +442,7 @@ def cmd_setting_dispatch(args, config: AppConfig) -> int:
     返回:
         退出码。
     """
-    from .cli_setting import cmd_setting
+    from .setting import cmd_setting
 
     return cmd_setting(args, config)
 

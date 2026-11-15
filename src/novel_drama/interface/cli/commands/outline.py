@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import re
 
-from .adapters.persistence.settings_store import SettingsStore
-from .adapters.persistence.world_store import WorldStore
-from .application.story.queries import golden_check
-from .cli_common import EXIT_FAILED, _emit, _resolve_store
-from .infrastructure.config import AppConfig
+from novel_drama.application.story.queries import golden_check
+from novel_drama.composition import SettingsStore, WorldStore
+from novel_drama.infrastructure.config import AppConfig
+
+from ..common import EXIT_FAILED, _emit, _resolve_store
 
 
 def cmd_outline_check(args, config: AppConfig) -> int:
@@ -102,7 +102,7 @@ def cmd_outline_bind(args, config: AppConfig) -> int:
 
     bible = settings.save(bible)
     # POV 以设定库为主源，同时写通章节副本，避免画本/大纲两处看到不同的值
-    from .application.story.outline_bind import sync_chapter_pov
+    from novel_drama.application.story.outline_bind import sync_chapter_pov
 
     sync_result = sync_chapter_pov(
         store,

@@ -20,9 +20,9 @@ from novel_drama.application.story.summarize_chapter import (
     apply_summary,
     summarize_chapter,
 )
-from novel_drama.cli_line import chapter_consistency
 from novel_drama.composition import AdapterError, ProjectStore
 from novel_drama.infrastructure.config import load_config
+from novel_drama.interface.cli.commands.line import chapter_consistency
 from novel_drama.interface.http.deps import run_cli, store_for
 from novel_drama.interface.http.routers.common import (
     _respond,

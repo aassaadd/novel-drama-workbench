@@ -6,7 +6,7 @@ import json
 import re
 from pathlib import Path
 
-from .adapters.persistence import (
+from novel_drama.composition import (
     ProjectStore,
     find_variant,
     find_voice,
@@ -14,7 +14,12 @@ from .adapters.persistence import (
     variant_ref,
     voice_binding_summary,
 )
-from .cli_common import (
+from novel_drama.domain.story.rules.chapter_rules import bump_revision
+from novel_drama.infrastructure.config import AppConfig
+from novel_drama.models import entities
+from novel_drama.models.ids import now_iso
+
+from ..common import (
     EXIT_FAILED,
     EXIT_OK,
     PreconditionError,
@@ -22,10 +27,6 @@ from .cli_common import (
     _resolve_store,
     _tts_service,
 )
-from .domain.story.rules.chapter_rules import bump_revision
-from .infrastructure.config import AppConfig
-from .models import entities
-from .models.ids import now_iso
 
 # ---------------- 音色库变体管理 ----------------
 
@@ -43,7 +44,7 @@ def _build_variant(args, store: ProjectStore, name: str) -> dict:
     """
     import shutil
 
-    from .adapters.media.ffmpeg import probe_duration_ms
+    from novel_drama.composition import probe_duration_ms
 
     source = args.source
     tags = args.emotion_tag or ["default"]
@@ -102,7 +103,7 @@ def cmd_voice_builtin(args, config: AppConfig) -> int:
     返回:
         退出码。
     """
-    from .tts import builtin_voices
+    from novel_drama.tts import builtin_voices
 
     action = args.action
     if action == "list":
@@ -278,7 +279,7 @@ def cmd_voice(args, config: AppConfig) -> int:
         ref_audio, ref_text = variant_ref(store, variant)
         if not ref_audio:
             raise PreconditionError("该变体没有参考音频（预设音色无法在当前克隆 provider 上试听）")
-        from .tts import Requirement, VoiceRef
+        from novel_drama.tts import Requirement, VoiceRef
 
         service = _tts_service(args, config)
         text = args.text or "这是一段音色试听，用来确认音色与情绪是否符合角色设定。"
@@ -324,10 +325,10 @@ def cmd_voice(args, config: AppConfig) -> int:
 
 def cmd_script(args, config: AppConfig) -> int:
     """导演脚本：语法说明、解析标注、同步到章节、校验。"""
-    from .director import parse_markup
+    from novel_drama.director import parse_markup
 
     if args.action == "syntax":
-        from .director import markup as markup_module
+        from novel_drama.director import markup as markup_module
 
         print(markup_module.__doc__)
         return EXIT_OK
@@ -484,7 +485,7 @@ def _apply_script_to_chapter(store: ProjectStore, chapter: dict, script: dict) -
     bump_revision(chapter)
     chapter["updated_at"] = now_iso()
     # 把镜头里的音效/画面/动画物化进场景，供时间轴与渲染使用
-    from .director.materialize import materialize_media
+    from novel_drama.director.materialize import materialize_media
 
     media = materialize_media(chapter, script, store.settings())
     store.save_chapter(chapter)
@@ -510,8 +511,8 @@ def cmd_voice_design(args, config: AppConfig) -> int:
     """
     import time
 
-    from .adapters import build_adapters
-    from .tts import voice_design
+    from novel_drama.composition import build_adapters
+    from novel_drama.tts import voice_design
 
     store = _resolve_store(args, config)
     design = config.get("voice.design") or {}

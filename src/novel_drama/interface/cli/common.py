@@ -5,9 +5,9 @@ from __future__ import annotations
 import json
 import sys
 
-from .adapters.persistence import ProjectStore
-from .domain.shared.errors import PreconditionError, TaskFailedError
-from .infrastructure.config import AppConfig
+from novel_drama.composition import ProjectStore
+from novel_drama.domain.shared.errors import PreconditionError, TaskFailedError
+from novel_drama.infrastructure.config import AppConfig
 
 EXIT_OK = 0
 EXIT_REJECTED = 1
@@ -67,7 +67,7 @@ def cast_hint(store: ProjectStore, chapter_id: str | None = None) -> None:
     返回:
         无。
     """
-    from .adapters.persistence.voice_cast import check_cast
+    from novel_drama.composition import check_cast
 
     try:
         result = check_cast(store, chapter_id)
@@ -95,7 +95,7 @@ def _tts_service(args, config: AppConfig):
     返回:
         TtsService 实例。
     """
-    from .tts import TtsService
+    from novel_drama.tts import TtsService
 
     root = getattr(args, "project", None) or config.project_root
     project_root = None

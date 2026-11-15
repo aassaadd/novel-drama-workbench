@@ -9,18 +9,19 @@ import json
 import re
 from pathlib import Path
 
-from .adapters.persistence.imports_store import (
+from novel_drama.application.story.queries import chapter_detail, chapter_list
+from novel_drama.composition import (
     ImportsStore,
     compare_texts,
     digest,
     preview,
     split_paragraphs,
 )
-from .application.story.queries import chapter_detail, chapter_list
-from .cli_common import EXIT_OK, EXIT_REJECTED, _emit, _resolve_store
-from .domain.story.rules.chapter_rules import bump_revision, count_words
-from .infrastructure.config import AppConfig
-from .tts import line_state
+from novel_drama.domain.story.rules.chapter_rules import bump_revision, count_words
+from novel_drama.infrastructure.config import AppConfig
+from novel_drama.tts import line_state
+
+from ..common import EXIT_OK, EXIT_REJECTED, _emit, _resolve_store
 
 # ---------------- chapter ----------------
 

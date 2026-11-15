@@ -990,8 +990,10 @@ def register_stream_routes(app, config_path: str | None = None) -> None:
                 result["markup_path"] = str(out_path)
             # 有失败批次时不应用，避免把不完整的标注写入章节
             if body.get("apply") and not result.get("partial"):
-                from novel_drama.cli_voice import _apply_script_to_chapter
                 from novel_drama.composition import validate
+                from novel_drama.interface.cli.commands.voice import (
+                    _apply_script_to_chapter,
+                )
 
                 validate(result["script"], "director-script.schema.json")
                 store.save_script(result["script"])
@@ -1024,9 +1026,9 @@ def register_stream_routes(app, config_path: str | None = None) -> None:
         if not markup:
             raise HTTPException(status_code=400, detail="没有可写入的标注内容：请先生成预览")
 
-        from novel_drama.cli_voice import _apply_script_to_chapter
         from novel_drama.composition import validate
         from novel_drama.director.markup import parse_markup
+        from novel_drama.interface.cli.commands.voice import _apply_script_to_chapter
 
         chapter = store.load_chapter(chapter_id)
         characters = store.load_characters()["characters"]

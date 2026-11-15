@@ -2,9 +2,15 @@
 
 from __future__ import annotations
 
-from .cli_common import EXIT_FAILED, EXIT_OK, _emit, _resolve_store
-from .infrastructure.config import AppConfig
-from .orchestration.produce import STAGE_LABELS, latest_run, load_run, produce
+from novel_drama.infrastructure.config import AppConfig
+from novel_drama.orchestration.produce import (
+    STAGE_LABELS,
+    latest_run,
+    load_run,
+    produce,
+)
+
+from ..common import EXIT_FAILED, EXIT_OK, _emit, _resolve_store
 
 
 def _fmt_stages(stages: list[dict]) -> str:
