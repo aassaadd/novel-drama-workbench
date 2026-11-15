@@ -12,6 +12,7 @@ import sys
 
 from novel_drama import __version__
 from novel_drama.composition import AdapterError, ErrorCode, SchemaValidationError
+from novel_drama.domain.shared.errors import RefusedError
 from novel_drama.infrastructure.config import load_config
 from novel_drama.interface.cli.commands import (
     cast,
@@ -150,6 +151,9 @@ def main(argv: list[str] | None = None) -> int:
     except PreconditionError as exc:
         print(f"[PRECONDITION] {exc}", file=sys.stderr)
         return EXIT_PRECONDITION
+    except RefusedError as exc:
+        print(f"[{exc.code}] {exc.message}", file=sys.stderr)
+        return EXIT_REJECTED
     except FileExistsError as exc:
         print(f"[EXISTS] {exc}", file=sys.stderr)
         return EXIT_REJECTED

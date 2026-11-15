@@ -1,8 +1,7 @@
 """页面接口直接调应用用例时的统一异常翻译。
 
 页面接口不再经 `cli_bridge.run` 走 CLI，但「哪类失败返回哪个状态码、消息长什么样」
-必须与终端一致：本模块与 `cli.main` 的异常分支一一对应，状态码表与
-`cli_bridge.EXIT_TO_STATUS` 保持同源。
+必须与终端一致：本模块与 `cli.main` 的异常分支一一对应，标签前缀与中文消息同格式。
 """
 
 from __future__ import annotations
@@ -13,15 +12,18 @@ from typing import Callable, TypeVar
 from fastapi import HTTPException
 
 from novel_drama.composition import AdapterError, ErrorCode, SchemaValidationError
+from novel_drama.domain.shared.errors import RefusedError
 from novel_drama.interface.cli.common import PreconditionError, TaskFailedError
 from novel_drama.tts.errors import TtsError
 
 T = TypeVar("T")
 
-#: 退出码 → HTTP 状态码（与 `interface/http/cli_bridge.py` 的 EXIT_TO_STATUS 同源）
+#: 退出码 → HTTP 状态码。
+#: 1（拒绝执行）映射 412 而不是 409：语义是「前置条件不满足、需用户处理」，
+#: 与退出码 4 对齐；参数错误仍走 400，不复用这一码。
 EXIT_TO_STATUS: dict[int, int] = {
     0: 200,
-    1: 409,
+    1: 412,
     2: 400,
     3: 501,
     4: 412,
@@ -62,7 +64,7 @@ def call(action: Callable[[], T], *, business: bool = False) -> T:
         action 的返回值。
 
     异常:
-        HTTPException: 参数错 400、前置缺失 412、适配器未对接 501、任务失败 500、schema 失败 422。
+        HTTPException: 参数错 400、拒绝执行/前置缺失 412、适配器未对接 501、任务失败 500、schema 失败 422。
     """
     try:
         return action()
@@ -83,6 +85,8 @@ def call(action: Callable[[], T], *, business: bool = False) -> T:
         _raise(5, f"[FAILED] {error}", business=business)
     except PreconditionError as error:
         _raise(4, f"[PRECONDITION] {error}", business=business)
+    except RefusedError as error:
+        _raise(1, f"[{error.code}] {error.message}", business=business)
     except FileExistsError as error:
         _raise(1, f"[EXISTS] {error}", business=business)
     except (FileNotFoundError, KeyError) as error:

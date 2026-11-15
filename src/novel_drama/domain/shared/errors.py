@@ -21,6 +21,31 @@ class TaskFailedError(DomainError):
     """任务校验失败（章节绑定不完整、引用的条目不存在等），接口层映射为退出码 5。"""
 
 
+class RefusedError(DomainError):
+    """拒绝执行：前置条件不满足、需用户处理后重试（重复创建、仍被引用等）。
+
+    语义与「参数错误」严格区分：参数可以照原样重试修正，而这里即使参数正确，
+    也要用户先处理掉冲突（换个名字、先解开引用）才能继续。
+
+    属性:
+        code: 可读原因码（大写下划线，如 `EXISTS` / `IN_USE`），供界面按类分支。
+        message: 中文说明，可直接展示。
+
+    接口层映射：CLI 退出码 1 / HTTP 412。
+    """
+
+    def __init__(self, code: str, message: str):
+        """构造异常。
+
+        参数:
+            code: 原因码，为空时回落为 `REFUSED`。
+            message: 中文说明。
+        """
+        self.code = str(code or "REFUSED")
+        self.message = str(message or "")
+        super().__init__(f"[{self.code}] {self.message}")
+
+
 class InvariantViolation(DomainError):
     """不变式被违反：数据或操作不符合该实体/值对象的既定规则。
 
