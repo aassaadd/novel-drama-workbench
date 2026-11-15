@@ -3140,7 +3140,7 @@ function openOutlineExpand() {
       };
       modeEl.addEventListener('change', sync);
       sync();
-      mask.querySelector('[data-oe-run]').addEventListener('click', () => {
+      mask.querySelector('[data-oe-run]').addEventListener('click', async () => {
         const mode = modeEl.value;
         const body = {
           path: cache.path,

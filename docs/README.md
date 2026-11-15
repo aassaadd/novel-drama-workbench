@@ -15,6 +15,7 @@
 | [ui-plan.md](ui-plan.md) | 页面/面板与 CLI 命令清单 | 基线，页面已按 7 个 hash 路由落地 |
 | [roadmap-remaining.md](roadmap-remaining.md) | 剩余里程碑、依赖顺序与验收标准 | 早期路线图，R 系列推进后仅作历史参考 |
 | [tts-line-state-and-seams.md](tts-line-state-and-seams.md) | 台词行状态、diff/revert、接缝裁切、虚拟分组 | 已实现（行状态/diff/revert/分组/裁切均在用；文档头部「未实现」未更新） |
+| [architecture-domain-model.md](architecture-domain-model.md) | 面向对象领域模型：实体/值对象清单、聚合边界、分层与目录、现有模块映射、分阶段落地 | 方案待确认（未改业务代码） |
 
 ## 迭代 spec（按 R 编号）
 

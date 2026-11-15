@@ -254,6 +254,25 @@ $PY -m novel_drama.cli -p ~/novels/changan serve --port 8765
 PYTHONPATH=src .venv/bin/python tests/smoke_test.py   # 期望输出 SMOKE OK
 ```
 
+## 前端交付检查（必须）
+
+改动 `web-next/` 下任何脚本或页面后，交付前必须做完下面两项，缺一不可：
+
+**1. 浏览器实际走查（这是验收，不是可选步骤）**
+
+- 在浏览器里真实打开改动涉及的页面（首页、画本、角色、任务、设置、录音/后期/对轨等），确认：页面正常渲染、关键入口点得动、控制台无报错。
+- 不接受用 `node --check`、接口返回 200、抽取单个函数验证、静态读代码代替走查；这些只能当补充，不能当验收。
+- 要求验证的坑：整页白屏往往来自某个模块脚本解析失败，此时接口全是 200，只有浏览器控制台会报错——所以必须看控制台。
+
+**2. 前端脚本语法检查（必须按 ES module 模式）**
+
+```bash
+node scripts/check_web_modules.mjs   # 期望输出「前端脚本检查通过：N 个文件…」
+```
+
+- 该脚本把 `web-next/js/**/*.js` 复制为临时 `.mjs` 用 ES module 模式跑 `node --check`，并扫描 `addEventListener` / `forEach` / `map` / `then` 等非 async 回调里的 `await`。
+- 不要直接对 `.js` 跑 `node --check`：没有 `package.json` 时会按脚本模式解析，`await` 被当成标识符，`非 async 回调里 await` 这类错误会漏报（历史上曾因此把整页白屏漏到用户侧）。
+
 ## 适配层对接约定
 
 所有实现都继承 `src/novel_drama/adapters/base.py` 中的接口，错误统一为 `AdapterError(code, message, retryable)`：
