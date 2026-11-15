@@ -49,3 +49,23 @@ def require(condition: bool, field: str, message: str) -> None:
     """
     if not condition:
         raise InvariantViolation(field, message)
+
+
+def require_len(value: str | None, field: str, maximum: int, minimum: int = 0) -> None:
+    """断言字符串长度在允许区间内（None 视为长度 0）。
+
+    参数:
+        value: 待检查文本。
+        field: 字段名。
+        maximum: 允许的最大字符数。
+        minimum: 允许的最小字符数，默认 0。
+
+    返回:
+        无。
+
+    异常:
+        InvariantViolation: 长度越界，消息里给出实际长度与区间。
+    """
+    length = len(value or "")
+    if length < minimum or length > maximum:
+        raise InvariantViolation(field, f"长度 {length} 超出允许范围 {minimum}~{maximum}")

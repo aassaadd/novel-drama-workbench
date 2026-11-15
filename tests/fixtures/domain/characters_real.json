@@ -1,0 +1,120 @@
+{
+  "schema_version": 1,
+  "characters": [
+    {
+      "id": "chr_narrator",
+      "name": "旁白",
+      "aliases": [],
+      "role": "narrator",
+      "gender": "unknown",
+      "age_range": null,
+      "personality": [],
+      "background": "",
+      "speech_style": {
+        "tempo": null,
+        "pitch": null,
+        "accent": null,
+        "catchphrases": []
+      },
+      "voice_binding": null,
+      "appearance_prompt": "",
+      "negative_prompt": "",
+      "portrait_asset": null,
+      "created_at": "2026-11-14T03:23:04Z",
+      "updated_at": "2026-11-14T03:23:04Z"
+    },
+    {
+      "id": "chr_01M7FBXTQB524WGBF4W6RRHGJH",
+      "name": "周也",
+      "aliases": [],
+      "role": "protagonist",
+      "gender": "male",
+      "age_range": "30-40",
+      "personality": [
+        "冷静",
+        "高智商",
+        "善于分析"
+      ],
+      "background": "程序员，智商180，与妻子九斤被卷入副本，负责拆解规则",
+      "speech_style": {
+        "tempo": "measured",
+        "pitch": "medium",
+        "accent": "",
+        "catchphrases": []
+      },
+      "voice_binding": null,
+      "appearance_prompt": "",
+      "negative_prompt": "",
+      "voice_description_zh": "",
+      "voice_description_en": "",
+      "appearance_desc_zh": "",
+      "appearance_desc_en": "",
+      "appearance_negative_zh": "",
+      "appearance_negative_en": "",
+      "portrait_asset": null,
+      "created_at": "2026-11-15T10:26:56Z",
+      "updated_at": "2026-11-15T10:26:56Z"
+    },
+    {
+      "id": "chr_01M7FBY5A1C6D8ZW5ZCC7VKFH9",
+      "name": "林九斤",
+      "aliases": [
+        "九斤"
+      ],
+      "role": "protagonist",
+      "gender": "female",
+      "age_range": "30-39",
+      "personality": [
+        "悍烈",
+        "直爽"
+      ],
+      "background": "38岁悍妇，抡棍子杀穿副本的主力。",
+      "speech_style": {
+        "tempo": "快",
+        "pitch": "高",
+        "accent": "无",
+        "catchphrases": []
+      },
+      "voice_binding": null,
+      "appearance_prompt": "",
+      "negative_prompt": "",
+      "voice_description_zh": "",
+      "voice_description_en": "",
+      "appearance_desc_zh": "",
+      "appearance_desc_en": "",
+      "appearance_negative_zh": "",
+      "appearance_negative_en": "",
+      "portrait_asset": null,
+      "created_at": "2026-11-15T10:27:07Z",
+      "updated_at": "2026-11-15T10:27:07Z"
+    },
+    {
+      "id": "chr_01M7FFSM1M8G8D6XGP9RZTGP2B",
+      "name": "纸扎喜娘",
+      "aliases": [],
+      "role": "supporting",
+      "gender": "unknown",
+      "age_range": null,
+      "personality": [],
+      "background": "大纲第 3 章创建",
+      "speech_style": {
+        "tempo": null,
+        "pitch": null,
+        "accent": null,
+        "catchphrases": []
+      },
+      "voice_binding": null,
+      "appearance_prompt": "",
+      "negative_prompt": "",
+      "voice_description_zh": "",
+      "voice_description_en": "",
+      "appearance_desc_zh": "",
+      "appearance_desc_en": "",
+      "appearance_negative_zh": "",
+      "appearance_negative_en": "",
+      "portrait_asset": null,
+      "created_at": "2026-11-15T11:34:32Z",
+      "updated_at": "2026-11-15T11:34:32Z"
+    }
+  ]
+}

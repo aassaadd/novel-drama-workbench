@@ -46,6 +46,12 @@ ALLOWED: dict[str, frozenset[str]] = {
 #: 迁移期允许依赖 legacy 旧模块的层（domain 与 infrastructure 不在此列）
 LEGACY_EXEMPT: frozenset[str] = frozenset({"application", "adapters", "interface"})
 
+#: 共享内核：迁移期唯一允许 domain 依赖的旧模块。
+#: 枚举是领域概念，当前由 `models/enums.py` 单点维护（枚举类型化改造的产物，
+#: 前端 `web-next/js/enums.js` 与之对应）。阶段 6 该模块整体迁入 domain/shared 后，
+#: 必须删除本例外，domain 恢复「只依赖自己」。
+SHARED_KERNEL: frozenset[str] = frozenset({"novel_drama.models.enums"})
+
 #: 单文件行数上限
 MAX_LINES = 1500
 
@@ -196,6 +202,8 @@ def scan(root: Path) -> tuple[list[Violation], int, list[tuple[str, int]]]:
                     continue
                 target = classify_target(target_module)
                 if target is None:
+                    continue
+                if layer == "domain" and target_module in SHARED_KERNEL:
                     continue
                 allowed = ALLOWED[layer] | ({"legacy"} if layer in LEGACY_EXEMPT else set())
                 if target in allowed:

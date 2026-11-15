@@ -1,0 +1,107 @@
+{
+  "id": "chr_01M7C19017ABCDEFGHJKMNPQRS",
+  "name": "林九斤",
+  "aliases": ["九斤", "老林"],
+  "role": "protagonist",
+  "gender": "male",
+  "age_range": "26-39",
+  "personality": ["固执", "嘴硬心软"],
+  "background": "鱼市长大的孤儿，靠一杆老秤认人认命。",
+  "speech_style": {
+    "tempo": "slow",
+    "pitch": "low",
+    "accent": "江淮官话尾音",
+    "catchphrases": ["称一称就知道了"]
+  },
+  "voice_binding": {
+    "adapter": "qwen3-tts",
+    "voice_id": "vendor_voice_jiujin",
+    "voice_library_id": "voc_01M7C19017ABCDEFGHJKMNPQRS",
+    "default_variant_id": "vav_01M7C19017ABCDEFGHJKMNPQRS",
+    "emotion_variant_map": {
+      "angry": "vav_01M7C19017ABCDEFGHJKMNPQRT",
+      "sad": "vav_01M7C19017ABCDEFGHJKMNPQRV"
+    },
+    "fallback_voice_id": "voc_01M7C19017ABCDEFGHJKMNPQRW",
+    "provider_id": "local-cosyvoice3",
+    "fallback_provider_id": "local-index-tts",
+    "reference_audio": "assets/voice/refs/jiujin.wav",
+    "seed": 20261115,
+    "speed": 1.05,
+    "emotion_map": {
+      "angry": "愤怒",
+      "sad": "低落"
+    }
+  },
+  "voice_profile": {
+    "schema": "voice-profile/v2",
+    "summary": "低沉沙哑的中年男声，尾音下压",
+    "voice_summary": "低沉男声",
+    "gender": "male",
+    "gender_source": "character",
+    "age_feel": "adult",
+    "age_range_text": "三十出头",
+    "age_range": "26-39",
+    "pitch": "偏低",
+    "timbre": ["沙哑", "厚实"],
+    "pace": "偏慢",
+    "volume": "中等",
+    "energy": "克制",
+    "warmth": "偏冷",
+    "articulation": "含糊",
+    "breathiness": 0.2,
+    "raspiness": 0.45,
+    "temperament": ["倔强"],
+    "accent": "江淮官话",
+    "region_hint": "沿江小城",
+    "language": "zh-CN",
+    "role_distinctiveness": 0.7,
+    "design_prompt": "A low, slightly raspy male voice in his thirties, slow and grounded.",
+    "negative_prompt": ["childish", "singing"],
+    "reference_text": "称一称就知道了。",
+    "confidence": 0.86,
+    "evidence": ["第一章出场对白"],
+    "source": {
+      "kind": "llm",
+      "model": "omlx",
+      "at": "2026-11-15T09:00:00Z",
+      "from_hash": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    },
+    "status": "ready",
+    "stale_reason": null,
+    "custom_note": "旧版扩展字段，必须原样保留"
+  },
+  "appearance_prompt": "a lean man in his thirties, weathered face, gray fisher jacket",
+  "negative_prompt": "cartoon, extra fingers",
+  "voice_description_zh": "低沉、微哑的中年男声，语速偏慢。",
+  "voice_description_en": "A low, slightly raspy male voice, slow paced.",
+  "appearance_desc_zh": "瘦削，皮肤被风吹得粗糙，穿灰色渔家夹克。",
+  "appearance_desc_en": "Lean, weather-beaten skin, gray fisher jacket.",
+  "appearance_negative_zh": "不要卡通感、不要多余手指",
+  "appearance_negative_en": "cartoon, extra fingers",
+  "portrait_asset": "assets/characters/jiujin/portrait.png",
+  "image_assets": {
+    "fullbody": "assets/characters/jiujin/fullbody.png",
+    "closeup": "assets/characters/jiujin/closeup.png",
+    "turnaround": null
+  },
+  "state": {
+    "situation": "守着鱼摊，等一个不肯开口的客人。",
+    "relationship_notes": {
+      "chr_01M7C19017ABCDEFGHJKMNPQRX": "欠他一条命"
+    },
+    "knowledge": ["秤砣里藏着东西"],
+    "relations": [
+      {
+        "target_id": "chr_01M7C19017ABCDEFGHJKMNPQRX",
+        "label": "旧识",
+        "sentiment": "neutral",
+        "since_chapter_id": "chp_01M7CY5ZD30TT3H0AE342SHYDD",
+        "note": "三年前在江上见过"
+      }
+    ],
+    "as_of_chapter_id": "chp_01M7CY5ZD30TT3H0AE342SHYDD"
+  },
+  "created_at": "2026-11-14T03:23:04Z",
+  "updated_at": "2026-11-15T09:00:00Z"
+}

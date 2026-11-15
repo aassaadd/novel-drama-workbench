@@ -56,6 +56,8 @@ def test_scan_flags_forbidden_dependencies(tmp_path: Path):
     files = {
         "novel_drama/domain/bad.py": "from ..adapters import tts\n",
         "novel_drama/domain/legacy_bad.py": "from ..store import ProjectStore\n",
+        "novel_drama/domain/kernel_ok.py": "from novel_drama.models.enums import ChapterStatus\n",
+        "novel_drama/domain/kernel_bad.py": "from novel_drama.models.ids import new_id\n",
         "novel_drama/application/ok.py": "from ..store import ProjectStore\nfrom ..domain.shared import ids\n",
         "novel_drama/adapters/bad.py": "from ..application.ok import run\n",
         "novel_drama/interface/bad.py": "from ..adapters import tts\n",
@@ -73,10 +75,17 @@ def test_scan_flags_forbidden_dependencies(tmp_path: Path):
     assert checked == len(files)
     assert ("novel_drama/domain/bad.py", "domain", "adapters") in got
     assert ("novel_drama/domain/legacy_bad.py", "domain", "legacy") in got
+    assert ("novel_drama/domain/kernel_bad.py", "domain", "legacy") in got
     assert ("novel_drama/adapters/bad.py", "adapters", "application") in got
     assert ("novel_drama/interface/bad.py", "interface", "adapters") in got
     assert ("novel_drama/infrastructure/bad.py", "infrastructure", "domain") in got
-    assert len(violations) == 5
+    assert len(violations) == 6
+
+
+def test_shared_kernel_enum_module_is_the_only_domain_exception():
+    """domain 允许依赖 models.enums（共享内核），但不允许依赖 models 下其他模块。"""
+    assert "novel_drama.models.enums" in guard.SHARED_KERNEL
+    assert guard.SHARED_KERNEL == frozenset({"novel_drama.models.enums"})
 
 
 def test_scan_reports_oversize_new_layer_file(tmp_path: Path):
