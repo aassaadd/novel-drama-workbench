@@ -1,8 +1,8 @@
-"""Web 直接调应用用例时的统一异常翻译。
+"""页面接口直接调应用用例时的统一异常翻译。
 
-页面接口不再经 `actions.run` 走 CLI，但「哪类失败返回哪个状态码、消息长什么样」
+页面接口不再经 `cli_bridge.run` 走 CLI，但「哪类失败返回哪个状态码、消息长什么样」
 必须与终端一致：本模块与 `cli.main` 的异常分支一一对应，状态码表与
-`actions.EXIT_TO_STATUS` 保持同源。
+`cli_bridge.EXIT_TO_STATUS` 保持同源。
 """
 
 from __future__ import annotations
@@ -12,10 +12,9 @@ from typing import Callable, TypeVar
 
 from fastapi import HTTPException
 
-from ..adapters.errors import AdapterError, ErrorCode
-from ..adapters.persistence import SchemaValidationError
-from ..interface.cli.common import PreconditionError, TaskFailedError
-from ..tts.errors import TtsError
+from novel_drama.composition import AdapterError, ErrorCode, SchemaValidationError
+from novel_drama.interface.cli.common import PreconditionError, TaskFailedError
+from novel_drama.tts.errors import TtsError
 
 T = TypeVar("T")
 
@@ -37,7 +36,7 @@ def _raise(code: int, message: str, *, business: bool = False) -> None:
     参数:
         code: CLI 退出码。
         message: 带标签的中文说明（与 CLI stderr 同格式）。
-        business: 为 True 时沿用 `web/app._business_error` 的口径：
+        business: 为 True 时沿用 `business` 口径：
             剥掉 `[TAG]` 前缀，前置缺失且含「不存在」返回 404，任务/schema 失败返回 422。
 
     异常:

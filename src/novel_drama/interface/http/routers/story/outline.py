@@ -9,12 +9,12 @@ from novel_drama.application.story.queries import (
     golden_check,
     outline_view,
 )
+from novel_drama.interface.http import use_cases
 from novel_drama.interface.http.deps import run_cli, store_for
 from novel_drama.interface.http.routers.common import (
     _respond,
     _respond_business,
 )
-from novel_drama.web import use_cases
 
 
 def register_story_outline_routes(app, project_root: str | None = None, config_path: str | None = None) -> None:

@@ -23,11 +23,11 @@ from novel_drama.application.story.summarize_chapter import (
 from novel_drama.composition import AdapterError, ProjectStore
 from novel_drama.infrastructure.config import load_config
 from novel_drama.interface.cli.commands.line import chapter_consistency
+from novel_drama.interface.http import use_cases
 from novel_drama.interface.http.deps import run_cli, store_for
 from novel_drama.interface.http.routers.common import (
     _respond,
 )
-from novel_drama.web import use_cases
 
 _SUMMARY_PREVIEWS: dict[str, dict] = {}
 

@@ -9,11 +9,11 @@ from novel_drama.application.story.queries import (
     world_list,
 )
 from novel_drama.application.story.world_crud import remove_world, upsert_worlds
+from novel_drama.interface.http import use_cases
 from novel_drama.interface.http.deps import run_cli, store_for
 from novel_drama.interface.http.routers.common import (
     _respond_business,
 )
-from novel_drama.web import use_cases
 
 
 def register_story_worlds_routes(app, project_root: str | None = None, config_path: str | None = None) -> None:

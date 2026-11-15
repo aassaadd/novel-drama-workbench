@@ -8,12 +8,12 @@ from novel_drama.application.production.job_tracker import (
     UiJob,
 )
 from novel_drama.application.story.settings_edit import apply_section, set_scalars
+from novel_drama.interface.http import use_cases
 from novel_drama.interface.http.deps import run_cli, store_for
 from novel_drama.interface.http.routers.common import (
     _respond,
     _respond_business,
 )
-from novel_drama.web import use_cases
 
 SECTION_LABEL = {
     "premise": "故事内核",

@@ -23,6 +23,7 @@ from novel_drama.composition import (
     list_workspaces,
 )
 from novel_drama.infrastructure.config import DEFAULT_UI_CONFIG_PATH, load_config
+from novel_drama.interface.http import use_cases
 from novel_drama.interface.http.cli_bridge import fail_body
 from novel_drama.interface.http.deps import run_cli, store_for
 from novel_drama.interface.http.routers.common import (
@@ -30,7 +31,6 @@ from novel_drama.interface.http.routers.common import (
 )
 from novel_drama.interface.http.routers.models_helpers import resolve_llm_settings
 from novel_drama.models.ids import now_iso
-from novel_drama.web import use_cases
 
 CONFIG_FIELD_GROUPS = (
     (
