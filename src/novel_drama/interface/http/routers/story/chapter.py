@@ -229,20 +229,24 @@ def register_story_chapter_routes(app, project_root: str | None = None, config_p
         异常:
             HTTPException 500: 混音失败。
         """
-        from novel_drama.interface.http.cli_bridge import run
+        from novel_drama.interface.http.executor import ChildFailed, run_application
 
         store = _store(body.get("path"))
         chapter_id = body.get("chapter") or ""
         try:
-            result = run(
-                "--config", config_path, "--project", str(store.root),
-                "--json", "mix", "--chapter", chapter_id, "--render",
+            # 混音要跑 ffmpeg、耗时以分钟计：放独立子进程，页面其它接口不被阻塞
+            result = run_application(
+                "novel_drama.application.production.mix:mix_chapter",
+                {
+                    "root": str(store.root),
+                    "chapter_id": chapter_id,
+                    "config_path": config_path,
+                    "render": True,
+                },
             )
-        except Exception as exc:  # noqa: BLE001 - 统一转成 500
+        except ChildFailed as exc:
             raise HTTPException(status_code=500, detail=f"混音失败：{exc}") from exc
-        if result.code != 0:
-            raise HTTPException(status_code=500, detail=f"混音失败：{result.stderr or result.text}")
-        return result.payload or {}
+        return dict(result or {})
 
     @app.get("/api/project/chapters")
     def chapters(path: str | None = Query(default=None)) -> list[dict]:

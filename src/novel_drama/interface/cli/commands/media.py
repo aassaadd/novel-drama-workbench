@@ -7,24 +7,25 @@ import os
 import sys
 from pathlib import Path
 
+from novel_drama.application.production.mix import mix_chapter
+from novel_drama.application.production.timeline import (
+    build_chapter_timeline,
+    silence_events,
+)
 from novel_drama.composition import (
     ProjectStore,
     build_schedule,
-    build_timeline,
     concat_voice,
     format_schedule_tsv,
-    load_cues,
     load_manifest,
     normalize_audio,
     plan_concat,
     plan_media,
     plan_mix,
     plan_mux,
-    render_mix,
     run_media,
     summarize_timeline,
     templates_dir,
-    validate,
     write_export,
 )
 from novel_drama.infrastructure.config import AppConfig
@@ -126,20 +127,15 @@ def cmd_media(args, config: AppConfig) -> int:
 def cmd_mix(args, config: AppConfig) -> int:
     """混音：默认只打印计划，--render 执行分轨 + 混音 + 规整。"""
     store = _resolve_store(args, config)
-    path = store.timeline_path(args.chapter)
-    if not path.exists():
-        raise PreconditionError(f"时间轴不存在: {path}（先执行 ndw timeline build）")
-    timeline = json.loads(path.read_text(encoding="utf-8"))
-    plan = plan_mix(timeline, store.root, bgm_cues=load_cues(store.root, args.chapter))
-    if not args.render:
-        _emit(args, json.dumps(plan, ensure_ascii=False, indent=2), plan)
-        return EXIT_OK
-    result = render_mix(
-        plan,
-        binary=config.get("ffmpeg.binary", "ffmpeg"),
-        audio_cfg=config.get("audio"),
-        loudness_target=config.get("output.loudness_target_lufs", -16),
+    result = mix_chapter(
+        str(store.root),
+        args.chapter,
+        config_path=getattr(args, "config", None),
+        render=args.render,
     )
+    if not args.render:
+        _emit(args, json.dumps(result, ensure_ascii=False, indent=2), result)
+        return EXIT_OK
     text = [f"混音完成：{result['mix']['path']}  时长 {result['duration_ms']}ms"]
     for stem in result["stems"]:
         text.append(f"  分轨 {stem['kind']}: {stem['path']}  素材 {stem['items']}  峰值 {stem['peak_db']}dBFS")
@@ -183,26 +179,6 @@ def _target_chapters(store: ProjectStore, args) -> list[str]:
 
 
 # ---------------- 配音：行级批量合成 ----------------
-
-
-def _silence_events(store: ProjectStore, chapter_id: str) -> list[dict]:
-    """从导演脚本里拍平静音事件（缺失脚本时返回空列表）。
-
-    参数:
-        store: 工程。
-        chapter_id: 章节 ID。
-
-    返回:
-        静音事件列表（已展开 shots）。
-    """
-    path = store.script_path(chapter_id)
-    if not path.exists():
-        return []
-    script = json.loads(path.read_text(encoding="utf-8"))
-    events = []
-    for shot in script.get("shots") or []:
-        events.extend(shot.get("silence_events") or [])
-    return events
 
 
 def _line_filter(store: ProjectStore, chapters: list[dict], args, config) -> tuple[set[str] | None, bool]:
@@ -832,7 +808,7 @@ def cmd_timeline(args, config: AppConfig) -> int:
     """构建、查看时间轴，或输出可核对的时间表。"""
     store = _resolve_store(args, config)
     chapter = store.load_chapter(args.chapter)
-    silences = _silence_events(store, chapter["id"])
+    silences = silence_events(store, chapter["id"])
     if args.action == "show":
         path = store.timeline_path(chapter["id"])
         if not path.exists():
@@ -857,18 +833,11 @@ def cmd_timeline(args, config: AppConfig) -> int:
         _emit(args, tsv + (f"\n时间表已写入 {out}" if out else ""), {"rows": rows, "out": out})
         return EXIT_OK
 
-    existing = None
-    path = store.timeline_path(chapter["id"])
-    if path.exists():
-        existing = json.loads(path.read_text(encoding="utf-8"))
-    timeline = build_timeline(chapter, store.settings(), existing=existing, silence_events=silences)
+    timeline = build_chapter_timeline(store, chapter["id"], dry_run=args.dry_run)
     summary = summarize_timeline(timeline)
     if args.dry_run:
         _emit(args, "[dry-run] " + summary + "\n" + "\n".join(timeline.get("warnings") or []), timeline)
         return EXIT_OK
-    timeline["built_at"] = now_iso()
-    validate(timeline, "timeline.schema.json")
-    store._write_json(path, timeline)  # 时间轴为派生物，不走章节校验
     warnings = "\n".join(timeline.get("warnings") or [])
     _emit(args, summary + ("\n" + warnings if warnings else ""), timeline)
     return EXIT_OK
@@ -890,7 +859,7 @@ def cmd_export(args, config: AppConfig) -> int:
     if cast_warnings:
         detail = "；".join(item["message"] for item in cast_warnings[:5])
         print(f"[warn] 音色/BGM 编排提示 {len(cast_warnings)} 条：{detail}", file=sys.stderr)
-    silences = _silence_events(store, chapter["id"])
+    silences = silence_events(store, chapter["id"])
     if getattr(args, "format", "srt") == "jianying":
         from novel_drama.composition import JianyingExportError, export_jianying
 

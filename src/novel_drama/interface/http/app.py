@@ -111,7 +111,7 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
     register_voice_tools_routes(app, config_path)
     register_script_routes(app, project_root, config_path)
     register_media_routes(app, project_root, config_path)
-    register_align_routes(app, config_path)
+    register_align_routes(app)
     register_bgm_routes(app, config_path)
     register_sfx_routes(app, config_path)
     register_models_http_routes(app, project_root, config_path)

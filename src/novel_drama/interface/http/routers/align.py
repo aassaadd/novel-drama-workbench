@@ -285,12 +285,11 @@ def _apply_take(store: ProjectStore, line: dict, rel: str, duration_ms: int, tas
     _save_takes(store, takes)
 
 
-def register_align_routes(app, config_path: str | None = None) -> None:
+def register_align_routes(app) -> None:
     """注册智能对轨相关接口。
 
     参数:
         app: FastAPI 应用。
-        config_path: 本机配置路径；重建时间轴时透传给 CLI。
     """
 
     @app.get("/api/ui/align/tasks")
@@ -422,14 +421,13 @@ def register_align_routes(app, config_path: str | None = None) -> None:
         tasks.insert(0, task)
         _save_tasks(store, tasks)
 
-        if task["status"] == "ready" and config_path is not None:
+        if task["status"] == "ready":
             # 已有时间轴时重建，让新写入的录音立刻进入时间轴
-            from novel_drama.interface.http.cli_bridge import run
+            from novel_drama.application.production.timeline import (
+                build_chapter_timeline,
+            )
 
             for chapter in chapters:
                 if store.timeline_path(chapter["id"]).exists():
-                    run(
-                        "--config", config_path, "--project", str(store.root),
-                        "--json", "timeline", "build", "--chapter", chapter["id"],
-                    )
+                    build_chapter_timeline(store, chapter["id"])
         return {"ok": True, "task": task}

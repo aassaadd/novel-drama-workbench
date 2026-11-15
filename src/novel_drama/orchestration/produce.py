@@ -26,7 +26,7 @@ from ..adapters.media import (
     run_media,
 )
 from ..adapters.media.mux import mux as run_mux
-from ..adapters.media.timeline_builder import build_timeline, summarize_timeline
+from ..adapters.media.timeline_builder import summarize_timeline
 from ..adapters.persistence import ProjectStore, validate
 from ..adapters.persistence.settings_store import SettingsStore
 from ..application.script.annotate import suggest_script
@@ -340,16 +340,9 @@ def _timeline_state(store: ProjectStore, chapter_id: str) -> dict:
     返回:
         时间轴 dict。
     """
-    from ..interface.cli.commands.media import _silence_events
+    from ..application.production.timeline import build_chapter_timeline
 
-    path = store.timeline_path(chapter_id)
-    chapter = store.load_chapter(chapter_id)
-    existing = json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
-    timeline = build_timeline(chapter, store.settings(), existing=existing, silence_events=_silence_events(store, chapter_id))
-    timeline["built_at"] = now_iso()
-    validate(timeline, "timeline.schema.json")
-    store._write_json(path, timeline)
-    return timeline
+    return build_chapter_timeline(store, chapter_id)
 
 
 def _stage_timeline(ctx: dict) -> tuple[list[dict], str]:
@@ -406,7 +399,7 @@ def _stage_mux(ctx: dict) -> tuple[list[dict], str]:
 
 def _stage_export(ctx: dict) -> tuple[list[dict], str]:
     """导出交付包。"""
-    from ..interface.cli.commands.media import _silence_events
+    from ..application.production.timeline import silence_events
 
     store = ctx["store"]
     chapter = store.load_chapter(ctx["chapter_id"])
@@ -417,7 +410,7 @@ def _stage_export(ctx: dict) -> tuple[list[dict], str]:
         chapter,
         timeline,
         characters,
-        _silence_events(store, ctx["chapter_id"]),
+        silence_events(store, ctx["chapter_id"]),
         binary=ctx["config"].get("ffmpeg.binary", "ffmpeg"),
     )
     artifacts = [_artifact(item["kind"], item["path"]) for item in result["artifacts"]]

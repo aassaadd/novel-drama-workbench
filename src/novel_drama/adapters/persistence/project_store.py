@@ -204,6 +204,18 @@ class ProjectStore:
         """
         return self.root / "timelines" / f"{chapter_id}.timeline.json"
 
+    def save_timeline(self, chapter_id: str, timeline: dict) -> None:
+        """写入时间轴文件（派生物，不走章节 schema 校验）。
+
+        参数:
+            chapter_id: 章节 ID。
+            timeline: 完整时间轴 dict（调用方负责先做 schema 校验）。
+
+        返回:
+            无。
+        """
+        self._write_json(self.timeline_path(chapter_id), timeline)
+
     def chapter_versions_dir(self, chapter_id: str) -> Path:
         """章节历史版本目录。
 
