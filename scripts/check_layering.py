@@ -62,6 +62,9 @@ OVERSIZE_DEBT: frozenset[str] = frozenset()
 #: 项目包名
 PACKAGE = "novel_drama"
 
+#: 已退役的 CLI 模块：界面层不得再用 subprocess 拼命令串调用它
+CLI_MODULE = "novel_drama.cli"
+
 
 @dataclass(frozen=True)
 class Violation:
@@ -159,6 +162,39 @@ def module_imports(tree: ast.AST) -> list[tuple[int, str, str | None, int]]:
     return rows
 
 
+def cli_invocations(tree: ast.AST) -> list[tuple[int, str]]:
+    """找出界面层里把 `novel_drama.cli` 当命令串用的字面量。
+
+    只看字面量出现的上下文：文档字符串与 `"novel_drama.cli" in command` 这类
+    命令行检测不算调用；列表里的 `"-m", "novel_drama.cli"`、f-string 等都算。
+
+    参数:
+        tree: 已解析的 AST。
+
+    返回:
+        `[(行号, 字面量)]`。
+    """
+    parents: dict[ast.AST, ast.AST] = {}
+    for node in ast.walk(tree):
+        for child in ast.iter_child_nodes(node):
+            parents[child] = node
+    rows: list[tuple[int, str]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
+            continue
+        if CLI_MODULE not in node.value:
+            continue
+        parent = parents.get(node)
+        if isinstance(parent, ast.Expr):
+            # 模块 / 函数文档字符串：说明现状不构成调用
+            continue
+        if isinstance(parent, ast.Compare):
+            # 进程命令行身份检测（ps 输出里判断是不是配音进程）
+            continue
+        rows.append((node.lineno, node.value))
+    return rows
+
+
 def scan(root: Path) -> tuple[list[Violation], int, list[tuple[str, int]]]:
     """扫描五层目录的跨层依赖与行数。
 
@@ -217,6 +253,19 @@ def scan(root: Path) -> tuple[list[Violation], int, list[tuple[str, int]]]:
                         f"{layer} 不允许依赖 {target}：{target_module}",
                     )
                 )
+
+            if layer == "interface":
+                # 界面层只允许调用 application 入口，不允许再拼 `novel_drama.cli` 命令串
+                for lineno, literal in cli_invocations(tree):
+                    violations.append(
+                        Violation(
+                            rel_text,
+                            lineno,
+                            layer,
+                            "cli",
+                            f"interface 不允许用 subprocess 调用 {CLI_MODULE}（改用 application 入口）：{literal!r}",
+                        )
+                    )
     return violations, checked, oversize
 
 
