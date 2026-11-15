@@ -105,14 +105,8 @@ def _generate_validated(
             if counter is not None:
                 counter["calls"] = int(counter.get("calls") or 0) + 1
             try:
-                if on_delta:
-                    result = stream_text(adapter, current, on_delta, guard=guard)
-                else:
-                    result = adapter.generate(current)
-                    if result.text:
-                        reason = guard.feed(result.text) or guard.check_all()
-                        if reason:
-                            raise guard.exception(len(result.text))
+                # stream_text 统一处理流式/非流式：退化检测、空正文关思考重试都在里面
+                result = stream_text(adapter, current, on_delta, guard=guard, on_notice=on_notice)
             except DegenerationDetected as exc:
                 # 截到循环起点前一句：保留正常行文，只丢重复段落
                 accepted = (accepted + guard.text)[: len(accepted) + exc.keep_index]

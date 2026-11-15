@@ -31,6 +31,9 @@ LLM_REASON_LABELS = {
     "sse_reconnect": "SSE 预连接失败后重试",
     "degeneration": "退化熔断中止本轮（或由此触发的续写/重写）",
     "watchdog": "看门狗截停（或由此触发的续写）",
+    "reasoning_loop": "思考通道检测到重复循环，提前中止本次调用",
+    "empty_body_retry": "正文为空（思考占满额度），关闭思考重试一次",
+    "thinking_exhausted": "思考占满额度且重试仍无正文，本轮未写入",
     "content_retry": "内容校验未通过后的重试",
     "superseded": "被新请求取代",
     "timeout": "HTTP 超时",
@@ -358,6 +361,25 @@ def _is_timeout(exc: BaseException) -> bool:
     return "timed out" in text or "timeout" in text
 
 
+def _error_reason_code(exc: BaseException) -> str:
+    """从适配器异常里取主动中止的原因码（`AdapterError.detail.code`）。
+
+    适配器主动中止（例如思考通道检测到重复循环）时会把原因码放进 detail，
+    这里把它映射成日志里的 `reason.code`，便于统计「谁把这次调用停掉的」。
+
+    参数:
+        exc: 捕获到的异常。
+
+    返回:
+        已知原因码；没有或不在清单里时返回空串。
+    """
+    detail = getattr(exc, "detail", None)
+    if not isinstance(detail, dict):
+        return ""
+    code = str(detail.get("code") or "")
+    return code if code in LLM_REASON_LABELS else ""
+
+
 def install_llm_hooks() -> None:
     """给写作适配器的两个 HTTP 入口装采集钩子（幂等）。
 
@@ -393,8 +415,8 @@ def install_llm_hooks() -> None:
                 "error",
                 str(exc),
                 _trace_text(exc),
-                reason="timeout" if _is_timeout(exc) else "",
-                site="adapter: 非流式请求异常" if _is_timeout(exc) else "",
+                reason="timeout" if _is_timeout(exc) else _error_reason_code(exc),
+                site="adapter: 非流式请求异常" if _is_timeout(exc) else ("adapter: 主动中止" if _error_reason_code(exc) else ""),
             )
             raise
         call.status_code = 200
@@ -449,7 +471,9 @@ def install_llm_hooks() -> None:
                 # 还没收到任何事件就失败：适配器会自动重连，这类不是用户中断
                 reason, site = "sse_reconnect", "adapter: 流建立阶段失败（随后自动重试）"
             else:
-                reason, site = "", ""
+                # 适配器主动中止（如思考通道检测到重复循环）：沿用 detail.code 作为原因码
+                reason = _error_reason_code(exc)
+                site = "adapter: 主动中止" if reason else ""
             call.finish("error", str(exc), _trace_text(exc), reason=reason, site=site)
             raise
         else:

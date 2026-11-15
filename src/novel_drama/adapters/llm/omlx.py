@@ -49,6 +49,7 @@ from .helpers import (
     logger,
     probe_sampling_support,
 )
+from .reasoning_guard import ReasoningLoopGuard, reasoning_target_chars
 
 
 class OmlxWritingAdapter(ModelCatalogMixin):
@@ -425,16 +426,23 @@ class OmlxWritingAdapter(ModelCatalogMixin):
         }
         return available
 
-    def _watchdog_for(self, req: TextGenRequest, available: int | None) -> tuple[int, str] | None:
+    def _watchdog_for(
+        self,
+        req: TextGenRequest,
+        available: int | None,
+        thinking: bool = False,
+    ) -> tuple[int, str] | None:
         """按本轮目标字数计算看门狗（止损线），并把计算口径写进日志。
 
-        口径统一由 `writing.watchdog` 给出：目标字数 × 1.65 × 0.886 token/字，
-        末轮加摘要额度，再与上下文剩余空间取小。
+        口径统一由 `domain.production.rules.watchdog` 给出：目标字数 × 1.65 ×
+        0.886 token/字，末轮加摘要额度；开启思考时再保证「正文额度 + 思考预留」
+        的下限，最后与上下文剩余空间取小。
 
         参数:
             req: 统一文本请求；`metadata.watchdog_target_words` 优先，
                 其次 `metadata.target_words`。
             available: 上下文剩余可用 token；None 表示窗口未知。
+            thinking: 本轮是否开启思考。
 
         返回:
             `(max_tokens, 计算说明)`；非正文任务或目标字数未知时返回 None。
@@ -450,9 +458,9 @@ class OmlxWritingAdapter(ModelCatalogMixin):
         if target <= 0:
             return None
         with_summary = bool(meta.get("with_summary"))
-        desired = watchdog_tokens(target, with_summary)
+        desired = watchdog_tokens(target, with_summary, thinking)
         value, _clamped = apply_context_limit(desired, available)
-        note = describe_watchdog(target, with_summary, available, value)
+        note = describe_watchdog(target, with_summary, available, value, thinking)
         self._budget_stats["max_tokens"] = value
         return value, note
 
@@ -499,6 +507,8 @@ class OmlxWritingAdapter(ModelCatalogMixin):
         # 输出侧不设人为上限：有上下文窗口时传「窗口 − 已用提示词」的剩余空间，
         # 不额外留余量；窗口未知时不传 max_tokens，由模型自身决定何时停止。
         available = self._available_output_tokens(messages)
+        # 思考先解析：看门狗要给思考留出额度，不能等组装完再补
+        enabled, effort, thinking_source, thinking_stage = self._thinking_for(req)
         payload = {
             "model": self.model,
             "messages": messages,
@@ -506,7 +516,7 @@ class OmlxWritingAdapter(ModelCatalogMixin):
             "stream": stream,
         }
         # 正文类任务：按本轮目标字数算看门狗（止损线）；其它任务仍用上下文剩余空间。
-        watchdog = self._watchdog_for(req, available)
+        watchdog = self._watchdog_for(req, available, thinking=bool(enabled))
         if watchdog is not None:
             value, note = watchdog
             payload["max_tokens"] = value
@@ -524,7 +534,6 @@ class OmlxWritingAdapter(ModelCatalogMixin):
             payload["stop"] = stop
         # 思考按调用点解析：全局关闭 > 调用点显式值 > 阶段设置 > 系统自动清单；
         # 强度统一跟随全局，不按阶段分档
-        enabled, effort, thinking_source, thinking_stage = self._thinking_for(req)
         payload["chat_template_kwargs"] = {"enable_thinking": bool(enabled)}
         if bool(enabled) and effort in _THINKING_EFFORTS:
             payload["reasoning_effort"] = effort
@@ -653,7 +662,9 @@ class OmlxWritingAdapter(ModelCatalogMixin):
         message = choices[0].get("message") or {}
         # 只取 content：reasoning_content 是模型的思考通道，绝不能当成正文返回
         text = str(message.get("content") or "")
-        _log_reasoning(req.task, str(message.get("reasoning_content") or ""))
+        reasoning = str(message.get("reasoning_content") or "")
+        self._check_reasoning_loop(req, reasoning)
+        _log_reasoning(req.task, reasoning)
         return TextGenResult(
             text=text,
             finish_reason=str(choices[0].get("finish_reason") or "stop"),
@@ -685,8 +696,12 @@ class OmlxWritingAdapter(ModelCatalogMixin):
 
         返回:
             TextGenResult；usage 取流中最后出现的用量事件。
+
+        异常:
+            AdapterError: 思考通道检测到重复循环时提前中止（本轮不产出正文）。
         """
         payload = self._build_payload(req, stream=True)
+        guard = ReasoningLoopGuard(reasoning_target_chars(req.metadata))
         parts: list[str] = []
         reasoning_parts: list[str] = []
         finish = "stop"
@@ -705,6 +720,7 @@ class OmlxWritingAdapter(ModelCatalogMixin):
             text, reasoning = _split_delta(delta)
             if reasoning:
                 reasoning_parts.append(reasoning)
+                self._abort_on_reasoning_loop(req, guard.feed(reasoning))
             if text:
                 parts.append(text)
                 if on_delta is not None:
@@ -713,6 +729,52 @@ class OmlxWritingAdapter(ModelCatalogMixin):
                 finish = str(choices[0]["finish_reason"])
         _log_reasoning(req.task, "".join(reasoning_parts))
         return TextGenResult(text="".join(parts), finish_reason=finish, model=model, usage=usage, raw={"stream": True})
+
+    def _check_reasoning_loop(self, req: TextGenRequest, reasoning: str) -> None:
+        """对非流式响应里的整段思考做一次重复检测。
+
+        参数:
+            req: 统一文本请求。
+            reasoning: 上游返回的 reasoning_content。
+
+        返回:
+            无。
+
+        异常:
+            AdapterError: 思考内容命中重复循环。
+        """
+        if not reasoning:
+            return
+        guard = ReasoningLoopGuard(reasoning_target_chars(req.metadata))
+        guard.feed(reasoning)
+        self._abort_on_reasoning_loop(req, guard.check_all())
+
+    def _abort_on_reasoning_loop(self, req: TextGenRequest, reason: str) -> None:
+        """思考通道命中重复时提前中止本次调用，并写下原因码。
+
+        思考与正文共用输出额度：放任它绕圈就会把额度耗光、正文为空，所以
+        命中即止损，不等它自然结束。
+
+        参数:
+            req: 统一文本请求。
+            reason: 命中原因；空串表示未命中。
+
+        返回:
+            无。
+
+        异常:
+            AdapterError: 命中时抛出，携带 `detail.code = reasoning_loop`。
+        """
+        if not reason:
+            return
+        # 原因码随异常 detail 一起带给日志钩子（不占用「下一次调用」的来因标记）
+        logger.warning("思考通道检测到重复循环 task=%s 原因=%s", str(req.task or ""), reason)
+        raise AdapterError(
+            ErrorCode.UPSTREAM_ERROR,
+            f"模型思考出现重复循环（{reason}），已提前中止本次调用；本轮不产出正文，请重试或关闭思考",
+            retryable=True,
+            detail={"code": "reasoning_loop", "reason": reason},
+        )
 
     def generate_tool(
         self,
@@ -1082,6 +1144,7 @@ class OmlxWritingAdapter(ModelCatalogMixin):
         self._require_ready()
         self._check_model_available()
         payload = self._build_payload(req, stream=True)
+        guard = ReasoningLoopGuard(reasoning_target_chars(req.metadata))
         reasoning_parts: list[str] = []
         for event in self._iter_sse_with_retry(payload):
             usage = self._parse_usage(event.get("usage")) if event.get("usage") else None
@@ -1095,12 +1158,13 @@ class OmlxWritingAdapter(ModelCatalogMixin):
             text, reasoning = _split_delta(delta)
             if reasoning:
                 reasoning_parts.append(reasoning)
+                self._abort_on_reasoning_loop(req, guard.feed(reasoning))
             finish = choices[0].get("finish_reason")
             if text:
                 yield TextGenChunk(delta=text, done=False, usage=usage)
             if finish:
                 _log_reasoning(req.task, "".join(reasoning_parts))
-                yield TextGenChunk(delta="", done=True, usage=usage)
+                yield TextGenChunk(delta="", done=True, usage=usage, finish_reason=str(finish))
                 return
         _log_reasoning(req.task, "".join(reasoning_parts))
         yield TextGenChunk(delta="", done=True)

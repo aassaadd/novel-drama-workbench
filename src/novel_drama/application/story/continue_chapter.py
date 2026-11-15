@@ -624,13 +624,13 @@ def continue_chapter(
             异常:
                 DegenerationDetected: 命中重复退化。
             """
-            if on_delta:
-                return stream_text(context["adapter"], call_request, on_delta, guard=call_guard)
-            result = context["adapter"].generate(call_request)
-            reason = call_guard.feed(result.text or "") or call_guard.check_all()
-            if reason:
-                raise call_guard.exception(len(result.text or ""))
-            return result
+            return stream_text(
+                context["adapter"],
+                call_request,
+                on_delta,
+                guard=call_guard,
+                on_notice=warnings.append,
+            )
 
         try:
             result = _round_call(request, guard)

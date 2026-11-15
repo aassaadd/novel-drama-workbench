@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
+from ...adapters.errors import AdapterError, ErrorCode
 from ...adapters.llm.contracts import TextGenRequest, TextGenResult
-from ...adapters.observability import set_llm_abort_reason
+from ...adapters.observability import set_llm_abort_reason, set_llm_call_reason
 from ...adapters.persistence import ProjectStore
 from ...adapters.persistence.settings_store import SettingsStore
 from ...adapters.persistence.world_store import WorldStore
@@ -169,6 +172,7 @@ def stream_text(
     request: TextGenRequest,
     on_delta,
     guard: DegenerationGuard | None = None,
+    on_notice=None,
 ) -> TextGenResult:
     """流式调用写作适配器，逐段回调增量文本并聚合为 TextGenResult。
 
@@ -178,20 +182,80 @@ def stream_text(
     `DegenerationDetected`，异常里带可读原因、已接收字数与建议保留长度
     （截到循环起点前一句），由调用方决定局部续写还是整节重写。
 
+    「输出不设人为上限」的补充保障：正文为空且上游因额度用尽而结束时
+    （几乎都是思考把额度吃光），关掉思考重试一次；仍为空则报明确错误，
+    不返回空正文、不落盘。
+
     参数:
         adapter: 写作适配器。
         request: 统一文本请求。
         on_delta: 增量回调 `(text) -> None`；可为 None。
         guard: 退化检测器；None 时不做检测。
+        on_notice: 自动补救说明回调 `(text) -> None`；可为 None。
 
     返回:
         聚合后的 TextGenResult。
 
     异常:
         DegenerationDetected: 命中重复退化，携带可读原因与已接收字数。
+        AdapterError: 正文为空且关闭思考重试后仍为空。
+    """
+    result = _stream_once(adapter, request, on_delta, guard)
+    if (result.text or "").strip() or result.finish_reason != "length":
+        return result
+
+    # 正文为空 + 额度用尽：思考占满了输出额度，关掉思考再试一次
+    set_llm_call_reason("empty_body_retry", "stream_text: 空正文重试（关闭思考）")
+    if on_notice:
+        on_notice("本轮正文为空且额度用尽（思考占满额度），已关闭思考重试一次")
+    retry_request = replace(
+        request,
+        metadata={**(request.metadata or {}), "enable_thinking": False},
+    )
+    retried = _stream_once(adapter, retry_request, on_delta, guard)
+    if (retried.text or "").strip():
+        return retried
+
+    set_llm_call_reason("thinking_exhausted", "stream_text: 关闭思考重试仍无正文")
+    raise AdapterError(
+        ErrorCode.UPSTREAM_ERROR,
+        "本轮正文为空：思考占满输出额度（finish_reason=length），关闭思考重试后仍无正文；本轮未写入章节",
+        retryable=True,
+        detail={"code": "thinking_exhausted"},
+    )
+
+
+def _stream_once(
+    adapter,
+    request: TextGenRequest,
+    on_delta,
+    guard: DegenerationGuard | None,
+) -> TextGenResult:
+    """执行一次流式（或回落一次性）调用，聚合文本与结束原因。
+
+    参数:
+        adapter: 写作适配器。
+        request: 统一文本请求。
+        on_delta: 增量回调；可为 None。
+        guard: 退化检测器；None 时不做检测。
+
+    返回:
+        聚合后的 TextGenResult（finish_reason 取上游 done 块上的值）。
+
+    异常:
+        DegenerationDetected: 命中重复退化。
     """
     parts: list[str] = []
     usage = None
+    finish = "stop"
+    if on_delta is None:
+        # 非流式：一次拿到全文，退化检测与流式共用同一个 guard
+        result = adapter.generate(request)
+        if guard is not None and result.text:
+            reason = guard.feed(result.text) or guard.check_all()
+            if reason:
+                raise guard.exception(len(result.text))
+        return result
     try:
         for chunk in adapter.stream(request):
             if chunk.delta:
@@ -206,6 +270,8 @@ def stream_text(
                     on_delta(chunk.delta)
             if chunk.usage is not None:
                 usage = chunk.usage
+            if chunk.finish_reason:
+                finish = str(chunk.finish_reason)
             if chunk.done:
                 # 上游已给 finish_reason：属于正常结束，关闭迭代器不应记成「调用方断开」
                 set_llm_abort_reason("natural_end", "service.stream_text: done 后停止读取")
@@ -226,7 +292,7 @@ def stream_text(
             raise guard.exception(len(guard.text))
     return TextGenResult(
         text="".join(parts),
-        finish_reason="stop",
+        finish_reason=finish,
         model=str(getattr(adapter, "model", "") or ""),
         usage=usage,
     )

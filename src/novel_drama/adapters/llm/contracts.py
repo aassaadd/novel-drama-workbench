@@ -50,6 +50,8 @@ class TextGenChunk:
     delta: str
     done: bool = False
     usage: Usage | None = None
+    #: 上游结束原因（stop/length 等）；只有 done 块上带值
+    finish_reason: str = ""
 
 
 @dataclass
