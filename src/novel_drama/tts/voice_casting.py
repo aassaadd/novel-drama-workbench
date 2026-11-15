@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,6 +21,8 @@ from pathlib import Path
 from ..adapters.persistence.voice_cast import cast_config
 from ..adapters.persistence.voice_store import find_voice, pick_variant
 from ..models import entities
+
+logger = logging.getLogger(__name__)
 
 #: 年龄段（由弱到强），用于年龄相近性打分
 _AGE_BANDS = ["child", "youth", "adult", "middle", "senior"]
@@ -637,7 +640,8 @@ def undo_last(store, kind: str | None = None) -> dict:
         kind: 只撤销该类型（casting/generation/manual）；为空取最近一条。
 
     返回:
-        `{restored: [...], kind, id}`。
+        `{restored, kind, id, restored_chapters, skipped_chapters, skipped_characters, message}`；
+        损坏或写回失败的章节进 `skipped_chapters`（含文件路径与原因），不会伪装成回滚成功。
 
     异常:
         ValueError: 没有可撤销的记录。
@@ -659,20 +663,67 @@ def undo_last(store, kind: str | None = None) -> dict:
     characters = store.load_characters()
     rows = {item["id"]: item for item in characters["characters"]}
     restored = []
+    skipped_characters: list[dict] = []
     for item in payload.get("characters") or []:
         character = rows.get(item.get("character_id"))
         if character is None:
+            skipped_characters.append(
+                {"character_id": item.get("character_id"), "reason": "角色已不存在（可能已删除或改名）"}
+            )
             continue
         character["voice_binding"] = item.get("voice_binding")
         character["updated_at"] = _now()
         restored.append(item.get("character_id"))
     store.save_characters(characters)
+    restored_chapters: list[str] = []
+    skipped_chapters: list[dict] = []
     for snapshot in payload.get("chapters") or []:
+        chapter_id = str(snapshot.get("chapter_id") or "")
         try:
-            chapter = store.load_chapter(snapshot["chapter_id"])
-        except Exception:  # noqa: BLE001 - 章节已删除时跳过该条
+            chapter = store.load_chapter(chapter_id)
+        except Exception as exc:  # 单章损坏时跳过，但必须留痕并回报
+            logger.warning("音色撤销跳过损坏章节 %s：%s", chapter_id, exc, exc_info=True)
+            skipped_chapters.append(
+                {
+                    "chapter_id": chapter_id,
+                    "path": str(store.chapter_path(chapter_id)),
+                    "reason": str(exc),
+                }
+            )
             continue
         chapter["voice_overrides"] = snapshot.get("voice_overrides") or {}
-        store.save_chapter(chapter)
+        try:
+            store.save_chapter(chapter)
+        except Exception as exc:  # 写失败同样不能静默当成成功
+            logger.warning("音色撤销写回章节失败 %s：%s", chapter_id, exc, exc_info=True)
+            skipped_chapters.append(
+                {
+                    "chapter_id": chapter_id,
+                    "path": str(store.chapter_path(chapter_id)),
+                    "reason": f"写回失败：{exc}",
+                }
+            )
+            continue
+        restored_chapters.append(chapter_id)
     path.unlink(missing_ok=True)
-    return {"restored": restored, "kind": payload.get("kind"), "id": payload.get("id")}
+    # 中文结果说明：即使有跳过项也返回成功，但要让调用方能直接展示原因
+    if skipped_chapters:
+        names = "、".join(item["chapter_id"] for item in skipped_chapters)
+        message = (
+            f"已回滚 {len(restored_chapters)} 章音色覆盖，"
+            f"{len(skipped_chapters)} 章未能回滚（文件损坏或写回失败）：{names}；"
+            "这些章节的音色覆盖保持原样，请修复文件后重试"
+        )
+    else:
+        message = f"已回滚 {len(restored_chapters)} 章音色覆盖"
+    if skipped_characters:
+        message += f"；另有 {len(skipped_characters)} 个角色已不存在，未恢复绑定"
+    return {
+        "restored": restored,
+        "kind": payload.get("kind"),
+        "id": payload.get("id"),
+        "restored_chapters": restored_chapters,
+        "skipped_chapters": skipped_chapters,
+        "skipped_characters": skipped_characters,
+        "message": message,
+    }

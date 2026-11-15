@@ -277,7 +277,7 @@ def expand_outline(
         acts.extend(built_blocks)
 
     bible.setdefault("outline", {})["acts"] = acts
-    _renumber(bible, store, dry_run=dry_run)
+    renumber_failures = _renumber(bible, store, dry_run=dry_run)
     # 角色引用：先清洗非法引用（人名/空串/重复 ID）；auto 再按幕绑定世界并回落到 POV，none 只清洗
     # 只处理本次新增的章节，旧章节的引用保持原样
     new_view = (
@@ -378,6 +378,12 @@ def expand_outline(
     label = "续写" if mode == "append" else "扩充"
     lines = [f"{placement}", report_text,
              f"全书现为 {len(acts)} 幕 / {total_chapters} 章 / {total_beats} 个节拍；已有内容未改动，只新增。"]
+    if renumber_failures:
+        # 序号顺延失败不阻断大纲保存，但必须在页面上说明哪些章节没同步
+        message = f"有 {len(renumber_failures)} 个章节序号顺延失败，可重新打开大纲或手动核对"
+        _progress(on_progress, {"type": "notice", "message": message})
+        lines.append(f"⚠ {message}：")
+        lines.extend(f"- {item}" for item in renumber_failures)
     new_act_count = 0 if mode == "after_chapter" else len(built_blocks)
     return {
         "mode": mode,
@@ -399,5 +405,6 @@ def expand_outline(
         "bound_character_refs": bound_stats["refs"],
         "characters_created": cast_created_total,
         "characters_reused": cast_reused_total,
+        "renumber_failures": renumber_failures,
         "dry_run": dry_run,
     }

@@ -1360,11 +1360,18 @@ async function openSceneSplitPreview() {
   }
   const scenes = impact?.preview?.scenes || [];
   const rebuilt = impact?.preview?.rebuilt || [];
+  const scriptError = impact?.script?.error || '';
   const mask = openDialog({
     title: '拆场景预览',
     wide: true,
     body: `
       ${modeSwitchHTML('scene.split', { fallback: 'regen' })}
+      ${
+        scriptError
+          ? `<div class="dlg-note bad"><b>分镜文件损坏</b><br />${esc(scriptError)}<br />
+               上面的「分镜数」按 0 统计；请先修复该文件或重新生成标注，再重切场景。</div>`
+          : ''
+      }
       <div class="dlg-note">按地点与时间切分为 ${scenes.length} 场${
         rebuilt.length ? ` · 将覆盖 ${rebuilt.length} 个已有场景` : ''
       }</div>

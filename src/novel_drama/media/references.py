@@ -6,10 +6,13 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from ..adapters.persistence import ProjectStore, SettingsStore, WorldStore
 from ..models.entities import NARRATOR_ID, UNKNOWN_SPEAKER_ID
+
+logger = logging.getLogger(__name__)
 
 #: 参考图默认配置（`comfyui.references` 缺失时逐项回退）
 DEFAULT_OPTIONS = {"enabled": True, "max_count": 4, "auto_fill": True, "use_world_cover": True}
@@ -84,23 +87,29 @@ def reference_options(config) -> dict:
     }
 
 
-def scene_characters(store: ProjectStore, scene: dict, item: dict | None = None) -> list[dict]:
+def scene_characters(
+    store: ProjectStore, scene: dict, item: dict | None = None, problems: list[str] | None = None
+) -> list[dict]:
     """按出场顺序解析场景角色（剔除旁白 / 未识别 / 未知 / 重复 ID）。
 
     参数:
         store: 工程。
         scene: 场景 dict。
         item: 关键图或视频条目（可选，其 `character_ids` 优先于场景）。
+        problems: 可选；角色表读取失败时追加中文原因，供调用方在界面上提示。
 
     返回:
-        角色 dict 列表，顺序与 `character_ids` 一致；角色表损坏时返回空列表。
+        角色 dict 列表，顺序与 `character_ids` 一致；角色表损坏时返回空列表（并记日志）。
     """
     ids = (item or {}).get("character_ids") or (scene or {}).get("character_ids") or []
     if not isinstance(ids, (list, tuple)):
         return []
     try:
         table = store.load_characters()
-    except Exception:  # characters.json 缺失或损坏时按「没有角色」处理
+    except Exception as exc:  # characters.json 缺失或损坏时按「没有角色」处理
+        logger.warning("场景角色参考图读取失败：角色表无法读取（%s）", exc, exc_info=True)
+        if problems is not None:
+            problems.append(f"角色表读取失败（{exc}）")
         return []
     by_id = {}
     for character in table.get("characters") or []:
@@ -134,7 +143,7 @@ def _project_path(store: ProjectStore, rel: str) -> Path:
     return path if path.is_absolute() else (store.root / path)
 
 
-def _chapter_world_ids(store: ProjectStore, chapter: dict) -> list[str]:
+def _chapter_world_ids(store: ProjectStore, chapter: dict) -> tuple[list[str], list[str]]:
     """取章节绑定的世界 ID：章节字段优先，其次设定库大纲章节，最后回落全部世界。
 
     参数:
@@ -142,30 +151,35 @@ def _chapter_world_ids(store: ProjectStore, chapter: dict) -> list[str]:
         chapter: 章节 dict。
 
     返回:
-        世界 ID 列表，用于按顺序寻找带封面的世界。
+        `(世界 ID 列表, 读取失败说明列表)`；说明非空表示某一层数据损坏，
+        已按后一层兜底，但调用方需要把原因告诉用户。
     """
+    problems: list[str] = []
     bound = [str(value) for value in (chapter.get("world_ids") or []) if value]
     if bound:
-        return bound
+        return bound, problems
     try:
         settings_store = SettingsStore(store.root)
         bible = settings_store.load_or_none() or {}
         entry = settings_store.find_outline_chapter(bible, chapter.get("id"), index=int(chapter.get("index") or 0))
         bound = [str(value) for value in ((entry or {}).get("world_ids") or []) if value]
         if bound:
-            return bound
-    except Exception:  # 设定库缺失/损坏时继续尝试全部世界
-        pass
+            return bound, problems
+    except Exception as exc:  # 设定库缺失/损坏时继续尝试全部世界
+        logger.warning("参考图读取失败：设定库无法读取（%s）", exc, exc_info=True)
+        problems.append(f"设定库读取失败（{exc}）")
     try:
         world_store = WorldStore(store.root)
         if world_store.exists():
-            return [str(world.get("id")) for world in world_store.list_worlds() if world.get("id")]
-    except Exception:
-        pass
-    return []
+            worlds = world_store.list_worlds()
+            return [str(world.get("id")) for world in worlds if world.get("id")], problems
+    except Exception as exc:
+        logger.warning("参考图读取失败：世界列表无法读取（%s）", exc, exc_info=True)
+        problems.append(f"世界列表读取失败（{exc}）")
+    return [], problems
 
 
-def _pick_world_cover(store: ProjectStore, chapter: dict, scene: dict) -> tuple[dict, str] | None:
+def _pick_world_cover(store: ProjectStore, chapter: dict, scene: dict) -> tuple[tuple[dict, str] | None, list[str]]:
     """按「场景世界 → 章节绑定世界 → 全部世界」顺序找第一个带真实封面文件的世界。
 
     参数:
@@ -174,25 +188,30 @@ def _pick_world_cover(store: ProjectStore, chapter: dict, scene: dict) -> tuple[
         scene: 场景 dict。
 
     返回:
-        `(世界条目, 封面相对路径)`；没有可用封面时返回 None。
+        `((世界条目, 封面相对路径) | None, 读取失败说明列表)`；没有可用封面时第一项为 None。
     """
-    candidates = [scene.get("world_id")] + _chapter_world_ids(store, chapter or {})
+    problems: list[str] = []
+    bound_ids, bound_problems = _chapter_world_ids(store, chapter or {})
+    problems.extend(bound_problems)
+    candidates = [scene.get("world_id")] + bound_ids
     world_store = WorldStore(store.root)
     if not world_store.exists():
-        return None
+        return None, problems
     for world_id in candidates:
         if not world_id:
             continue
         try:
             world = world_store.get(world_id)
-        except Exception:  # worlds.json 损坏等异常不影响关键图流程
+        except Exception as exc:  # worlds.json 损坏等异常不影响关键图流程，但要留痕
+            logger.warning("参考图读取失败：世界 %s 读取异常（%s）", world_id, exc, exc_info=True)
+            problems.append(f"世界「{world_id}」读取失败（{exc}）")
             continue
         if not world:
             continue
         rel = world.get("cover_asset")
         if rel and _project_path(store, rel).is_file():
-            return world, str(rel)
-    return None
+            return (world, str(rel)), problems
+    return None, problems
 
 
 def collect_references(store: ProjectStore, config, chapter: dict, scene: dict, item: dict | None = None) -> dict:
@@ -222,9 +241,12 @@ def collect_references(store: ProjectStore, config, chapter: dict, scene: dict, 
     # 世界封面：仅取一个（场景世界优先，其次章节绑定的世界）
     if options["use_world_cover"]:
         try:
-            picked = _pick_world_cover(store, chapter or {}, scene or {})
-        except Exception:  # 世界数据异常只跳过世界参考图
-            picked = None
+            picked, world_problems = _pick_world_cover(store, chapter or {}, scene or {})
+        except Exception as exc:  # 世界数据异常只跳过世界参考图，但要告诉用户
+            logger.warning("参考图读取失败：世界封面解析异常（%s）", exc, exc_info=True)
+            picked, world_problems = None, [f"世界封面解析失败（{exc}）"]
+        if world_problems:
+            warnings.extend(f"参考图读取失败：{item}，本次未使用该参考" for item in world_problems)
         if picked:
             world, rel = picked
             path = _project_path(store, rel)
@@ -242,10 +264,15 @@ def collect_references(store: ProjectStore, config, chapter: dict, scene: dict, 
                 )
 
     # 角色设定图：fullbody → closeup → portrait_asset
+    character_problems: list[str] = []
     try:
-        characters = scene_characters(store, scene or {}, item)
-    except Exception:
+        characters = scene_characters(store, scene or {}, item, problems=character_problems)
+    except Exception as exc:
+        logger.warning("参考图读取失败：场景角色解析异常（%s）", exc, exc_info=True)
         characters = []
+        character_problems.append(f"场景角色解析失败（{exc}）")
+    if character_problems:
+        warnings.extend(f"参考图读取失败：{item}，本次未使用角色参考" for item in character_problems)
     for character in characters:
         character_id = str(character.get("id") or "")
         name = str(character.get("name") or character_id)

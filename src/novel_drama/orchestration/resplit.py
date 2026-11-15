@@ -10,9 +10,12 @@
 from __future__ import annotations
 
 import copy
+import logging
 
 from ..models import entities
 from ..text.splitter import split_lines, split_scenes
+
+logger = logging.getLogger(__name__)
 
 #: 影响清单里最多列出的明细条数（完整数量在计数里，明细只用于让用户点名确认）
 _MAX_SAMPLES = 10
@@ -161,18 +164,34 @@ def _split_and_classify(existing: list[dict], source_text: str, characters: list
 
 
 def _script_info(store, chapter: dict) -> dict:
-    """读取本章导演标注状态（只读，失败按无标注处理）。"""
+    """读取本章导演标注状态（只读）。
+
+    参数:
+        store: 工程。
+        chapter: 章节 dict。
+
+    返回:
+        `{exists, shots}`；文件存在但无法解析时额外带 `path` 与 `error`，
+        让页面显示「分镜文件损坏」和具体位置，而不是把它当成 0 个镜头。
+    """
     try:
         path = store.script_path(chapter["id"])
-    except Exception:
-        return {"exists": False, "shots": 0}
+    except Exception as exc:
+        logger.warning("分镜文件路径解析失败（chapter=%s）：%s", chapter.get("id"), exc, exc_info=True)
+        return {"exists": False, "shots": 0, "error": f"分镜文件路径解析失败（{exc}）"}
     if not path.exists():
         return {"exists": False, "shots": 0}
     try:
         script = store.load_script(chapter["id"])
         return {"exists": True, "shots": len(script.get("shots") or [])}
-    except Exception:
-        return {"exists": True, "shots": 0}
+    except Exception as exc:
+        logger.warning("分镜文件损坏：%s（%s）", path, exc, exc_info=True)
+        return {
+            "exists": True,
+            "shots": 0,
+            "path": str(path),
+            "error": f"分镜文件损坏：{path}（{exc}）",
+        }
 
 
 def _scene_lines(scene: dict) -> list[dict]:
@@ -272,6 +291,14 @@ def analyze_scene_split(store, chapter: dict, characters: list[dict], max_chars:
         ],
     }
 
+    if script.get("error"):
+        # 文件存在但读不出来：不能显示成「0 个镜头」，要把位置和原因直接摆出来
+        script_line = f"{script['error']}；本次影响清单里的分镜数按 0 统计，请先修复该文件或重新生成标注。"
+    elif script["exists"]:
+        script_line = f"本章已有导演标注：是（{script['shots']} 个镜头），场景重切后必须重新生成标注。"
+    else:
+        script_line = "本章暂无导演标注。"
+
     text = [
         f"重新切分场景影响：已有 {len(old_scenes)} 个场景 / {total_lines} 行台词，规则将切出 {len(drafts)} 个场景。",
         (
@@ -282,7 +309,7 @@ def analyze_scene_split(store, chapter: dict, characters: list[dict], max_chars:
         ),
         f"丢失台词中人工/标注改动 {lost_manual} 行，已有配音 {lost_audio} 条。",
         f"另有 {total_folded} 行强调引语会折回旁白（不单独成行，不计入人工改动）。",
-        ("本章已有导演标注：是（" + str(script["shots"]) + " 个镜头），场景重切后必须重新生成标注。") if script["exists"] else "本章暂无导演标注。",
+        script_line,
         "场景重切后需要重新切分台词；已有音频/图片/视频文件不会删除，但会失去引用，需要重新生成。",
     ]
     if samples:
@@ -355,6 +382,12 @@ def analyze_line_split(store, chapter: dict, characters: list[dict], scene_ids: 
 
     script = _script_info(store, chapter)
     need_audio = new_lines + (0 if keep_manual else max(0, manual_total))
+    if script.get("error"):
+        script_line = f"{script['error']}；本次影响清单里的分镜数按 0 统计，请先修复该文件或重新生成标注。"
+    elif script["exists"]:
+        script_line = f"本章已有导演标注：是（{script['shots']} 个镜头），台词重切后锚点会变化，需要重新生成标注。"
+    else:
+        script_line = "本章暂无导演标注。"
     text = [
         f"重新切分台词影响：{len(scenes)} 个场景 / 已有 {existing_total} 行台词，规则将切出 {draft_total} 行。",
         (
@@ -363,7 +396,7 @@ def analyze_line_split(store, chapter: dict, characters: list[dict], scene_ids: 
             if keep_manual
             else f"全部按规则重切：{manual_total} 行人工/标注改动会丢失，{draft_total} 行全部按规则重建。"
         ),
-        ("本章已有导演标注：是（" + str(script["shots"]) + " 个镜头），台词重切后锚点会变化，需要重新生成标注。") if script["exists"] else "本章暂无导演标注。",
+        script_line,
         "台词重切不影响场景划分；已有音频文件不会删除，但被替换的行会失去引用并需要重新生成。",
         f"另有 {folded_total} 行强调引语会折回旁白（不单独成行，不计入人工改动）。",
     ]

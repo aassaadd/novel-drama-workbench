@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import logging
+
 from fastapi import HTTPException
 
 from ..adapters.errors import AdapterError, ErrorCode
@@ -22,6 +24,8 @@ from ..media.music import (
     render_bgm,
     resolve_mode,
 )
+
+logger = logging.getLogger(__name__)
 
 #: ComfyUI / ACE-Step 的时长边界，与 `media.music` 的校验保持一致
 COMFY_MIN_SECONDS = 10
@@ -80,7 +84,7 @@ def _store(path: str | None) -> ProjectStore:
     return store
 
 
-def _plans(store: ProjectStore, chapter_id: str) -> list[dict]:
+def _plans(store: ProjectStore, chapter_id: str) -> tuple[list[dict], str | None]:
     """列出本章导演脚本里的 BGM 计划，并给出推断档位供页面预选。
 
     参数:
@@ -88,12 +92,22 @@ def _plans(store: ProjectStore, chapter_id: str) -> list[dict]:
         chapter_id: 章节 ID。
 
     返回:
-        计划列表 `[{id, name, duration_s, has_dialogue, mode, mode_label, reason}]`。
+        `(计划列表, 读取失败说明)`；计划列表元素为
+        `{id, name, duration_s, has_dialogue, mode, mode_label, reason}`。
+        脚本文件损坏时列表为空，但第二项给出中文原因与文件位置，
+        页面据此提示「分镜文件损坏」，不会把它当成「本章没有配乐计划」。
     """
     try:
         script = store.load_script(chapter_id)
     except FileNotFoundError:
-        return []
+        return [], None
+    except Exception as exc:  # 损坏的标注文件不能把整页打成 500
+        logger.warning("分镜文件损坏（chapter=%s）：%s", chapter_id, exc, exc_info=True)
+        try:
+            path = store.script_path(chapter_id)
+        except Exception:
+            path = chapter_id
+        return [], f"分镜文件损坏：{path}（{exc}），本次无法读取配乐计划"
     plans: list[dict] = []
     for shot in script.get("shots") or []:
         plan = shot.get("bgm")
@@ -114,7 +128,7 @@ def _plans(store: ProjectStore, chapter_id: str) -> list[dict]:
                 "reason": decision["reason"],
             }
         )
-    return plans
+    return plans, None
 
 
 def register_bgm_routes(app, config_path: str | None = None) -> None:
@@ -137,12 +151,14 @@ def register_bgm_routes(app, config_path: str | None = None) -> None:
             chapter: 章节 ID。
 
         返回:
-            `{cues, records, plans, modes, long_bed_seconds, defaults, providers}`；
+            `{cues, records, plans, plan_error, modes, long_bed_seconds, defaults, providers}`；
+            plan_error 非空表示标注文件损坏、配乐计划读不出来；
             defaults/providers 供页面显示开关来源与后端时长上限。
         """
         store = _store(path)
         config = load_config(config_path)
         local = _local_status(config)
+        plans, plan_error = _plans(store, chapter)
         # 显式给页面两档来源与开关来源：默认值来自配置，条目/CLI 可在生成时覆盖
         defaults = {
             "provider": str(config.get("bgm.provider") or "local"),
@@ -152,7 +168,8 @@ def register_bgm_routes(app, config_path: str | None = None) -> None:
         return {
             "cues": load_cues(store.root, chapter),
             "records": load_generation_records(store.root, chapter),
-            "plans": _plans(store, chapter),
+            "plans": plans,
+            "plan_error": plan_error,
             "modes": MODE_LABELS,
             "long_bed_seconds": LONG_BED_SECONDS,
             "defaults": defaults,

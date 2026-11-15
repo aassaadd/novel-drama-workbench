@@ -1177,25 +1177,46 @@ export function onResplit(fn) {
  * 只读检查某章正文与切分是否一致。
  * @param {string} path 工程目录
  * @param {string} chapterId 章节 ID
- * @returns {Promise<object|null>} 检查结果；接口异常时返回 null（页面不误报）
+ * @returns {Promise<object|null>} 检查结果；接口异常时返回带 error 的结果，
+ *   让页面仍保留「重新切分」入口并说明检查失败原因（不静默当成一致）
  */
 export async function checkConsistency(path, chapterId) {
   if (!path || !chapterId) return null;
   try {
     return await getJSON('/api/ui/chapter/consistency', { path, chapter: chapterId });
-  } catch {
-    return null;
+  } catch (error) {
+    return {
+      ok: null,
+      chapter: chapterId,
+      chapter_title: '',
+      missing_total: 0,
+      error: `正文一致性检查失败：${error?.message || '接口请求失败'}`,
+    };
   }
 }
 
 /**
  * 正文与切分不一致时的统一提示条。
  * 说明是哪一章、会影响哪些操作，并提供保留人工改动的「重新切分本章」。
+ * 检查本身失败时同样保留入口，并说明失败原因（不把「没检查」伪装成「没问题」）。
  * @param {object|null} consistency `checkConsistency` / `lines` 接口返回的 consistency
  * @returns {string} HTML；一致或未检查时返回空串
  */
 export function resplitBannerHTML(consistency) {
-  if (!consistency || consistency.ok !== false) return '';
+  if (!consistency) return '';
+  if (consistency.error) {
+    return `
+      <div class="drift-bar" role="alert">
+        ${icon('warn', 16)}
+        <div class="db-main">
+          <b>无法确认「${esc(consistency.chapter_title || '当前章节')}」正文与切分台词是否一致</b>
+          <span>${esc(consistency.error)}。这不代表正文没问题；仍可重新切分本章（保留人工改动与已有配音），
+          切分前请先确认章节文件能正常打开。</span>
+        </div>
+        <button class="btn primary sm" data-act="resplit-chapter">重新切分本章</button>
+      </div>`;
+  }
+  if (consistency.ok !== false) return '';
   const title = consistency.chapter_title || '当前章节';
   const missing = Number(consistency.missing_total || 0);
   const escalated = keepFailedFor === consistency.chapter;

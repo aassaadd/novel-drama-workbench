@@ -77,12 +77,20 @@ function rowHTML(item) {
         item.width
       }×${item.height} 不一致">尺寸不符</span>`
     : '';
+  const refWarnings = (item.reference_warnings || []).filter(Boolean).join('；');
   return `
     <div class="summary-line" style="align-items:flex-start">
       <span style="min-width:0;flex:1">
         <span style="color:var(--text)">${esc(item.prompt || '(无提示词)')}</span>
         <span style="display:block;color:var(--text-4);font-size:11px;margin-top:2px">${esc(metaOf(item))}</span>
         ${item.error ? `<span style="display:block;color:var(--bad);font-size:11px;margin-top:2px">${esc(item.error)}</span>` : ''}
+        ${
+          refWarnings
+            ? `<span style="display:block;color:var(--warn);font-size:11px;margin-top:2px">${icon('warn', 12)} ${esc(
+                refWarnings
+              )}</span>`
+            : ''
+        }
       </span>
       <span class="right" style="display:flex;gap:6px;align-items:center;flex:0 0 auto">
         ${mismatch}
@@ -144,6 +152,7 @@ function cardHTML(item) {
 function bgmHTML() {
   const data = bgm || {};
   const plans = data.plans || [];
+  const planError = data.plan_error || '';
   const modes = data.modes || {};
   const records = [...(data.records || [])].reverse();
   const cues = data.cues || [];
@@ -171,6 +180,12 @@ function bgmHTML() {
       </div>
       <div class="card-body">
         ${modeSwitchHTML('media.bgm', { fallback: 'fill' })}
+        ${
+          planError
+            ? `<div class="dlg-note bad"><b>分镜文件损坏</b><br />${esc(planError)}。<br />
+                 「关联计划」暂时为空；请先修复该文件或重新生成标注后再按计划生成配乐。</div>`
+            : ''
+        }
         <div style="display:grid;grid-template-columns:2fr 120px 140px;gap:10px">
           <div class="field"><label>关联计划</label>
             <select class="select" id="bgm-plan"><option value="">不关联（手填描述）</option>${planOptions}</select></div>

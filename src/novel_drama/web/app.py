@@ -83,6 +83,8 @@ from .voice_tools_api import register_voice_tools_routes
 #: 唯一前端目录（仓库根 web-next/）；直接挂到根路径，旧 static 界面已废弃
 WEB_NEXT_DIR = Path(__file__).resolve().parents[3] / "web-next"
 
+logger = logging.getLogger(__name__)
+
 #: 写作设定分区中文名（任务队列展示用）
 SECTION_LABEL = {
     "premise": "故事内核",
@@ -1011,8 +1013,19 @@ def _export_preflight(store: ProjectStore, chapter_id: str) -> dict:
         )
     try:
         findings = check_cast(store, chapter_id).get("findings") or []
-    except Exception:  # 音色检查失败不应阻断导出前的其他信息
+    except Exception as exc:  # 检查失败必须让用户看见，而不是当成「无问题」
+        logger.warning("导出前音色检查失败（chapter=%s）：%s", chapter_id, exc, exc_info=True)
         findings = []
+        issues.append(
+            {
+                "code": "cast-check-failed",
+                "level": "error",
+                "message": (
+                    f"音色编排检查失败：{exc}；本次无法确认哪些行音色有问题。"
+                    "确认忽略后仍可导出，但成品可能有音色错配"
+                ),
+            }
+        )
     for item in findings[:20]:
         issues.append(
             {
@@ -2115,8 +2128,17 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         # 正文与切分是否还对得上：只读检查，让编辑区能直接给出「重新切分」出口
         try:
             payload["consistency"] = chapter_consistency(_store(path).load_chapter(chapter))
-        except Exception:  # noqa: BLE001 - 检查失败不影响台词展示
-            payload["consistency"] = None
+        except Exception as exc:  # 检查失败不影响台词展示，但必须留下原因
+            logger.warning("正文一致性检查失败（chapter=%s）：%s", chapter, exc, exc_info=True)
+            payload["consistency"] = {
+                "ok": None,
+                "chapter": chapter,
+                "chapter_title": "",
+                "total": 0,
+                "missing_total": 0,
+                "missing": [],
+                "error": f"正文一致性检查失败：{exc}",
+            }
         return payload
 
     @app.get("/api/ui/chapter/consistency")
@@ -5732,9 +5754,18 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
             result = voice_casting.undo_last(store, body.get("kind") or None)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail={"code": 2, "message": str(exc)}) from exc
+        # 撤销已经完成；章节文件损坏时概览可能读不出来，不能因此把整次撤销打成 500
+        overview_error = None
+        try:
+            overview = voice_casting.overview(store, "", "need")
+        except Exception as exc:  # 概览失败只影响展示
+            logger.warning("撤销后音色概览读取失败：%s", exc, exc_info=True)
+            overview = None
+            overview_error = f"音色编排概览读取失败：{exc}；撤销结果已保存，可修复损坏章节后刷新"
         return {
             **result,
-            "overview": voice_casting.overview(store, "", "need"),
+            "overview": overview,
+            "overview_error": overview_error,
             "undo": voice_casting.undo_state(store),
         }
 

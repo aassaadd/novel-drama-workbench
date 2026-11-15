@@ -431,7 +431,7 @@ def _apply_expand_cast(
     _progress(on_progress, {"type": "notice", "message": summary})
     return report
 
-def _renumber(bible: dict, store: ProjectStore, dry_run: bool = False) -> None:
+def _renumber(bible: dict, store: ProjectStore, dry_run: bool = False) -> list[str]:
     """按幕顺序重排大纲章序号，并同步已有章节文件的 index 字段。
 
     已有对象的 ID 不变，因此正文、标注、配音等按 ID 的引用不受影响；
@@ -444,7 +444,8 @@ def _renumber(bible: dict, store: ProjectStore, dry_run: bool = False) -> None:
         dry_run: 只预览不写盘。
 
     返回:
-        无。
+        失败清单（中文）；空列表表示全部序号已同步。单个章节失败不阻断大纲保存，
+        但必须把章节与原因交给调用方提示用户，不能静默丢弃。
     """
     acts = (bible.get("outline") or {}).get("acts") or []
     outline_index: dict[str, int] = {}
@@ -457,8 +458,9 @@ def _renumber(bible: dict, store: ProjectStore, dry_run: bool = False) -> None:
                 outline_index[chapter["id"]] = counter
 
     if dry_run:
-        return
+        return []
 
+    failures: list[str] = []
     files = store.list_chapters()
     for item in files:
         chapter_id = item.get("id")
@@ -469,12 +471,14 @@ def _renumber(bible: dict, store: ProjectStore, dry_run: bool = False) -> None:
             continue
         try:
             chapter = store.load_chapter(chapter_id)
-        except (OSError, ValueError):
+        except (OSError, ValueError) as exc:
+            failures.append(f"第 {desired} 章（{chapter_id}）序号未同步：章节文件读取失败（{exc}）")
             continue
         chapter["index"] = desired
         try:
             store.save_chapter(chapter)
-        except Exception:  # 单个章节文件写失败不影响大纲本身
+        except Exception as exc:  # 单个章节文件写失败不影响大纲本身，但必须回报
+            failures.append(f"第 {desired} 章（{chapter_id}）序号写入失败：{exc}")
             continue
 
     used = set(outline_index.values())
@@ -492,11 +496,14 @@ def _renumber(bible: dict, store: ProjectStore, dry_run: bool = False) -> None:
             next_index += 1
         try:
             chapter = store.load_chapter(chapter_id)
-        except (OSError, ValueError):
+        except (OSError, ValueError) as exc:
+            failures.append(f"第 {current} 章（{chapter_id}）顺延失败：章节文件读取失败（{exc}）")
             continue
         chapter["index"] = next_index
         used.add(next_index)
         try:
             store.save_chapter(chapter)
-        except Exception:  # 同上：顺延失败不阻断大纲保存
+        except Exception as exc:  # 同上：顺延失败不阻断大纲保存，但必须回报
+            failures.append(f"第 {current} 章（{chapter_id}）顺延到第 {next_index} 章失败：{exc}")
             continue
+    return failures
