@@ -6,6 +6,7 @@ import json
 import sys
 
 from .config import AppConfig
+from .domain.shared.errors import PreconditionError, TaskFailedError
 from .store import ProjectStore
 
 EXIT_OK = 0
@@ -16,13 +17,8 @@ EXIT_PRECONDITION = 4
 EXIT_FAILED = 5
 EXIT_SCHEMA = 6
 
-
-class PreconditionError(RuntimeError):
-    """前置条件不满足（未建工程、未拆场景、未绑音色等）。"""
-
-
-class TaskFailedError(RuntimeError):
-    """任务校验失败（章节绑定不完整、引用的条目不存在等），映射退出码 5。"""
+#: 接口层仍从本模块取这两个异常，保持原有导入路径不变（定义已下沉到 domain）
+__all__ = ["PreconditionError", "TaskFailedError"]
 
 
 def _emit(args, text: str = "", payload=None) -> None:

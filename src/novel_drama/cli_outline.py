@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 
-from .application.story.outline_validate import check_golden_three
+from .application.story.queries import golden_check
 from .cli_common import EXIT_FAILED, _emit, _resolve_store
 from .config import AppConfig
 from .store.settings_store import SettingsStore
@@ -22,8 +22,7 @@ def cmd_outline_check(args, config: AppConfig) -> int:
         进程退出码（检查结果放在 passed 字段里，不阻断流程）。
     """
     store = _resolve_store(args, config)
-    bible = SettingsStore(store.root).ensure()
-    result = check_golden_three(bible)
+    result = golden_check(store)
     if result["passed"]:
         text = "黄金三章检查通过"
     else:
@@ -32,7 +31,7 @@ def cmd_outline_check(args, config: AppConfig) -> int:
             title = f"《{issue['chapter_title']}》" if issue.get("chapter_title") else ""
             lines.append(f"  第 {issue['chapter_index']} 章{title}：{issue['problem']}——{issue['hint']}")
         text = "\n".join(lines)
-    _emit(args, text, {**result, "settings_revision": bible.get("settings_revision")})
+    _emit(args, text, result)
     return 0
 
 

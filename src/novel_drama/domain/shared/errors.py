@@ -13,6 +13,14 @@ class DomainError(Exception):
     """领域异常基类：所有可预期的业务拒绝都从这里派生。"""
 
 
+class PreconditionError(DomainError):
+    """前置条件不满足（未建工程、未拆场景、未绑音色等），接口层映射为退出码 4。"""
+
+
+class TaskFailedError(DomainError):
+    """任务校验失败（章节绑定不完整、引用的条目不存在等），接口层映射为退出码 5。"""
+
+
 class InvariantViolation(DomainError):
     """不变式被违反：数据或操作不符合该实体/值对象的既定规则。
 

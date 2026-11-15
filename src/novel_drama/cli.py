@@ -14,7 +14,7 @@ from pathlib import Path
 
 from . import __version__
 from .adapters import AdapterError, ErrorCode, build_adapters
-from .cli_common import EXIT_FAILED, EXIT_NOT_IMPLEMENTED, EXIT_OK, EXIT_PRECONDITION, EXIT_REJECTED, EXIT_SCHEMA, EXIT_USAGE, PreconditionError, TaskFailedError, _emit, _resolve_store, _tts_service
+from .application.cast.queries import character_list
 from .cli_cast import cmd_cast
 from .cli_chapter import (
     cmd_chapter_add,
@@ -31,6 +31,20 @@ from .cli_character import (
     cmd_character_update,
 )
 from .cli_comfy import cmd_comfy
+from .cli_common import (
+    EXIT_FAILED,
+    EXIT_NOT_IMPLEMENTED,
+    EXIT_OK,
+    EXIT_PRECONDITION,
+    EXIT_REJECTED,
+    EXIT_SCHEMA,
+    EXIT_USAGE,
+    PreconditionError,
+    TaskFailedError,
+    _emit,
+    _resolve_store,
+    _tts_service,
+)
 from .cli_continue import cmd_chapter_continue, cmd_outline_continue
 from .cli_group import cmd_group_apply, cmd_group_diff, cmd_group_list
 from .cli_line import (
@@ -45,9 +59,21 @@ from .cli_line import (
     cmd_line_split_at,
     cmd_scene_split,
 )
-from .cli_media import cmd_bgm, cmd_concat, cmd_export, cmd_mux, cmd_timeline, cmd_tts_batch
+from .cli_media import (
+    cmd_bgm,
+    cmd_concat,
+    cmd_export,
+    cmd_mux,
+    cmd_timeline,
+    cmd_tts_batch,
+)
+from .cli_models import (
+    cmd_models_import,
+    cmd_models_install,
+    cmd_models_list,
+    cmd_models_verify,
+)
 from .cli_music import cmd_bgm_generate
-from .cli_models import cmd_models_import, cmd_models_install, cmd_models_list, cmd_models_verify
 from .cli_outline import cmd_outline_bind, cmd_outline_check
 from .cli_produce import cmd_produce, cmd_run_show
 from .cli_setting import cmd_setting
@@ -75,13 +101,19 @@ from .media.timeline_builder import build_timeline, summarize_timeline
 from .models import entities
 from .models.ids import now_iso
 from .orchestration import GpuQueue
-from .orchestration.produce import STAGES as PRODUCE_STAGES
 from .orchestration.pipeline import (
     build_tts_jobs,
     split_chapter_scenes,
     split_scene_lines,
 )
-from .store import ProjectStore, QueueStore, SchemaValidationError, list_workspaces, validate
+from .orchestration.produce import STAGES as PRODUCE_STAGES
+from .store import (
+    ProjectStore,
+    QueueStore,
+    SchemaValidationError,
+    list_workspaces,
+    validate,
+)
 from .tts import line_state
 from .tts.errors import TtsError
 
@@ -363,9 +395,9 @@ def cmd_character_list(args, config: AppConfig) -> int:
         进程退出码。
     """
     store = _resolve_store(args, config)
+    rows = character_list(store)
     characters = store.load_characters()["characters"]
     if getattr(args, "json", False):
-        rows = [{**item, "image_assets": item.get("image_assets")} for item in characters]
         _emit(args, payload=rows)
         return EXIT_OK
     for item in characters:

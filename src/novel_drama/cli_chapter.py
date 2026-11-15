@@ -9,6 +9,7 @@ import json
 import re
 from pathlib import Path
 
+from .application.story.queries import chapter_detail, chapter_list
 from .cli_common import EXIT_OK, EXIT_REJECTED, _emit, _resolve_store
 from .config import AppConfig
 from .domain.story.rules.chapter_rules import bump_revision, count_words
@@ -66,7 +67,7 @@ def cmd_chapter_add(args, config: AppConfig) -> int:
 def cmd_chapter_list(args, config: AppConfig) -> int:
     """列出章节。"""
     store = _resolve_store(args, config)
-    chapters = store.list_chapters()
+    chapters = chapter_list(store)
     if getattr(args, "json", False):
         _emit(args, payload=chapters)
         return EXIT_OK
@@ -80,7 +81,7 @@ def cmd_chapter_list(args, config: AppConfig) -> int:
 def cmd_chapter_show(args, config: AppConfig) -> int:
     """输出章节 JSON。"""
     store = _resolve_store(args, config)
-    chapter = store.load_chapter(args.chapter)
+    chapter = chapter_detail(store, args.chapter)
     print(json.dumps(chapter, ensure_ascii=False, indent=2))
     return EXIT_OK
 

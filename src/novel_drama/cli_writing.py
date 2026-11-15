@@ -15,6 +15,7 @@ from .application.story.edit_chapter import edit_chapter, save_chapter_content
 from .application.story.generate_chapter import generate_chapter
 from .application.story.generate_outline import generate_outline
 from .application.story.outline_bind import validate_chapter_binding
+from .application.story.queries import outline_view
 from .application.story.summarize_chapter import summarize_chapter
 from .cli_common import (
     EXIT_OK,
@@ -25,7 +26,6 @@ from .cli_common import (
 )
 from .config import AppConfig
 from .store import validate
-from .store.settings_store import SettingsStore
 
 
 def _fmt_outline(acts: list[dict]) -> str:
@@ -59,12 +59,10 @@ def cmd_outline(args, config: AppConfig) -> int:
         退出码。
     """
     store = _resolve_store(args, config)
-    settings = SettingsStore(store.root)
 
     if args.action == "show":
-        bible = settings.ensure()
-        acts = (bible.get("outline") or {}).get("acts") or []
-        _emit(args, _fmt_outline(acts), {"acts": acts, "settings_revision": bible.get("settings_revision")})
+        payload = outline_view(store)
+        _emit(args, _fmt_outline(payload["acts"]), payload)
         return EXIT_OK
 
     if args.action == "generate":

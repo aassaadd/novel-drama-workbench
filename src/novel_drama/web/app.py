@@ -25,12 +25,31 @@ from fastapi import HTTPException
 from .. import __version__
 from ..adapters.base import AdapterError
 from ..adapters.writing import OmlxWritingAdapter
+from ..application.cast.character_crud import (
+    UPDATE_FIELDS,
+    append_characters,
+    character_refs,
+    remove_character,
+    update_character,
+)
+from ..application.cast.queries import character_list
+from ..application.story.apply_outline import apply_outline
 from ..application.story.edit_chapter import (
     edit_chapter,
     restore_chapter_version,
     save_chapter_content,
 )
+from ..application.story.queries import (
+    chapter_detail,
+    chapter_list,
+    golden_check,
+    outline_view,
+    settings_view,
+    world_list,
+)
+from ..application.story.settings_edit import apply_section, set_scalars
 from ..application.story.summarize_chapter import apply_summary, summarize_chapter
+from ..application.story.world_crud import remove_world, upsert_worlds
 from ..cli_line import chapter_consistency
 from ..config import DEFAULT_UI_CONFIG_PATH, load_config
 from ..media import comfy_media
@@ -39,6 +58,7 @@ from ..models.ids import now_iso
 from ..store import ProjectStore, list_workspaces
 from ..store.project_store import WORKSPACE_INDEX
 from ..store.queue_store import QueueStore
+from . import use_cases
 from .actions import fail_body, run
 from .align_api import register_align_routes
 from .bgm_api import register_bgm_routes
@@ -1741,8 +1761,8 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
 
     @app.get("/api/ui/chapters")
     def ui_chapters(path: str = Query(...)):
-        """章节目录（`chapter list --json`）。"""
-        return _respond(_cli("--project", path, "--json", "chapter", "list"))
+        """章节目录（应用层读模型，与 `chapter list --json` 同源）。"""
+        return chapter_list(_store(path))
 
     @app.get("/api/ui/chapters/search")
     def ui_chapters_search(path: str = Query(...), q: str = Query("")) -> dict:
@@ -2051,12 +2071,13 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
 
     @app.get("/api/ui/chapter")
     def ui_chapter(path: str = Query(...), chapter: str = Query(...)):
-        """章节详情（含场景，`chapter show <id> --json`）。"""
-        return _respond(_cli("--project", path, "--json", "chapter", "show", chapter))
+        """章节详情（应用层读模型，与 `chapter show <id> --json` 同源）。"""
+        store = _store(path)
+        return use_cases.call(lambda: chapter_detail(store, chapter))
 
     @app.post("/api/ui/chapter/add")
     def ui_chapter_add(body: dict) -> dict:
-        """新建章节（`chapter add --json`），返回新章节 ID 供前端直接跳转。
+        """新建章节（与 `chapter add --json` 同源），返回新章节 ID 供前端直接跳转。
 
         参数:
             body: `{path, title, index?, outline?}`。
@@ -2067,12 +2088,14 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         title = str(body.get("title") or "").strip()
         if not title:
             raise HTTPException(status_code=400, detail={"code": 2, "message": "章节标题不能为空"})
-        argv = ["--project", body["path"], "--json", "chapter", "add", "--title", title]
-        if body.get("index") is not None:
-            argv += ["--index", str(int(body["index"]))]
-        if body.get("outline"):
-            argv += ["--outline", str(body["outline"])]
-        return _respond(_cli(*argv))
+        store = _store(body["path"])
+        index = body.get("index")
+        return store.create_chapter(
+            title,
+            content="",
+            outline=str(body.get("outline") or ""),
+            index=int(index) if index is not None else None,
+        )
 
     @app.get("/api/ui/lines")
     def ui_lines(
@@ -2521,27 +2544,25 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
 
     @app.get("/api/ui/setting")
     def ui_setting(path: str = Query(...)):
-        """设定库全文（`setting show --json`）。"""
-        return _respond(_cli("--project", path, "--json", "setting", "show"))
+        """设定库全文（应用层读模型，与 `setting show --json` 同源）。"""
+        store = _store(path)
+        return use_cases.call(lambda: settings_view(store))
 
     @app.post("/api/ui/setting/set")
     def ui_setting_set(body: dict) -> dict:
-        """修改设定库标量字段（`setting set`）。"""
-        argv = ["--project", body["path"], "--json", "setting", "set"]
+        """修改设定库标量字段（应用层用例 `set_scalars`，与 `setting set` 同源）。"""
+        store = _store(body["path"])
         fields = body.get("fields") or {}
-        for key in SETTING_SCALARS:
-            value = fields.get(key)
-            if value is None or value == "":
-                continue
-            argv += ["--" + key.replace("_", "-"), str(value)]
-        if len(argv) == 5:
+        values = {key: fields.get(key) for key in SETTING_SCALARS if fields.get(key) not in (None, "")}
+        if not values:
             raise HTTPException(status_code=400, detail={"code": 2, "message": "没有要修改的字段"})
-        return _respond(_cli(*argv))
+        return use_cases.call(lambda: set_scalars(store, values))
 
     @app.get("/api/ui/outline")
     def ui_outline(path: str = Query(...)):
-        """大纲（`outline show --json`）。"""
-        return _respond(_cli("--project", path, "--json", "outline", "show"))
+        """大纲（应用层读模型，与 `outline show --json` 同源）。"""
+        store = _store(path)
+        return use_cases.call(lambda: outline_view(store))
 
     @app.post("/api/ui/outline/generate")
     def ui_outline_generate(body: dict) -> dict:
@@ -2563,11 +2584,10 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
 
     @app.post("/api/ui/outline/apply")
     def ui_outline_apply(body: dict) -> dict:
-        """大纲落地成章节（`outline apply`）。"""
-        argv = ["--project", body["path"], "--json", "outline", "apply"]
-        if body.get("dry_run"):
-            argv.append("--dry-run")
-        return _respond(_cli(*argv))
+        """大纲落地成章节（应用层用例 `apply_outline`，不调模型）。"""
+        store = _store(body["path"])
+        dry_run = bool(body.get("dry_run"))
+        return use_cases.call(lambda: apply_outline(store, dry_run=dry_run))
 
     @app.post("/api/ui/chapter/generate")
     def ui_chapter_generate(body: dict) -> dict:
@@ -3602,23 +3622,6 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
 
     # ---------------- AI 生书创作向导（设定 / 人物 / 大纲检查）----------------
 
-    def _temp_json(payload: dict) -> str:
-        """把 JSON 负载写入临时文件，供 CLI 的 `--file` 参数使用。
-
-        参数:
-            payload: 待写入的 JSON 对象。
-
-        返回:
-            临时文件的绝对路径（调用方负责删除）。
-        """
-        import json as _json
-        import tempfile
-
-        handle = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8")
-        with handle:
-            _json.dump(payload, handle, ensure_ascii=False)
-        return handle.name
-
     def _business_error(result):
         """把新接口的 CLI 失败结果转成中文说明 + 分级状态码。
 
@@ -3779,11 +3782,9 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         fields = body.get("fields")
         if not isinstance(fields, dict) or not fields:
             raise HTTPException(status_code=400, detail={"code": 2, "message": "fields 必须是非空对象"})
-        tmp = _temp_json({"fields": fields})
-        try:
-            return _respond(_cli("--project", path, "--json", "setting", "apply", "--section", section, "--file", tmp))
-        finally:
-            Path(tmp).unlink(missing_ok=True)
+        store = _store(path)
+        payload = use_cases.call(lambda: apply_section(store, section, fields))
+        return {key: payload[key] for key in ("section", "changed", "settings_revision")}
 
     @app.post("/api/ui/setting/polish")
     def ui_setting_polish(body: dict) -> dict:
@@ -3823,7 +3824,7 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         from ..models.enum_check import check_character_table
 
         store = _store(path)
-        payload = _respond(_cli("--project", path, "--json", "character", "list"))
+        payload = character_list(store)
         table = store.load_characters()
         try:
             issues = check_character_table(table, baseline=table)
@@ -4440,7 +4441,7 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
 
     @app.post("/api/ui/characters")
     def ui_characters_add(body: dict) -> dict:
-        """批量追加人物（`character apply --file`）。
+        """批量追加人物（应用层用例 `append_characters`，与 `character apply` 同源）。
 
         参数:
             body: `{path, characters: [...]}`。
@@ -4448,16 +4449,12 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         异常:
             HTTPException 400: characters 不是非空数组。
         """
-        path = body.get("path")
-        _store(path)
+        store = _store(body.get("path"))
         rows = body.get("characters")
         if not isinstance(rows, list) or not rows:
             raise HTTPException(status_code=400, detail={"code": 2, "message": "characters 必须是非空数组"})
-        tmp = _temp_json({"characters": rows})
-        try:
-            return _respond(_cli("--project", path, "--json", "character", "apply", "--file", tmp))
-        finally:
-            Path(tmp).unlink(missing_ok=True)
+        applied = use_cases.call(lambda: append_characters(store, rows))
+        return {"characters": applied["characters"], "applied": True, "skipped": applied["skipped"]}
 
     @app.post("/api/ui/characters/generate")
     def ui_characters_generate(body: dict) -> dict:
@@ -4506,7 +4503,7 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
 
     @app.patch("/api/ui/characters")
     def ui_characters_update(body: dict) -> dict:
-        """按 ID 更新人物字段（`character update`）。
+        """按 ID 更新人物字段（应用层用例 `update_character`，与 `character update` 同源）。
 
         参数:
             body: `{path, id, name?, role?, gender?, age_range?, personality?, background?,
@@ -4516,51 +4513,28 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         异常:
             HTTPException 400: 缺少 id。
         """
-        path = body.get("path")
-        _store(path)
+        store = _store(body.get("path"))
         character_id = body.get("id") or body.get("character")
         if not character_id:
             raise HTTPException(status_code=400, detail={"code": 2, "message": "缺少 id 参数"})
-        argv = ["--project", path, "--json", "character", "update", "--id", str(character_id)]
-        for key, flag in (
-            ("name", "--name"),
-            ("role", "--role"),
-            ("gender", "--gender"),
-            ("age_range", "--age-range"),
-            ("personality", "--personality"),
-            ("background", "--background"),
-            ("aliases", "--aliases"),
-            ("appearance_prompt", "--appearance-prompt"),
-            ("negative_prompt", "--negative-prompt"),
-            ("voice_description_zh", "--voice-description-zh"),
-            ("voice_description_en", "--voice-description-en"),
-            ("appearance_desc_zh", "--appearance-desc-zh"),
-            ("appearance_desc_en", "--appearance-desc-en"),
-            ("appearance_negative_zh", "--appearance-negative-zh"),
-            ("appearance_negative_en", "--appearance-negative-en"),
-            ("situation", "--situation"),
-            ("knowledge", "--knowledge"),
-            ("relations", "--relations"),
-            ("speech_style", "--speech-style"),
-            ("voice_profile", "--voice-profile"),
-            ("stock", "--stock"),
-        ):
+        changes: dict = {}
+        for key in UPDATE_FIELDS:
             value = body.get(key)
             if value is None:
                 continue
             if isinstance(value, (dict, list)):
                 value = json.dumps(value, ensure_ascii=False)
-            argv += [flag, str(value)]
+            changes[key] = str(value)
         relationships = body.get("relationships") or {}
         if isinstance(relationships, dict):
             relationships = [f"{key}={value}" for key, value in relationships.items()]
-        for item in relationships:
-            argv += ["--relationship", str(item)]
-        # 列表编辑里被删掉的关系行：显式通知 CLI 移除，避免旧关系残留
-        for target_id in body.get("removed_relationships") or []:
-            if str(target_id).strip():
-                argv += ["--relationship-remove", str(target_id).strip()]
-        return _respond(_cli(*argv))
+        # 关系键统一按 CLI 的 `目标ID=备注` 形式传入；被删掉的关系显式通知用例移除
+        changes["relationship"] = [str(item) for item in relationships]
+        changes["relationship_remove"] = [
+            str(target_id).strip() for target_id in (body.get("removed_relationships") or []) if str(target_id).strip()
+        ]
+        payload = use_cases.call(lambda: update_character(store, str(character_id), changes))
+        return payload["character"]
 
     @app.get("/api/ui/characters/refs")
     def ui_character_refs(path: str = Query(...), character: str = Query(...)) -> dict:
@@ -4573,13 +4547,11 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         返回:
             `{total, chapters: [{id, index, title, lines}]}`。
         """
-        from ..cli_character import character_refs
-
         return character_refs(_store(path), character)
 
     @app.post("/api/ui/characters/delete")
     def ui_characters_delete(body: dict) -> dict:
-        """按 ID 删除人物（`character remove`，旁白会被拒绝）。
+        """按 ID 删除人物（应用层用例 `remove_character`，旁白会被拒绝）。
 
         参数:
             body: `{path, id}`。
@@ -4587,12 +4559,11 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         异常:
             HTTPException 400: 缺少 id。
         """
-        path = body.get("path")
-        _store(path)
+        store = _store(body.get("path"))
         character_id = body.get("id") or body.get("character")
         if not character_id:
             raise HTTPException(status_code=400, detail={"code": 2, "message": "缺少 id 参数"})
-        return _respond(_cli("--project", path, "--json", "character", "remove", "--id", str(character_id)))
+        return use_cases.call(lambda: remove_character(store, str(character_id)))
 
     @app.get("/api/ui/characters/merge/impact")
     def ui_character_merge_impact(path: str = Query(...), source: str = Query(...), target: str = Query(...)) -> dict:
@@ -5856,9 +5827,9 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
 
     @app.get("/api/ui/outline/check")
     def ui_outline_check(path: str = Query(...)) -> dict:
-        """黄金三章检查（`outline check --json`），不阻断流程。"""
-        _store(path)
-        return _respond(_cli("--project", path, "--json", "outline", "check"))
+        """黄金三章检查（应用层读模型，与 `outline check --json` 同源），不阻断流程。"""
+        store = _store(path)
+        return use_cases.call(lambda: golden_check(store))
 
     @app.post("/api/ui/outline/bind")
     def ui_outline_bind(body: dict) -> dict:
@@ -6035,9 +6006,9 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         返回:
             `{worlds, count, characters}`；worlds 每项含世界观总述与地点/势力/术语/其它条目。
         """
-        _store(path)
-        payload = _respond_business(_cli("--project", path, "--json", "world", "list")) or {}
-        characters = _respond_business(_cli("--project", path, "--json", "character", "list")) or []
+        store = _store(path)
+        payload = world_list(store)
+        characters = character_list(store)
         return {
             "worlds": payload.get("worlds") or [],
             "count": payload.get("count") or 0,
@@ -6046,7 +6017,7 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
 
     @app.post("/api/ui/worlds")
     def ui_worlds_apply(body: dict) -> dict:
-        """写入世界条目（`world apply --file`，带 id 且存在则更新）。
+        """写入世界条目（应用层用例 `upsert_worlds`，带 id 且存在则更新）。
 
         参数:
             body: `{path, world?: {...}, worlds?: [...]}`。
@@ -6054,24 +6025,19 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         异常:
             HTTPException 400: 既没有 world 也没有 worlds。
         """
-        path = body.get("path")
-        _store(path)
-        payload: dict = {}
+        store = _store(body.get("path"))
+        rows: list[dict] = []
         if isinstance(body.get("world"), dict):
-            payload["world"] = body["world"]
+            rows.append(body["world"])
         if isinstance(body.get("worlds"), list):
-            payload["worlds"] = body["worlds"]
-        if not payload:
+            rows.extend(body["worlds"])
+        if not rows:
             raise HTTPException(status_code=400, detail={"code": 2, "message": "world 或 worlds 至少给一个"})
-        tmp = _temp_json(payload)
-        try:
-            return _respond_business(_cli("--project", path, "--json", "world", "apply", "--file", tmp))
-        finally:
-            Path(tmp).unlink(missing_ok=True)
+        return use_cases.call(lambda: upsert_worlds(store, rows), business=True)
 
     @app.post("/api/ui/worlds/delete")
     def ui_worlds_delete(body: dict) -> dict:
-        """删除整套世界（`world remove`）：总述 + 分类条目，并解除章节/场景绑定。
+        """删除整套世界（应用层用例 `remove_world`）：总述 + 分类条目，并解除章节/场景绑定。
 
         参数:
             body: `{path, id}`；id 为世界 ID。
@@ -6080,12 +6046,11 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
             HTTPException 400: 缺少 id。
             HTTPException 404: 世界不存在。
         """
-        path = body.get("path")
-        _store(path)
+        store = _store(body.get("path"))
         world_id = body.get("id")
         if not world_id:
             raise HTTPException(status_code=400, detail={"code": 2, "message": "缺少世界 id 参数"})
-        return _respond_business(_cli("--project", path, "--json", "world", "remove", "--id", str(world_id)))
+        return use_cases.call(lambda: remove_world(store, str(world_id)), business=True)
 
     @app.post("/api/ui/worlds/generate")
     def ui_worlds_generate(body: dict) -> dict:
