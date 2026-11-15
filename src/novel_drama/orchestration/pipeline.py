@@ -11,6 +11,7 @@ import copy
 
 from ..adapters.errors import not_implemented
 from ..adapters.persistence import ProjectStore
+from ..application.production.lines_source import read_scenes, save_lines
 from ..domain.story.rules.chapter_rules import bump_revision
 from ..models import entities
 from ..text.splitter import split_lines, split_scenes
@@ -46,6 +47,8 @@ def split_chapter_scenes(
     drafts = split_scenes(chapter.get("content") or "", max_chars=max_chars)
     if dry_run:
         return drafts
+    # 台本源下章节落盘场景是旧投影：先换成派生视图，避免用过期内容做「保留旧场景」匹配
+    chapter["scenes"] = read_scenes(store, chapter)
     if chapter.get("scenes") and not force:
         raise ValueError("章节已有场景，若确认覆盖请加 --force")
 
@@ -75,7 +78,7 @@ def split_chapter_scenes(
     chapter["scenes"] = scenes
     chapter["status"] = "split"
     bump_revision(chapter)
-    store.save_chapter(chapter)
+    save_lines(store, chapter)
     return scenes
 
 
@@ -108,6 +111,8 @@ def split_scene_lines(
     total_lines = 0
     unknown = 0
     scene_count = 0
+    # 台本源下章节落盘场景是旧投影：先换成派生视图，避免用过期台词做「保留人工修改」
+    chapter["scenes"] = read_scenes(store, chapter)
     for scene in chapter.get("scenes") or []:
         if scene_ids and scene.get("id") not in scene_ids:
             continue
@@ -136,7 +141,7 @@ def split_scene_lines(
 
     if not dry_run and scene_count:
         bump_revision(chapter)
-        store.save_chapter(chapter)
+        save_lines(store, chapter)
     return {"scenes": scene_count, "lines": total_lines, "unknown": unknown}
 
 
