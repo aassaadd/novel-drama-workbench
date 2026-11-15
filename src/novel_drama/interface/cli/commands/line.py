@@ -7,12 +7,13 @@ from __future__ import annotations
 
 import copy
 
+from novel_drama.application.story.scene_split import scene_split_impact, split_scenes
 from novel_drama.domain.story.rules.chapter_rules import bump_revision, count_words
 from novel_drama.infrastructure.config import AppConfig
 from novel_drama.models import entities
 from novel_drama.models.ids import new_id
-from novel_drama.orchestration.pipeline import split_chapter_scenes, split_scene_lines
-from novel_drama.orchestration.resplit import analyze_line_split, analyze_scene_split
+from novel_drama.orchestration.pipeline import split_scene_lines
+from novel_drama.orchestration.resplit import analyze_line_split
 from novel_drama.tts import line_state
 
 from ..common import EXIT_OK, EXIT_REJECTED, _emit, _resolve_store, cast_hint
@@ -85,16 +86,16 @@ def cmd_scene_split(args, config: AppConfig) -> int:
         退出码。
     """
     store = _resolve_store(args, config)
-    chapter = store.load_chapter(args.chapter)
     keep_lines = bool(getattr(args, "keep_lines", False))
     if getattr(args, "impact", False):
-        characters = store.load_characters()["characters"]
-        report = analyze_scene_split(store, chapter, characters, max_chars=args.max_chars, keep_lines=keep_lines)
+        report = scene_split_impact(
+            store, args.chapter, max_chars=args.max_chars, keep_lines=keep_lines
+        )
         _emit(args, report["text"], report)
         return EXIT_OK
-    scenes = split_chapter_scenes(
+    scenes = split_scenes(
         store,
-        chapter,
+        args.chapter,
         max_chars=args.max_chars,
         force=args.force,
         dry_run=args.dry_run,
