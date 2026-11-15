@@ -14,7 +14,7 @@ from ...domain.shared.errors import PreconditionError
 from ...models import entities
 from ...models.enums import AgeRange, SpeechPitch, SpeechTempo, choices_text
 from ...models.ids import now_iso
-from ..production.lines_source import chapter_view
+from ..production.lines_source import chapter_view, save_lines
 
 #: 允许写入的角色定位（narrator 由系统保留）
 ROLE_CHOICES = ("protagonist", "antagonist", "supporting", "minor")
@@ -707,7 +707,7 @@ def _clean_character_references(store: ProjectStore, character_id: str) -> dict:
 
     for meta in store.list_chapters():
         try:
-            chapter = store.load_chapter(meta["id"])
+            chapter = chapter_view(store, store.load_chapter(meta["id"]))
         except (OSError, ValueError):
             continue
         changed = False
@@ -733,7 +733,7 @@ def _clean_character_references(store: ProjectStore, character_id: str) -> dict:
             removed["overrides"] += 1
             changed = True
         if changed:
-            store.save_chapter(chapter)
+            save_lines(store, chapter)
 
     table = store.load_characters()
     relations_changed = False

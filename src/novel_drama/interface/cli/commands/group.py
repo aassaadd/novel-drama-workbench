@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import copy
 
+from novel_drama.application.production.lines_source import chapter_view, save_lines
 from novel_drama.composition import (
     GroupsStore,
     apply_group,
@@ -201,11 +202,13 @@ def cmd_group_apply(args, config) -> int:
     """
     store = _resolve_store(args, config)
     groups_store = GroupsStore(store.root)
-    chapter = store.load_chapter(args.chapter)
+    chapter = chapter_view(store, store.load_chapter(args.chapter))
     group = groups_store.find(chapter["id"], args.group)
     before_chapter = copy.deepcopy(chapter)
     before_states = _derive_states(store, config, before_chapter)
-    result = apply_group(store, chapter, group)
+    result = apply_group(chapter, group)
+    if result["changed_lines"]:
+        save_lines(store, chapter)
     if not result["changed_lines"]:
         payload = {
             "chapter": chapter["id"],

@@ -22,6 +22,7 @@ from .application.cast.character_crud import (
     relation_references,
 )
 from .application.cast.sync_cast import load_pending, save_pending
+from .application.production.lines_source import chapter_view, save_lines
 from .domain.cast.rules.merge import (
     merge_chapter_file as _merge_chapter_file,
 )
@@ -242,11 +243,11 @@ def merge_characters(store: ProjectStore, source_id: str, target_id: str) -> dic
     changed_chapters = 0
     for meta in store.list_chapters():
         try:
-            chapter = store.load_chapter(meta["id"])
+            chapter = chapter_view(store, store.load_chapter(meta["id"]))
         except (OSError, ValueError):
             continue
         if _merge_chapter_file(chapter, source_id, target_id):
-            store.save_chapter(chapter)
+            save_lines(store, chapter)
             changed_chapters += 1
 
     _clean_registries(store, source, target_id, target.get("name") or "")

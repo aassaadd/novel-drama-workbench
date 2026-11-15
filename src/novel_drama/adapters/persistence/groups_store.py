@@ -250,16 +250,19 @@ def covering_groups(groups: list[dict], line_id: str, exclude: str | None = None
     return found
 
 
-def apply_group(store, chapter: dict, group: dict) -> dict:
-    """把分组物化写入行参数（只改参数，不碰 tts.status）。
+def apply_group(chapter: dict, group: dict) -> dict:
+    """把分组物化写入行参数（只改参数，不碰 tts.status，不写盘）。
 
     参数:
-        store: 工程（用于保存章节）。
         chapter: 章节 dict（就地修改）。
         group: 分组 dict。
 
     返回:
         `{"changed_lines": [line_id], "changed": {line_id: {字段: {"from","to"}}}, "unchanged": n}`。
+
+    说明:
+        落盘由调用方走 `application.production.lines_source.save_lines`；
+        adapter 不回读工程结构，也不决定写哪份文件。
     """
     spec = validate_group(group)
     overrides = spec["overrides"]
@@ -277,8 +280,6 @@ def apply_group(store, chapter: dict, group: dict) -> dict:
         # revision 只做并发锁；过期与否由读取时按参数指纹派生（见 docs §4.3）
         line["revision"] = int(line.get("revision") or 1) + 1
         changed[line["id"]] = fields
-    if changed:
-        store.save_chapter(chapter)
     return {
         "changed_lines": list(changed),
         "changed": changed,

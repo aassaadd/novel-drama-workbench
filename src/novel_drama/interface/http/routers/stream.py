@@ -996,7 +996,6 @@ def register_stream_routes(app, config_path: str | None = None) -> None:
                 from novel_drama.composition import validate
 
                 validate(result["script"], "director-script.schema.json")
-                store.save_script(result["script"])
                 result["apply"] = apply_script_to_chapter(store, store.load_chapter(chapter_id), result["script"])
             return result
 
@@ -1044,7 +1043,6 @@ def register_stream_routes(app, config_path: str | None = None) -> None:
         out_path = store.root / "scripts" / f"{chapter_id}.markup.txt"
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(markup + "\n", encoding="utf-8")
-        store.save_script(script)
         applied = apply_script_to_chapter(store, chapter, script)
         return {
             "markup_path": str(out_path),

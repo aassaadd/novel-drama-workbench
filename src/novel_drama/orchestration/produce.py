@@ -271,7 +271,6 @@ def _stage_script(ctx: dict) -> list[dict]:
     markup_path.write_text(result["markup"] + "\n", encoding="utf-8")
     script = result["script"]
     validate(script, "director-script.schema.json")
-    store.save_script(script)
     chapter = store.load_chapter(ctx["chapter_id"])
     summary = _apply_script_to_chapter(store, chapter, script)
     return (

@@ -53,7 +53,6 @@ def suggest_and_apply(
     if apply and not dry_run and not failures:
         script = result["script"]
         validate(script, "director-script.schema.json")
-        store.save_script(script)
         chapter = store.load_chapter(chapter_id)
         summary = apply_script_to_chapter(store, chapter, script)
         payload = {**base, "apply": summary, "markup_path": str(markup_path)}
