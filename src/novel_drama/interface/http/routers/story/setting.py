@@ -4,14 +4,14 @@ from __future__ import annotations
 
 from fastapi import HTTPException
 
-from novel_drama.adapters.persistence import SettingsStore
 from novel_drama.application.production.job_tracker import (
     UiJob,
 )
 from novel_drama.application.story.settings_edit import (
     apply_section,
-    read_field_value,
+    current_field_text,
     set_scalars,
+    settings_revision,
 )
 from novel_drama.application.story.settings_generate import (
     generate_section,
@@ -134,8 +134,7 @@ def register_story_setting_routes(app, project_root: str | None = None, config_p
             job.fail(str(getattr(exc, "detail", exc)))
             raise
         job.finish("生成完成")
-        revision = (SettingsStore(store.root).load_or_none() or {}).get("settings_revision")
-        return {**result, "applied": False, "settings_revision": revision}
+        return {**result, "applied": False, "settings_revision": settings_revision(store)}
 
     @app.post("/api/ui/setting/apply")
     def ui_setting_apply(body: dict) -> dict:
@@ -180,8 +179,7 @@ def register_story_setting_routes(app, project_root: str | None = None, config_p
             """读取待润色文本（未传时取当前值）并调用润色用例。"""
             source = body.get("text")
             if source is None:
-                settings = SettingsStore(store.root)
-                source = read_field_value(store, settings.ensure(), field, character_id)
+                source = current_field_text(store, field, character_id)
             return polish_field(
                 store,
                 load_config(config_path),

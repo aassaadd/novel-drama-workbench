@@ -267,3 +267,37 @@ def apply_polished(
         return {"field": field, "applied": True, "settings_revision": saved["settings_revision"]}
 
     raise ValueError(f"不支持的润色字段: {field}")
+
+
+def current_field_text(
+    store: ProjectStore, field: str, character_id: str | None = None
+) -> str:
+    """读取润色字段的当前文本（页面未显式传 text 时使用）。
+
+    参数:
+        store: 工程。
+        field: 润色字段名。
+        character_id: character.* 字段所属角色 ID。
+
+    返回:
+        字段当前文本（数组用「、」连接）。
+
+    异常:
+        ValueError: 字段不受支持。
+        PreconditionError: 设定库或角色不存在。
+    """
+    bible = SettingsStore(store.root).ensure()
+    return read_field_value(store, bible, field, character_id)
+
+
+def settings_revision(store: ProjectStore) -> int | None:
+    """读取设定库当前修订号。
+
+    参数:
+        store: 工程。
+
+    返回:
+        `settings_revision`；设定库不存在时返回 None。
+    """
+    bible = SettingsStore(store.root).load_or_none() or {}
+    return bible.get("settings_revision")

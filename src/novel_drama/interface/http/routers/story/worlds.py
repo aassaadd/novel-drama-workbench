@@ -4,15 +4,16 @@ from __future__ import annotations
 
 from fastapi import HTTPException, Query
 
-from novel_drama.adapters.media.art import render_world_cover
-from novel_drama.adapters.persistence import WorldStore
 from novel_drama.application.cast.queries import character_list
 from novel_drama.application.story.queries import (
     world_list,
 )
 from novel_drama.application.story.settings_generate import generate_worlds
-from novel_drama.application.story.world_crud import remove_world, upsert_worlds
-from novel_drama.domain.shared.errors import PreconditionError
+from novel_drama.application.story.world_crud import (
+    remove_world,
+    render_cover,
+    upsert_worlds,
+)
 from novel_drama.infrastructure.config import load_config
 from novel_drama.interface.http import use_cases
 from novel_drama.interface.http.deps import store_for
@@ -134,12 +135,7 @@ def register_story_worlds_routes(app, project_root: str | None = None, config_pa
             raise HTTPException(status_code=400, detail={"code": 2, "message": "缺少 id 参数"})
         force = bool(body.get("force"))
 
-        def _render() -> dict:
-            """确认世界存在后生成封面（已存在且未强制时直接复用）。"""
-            worlds = WorldStore(store.root)
-            worlds.ensure()
-            if worlds.get(str(world_id)) is None:
-                raise PreconditionError(f"世界条目不存在: {world_id}")
-            return render_world_cover(store, load_config(config_path), str(world_id), force=force)
-
-        return use_cases.call(_render, business=True)
+        return use_cases.call(
+            lambda: render_cover(store, load_config(config_path), str(world_id), force=force),
+            business=True,
+        )

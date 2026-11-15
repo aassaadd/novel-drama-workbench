@@ -115,3 +115,29 @@ def remove_world(store: ProjectStore, world_id: str) -> dict:
     if not worlds.remove(world_id):
         raise PreconditionError(f"世界不存在: {world_id}")
     return {"removed": True, "id": world_id, "name": existing.get("name"), "chapters": refs, "unbound": unbound}
+
+
+def render_cover(
+    store: ProjectStore, config, world_id: str, force: bool = False
+) -> dict:
+    """生成（或复用）世界封面，并写回 `cover_asset`。
+
+    参数:
+        store: 工程。
+        config: 本机配置（取图像 provider 与分辨率）。
+        world_id: 世界 ID。
+        force: True 时忽略已有封面重新生成。
+
+    返回:
+        `render_world_cover` 的结果（含 `created` / `cover_asset` 等）。
+
+    异常:
+        PreconditionError: 世界条目不存在。
+    """
+    from ...adapters.media.art import render_world_cover
+
+    worlds = WorldStore(store.root)
+    worlds.ensure()
+    if worlds.get(world_id) is None:
+        raise PreconditionError(f"世界条目不存在: {world_id}")
+    return render_world_cover(store, config, world_id, force=force)
