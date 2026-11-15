@@ -6,14 +6,14 @@
 
 from __future__ import annotations
 
-from ..adapters.base import AdapterError, ErrorCode, Message, TextGenRequest
-from ..config import AppConfig
-from ..domain.story.rules.chapter_rules import bump_revision
-from ..models.ids import new_id
-from ..store import ProjectStore
-from ..store.settings_store import SettingsStore
-from ..text.context import POV_LABELS
-from .editing import _split_text_chunks
+from ...adapters.base import AdapterError, ErrorCode, Message, TextGenRequest
+from ...config import AppConfig
+from ...domain.story.rules.chapter_rules import bump_revision
+from ...models.ids import new_id
+from ...store import ProjectStore
+from ...store.settings_store import SettingsStore
+from ...text.context import POV_LABELS
+from ...application.story.edit_chapter import _split_text_chunks
 from .service import _extract_json_object, build_chapter_context
 
 #: 章节字段上限（与 `schema/chapter.schema.json` 保持一致）
@@ -556,7 +556,7 @@ def _apply_preview(
     cast_report: dict = {}
     if entry is not None and entry.get("beats"):
         try:
-            from .cast_capture import ensure_chapter_cast
+            from ...application.cast.capture_cast import ensure_chapter_cast
 
             cast_report = ensure_chapter_cast(store, None, chapter_id, adapter=context.get("adapter"))
             if cast_report.get("message"):

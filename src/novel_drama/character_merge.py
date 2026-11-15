@@ -30,7 +30,7 @@ from .domain.cast.rules.naming import alias_key, merge_aliases
 from .models import entities
 from .store import ProjectStore
 from .store.settings_store import SettingsStore
-from .writing.cast_sync import load_pending, save_pending
+from .application.cast.sync_cast import load_pending, save_pending
 
 
 def _find(table: dict, character_id: str) -> dict:

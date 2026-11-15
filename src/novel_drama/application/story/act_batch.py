@@ -12,10 +12,10 @@
 
 from __future__ import annotations
 
-from ..adapters.base import AdapterError
-from ..cancel import GenerationCanceled
-from ..store import ProjectStore
-from ..store.settings_store import SettingsStore
+from ...adapters.base import AdapterError
+from ...cancel import GenerationCanceled
+from ...store import ProjectStore
+from ...store.settings_store import SettingsStore
 from .service import generate_chapter
 
 #: 生成模式：只补缺失 / 重新生成已有正文

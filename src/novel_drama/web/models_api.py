@@ -33,9 +33,9 @@ from ..config import (
 )
 from ..media import comfy_media, comfy_models
 from ..tts import model_store
-from ..writing.budgets import context_status
-from ..writing.thinking import STAGES as THINKING_STAGES
-from ..writing.thinking import STAGE_CONFIG_PREFIX, resolve_thinking
+from ..domain.production.rules.token_budget import context_status
+from ..domain.production.rules.thinking_policy import STAGES as THINKING_STAGES
+from ..domain.production.rules.thinking_policy import STAGE_CONFIG_PREFIX, resolve_thinking
 
 #: 本模块日志：配置键等排查信息只写日志，不回显到界面
 logger = logging.getLogger(__name__)

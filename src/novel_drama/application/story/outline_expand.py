@@ -20,13 +20,13 @@ import copy
 from collections import Counter
 from dataclasses import replace
 
-from ..adapters.base import AdapterError, ErrorCode, Message, TextGenRequest
-from ..config import AppConfig
-from ..models.ids import new_id, now_iso
-from ..store import ProjectStore
-from ..store.settings_store import SettingsStore
-from ..text.titles import strip_index_prefix
-from .cast_sync import (
+from ...adapters.base import AdapterError, ErrorCode, Message, TextGenRequest
+from ...config import AppConfig
+from ...models.ids import new_id, now_iso
+from ...store import ProjectStore
+from ...store.settings_store import SettingsStore
+from ...text.titles import strip_index_prefix
+from ...application.cast.sync_cast import (
     apply_chapter_cast,
     cast_prompt_block,
     load_pending,
@@ -1166,7 +1166,7 @@ def expand_outline(
     ignored_character_refs = int(stats["dropped"])
     if binding == "auto":
         # 只给新增章节绑世界/POV，已合格的旧章节保持原绑定不动
-        from ..store.world_store import WorldStore
+        from ...store.world_store import WorldStore
 
         world_store = WorldStore(store.root)
         worlds = world_store.list_worlds() if world_store.exists() else []

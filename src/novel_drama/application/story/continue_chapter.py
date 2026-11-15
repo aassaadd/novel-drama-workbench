@@ -14,23 +14,23 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 
-from ..adapters.base import AdapterError, Message, TextGenRequest
-from ..config import AppConfig
-from ..domain.story.rules.chapter_rules import bump_revision
-from ..models.ids import new_id, now_iso
-from ..store import ProjectStore
-from ..store.settings_store import SettingsStore
-from ..text.context import ContextAssembler
-from ..text.dialogue import normalize_dialogue
-from ..text.titles import strip_index_prefix
-from .budgets import context_budget_tokens
-from .cast_sync import (
+from ...adapters.base import AdapterError, Message, TextGenRequest
+from ...config import AppConfig
+from ...domain.story.rules.chapter_rules import bump_revision
+from ...models.ids import new_id, now_iso
+from ...store import ProjectStore
+from ...store.settings_store import SettingsStore
+from ...text.context import ContextAssembler
+from ...text.dialogue import normalize_dialogue
+from ...text.titles import strip_index_prefix
+from ...domain.production.rules.token_budget import context_budget_tokens
+from ...application.cast.sync_cast import (
     apply_chapter_cast,
     cast_prompt_block,
     load_pending,
     normalize_cast,
 )
-from .editing import INSTRUCTION_LIMIT, STALE_WARNING, _usage_payload
+from ...application.story.edit_chapter import INSTRUCTION_LIMIT, STALE_WARNING, _usage_payload
 from .service import (
     DEFAULT_CHAPTER_WORDS,
     _append_segment,

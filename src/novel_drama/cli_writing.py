@@ -19,16 +19,14 @@ from .cli_common import (
 from .config import AppConfig
 from .store import validate
 from .store.settings_store import SettingsStore
-from .writing import (
-    apply_outline,
-    edit_chapter,
-    generate_chapter,
-    generate_outline,
-    save_chapter_content,
-    suggest_script,
-    summarize_chapter,
-    validate_chapter_binding,
-)
+from .application.story.service import apply_outline
+from .application.story.edit_chapter import edit_chapter
+from .application.story.service import generate_chapter
+from .application.story.service import generate_outline
+from .application.story.edit_chapter import save_chapter_content
+from .application.story.service import suggest_script
+from .application.story.summarize_chapter import summarize_chapter
+from .application.story.service import validate_chapter_binding
 
 
 def _fmt_outline(acts: list[dict]) -> str:

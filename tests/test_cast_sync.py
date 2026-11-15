@@ -22,14 +22,14 @@ from novel_drama.config import load_config
 from novel_drama.models import entities
 from novel_drama.store import ProjectStore
 from novel_drama.store.settings_store import SettingsStore
-from novel_drama.writing.cast_sync import apply_chapter_cast
-from novel_drama.writing.continuation import continue_outline
-from novel_drama.writing.expand import expand_outline
-from novel_drama.writing.outline_hier import (
+from novel_drama.application.cast.sync_cast import apply_chapter_cast
+from novel_drama.application.story.continue_chapter import continue_outline
+from novel_drama.application.story.outline_expand import expand_outline
+from novel_drama.application.story.outline_hierarchical import (
     generate_hierarchical_outline,
     load_work,
 )
-from novel_drama.writing.service import generate_outline
+from novel_drama.application.story.service import generate_outline
 
 #: 旁白保留 ID
 NARRATOR_ID = entities.NARRATOR_ID
@@ -248,7 +248,7 @@ class CastSyncTest(unittest.TestCase):
     def test_hier_outline_one_call_per_chapter(self):
         """分层大纲：每章只有一次节拍调用，同时产出 cast，不再单独请求角色。"""
         adapter = CountingAdapter()
-        with patch("novel_drama.writing.outline_hier.build_writing_adapter", return_value=adapter):
+        with patch("novel_drama.application.story.outline_hierarchical.build_writing_adapter", return_value=adapter):
             result = generate_hierarchical_outline(
                 self.store,
                 self.config,
@@ -308,7 +308,7 @@ class CastSyncTest(unittest.TestCase):
         )
         before = sorted(self._character_names())
         adapter = CountingAdapter()
-        with patch("novel_drama.writing.outline_hier.build_writing_adapter", return_value=adapter):
+        with patch("novel_drama.application.story.outline_hierarchical.build_writing_adapter", return_value=adapter):
             again = generate_hierarchical_outline(
                 self.store,
                 self.config,
@@ -331,7 +331,7 @@ class CastSyncTest(unittest.TestCase):
         self.store.save_characters(table)
 
         adapter = CountingAdapter()
-        with patch("novel_drama.writing.expand.build_writing_adapter", return_value=adapter):
+        with patch("novel_drama.application.story.outline_expand.build_writing_adapter", return_value=adapter):
             result = expand_outline(
                 self.store,
                 self.config,
@@ -360,7 +360,7 @@ class CastSyncTest(unittest.TestCase):
     def test_continue_outline_uses_same_logic(self):
         """CLI 续写：新增章节的角色同样来自同一次节拍调用。"""
         adapter = CountingAdapter()
-        with patch("novel_drama.writing.continuation.build_writing_adapter", return_value=adapter):
+        with patch("novel_drama.application.story.continue_chapter.build_writing_adapter", return_value=adapter):
             result = continue_outline(
                 self.store,
                 self.config,

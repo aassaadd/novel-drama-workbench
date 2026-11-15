@@ -21,13 +21,13 @@ from novel_drama.models import entities
 from novel_drama.store import ProjectStore
 from novel_drama.store.settings_store import SettingsStore
 from novel_drama.text.context import ContextAssembler
-from novel_drama.writing.character_updates import (
+from novel_drama.application.cast.character_updates import (
     apply_character_updates,
     load_character_updates,
     propose_character_updates,
 )
-from novel_drama.writing.consistency import check_chapter_consistency
-from novel_drama.writing.service import (
+from novel_drama.application.story.consistency import check_chapter_consistency
+from novel_drama.application.story.service import (
     apply_outline,
     bind_beat_characters,
     chapter_binding,

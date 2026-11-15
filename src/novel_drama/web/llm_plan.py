@@ -17,7 +17,7 @@ from typing import Any
 
 from ..store import ProjectStore
 from ..store.settings_store import SettingsStore
-from ..writing.thinking import collect_overrides, resolve_thinking, stage_label
+from ..domain.production.rules.thinking_policy import collect_overrides, resolve_thinking, stage_label
 
 #: 动作清单：键 -> 说明与次数计算
 #: - title/what: 弹窗标题与「这次做什么」
@@ -456,7 +456,7 @@ def _describe_calls(store: ProjectStore, ctx: dict) -> int:
 
 def _capture_calls(store: ProjectStore, ctx: dict) -> int:
     """角色识别补跑的调用次数（每章一次）。"""
-    from ..writing.cast_capture import cast_capture_plan
+    from ..application.cast.capture_cast import cast_capture_plan
 
     plan = cast_capture_plan(
         store,

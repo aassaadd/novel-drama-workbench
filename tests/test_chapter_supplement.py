@@ -13,8 +13,9 @@ from __future__ import annotations
 import pytest
 from test_chapter_resume import InlineSummaryAdapter, _offline, _patch_adapter, _project
 
-from novel_drama.writing import chapter_checkpoint, service
-from novel_drama.writing.service import (
+from novel_drama.application.story import chapter_checkpoint as chapter_checkpoint
+from novel_drama.application.story import service as service
+from novel_drama.application.story.service import (
     UNDERFILL_ACTION_RATIO,
     _split_supplement_sections,
     _uncovered_beats,

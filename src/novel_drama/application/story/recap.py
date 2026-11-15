@@ -14,10 +14,10 @@
 
 from __future__ import annotations
 
-from ..adapters.base import AdapterError, ErrorCode, Message, TextGenRequest
-from ..config import AppConfig
-from ..models.ids import now_iso
-from ..store import ProjectStore
+from ...adapters.base import AdapterError, ErrorCode, Message, TextGenRequest
+from ...config import AppConfig
+from ...models.ids import now_iso
+from ...store import ProjectStore
 
 #: 送入摘要模型的正文字数：开头 + 结尾，中间省略（长章节也能覆盖起承转合）
 RECAP_HEAD_CHARS = 3000

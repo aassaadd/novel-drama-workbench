@@ -12,7 +12,7 @@ from fastapi.responses import StreamingResponse
 
 from ..config import load_config
 from ..store import ProjectStore
-from ..writing.character_plan import fill_character_descriptions
+from ..application.cast.character_plan import fill_character_descriptions
 from .job_tracker import UiJob
 from .stream_api import _progress_response
 

@@ -15,7 +15,7 @@ from .media.art import render_character_sheet
 from .models import entities
 from .models.enums import AgeRange, SpeechPitch, SpeechTempo, choices_text
 from .models.ids import now_iso
-from .writing import generate_characters
+from .application.story.service import generate_characters
 
 #: 允许写入的角色定位（narrator 由系统保留）
 ROLE_CHOICES = ("protagonist", "antagonist", "supporting", "minor")

@@ -16,8 +16,8 @@ from novel_drama.config import load_config
 from novel_drama.models import entities
 from novel_drama.store import ProjectStore
 from novel_drama.store.settings_store import SettingsStore
-from novel_drama.writing import service
-from novel_drama.writing.cast_capture import (
+from novel_drama.application.story import service as service
+from novel_drama.application.cast.capture_cast import (
     capture_chapter_cast,
     cast_capture_plan,
     cast_status_overview,
@@ -26,8 +26,8 @@ from novel_drama.writing.cast_capture import (
     pending_overview,
     start_capture_job,
 )
-from novel_drama.writing.cast_sync import discard_pending, promote_pending
-from novel_drama.writing.summarize import apply_summary
+from novel_drama.application.cast.sync_cast import discard_pending, promote_pending
+from novel_drama.application.story.summarize_chapter import apply_summary
 
 
 class CastAdapter:
@@ -241,7 +241,7 @@ def test_apply_summary_triggers_capture(tmp_path: Path, monkeypatch: pytest.Monk
         called["chapter"] = target_id
         return {"triggered": True, "message": "角色识别完成：识别到 1 个角色（沈砚）。"}
 
-    monkeypatch.setattr("novel_drama.writing.cast_capture.ensure_chapter_cast", fake_ensure)
+    monkeypatch.setattr("novel_drama.application.cast.capture_cast.ensure_chapter_cast", fake_ensure)
     preview = {
         "title": "新的章名",
         "synopsis": "反推摘要",

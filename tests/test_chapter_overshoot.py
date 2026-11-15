@@ -24,8 +24,9 @@ from test_chapter_resume import (
 )
 
 from novel_drama.adapters.base import AdapterError
-from novel_drama.writing import chapter_checkpoint, service
-from novel_drama.writing.service import (
+from novel_drama.application.story import chapter_checkpoint as chapter_checkpoint
+from novel_drama.application.story import service as service
+from novel_drama.application.story.service import (
     OVERSHOOT_ACTION_RATIO,
     OVERSHOOT_NOTICE_RATIO,
     _word_deviation,

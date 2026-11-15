@@ -12,12 +12,12 @@ import json
 import re
 from pathlib import Path
 
-from ..adapters.base import Message, TextGenRequest
-from ..config import AppConfig, resolve_temperature
-from ..models.ids import now_iso
-from ..store import ProjectStore
-from ..store.settings_store import SettingsStore
-from .service import build_writing_adapter, chapter_binding
+from ...adapters.base import Message, TextGenRequest
+from ...config import AppConfig, resolve_temperature
+from ...models.ids import now_iso
+from ...store import ProjectStore
+from ...store.settings_store import SettingsStore
+from ...application.story.service import build_writing_adapter, chapter_binding
 
 #: 提案中允许写回的角色状态字段
 UPDATE_FIELDS = ("situation", "knowledge_add", "relations")

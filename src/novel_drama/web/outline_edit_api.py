@@ -9,7 +9,7 @@ from __future__ import annotations
 from fastapi import HTTPException
 
 from ..store import ProjectStore
-from ..writing.outline_edit import (
+from ..application.story.outline_edit import (
     act_delete_impact,
     chapter_delete_impact,
     delete_beat,

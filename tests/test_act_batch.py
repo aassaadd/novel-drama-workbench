@@ -23,8 +23,8 @@ from novel_drama.models import entities
 from novel_drama.store import ProjectStore
 from novel_drama.store.settings_store import SettingsStore
 from novel_drama.web.app import create_app
-from novel_drama.writing.act_batch import ActBatchCanceled, generate_act_chapters
-from novel_drama.writing.service import apply_outline, generate_outline
+from novel_drama.application.story.act_batch import ActBatchCanceled, generate_act_chapters
+from novel_drama.application.story.service import apply_outline, generate_outline
 
 
 class ActBatchTest(unittest.TestCase):

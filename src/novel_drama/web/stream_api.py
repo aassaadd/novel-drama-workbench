@@ -29,12 +29,12 @@ from ..config import load_config
 from ..oplog import set_llm_abort_reason
 from ..store import ProjectStore
 from .job_tracker import UiJob
-from ..writing.act_batch import ActBatchCanceled, generate_act_chapters, resolve_act
-from ..writing.character_plan import generate_from_plan, load_plan, plan_characters
-from ..writing.continuation import continue_chapter
-from ..writing.expand import expand_outline
-from ..writing.outline_hier import generate_hierarchical_outline
-from ..writing.service import (
+from ..application.story.act_batch import ActBatchCanceled, generate_act_chapters, resolve_act
+from ..application.cast.character_plan import generate_from_plan, load_plan, plan_characters
+from ..application.story.continue_chapter import continue_chapter
+from ..application.story.outline_expand import expand_outline
+from ..application.story.outline_hierarchical import generate_hierarchical_outline
+from ..application.story.service import (
     DEFAULT_CHAPTER_WORDS,
     generate_chapter,
     generate_characters,

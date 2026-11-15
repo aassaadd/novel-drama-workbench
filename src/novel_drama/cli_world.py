@@ -15,8 +15,8 @@ from .config import AppConfig
 from .media.art import render_world_cover
 from .store.settings_store import SettingsStore
 from .store.world_store import WorldStore
-from .writing import generate_worlds
-from .writing.worlds import clean_world_entry
+from .application.story.service import generate_worlds
+from .application.story.world import clean_world_entry
 
 
 def _chapter_refs(store, world_id: str) -> list[dict]:

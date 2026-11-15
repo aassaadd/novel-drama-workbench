@@ -14,10 +14,10 @@ from __future__ import annotations
 
 import re
 
-from ..domain.story.rules.chapter_rules import bump_revision
-from ..store import ProjectStore
-from ..store.settings_store import SettingsStore
-from ..text.titles import strip_index_prefix
+from ...domain.story.rules.chapter_rules import bump_revision
+from ...store import ProjectStore
+from ...store.settings_store import SettingsStore
+from ...text.titles import strip_index_prefix
 
 #: 章节删除影响预览的默认结构
 _EMPTY_IMPACT = {"chars": 0, "lines": 0, "audio": 0, "image": 0, "video": 0}

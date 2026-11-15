@@ -17,12 +17,12 @@ from __future__ import annotations
 
 import json
 
-from ..domain.cast.rules.naming import add_aliases, is_descriptor
-from ..domain.shared.text import normalize_name
-from ..models import entities
-from ..models.ids import now_iso
-from ..store import ProjectStore
-from .service import _clean_speech_style
+from ...domain.cast.rules.naming import add_aliases, is_descriptor
+from ...domain.shared.text import normalize_name
+from ...models import entities
+from ...models.ids import now_iso
+from ...store import ProjectStore
+from ...application.story.service import _clean_speech_style
 
 #: 姓名归一化：阶段 3 起由 domain 单点实现（NFKC → 去空白 → casefold）
 _norm = normalize_name

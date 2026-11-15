@@ -33,8 +33,8 @@ from ..models.ids import now_iso
 from ..store import ProjectStore, list_workspaces
 from ..store.project_store import WORKSPACE_INDEX
 from ..store.queue_store import QueueStore
-from ..writing.editing import edit_chapter, restore_chapter_version, save_chapter_content
-from ..writing.summarize import apply_summary, summarize_chapter
+from ..application.story.edit_chapter import edit_chapter, restore_chapter_version, save_chapter_content
+from ..application.story.summarize_chapter import apply_summary, summarize_chapter
 from .actions import fail_body, run
 from .models_api import register_models_routes, resolve_llm_settings
 from .voice_tools_api import register_voice_tools_routes
@@ -1627,7 +1627,7 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         # 已落章通常也在大纲里：一并删除，避免章节列表删掉后大纲还留着悬空引用
         try:
             from ..store.settings_store import SettingsStore
-            from ..writing.outline_edit import delete_outline_chapter
+            from ..application.story.outline_edit import delete_outline_chapter
 
             settings_store = SettingsStore(store.root)
             if settings_store.exists():
@@ -4083,7 +4083,7 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         返回:
             `{chapters, count, seconds, seconds_per_chapter}`。
         """
-        from ..writing.cast_capture import cast_capture_plan
+        from ..application.cast.capture_cast import cast_capture_plan
 
         return cast_capture_plan(
             _store(path),
@@ -4102,7 +4102,7 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         返回:
             `{items, count}`。
         """
-        from ..writing.cast_capture import pending_overview
+        from ..application.cast.capture_cast import pending_overview
 
         return pending_overview(_store(path))
 
@@ -4116,7 +4116,7 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         返回:
             `{ok, created, character, pending}`。
         """
-        from ..writing.cast_sync import promote_pending
+        from ..application.cast.sync_cast import promote_pending
 
         key = str(body.get("key") or "").strip()
         if not key:
@@ -4137,7 +4137,7 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         返回:
             `{ok, discarded, pending}`。
         """
-        from ..writing.cast_sync import discard_pending
+        from ..application.cast.sync_cast import discard_pending
 
         key = str(body.get("key") or "").strip()
         if not key:
@@ -4160,7 +4160,7 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         返回:
             `{chapters, counts, job}`。
         """
-        from ..writing.cast_capture import cast_status_overview
+        from ..application.cast.capture_cast import cast_status_overview
 
         return cast_status_overview(
             _store(path),
@@ -4178,7 +4178,7 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         返回:
             `{job}`。
         """
-        from ..writing.cast_capture import start_capture_job
+        from ..application.cast.capture_cast import start_capture_job
 
         store = _store(body.get("path"))
         try:
@@ -4203,7 +4203,7 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         返回:
             `{job}`；没有任务时 job 为空对象。
         """
-        from ..writing.cast_capture import latest_capture_job
+        from ..application.cast.capture_cast import latest_capture_job
 
         return {"job": latest_capture_job(_store(path))}
 
@@ -4217,7 +4217,7 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         返回:
             `{job}`。
         """
-        from ..writing.cast_capture import cancel_capture_job
+        from ..application.cast.capture_cast import cancel_capture_job
 
         try:
             job = cancel_capture_job(_store(body.get("path")), str(body.get("job_id") or ""))
@@ -4641,7 +4641,7 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         返回:
             `{chapters: [{index, title, items: [{id, name, created_at}]}]}`。
         """
-        from ..writing.cast_sync import created_in_chapter, list_created_chapters
+        from ..application.cast.sync_cast import created_in_chapter, list_created_chapters
 
         store = _store(path)
         if chapter is not None:
@@ -4855,7 +4855,7 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         返回:
             `{chapter_id, exists, applied, updates: [{character_id, situation, knowledge_add, relations}]}`。
         """
-        from ..writing.character_updates import load_character_updates
+        from ..application.cast.character_updates import load_character_updates
 
         return load_character_updates(_store(path), chapter)
 
@@ -4872,7 +4872,7 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         异常:
             HTTPException 400: 正文为空或生成失败。
         """
-        from ..writing.character_updates import propose_character_updates
+        from ..application.cast.character_updates import propose_character_updates
 
         store = _store(body.get("path"))
         chapter = str(body.get("chapter") or "")
@@ -4897,7 +4897,7 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         异常:
             HTTPException 400: 没有可应用的提案。
         """
-        from ..writing.character_updates import apply_character_updates
+        from ..application.cast.character_updates import apply_character_updates
 
         store = _store(body.get("path"))
         chapter = str(body.get("chapter") or "")
@@ -4919,7 +4919,7 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         返回:
             `{chapter_id, exists, issues, counts}`。
         """
-        from ..writing.consistency import load_consistency
+        from ..application.story.consistency import load_consistency
 
         return load_consistency(_store(path), chapter)
 
@@ -4936,7 +4936,7 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         异常:
             HTTPException 400: 正文为空或生成失败。
         """
-        from ..writing.consistency import check_chapter_consistency
+        from ..application.story.consistency import check_chapter_consistency
 
         store = _store(body.get("path"))
         chapter = str(body.get("chapter") or "")
@@ -4961,7 +4961,7 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
             HTTPException 400: 缺少参数或节拍不存在。
         """
         from ..models import entities as model_entities
-        from ..writing.service import bind_beat_characters, chapter_binding
+        from ..application.story.service import bind_beat_characters, chapter_binding
 
         store = _store(body.get("path"))
         chapter_id = str(body.get("chapter") or "")
@@ -5887,7 +5887,7 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         异常:
             HTTPException 400: 角色不存在或视角写法非法。
         """
-        from ..writing.service import chapter_binding, sync_chapter_pov
+        from ..application.story.service import chapter_binding, sync_chapter_pov
 
         store = _store(body.get("path"))
         chapter_id = str(body.get("chapter") or "")
@@ -5921,7 +5921,7 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         返回:
             `chapter_binding` 的完整结果；页面据此显示绑定条与生成阻断提示。
         """
-        from ..writing.service import chapter_binding
+        from ..application.story.service import chapter_binding
 
         return chapter_binding(_store(path), chapter)
 
@@ -5938,7 +5938,7 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         异常:
             HTTPException 400: 缺少参数或角色 ID 非法。
         """
-        from ..writing.service import bind_beat_characters
+        from ..application.story.service import bind_beat_characters
 
         path = body.get("path")
         store = _store(path)

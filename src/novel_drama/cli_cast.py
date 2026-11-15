@@ -68,7 +68,7 @@ def _cmd_backfill(args, store, config: AppConfig) -> int:
 
     if want_profiles:
         from .tts.voice_design import build_profile
-        from .writing.service import build_writing_adapter
+        from .application.story.service import build_writing_adapter
 
         adapter = build_writing_adapter(config, SettingsStore(store.root).load_or_none() or {})
         for character in table.get("characters") or []:
@@ -166,7 +166,7 @@ def _cmd_fill_descriptions(args, store, config: AppConfig) -> int:
     返回:
         进程退出码：全部成功为 0，存在失败为 1，便于重试时判断。
     """
-    from .writing.character_plan import fill_character_descriptions
+    from .application.cast.character_plan import fill_character_descriptions
 
     result = fill_character_descriptions(store, config, names=getattr(args, "name", None))
     if getattr(args, "json", False):

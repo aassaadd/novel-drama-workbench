@@ -26,8 +26,9 @@ from test_chapter_resume import (
 )
 
 from novel_drama.adapters.base import AdapterError, Message, TextGenRequest, TextGenResult
-from novel_drama.writing import chapter_checkpoint, service
-from novel_drama.writing.degeneration import (
+from novel_drama.application.story import chapter_checkpoint as chapter_checkpoint
+from novel_drama.application.story import service as service
+from novel_drama.application.story.degeneration import (
     DegenerationGuard,
     SENTENCE_STOP_COUNT,
     SHINGLE_COVERAGE_STOP,
@@ -35,8 +36,8 @@ from novel_drama.writing.degeneration import (
     resolve_window,
     split_sentences,
 )
-from novel_drama.writing.recap import ROUND_SUMMARY_MARK
-from novel_drama.writing.watchdog import apply_context_limit, describe, watchdog_tokens
+from novel_drama.application.story.recap import ROUND_SUMMARY_MARK
+from novel_drama.domain.production.rules.watchdog import apply_context_limit, describe, watchdog_tokens
 
 #: 线上现象的对白循环（整段反复）
 LOOP_TEXT = "「你有。」周也说。「我没有！」九斤说。" * 40

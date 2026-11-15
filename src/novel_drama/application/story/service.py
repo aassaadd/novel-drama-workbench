@@ -14,30 +14,30 @@ import math
 import re
 from dataclasses import replace
 
-from ..adapters.base import (
+from ...adapters.base import (
     AdapterError,
     ErrorCode,
     Message,
     TextGenRequest,
     TextGenResult,
 )
-from ..adapters.offline_writing import OfflineWritingAdapter
-from ..cancel import GenerationCanceled
-from ..config import AppConfig, resolve_temperature
-from ..director.markup import parse_markup
-from ..domain.story.rules.chapter_rules import bump_revision, count_words
-from ..models import entities
-from ..models.enums import AgeRange, SpeechPitch, SpeechTempo
-from ..models.ids import new_id, now_iso
-from ..oplog import set_llm_abort_reason, set_llm_call_reason
-from ..store import ProjectStore
-from ..store.settings_store import SettingsStore
-from ..store.world_store import WorldStore
-from ..text.context import POV_LABELS, ContextAssembler
-from ..text.dialogue import normalize_dialogue
-from ..text.titles import strip_index_prefix
+from ...adapters.offline_writing import OfflineWritingAdapter
+from ...cancel import GenerationCanceled
+from ...config import AppConfig, resolve_temperature
+from ...director.markup import parse_markup
+from ...domain.story.rules.chapter_rules import bump_revision, count_words
+from ...models import entities
+from ...models.enums import AgeRange, SpeechPitch, SpeechTempo
+from ...models.ids import new_id, now_iso
+from ...oplog import set_llm_abort_reason, set_llm_call_reason
+from ...store import ProjectStore
+from ...store.settings_store import SettingsStore
+from ...store.world_store import WorldStore
+from ...text.context import POV_LABELS, ContextAssembler
+from ...text.dialogue import normalize_dialogue
+from ...text.titles import strip_index_prefix
 from . import chapter_checkpoint
-from .budgets import context_budget_tokens
+from ...domain.production.rules.token_budget import context_budget_tokens
 from .content_guard import check_chapter_content, strict_retry_instruction
 from .degeneration import (
     DegenerationDetected,
@@ -56,10 +56,10 @@ from .recap import (
     save_summary,
     split_final_output,
 )
-from .thinking import collect_overrides, step_stage
-from .watchdog import describe as describe_watchdog
-from .worlds import build_art_prompt as _build_art_prompt
-from .worlds import clean_world_entry, worlds_digest
+from ...domain.production.rules.thinking_policy import collect_overrides, step_stage
+from ...domain.production.rules.watchdog import describe as describe_watchdog
+from ...application.story.world import build_art_prompt as _build_art_prompt
+from ...application.story.world import clean_world_entry, worlds_digest
 
 # 默认每章目标字数
 DEFAULT_CHAPTER_WORDS = 1200
@@ -112,7 +112,7 @@ def build_writing_adapter(config: AppConfig, settings: dict | None = None):
     if name in ("offline", "offline-writing"):
         return OfflineWritingAdapter(config.get("writing.offline") or settings or {})
     if name == "omlx":
-        from ..adapters.writing import OmlxWritingAdapter
+        from ...adapters.writing import OmlxWritingAdapter
 
         # 思考：全局开关 + 强度 + 设置页按调用点覆盖（没有覆盖项即系统自动）
         settings = dict(config.get("omlx") or {})
@@ -966,7 +966,7 @@ def generate_chapter(
     # 节拍先于角色同步存在的历史章节：正文生成前补一次 cast-only 识别（每章一次性）。
     # 失败不阻断正文，但必须把原因透传给页面/任务通知，不能静默。
     if not dry_run:
-        from .cast_capture import ensure_chapter_cast
+        from ...application.cast.capture_cast import ensure_chapter_cast
 
         try:
             ensure_chapter_cast(store, config, chapter_id, on_notice=notify, on_progress=on_progress)
@@ -1795,7 +1795,7 @@ def supplement_chapter(
 
     # 补写会新增台词，同样需要角色绑定；未同步时先补一次识别（每章一次性）
     try:
-        from .cast_capture import ensure_chapter_cast
+        from ...application.cast.capture_cast import ensure_chapter_cast
 
         ensure_chapter_cast(store, config, chapter_id, on_notice=on_notice, on_progress=on_progress)
     except Exception as exc:  # noqa: BLE001 - 角色识别失败不阻断补写，但记录原因
@@ -4586,7 +4586,7 @@ def _clean_voice_profile(row) -> dict | None:
 
 def _attach_profile_source(character: dict, profile: dict) -> dict:
     """补齐音色描述的元数据（schema/summary/来源哈希/状态）。"""
-    from ..store.voice_cast import profile_source_hash
+    from ...store.voice_cast import profile_source_hash
 
     profile["schema"] = "voice_profile/1"
     profile.setdefault("summary", profile.get("voice_summary"))

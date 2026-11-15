@@ -15,7 +15,9 @@ from pathlib import Path
 from .cli_common import PreconditionError, _emit, _resolve_store
 from .config import AppConfig
 from .store.settings_store import SettingsStore
-from .writing import generate_section, generate_settings, polish_field
+from .application.story.service import generate_section
+from .application.story.service import generate_settings
+from .application.story.service import polish_field
 
 # `setting set` 支持标量字段：解析参数名 → (设定库路径, 字段名)
 SCALAR_FIELDS = {

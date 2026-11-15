@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..config import REPO_ROOT, AppConfig
-from ..writing.thinking import collect_overrides
+from ..domain.production.rules.thinking_policy import collect_overrides
 from .base import AdapterError, ComfyGateway, ErrorCode, SfxAdapter, TtsAdapter, WritingAdapter
 from .comfyui import LocalComfyGateway
 from .sfx import PlaceholderSfxAdapter

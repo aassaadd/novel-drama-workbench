@@ -15,13 +15,13 @@ import json
 import math
 from pathlib import Path
 
-from ..adapters.base import Message, TextGenRequest
-from ..config import AppConfig, resolve_temperature
-from ..models.ids import now_iso
-from ..store import ProjectStore
-from ..store.settings_store import SettingsStore
-from ..store.world_store import WorldStore
-from .service import (
+from ...adapters.base import Message, TextGenRequest
+from ...config import AppConfig, resolve_temperature
+from ...models.ids import now_iso
+from ...store import ProjectStore
+from ...store.settings_store import SettingsStore
+from ...store.world_store import WorldStore
+from ...application.story.service import (
     _CHARACTER_DESC_RULES,
     _clean_character_row,
     _clean_speech_style,

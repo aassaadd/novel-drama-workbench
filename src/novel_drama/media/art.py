@@ -19,7 +19,7 @@ from ..models.ids import now_iso
 from ..store import ProjectStore
 from ..store.settings_store import SettingsStore
 from ..store.world_store import WorldStore
-from ..writing.service import build_art_prompt
+from ..application.story.service import build_art_prompt
 from .comfy_media import resolve_aspect, seed_for
 from .generate import render_image
 

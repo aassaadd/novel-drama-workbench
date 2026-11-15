@@ -10,13 +10,13 @@ from __future__ import annotations
 import re
 from dataclasses import replace
 
-from ..adapters.base import AdapterError, ErrorCode, Message
-from ..config import AppConfig
-from ..domain.story.rules.chapter_rules import bump_revision, count_words
-from ..models.ids import new_id, now_iso
-from ..store import ProjectStore
-from ..text.context import EXCERPT_CHARS, ContextAssembler
-from .budgets import context_budget_tokens
+from ...adapters.base import AdapterError, ErrorCode, Message
+from ...config import AppConfig
+from ...domain.story.rules.chapter_rules import bump_revision, count_words
+from ...models.ids import new_id, now_iso
+from ...store import ProjectStore
+from ...text.context import EXCERPT_CHARS, ContextAssembler
+from ...domain.production.rules.token_budget import context_budget_tokens
 from .service import build_chapter_context
 
 #: 已有下游产物时给用户的提示：正文变了，场景与台词需要重新切分

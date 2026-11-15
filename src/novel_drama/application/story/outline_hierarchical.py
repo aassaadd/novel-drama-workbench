@@ -17,14 +17,14 @@ import logging
 from dataclasses import replace
 from pathlib import Path
 
-from ..adapters.base import ErrorCode, AdapterError, Message, TextGenRequest
-from ..config import AppConfig
-from ..models.ids import new_id, now_iso
-from ..store import ProjectStore
-from ..store.settings_store import SettingsStore
-from ..store.world_store import WorldStore
-from ..text.titles import strip_index_prefix
-from .cast_sync import (
+from ...adapters.base import ErrorCode, AdapterError, Message, TextGenRequest
+from ...config import AppConfig
+from ...models.ids import new_id, now_iso
+from ...store import ProjectStore
+from ...store.settings_store import SettingsStore
+from ...store.world_store import WorldStore
+from ...text.titles import strip_index_prefix
+from ...application.cast.sync_cast import (
     apply_chapter_cast,
     cast_prompt_block,
     load_pending,

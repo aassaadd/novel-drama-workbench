@@ -23,8 +23,9 @@ from novel_drama.config import load_config
 from novel_drama.models import entities
 from novel_drama.store import ProjectStore
 from novel_drama.store.settings_store import SettingsStore
-from novel_drama.writing import chapter_checkpoint, service
-from novel_drama.writing.recap import ROUND_SUMMARY_MARK
+from novel_drama.application.story import chapter_checkpoint as chapter_checkpoint
+from novel_drama.application.story import service as service
+from novel_drama.application.story.recap import ROUND_SUMMARY_MARK
 
 
 def _dedupe_sentences(text: str, prior: str = "") -> str:

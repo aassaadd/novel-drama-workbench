@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from .cli_common import EXIT_OK, PreconditionError, TaskFailedError, _emit, _resolve_store
 from .config import AppConfig
-from .writing.continuation import continue_chapter, continue_outline
+from .application.story.continue_chapter import continue_chapter, continue_outline
 
 
 def cmd_chapter_continue(args, config: AppConfig) -> int:

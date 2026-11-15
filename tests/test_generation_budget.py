@@ -21,7 +21,8 @@ from novel_drama.adapters.base import (
 )
 from novel_drama.adapters.writing import OmlxWritingAdapter
 from novel_drama.config import load_config
-from novel_drama.writing import budgets, service
+from novel_drama.domain.production.rules import token_budget as budgets
+from novel_drama.application.story import service as service
 
 
 def _write(path: Path, text: str) -> Path:

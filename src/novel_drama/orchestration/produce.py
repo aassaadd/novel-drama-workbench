@@ -23,7 +23,11 @@ from ..media.timeline_builder import build_timeline, summarize_timeline
 from ..models.ids import new_id, now_iso
 from ..store import ProjectStore, validate
 from ..store.settings_store import SettingsStore
-from ..writing import apply_outline, generate_chapter, generate_outline, suggest_script, summarize_chapter
+from ..application.story.service import apply_outline
+from ..application.story.service import generate_chapter
+from ..application.story.service import generate_outline
+from ..application.story.service import suggest_script
+from ..application.story.summarize_chapter import summarize_chapter
 
 # 阶段顺序（也是依赖顺序）
 STAGES = (
