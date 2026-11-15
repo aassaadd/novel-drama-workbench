@@ -463,6 +463,7 @@ function openManualModel(group, key) {
 const SECTIONS = [
   ['env', '本机环境与模型', '本机环境、模型列表与下载'],
   ['conn', '连接配置', 'ComfyUI 与写作模型连接'],
+  ['gen', '正文生成', '每轮节拍数与最大轮数等正文默认参数'],
   ['budget', '上下文与输出', '上下文上限、最近提示词占用与输出无人工上限说明'],
   ['prefs', '快捷键与界面偏好', '快捷键、字号与显示偏好'],
 ];
@@ -717,6 +718,210 @@ function connectionHTML() {
 }
 
 /**
+ * 配置来源的中文说明：设置页 / 配置文件 / 内置默认（与生成弹窗口径一致）。
+ * @param {'page'|'file'|'builtin'} source 来源标记
+ * @param {string} key 配置键（file 来源时展示）
+ * @returns {string} 说明文本
+ */
+function sourceLabel(source, key) {
+  if (source === 'page') return '来自设置页';
+  if (source === 'file') return `来自配置文件 ${key}`;
+  return '内置默认（设置页未改过）';
+}
+
+/** 正文生成可改项：字段名 → 覆盖层点分键 */
+const GENERATION_KEYS = {
+  beats_per_round: 'writing.multi_turn.beats_per_round',
+  max_rounds: 'writing.multi_turn.max_rounds',
+};
+
+/** 正文生成可改项卡片（只含每轮节拍数与最大轮数，不含输出预算） */
+function generationFormHTML() {
+  return `
+    <div class="card" style="margin-top:14px">
+      <div class="card-head"><span class="ct">正文生成默认参数（全局）</span>
+        <div class="right">
+          <button class="btn sm" data-act="gen-reset" title="删除页面覆盖项，回落到配置文件或内置默认">恢复默认</button>
+          <button class="btn sm primary" data-act="gen-save" title="写入本机覆盖层，立即生效">保存</button>
+        </div>
+      </div>
+      <div class="card-body">
+        <div class="hint">只影响正文生成的默认参数；输出侧仍然没有人为上限，「要写多少字」由提示词里的目标字数与每轮节拍数决定。</div>
+        <div id="gen-form">${generationFormBodyHTML()}</div>
+        <div class="conn-result" id="gen-form-result"></div>
+      </div>
+    </div>`;
+}
+
+/** 正文生成表单主体：值、默认值与来源一起展示 */
+function generationFormBodyHTML() {
+  const gen = generation?.generation || {};
+  const values = gen.values || {};
+  const defaults = gen.defaults || { beats_per_round: 0, max_rounds: 8 };
+  const sources = gen.sources || {};
+  const limits = gen.limits || {};
+  const beats = Number(values.beats_per_round ?? 0);
+  const auto = beats === 0;
+  const rounds = Number(values.max_rounds ?? defaults.max_rounds ?? 8);
+  const beatsMax = Number(limits.beats_per_round?.max ?? 50);
+  const roundsMax = Number(limits.max_rounds?.max ?? 20);
+  return `
+    <div class="conn-grid" style="margin-top:10px">
+      <div class="field"><label>每轮节拍数</label>
+        <label class="set-pref" style="padding-top:2px">
+          <input type="checkbox" id="gen-auto" ${auto ? 'checked' : ''}
+            title="勾选后按本章节拍总数自动均分轮次；取消勾选可填固定值" />
+          <span><b>自动分配</b><em>按本章节拍总数均分轮次</em></span>
+        </label>
+        <input class="input" id="gen-beats-input" data-setting-key="beats_per_round" type="number"
+          min="1" max="${beatsMax}" step="1" value="${auto ? '' : beats}" placeholder="例如 2"
+          ${auto ? 'disabled' : ''} title="固定每轮写几个节拍；勾选自动分配时不可填" />
+        <div class="hint" id="gen-beats-hint">当前生效 ${auto ? '自动分配' : `${beats} 拍/轮`} · 默认值 自动分配 · ${sourceLabel(
+          sources.beats_per_round,
+          GENERATION_KEYS.beats_per_round
+        )}</div>
+      </div>
+      <div class="field"><label>最大轮数（保险）</label>
+        <input class="input" id="gen-rounds-input" data-setting-key="max_rounds" type="number"
+          min="1" max="${roundsMax}" step="1" value="${rounds}"
+          title="防止跑飞的保险：达到该轮数仍未写完就停止" />
+        <div class="hint" id="gen-rounds-hint">当前生效 ${rounds} · 默认值 ${defaults.max_rounds ?? 8} · ${sourceLabel(
+          sources.max_rounds,
+          GENERATION_KEYS.max_rounds
+        )}</div>
+      </div>
+    </div>`;
+}
+
+/** 校验正文生成表单；非法时禁用保存并给出中文原因 */
+function validateGenerationForm() {
+  const auto = document.getElementById('gen-auto');
+  if (!auto) return true;
+  const beats = document.getElementById('gen-beats-input');
+  const rounds = document.getElementById('gen-rounds-input');
+  const result = document.getElementById('gen-form-result');
+  const save = document.querySelector('[data-act="gen-save"]');
+  let message = '';
+  if (!auto.checked) {
+    const value = Number(beats?.value);
+    if (!Number.isInteger(value) || value < 1 || value > 50) {
+      message = '每轮节拍数必须填 1–50 的整数；要自动分配请勾选上方选项';
+    }
+  }
+  if (!message) {
+    const value = Number(rounds?.value);
+    if (!Number.isInteger(value) || value < 1 || value > 20) {
+      message = '最大轮数必须填 1–20 的整数';
+    }
+  }
+  if (save) save.disabled = Boolean(message);
+  if (result) {
+    result.className = `conn-result ${message ? 'bad' : ''}`;
+    result.textContent = message;
+  }
+  return !message;
+}
+
+/** 局部刷新正文生成表单（保存/恢复默认后保留卡片与按钮） */
+function applyGenerationForm() {
+  const host = document.getElementById('gen-form');
+  if (host) host.innerHTML = generationFormBodyHTML();
+}
+
+/** 保存正文生成可改项：只提交每轮节拍数与最大轮数 */
+async function saveGeneration(button) {
+  if (!validateGenerationForm()) return;
+  const auto = document.getElementById('gen-auto').checked;
+  const values = {
+    [GENERATION_KEYS.beats_per_round]: auto
+      ? 0
+      : Number(document.getElementById('gen-beats-input').value),
+    [GENERATION_KEYS.max_rounds]: Number(document.getElementById('gen-rounds-input').value),
+  };
+  button.disabled = true;
+  button.textContent = '正在保存…';
+  try {
+    generation = await postJSON('/api/ui/config/generation', { values });
+    applyGenerationForm();
+    setConnResult('gen-form-result', true, `已保存到 ${generation.saved_to || '覆盖层'}，立即生效`);
+    toast('正文生成参数已保存，立即生效', 'ok', 2400);
+  } catch (error) {
+    setConnResult('gen-form-result', false, error.message || '保存失败');
+  } finally {
+    button.textContent = '保存';
+    validateGenerationForm();
+  }
+}
+
+/** 恢复默认：删除两项在覆盖层的键，回落到配置文件或内置默认 */
+async function resetGeneration(button) {
+  button.disabled = true;
+  button.textContent = '正在恢复…';
+  try {
+    generation = await postJSON('/api/ui/config/generation', {
+      values: { [GENERATION_KEYS.beats_per_round]: null, [GENERATION_KEYS.max_rounds]: null },
+    });
+    applyGenerationForm();
+    setConnResult('gen-form-result', true, '已恢复默认，立即生效');
+    toast('已恢复默认正文生成参数', 'ok', 2400);
+  } catch (error) {
+    setConnResult('gen-form-result', false, error.message || '恢复失败');
+  } finally {
+    button.textContent = '恢复默认';
+    validateGenerationForm();
+  }
+}
+
+/** 从生成弹窗跳转过来时暂存的返回信息（含已填参数与焦点项） */
+const RESUME_KEY = 'ndw.genResume';
+
+/**
+ * 读取待返回的生成弹窗信息；解析失败按无处理。
+ * @returns {object|null} `{path, chapter, hasBody, prefill}` 或 null
+ */
+function generationResume() {
+  try {
+    const raw = sessionStorage.getItem(RESUME_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch (error) {
+    return null;
+  }
+}
+
+/** 顶部返回条：从生成弹窗跳来时显示，Esc 与按钮都回到原弹窗 */
+function resumeBannerHTML() {
+  if (!generationResume()) return '';
+  return `<div class="banner" style="margin-top:12px;display:flex;align-items:center;gap:10px">
+    <span>正在调整正文生成默认参数；保存后点「返回生成」回到弹窗继续，已填内容会保留。</span>
+    <button class="btn sm" data-act="gen-return" title="回到正文生成弹窗（已填参数保留）">返回生成</button>
+  </div>`;
+}
+
+/**
+ * 聚焦跳转目标；自动分配时落在开关上，固定值落在数字框。
+ * @param {string} key 设置项字段名或 `temperature` / `thinking`
+ */
+function focusSetting(key) {
+  if (!key) return;
+  let target = null;
+  if (key === 'beats_per_round') {
+    target = document.getElementById('gen-auto')?.checked
+      ? document.getElementById('gen-auto')
+      : document.getElementById('gen-beats-input');
+  } else if (key === 'max_rounds') {
+    target = document.getElementById('gen-rounds-input');
+  } else if (key === 'temperature') {
+    target = document.getElementById('conn-llm-temp-writing');
+  } else if (key === 'thinking') {
+    target = document.getElementById('conn-llm-thinking');
+  }
+  if (!target) return;
+  target.focus({ preventScroll: true });
+  target.classList.add('set-focus');
+  window.setTimeout(() => target.classList.remove('set-focus'), 1800);
+}
+
+/**
  * 上下文与输出（只读）：说明输入上限与「输出无人工上限」的现状。
  */
 function generationHTML() {
@@ -794,10 +999,12 @@ function mainHTML() {
       <section class="set-section" data-section="global">
         ${sectionHead(
           '全局设置（本机）',
-          '模型与算力、连接配置、上下文与输出、环境自检与模型下载、快捷键、界面偏好'
+          '模型与算力、连接配置、正文生成、上下文与输出、环境自检与模型下载、快捷键、界面偏好'
         )}
+        ${resumeBannerHTML()}
         <div id="env" class="set-block">${environmentHTML()}</div>
         <div id="conn" class="set-block">${connectionHTML()}</div>
+        <div id="gen" class="set-block">${generationFormHTML()}</div>
         <div id="budget" class="set-block">${generationHTML()}</div>
         <div id="prefs" class="set-block">${shortcutsHTML()}${prefsHTML()}</div>
       </section>
@@ -1221,6 +1428,13 @@ function onRootClick(event) {
   if (button.dataset.act === 'conn-test-llm') return void testLlm(button);
   if (button.dataset.act === 'conn-refresh-llm') return void refreshLlmOptions(true);
   if (button.dataset.act === 'conn-save-llm') return void saveConnection('llm', button);
+  if (button.dataset.act === 'gen-save') return void saveGeneration(button);
+  if (button.dataset.act === 'gen-reset') return void resetGeneration(button);
+  if (button.dataset.act === 'gen-return') {
+    // 只有从生成弹窗跳过来时才回退，避免普通访问设置页误触返回
+    if (generationResume()) history.back();
+    return;
+  }
   if (button.dataset.act === 'model-install') {
     return void startInstall(button.dataset.group, button.dataset.key, button.dataset.gate);
   }
@@ -1266,6 +1480,19 @@ function applyPref(name, value) {
 
 /** 下拉选择 / 勾选：界面偏好写本地 */
 function onRootChange(event) {
+  // 每轮节拍数：勾选自动分配时禁用数字框，取消勾选后聚焦到数字框
+  if (event.target.id === 'gen-auto') {
+    const input = document.getElementById('gen-beats-input');
+    if (input) {
+      input.disabled = event.target.checked;
+      if (!event.target.checked) {
+        input.focus();
+        if (!input.value) input.value = '2';
+      }
+    }
+    validateGenerationForm();
+    return;
+  }
   // 思考开关与强度联动：关掉思考时强度置灰不可选
   if (event.target.id === 'conn-llm-thinking') {
     const effort = document.getElementById('conn-llm-effort');
@@ -1283,6 +1510,25 @@ function onRootChange(event) {
   applyPref(name, name === 'fontSize' ? pref.value : pref.checked);
 }
 
+/** 输入即时校验：正文生成两个数字框改动时更新保存按钮与中文原因 */
+function onRootInput(event) {
+  if (['gen-beats-input', 'gen-rounds-input'].includes(event.target.id)) {
+    validateGenerationForm();
+  }
+}
+
+/**
+ * 设置页按 Esc：从生成弹窗跳来时模拟关闭并返回；有弹窗时交给全局 Esc 处理。
+ * @param {KeyboardEvent} event 键盘事件
+ */
+function onSettingsEscape(event) {
+  if (event.key !== 'Escape') return;
+  if (!location.hash.startsWith('#/settings')) return;
+  if (document.querySelector('.dlg-mask')) return;
+  if (!generationResume()) return;
+  history.back();
+}
+
 /** 进入全局设置：不接收任何工程参数；section 决定默认停靠的分区 */
 export async function renderSettings(root, target = {}) {
   const wanted = String(target.section || '');
@@ -1292,9 +1538,19 @@ export async function renderSettings(root, target = {}) {
     window.clearInterval(envTimer);
     envTimer = null;
   }
+  // 手动进入设置（没有 focus）时丢弃遗留的弹窗返回信息，避免顶部误显示「返回生成」
+  if (!target.focus) {
+    try {
+      sessionStorage.removeItem(RESUME_KEY);
+    } catch (error) {
+      // 忽略：清理失败不影响页面
+    }
+  }
   if (!bound) {
     root.addEventListener('click', onRootClick);
     root.addEventListener('change', onRootChange);
+    root.addEventListener('input', onRootInput);
+    document.addEventListener('keydown', onSettingsEscape);
     bound = true;
   }
   await loadConnection();
@@ -1316,7 +1572,11 @@ export async function renderSettings(root, target = {}) {
       <aside class="studio-right"></aside>
     </div>`;
   // 渲染完再滚动，保证目标分区已存在；刷新时也停在同一分区
-  requestAnimationFrame(() => gotoSection(section, 'auto'));
+  // focus 来自生成弹窗的跳转（如 max_rounds），滚动后聚焦并高亮对应控件
+  requestAnimationFrame(() => {
+    gotoSection(section, 'auto');
+    focusSetting(String(target.focus || ''));
+  });
   void loadEnvironment();
   // 进页面就按当前配置拉一次工作流与模型列表，读不到时保留手填
   void refreshComfyOptions();

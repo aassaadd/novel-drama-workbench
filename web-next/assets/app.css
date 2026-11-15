@@ -1314,3 +1314,16 @@ button.banner-issue:hover { border-color: rgba(240, 138, 75, 0.55); background: 
 .lg-step > .mono { color: var(--text-4); font-size: 9.5px; }
 .lg-step > .lg-fold { margin-top: 4px; }
 .lg-kv { padding: 6px 10px; }
+
+/* 生成弹窗里可跳转设置的默认参数行 */
+.gen-default-link { display: block; margin-top: 3px; padding: 0; border: 0; background: none;
+  font: inherit; color: var(--text-4); text-align: left; text-decoration: underline;
+  text-decoration-style: dashed; text-underline-offset: 3px; cursor: pointer; }
+.gen-default-link:hover { color: var(--run); }
+.gen-default-line { width: 100%; border: 0; background: none; padding: 2px 0; font: inherit;
+  color: inherit; text-align: left; cursor: pointer; border-radius: 4px; }
+.gen-default-line:hover { background: var(--bg-2); }
+.gen-default-line:hover .right { color: var(--run); }
+/* 从生成弹窗跳转后高亮目标设置项 */
+.set-focus { border-color: var(--run) !important;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--run) 35%, transparent); }

@@ -3531,23 +3531,39 @@ async function loadGenerationDefaults() {
 
 /**
  * 生成弹窗里的「系统默认参数」只读区块。
+ * clickable 时数值行可点，跳到设置页对应项并聚焦；输出上限不是设置项，保持只读。
  * @param {object} defaults loadGenerationDefaults 的返回
+ * @param {boolean} [clickable=true] 是否允许点击跳转设置页
  * @returns {string} HTML
  */
-function generationDefaultsHTML(defaults) {
+function generationDefaultsHTML(defaults, clickable = true) {
   const badge = '<span class="badge">默认值</span>';
   const head = defaults.fallback
     ? '<div class="hint" style="margin-top:10px"><b>系统默认参数</b>：读取设置失败，下列为内置默认值。</div>'
-    : '<div class="hint" style="margin-top:10px"><b>系统默认参数</b>：未手填时按下列值生效，来源已标注。</div>';
+    : `<div class="hint" style="margin-top:10px"><b>系统默认参数</b>：未手填时按下列值生效，来源已标注${
+        clickable ? '；点带下划线的行可去设置页调整' : ''
+      }。</div>`;
+  const row = (key, section, label, value, source, sourceKey) =>
+    clickable
+      ? `<button type="button" class="summary-line gen-default-line" data-goto-setting="${key}"
+           data-goto-section="${section}" title="到设置页调整「${label}」并立即生效">
+           <span>${label}</span><span class="right">${value} ${badge} · ${defaultSourceLabel(source, sourceKey)}</span>
+         </button>`
+      : `<div class="summary-line"><span>${label}</span><span class="right">${value} ${badge} · ${defaultSourceLabel(
+          source,
+          sourceKey
+        )}</span></div>`;
   return `
     ${head}
-    <div class="summary-line"><span>温度</span><span class="right">${defaults.temperature} ${badge} · ${defaultSourceLabel(
-      defaults.temperatureSource,
-      'omlx.temperature'
-    )}</span></div>
-    <div class="summary-line"><span>思考开关</span><span class="right">${
-      defaults.thinking ? `开启（强度 ${esc(defaults.effort)}）` : '关闭'
-    } ${badge} · ${defaultSourceLabel(defaults.thinkingSource, 'omlx.enable_thinking')}</span></div>
+    ${row('temperature', 'conn', '温度', defaults.temperature, defaults.temperatureSource, 'omlx.temperature')}
+    ${row(
+      'thinking',
+      'conn',
+      '思考开关',
+      defaults.thinking ? `开启（强度 ${esc(defaults.effort)}）` : '关闭',
+      defaults.thinkingSource,
+      'omlx.enable_thinking'
+    )}
     <div class="summary-line"><span>输出上限</span><span class="right hint">无人工上限
       · 请求 max_tokens 取上下文剩余空间，模型自己输出结束符停止</span></div>`;
 }
@@ -3579,10 +3595,53 @@ function povStatusOf(binding, chapter) {
 }
 
 /**
+ * 从生成弹窗跳到设置页前，暂存已填参数与焦点项；返回小说页后据此恢复弹窗。
+ * @param {object} prefill 已填参数（含 focusKey）
+ * @param {boolean} hasBody 本章是否已有正文
+ * @param {string} chapterId 章节 ID
+ */
+function saveGenerationResume(prefill, hasBody, chapterId) {
+  try {
+    sessionStorage.setItem(
+      'ndw.genResume',
+      JSON.stringify({ path: cache.path, chapter: chapterId, hasBody, prefill, at: Date.now() })
+    );
+  } catch (error) {
+    // 隐私模式或容量不足：只影响自动回填，不阻断跳转
+  }
+}
+
+/**
+ * 返回小说页后恢复生成弹窗：默认值与来源重新读取，已填参数原样带回。
+ * 只消费一次；超过 10 分钟或工程不匹配则丢弃，避免误弹。
+ */
+function resumeGenerationIfAny() {
+  let resume = null;
+  try {
+    resume = JSON.parse(sessionStorage.getItem('ndw.genResume') || 'null');
+  } catch (error) {
+    resume = null;
+  }
+  try {
+    sessionStorage.removeItem('ndw.genResume');
+  } catch (error) {
+    // 忽略：清理失败不影响本次恢复
+  }
+  if (!resume || resume.path !== cache.path) return;
+  if (!resume.at || Date.now() - Number(resume.at) > 10 * 60 * 1000) return;
+  const hit = findOutlineChapter(resume.chapter);
+  if (!hit) return;
+  ui.sel = { kind: 'chapter', id: resume.chapter };
+  generationDefaultsCache = null;
+  paint();
+  window.setTimeout(() => openGenerateDialog(Boolean(resume.hasBody), resume.prefill || {}), 0);
+}
+
+/**
  * 正文生成：确认参数后走 SSE 流，完成后刷新。
  * @param {boolean} hasBody 本章是否已有正文
- * @param {{mode?: string, beatsPerRound?: number, maxRounds?: number, multiTurn?: boolean}} [prefill]
- *   从视角弹窗返回时用于还原已手填的参数，避免重新填一遍
+ * @param {{mode?: string, beatsPerRound?: number, maxRounds?: number, multiTurn?: boolean, focusKey?: string}} [prefill]
+ *   从视角弹窗或设置页返回时用于还原已手填的参数与焦点，避免重新填一遍
  */
 async function openGenerateDialog(hasBody, prefill = {}) {
   const hit = findOutlineChapter(ui.sel.id);
@@ -3610,15 +3669,17 @@ async function openGenerateDialog(hasBody, prefill = {}) {
       <div class="hint" style="margin-bottom:8px">按本章节拍逐轮写作：写完一组节拍即推进，全部节拍写完就收尾；篇幅只作参考。</div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
         <div class="field"><label>每轮节拍数</label><input class="input" id="gen-beats" type="number" min="0" step="1" value="${beatsValue}" />
-          <div class="hint">默认值 ${defaults.beatsPerRound} · 0 = 自动分配 · ${defaultSourceLabel(
+          <button type="button" class="hint gen-default-link" data-goto-setting="beats_per_round"
+            data-goto-section="gen" title="到设置页调整「每轮节拍数」并立即生效">默认值 ${defaults.beatsPerRound} · 0 = 自动分配 · ${defaultSourceLabel(
             defaults.beatsSource,
             'writing.multi_turn.beats_per_round'
-          )}</div></div>
+          )}</button></div>
         <div class="field"><label>最大轮数（保险）</label><input class="input" id="gen-rounds" type="number" min="1" max="20" value="${roundsValue}" />
-          <div class="hint">默认值 ${defaults.maxRounds} · ${defaultSourceLabel(
+          <button type="button" class="hint gen-default-link" data-goto-setting="max_rounds"
+            data-goto-section="gen" title="到设置页调整「最大轮数」并立即生效">默认值 ${defaults.maxRounds} · ${defaultSourceLabel(
             defaults.maxRoundsSource,
             'writing.multi_turn.max_rounds'
-          )}</div></div>
+          )}</button></div>
       </div>
       <label class="hint" style="display:flex;gap:6px;align-items:center;margin-top:4px">
         <input type="checkbox" id="gen-multi" ${multiValue ? 'checked' : ''} /> 按节拍分轮（更稳，耗时更长）
@@ -3645,6 +3706,35 @@ async function openGenerateDialog(hasBody, prefill = {}) {
         };
         openPovSetupDialog([hit.chapter], () => openGenerateDialog(hasBody, prefill), { actionLabel: '保存' });
       });
+      // 默认参数行可点：暂存已填参数后跳到设置页对应项；返回时自动恢复弹窗与焦点
+      mask.querySelectorAll('[data-goto-setting]').forEach((row) => {
+        row.addEventListener('click', () => {
+          saveGenerationResume(
+            {
+              mode: modeOf(),
+              beatsPerRound: Number(mask.querySelector('#gen-beats').value) || 0,
+              maxRounds: Number(mask.querySelector('#gen-rounds').value) || null,
+              multiTurn: mask.querySelector('#gen-multi').checked,
+              focusKey: row.dataset.gotoSetting,
+            },
+            hasBody,
+            hit.chapter.id
+          );
+          closeDialog();
+          location.hash = `#/settings?section=${row.dataset.gotoSection || 'gen'}&focus=${encodeURIComponent(
+            row.dataset.gotoSetting
+          )}`;
+        });
+      });
+      // 从设置页返回时把焦点放回刚才点击的默认参数行
+      if (prefill.focusKey) {
+        const row = mask.querySelector(`[data-goto-setting="${prefill.focusKey}"]`);
+        if (row) {
+          row.focus({ preventScroll: true });
+          row.classList.add('set-focus');
+          window.setTimeout(() => row.classList.remove('set-focus'), 1800);
+        }
+      }
       runBtn.addEventListener('click', async () => {
         if (runBtn.disabled) return;
         const mode = modeOf();
@@ -4128,7 +4218,7 @@ async function openActGenerateDialog(act, actIndex) {
       <div class="hint" style="margin-top:8px">按章节顺序逐章生成，复用单章链路（按节拍推进、滚动摘要、版本历史）；单章失败不中断整幕；「只补缺失」会跳过已有正文并计入结果。启动前会先检查本幕视角设置。</div>
       <div class="hint" style="margin-top:10px"><b>整幕生成使用的默认参数</b>：本弹窗没有逐章输入框，下列值直接生效，来源已标注。</div>
       ${generationRoundsHTML(defaults)}
-      ${generationDefaultsHTML(defaults)}`,
+      ${generationDefaultsHTML(defaults, false)}`,
     foot: `<div class="right"><button class="btn" data-dlg-close>取消</button>
       <button class="btn primary" data-ag-run>${icon('spark', 12)} 开始生成整幕</button></div>`,
     onMount: (mask) => {
@@ -4833,6 +4923,8 @@ function paint() {
 export async function renderNovel(root, target) {
   const path = target.path;
   state.path = path;
+  // 每次进入小说页都重读生成默认参数：用户可能刚在设置页改过，不能沿用旧缓存与旧来源
+  generationDefaultsCache = null;
   // 深链：数据已缓存时立即选中，否则等大纲到达后消费
   pendingChapter = String(target.chapter || '');
   if (pendingChapter && boot.state.outline === 'ok') {
@@ -4973,7 +5065,11 @@ async function bootBlock(key, path, seq, options = {}) {
       boot.errors[key] = error?.message || '读取失败';
     }
   }
-  if (seq === boot.seq) paint();
+  if (seq === boot.seq) {
+    paint();
+    // 大纲到达后再恢复：从设置页返回时要用最新默认值重开生成弹窗
+    if (key === 'outline') window.setTimeout(resumeGenerationIfAny, 0);
+  }
 }
 
 /**

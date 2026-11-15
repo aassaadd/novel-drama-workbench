@@ -32,8 +32,10 @@ function parseRoute() {
   const [body, rawQuery = ''] = raw.split('?');
   const query = new URLSearchParams(rawQuery);
   if (!body || body === '/' || body === '/projects') return { view: 'projects' };
-  // 全局设置：与任何工程无关，不再接受 ?project= 参数
-  if (body === '/settings') return { view: 'settings', section: query.get('section') || '' };
+  // 全局设置：与任何工程无关，不再接受 ?project= 参数；
+  // focus 用于从生成弹窗跳转后聚焦具体设置项
+  if (body === '/settings')
+    return { view: 'settings', section: query.get('section') || '', focus: query.get('focus') || '' };
   // 全平台日志：与工程无关，筛选条件在页面内维护
   if (body === '/logs') return { view: 'logs', trace: query.get('trace') || '' };
   const parts = body.split('/').filter(Boolean);

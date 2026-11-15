@@ -135,9 +135,90 @@ def test_output_budget_is_not_a_setting(tmp_path: Path, monkeypatch: pytest.Monk
     assert status["output"]["artificial_limit"] is False
     assert "人为上限" in status["output"]["note"]
     assert isinstance(status["last_call"], dict)
+    # 正文生成只恢复两个可改项，且不带任何输出预算字段
+    gen = status["generation"]
+    assert set(gen["values"]) == {"beats_per_round", "max_rounds"}
+    assert "max_tokens" not in gen["values"]
 
-    # 已删除的保存接口不能继续工作
-    assert client.post("/api/ui/config/generation", json={"values": {}}).status_code == 405
+
+def _generation_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """构造带独立覆盖层的设置客户端。
+
+    参数:
+        tmp_path: 临时目录。
+        monkeypatch: pytest 补丁工具。
+
+    返回:
+        (TestClient, 覆盖层路径)。
+    """
+    from fastapi.testclient import TestClient
+
+    from novel_drama.web import models_api
+    from novel_drama.web.app import create_app
+
+    base = _write(tmp_path / "config.yaml", "")
+    ui = tmp_path / "config.ui.yaml"
+    monkeypatch.setattr("novel_drama.config.DEFAULT_UI_CONFIG_PATH", ui)
+    monkeypatch.setattr(models_api, "DEFAULT_UI_CONFIG_PATH", ui)
+    return TestClient(create_app(config_path=str(base))), ui
+
+
+def test_generation_settings_save_and_reset(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """保存接口只写每轮节拍数与最大轮数，并支持恢复默认。"""
+    client, ui = _generation_client(tmp_path, monkeypatch)
+
+    saved = client.post(
+        "/api/ui/config/generation",
+        json={
+            "values": {
+                "writing.multi_turn.beats_per_round": 3,
+                "writing.multi_turn.max_rounds": 6,
+            }
+        },
+    )
+    assert saved.status_code == 200
+    gen = saved.json()["generation"]
+    assert gen["values"] == {"beats_per_round": 3, "max_rounds": 6}
+    assert gen["sources"]["beats_per_round"] == "page"
+    assert gen["sources"]["max_rounds"] == "page"
+    assert "beats_per_round" in ui.read_text(encoding="utf-8")
+
+    # 自动分配用 0 表示；最大轮数下限 1
+    reset = client.post(
+        "/api/ui/config/generation",
+        json={
+            "values": {
+                "writing.multi_turn.beats_per_round": None,
+                "writing.multi_turn.max_rounds": None,
+            }
+        },
+    )
+    assert reset.status_code == 200
+    gen = reset.json()["generation"]
+    assert gen["values"] == {"beats_per_round": 0, "max_rounds": 8}
+    assert gen["sources"]["beats_per_round"] == "builtin"
+    assert gen["sources"]["max_rounds"] == "builtin"
+
+
+def test_generation_settings_reject_budget_and_bad_values(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """输出预算类键与非整数/越界值都拒绝，不允许借这个接口加回预算。"""
+    client, _ui = _generation_client(tmp_path, monkeypatch)
+
+    budget = client.post(
+        "/api/ui/config/generation",
+        json={"values": {"omlx.max_tokens": 16384}},
+    )
+    assert budget.status_code == 400
+    assert "不支持修改" in budget.json()["detail"]["message"]
+
+    for value in (0, 21, 2.5, "abc"):
+        response = client.post(
+            "/api/ui/config/generation",
+            json={"values": {"writing.multi_turn.max_rounds": value}},
+        )
+        assert response.status_code == 400
 
 
 def test_thinking_is_single_global_switch() -> None:

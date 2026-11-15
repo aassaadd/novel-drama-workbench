@@ -370,6 +370,59 @@ def save_ui_config(updates: dict, path: str | Path | None = None) -> Path:
     return target
 
 
+def remove_ui_config(keys: list[str], path: str | Path | None = None) -> Path:
+    """删除覆盖层里的指定键（恢复默认），并清理因此变空的父级。
+
+    参数:
+        keys: 要删除的点号键列表，如 `["writing.multi_turn.max_rounds"]`。
+        path: 覆盖层路径；默认 `config/config.ui.yaml`。
+
+    返回:
+        实际写入的覆盖层路径。
+
+    异常:
+        OSError: 覆盖层不可写。
+    """
+    import yaml
+
+    target = Path(path).expanduser() if path else DEFAULT_UI_CONFIG_PATH
+    current = _read_yaml(target, [])
+    removed = False
+    for dotted in keys:
+        node = current
+        stack: list[tuple[dict, str]] = []
+        parts = dotted.split(".")
+        for part in parts[:-1]:
+            if not isinstance(node, dict) or part not in node:
+                node = None
+                break
+            stack.append((node, part))
+            node = node[part]
+        if isinstance(node, dict) and parts[-1] in node:
+            node.pop(parts[-1])
+            removed = True
+            # 从最深层往上清理空字典，避免留下空壳覆盖项
+            for parent, key in reversed(stack):
+                if isinstance(parent.get(key), dict) and not parent[key]:
+                    parent.pop(key)
+                else:
+                    break
+    if not removed:
+        return target
+    target.parent.mkdir(parents=True, exist_ok=True)
+    header = (
+        "# 由 Web「设置」页写入，只覆盖 config.yaml 里的同名键。\n"
+        "# 删掉本文件（或删掉某个键）即回落到 config.yaml 的取值。\n"
+    )
+    if current:
+        tmp = target.with_name(target.name + ".tmp")
+        tmp.write_text(header + yaml.safe_dump(current, allow_unicode=True, sort_keys=False), encoding="utf-8")
+        os.replace(tmp, target)
+    else:
+        target.unlink(missing_ok=True)
+    return target
+
+
 def _read_yaml(path: Path, warnings: list[str]) -> dict:
     """读取 YAML 文件；不存在或为空返回空字典。
 

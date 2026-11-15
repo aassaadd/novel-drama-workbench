@@ -27,6 +27,7 @@ from ..config import (
     DEFAULT_UI_CONFIG_PATH,
     _get_dotted,
     load_config,
+    remove_ui_config,
     save_ui_config,
 )
 from ..media import comfy_media, comfy_models
@@ -839,6 +840,67 @@ def register_models_routes(app, config_path: str | None = None) -> None:
         "omlx.reasoning_effort": ("思考强度", str),
     }
 
+    #: 正文生成可改项：点分键 -> (中文名, 最小值, 最大值, 默认值, 前端字段名)
+    GENERATION_FIELDS = {
+        "writing.multi_turn.beats_per_round": ("每轮节拍数", 0, 50, 0, "beats_per_round"),
+        "writing.multi_turn.max_rounds": ("最大轮数", 1, 20, 8, "max_rounds"),
+    }
+
+    def _generation_state(config) -> dict:
+        """读取正文生成可改项的生效值、默认值与来源（不含输出预算）。
+
+        参数:
+            config: AppConfig。
+
+        返回:
+            `{values, defaults, limits, sources, multi_turn_enabled}`。
+        """
+        values: dict = {}
+        defaults: dict = {}
+        limits: dict = {}
+        sources: dict = {}
+        for dotted, (_label, low, high, default, field) in GENERATION_FIELDS.items():
+            raw = config.get(dotted)
+            try:
+                number = int(float(raw)) if raw is not None else default
+            except (TypeError, ValueError):
+                number = default
+            values[field] = max(low, min(high, number))
+            defaults[field] = default
+            limits[field] = {"min": low, "max": high}
+            sources[field] = _config_source(config, dotted)
+        return {
+            "values": values,
+            "defaults": defaults,
+            "limits": limits,
+            "sources": sources,
+            "multi_turn_enabled": bool(config.get("writing.multi_turn.enabled", True)),
+        }
+
+    def _generation_status(config) -> dict:
+        """上下文/输出现状 + 正文生成可改项（GET 与保存后的返回共用）。
+
+        参数:
+            config: AppConfig。
+
+        返回:
+            `{context, output, last_call, generation}`。
+        """
+        return {
+            "context": context_status(config),
+            "output": {
+                "artificial_limit": False,
+                "max_tokens_rule": "上下文窗口 − 已用提示词（不额外留人为余量）",
+                "note": (
+                    "输出侧不设置人为上限：模型自己输出结束符就会停止。"
+                    "finish_reason=length 按异常记录并提示（模型自身输出上限或上游异常）。"
+                    "「要写多少字」由提示词里的目标字数与每轮节拍数决定。"
+                ),
+            },
+            "last_call": last_llm_call(),
+            "generation": _generation_state(config),
+        }
+
     #: 思考强度合法档位（与设置页下拉一致）
     THINKING_EFFORTS = ("low", "medium", "high")
 
@@ -977,21 +1039,74 @@ def register_models_routes(app, config_path: str | None = None) -> None:
 
     @app.get("/api/ui/config/generation")
     def ui_generation_status() -> dict:
-        """读取上下文与输出侧现状（只读；输出预算已不再作为设置项）。"""
-        config = load_config(config_path)
-        return {
-            "context": context_status(config),
-            "output": {
-                "artificial_limit": False,
-                "max_tokens_rule": "上下文窗口 − 已用提示词（不额外留人为余量）",
-                "note": (
-                    "输出侧不设置人为上限：模型自己输出结束符就会停止。"
-                    "finish_reason=length 按异常记录并提示（模型自身输出上限或上游异常）。"
-                    "「要写多少字」由提示词里的目标字数与每轮节拍数决定。"
-                ),
-            },
-            "last_call": last_llm_call(),
-        }
+        """读取上下文/输出现状与正文生成可改项（输出预算仍不是设置项）。"""
+        return _generation_status(load_config(config_path))
+
+    @app.post("/api/ui/config/generation")
+    def ui_save_generation(body: dict | None = None) -> dict:
+        """保存正文生成可改项到页面覆盖层，立即生效。
+
+        参数:
+            body: `{values: {点分键: 整数 | null}}`；只接受「每轮节拍数」「最大轮数」。
+                `null` / 空串表示删除覆盖项、恢复默认。
+
+        返回:
+            保存后的 `_generation_status`，附带 `saved_to`。
+
+        异常:
+            400：不支持的键、非整数或超出范围（中文说明）。
+            500：覆盖层写入失败。
+        """
+        if body is not None and not isinstance(body, dict):
+            raise HTTPException(status_code=400, detail={"code": 2, "message": "请求体必须是对象"})
+        values = dict((body or {}).get("values") or {})
+        if not isinstance(values, dict):
+            raise HTTPException(status_code=400, detail={"code": 2, "message": "values 必须是对象"})
+        updates: dict = {}
+        removals: list[str] = []
+        for dotted, value in values.items():
+            if dotted not in GENERATION_FIELDS:
+                raise HTTPException(
+                    status_code=400,
+                    detail={"code": 2, "message": f"不支持修改 {dotted}：正文生成只允许每轮节拍数与最大轮数"},
+                )
+            label, low, high, _default, field = GENERATION_FIELDS[dotted]
+            if value is None or (isinstance(value, str) and not value.strip()):
+                removals.append(dotted)
+                continue
+            try:
+                parsed = float(value)
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(
+                    status_code=400,
+                    detail={"code": 2, "message": f"{label}必须是整数"},
+                ) from exc
+            if not parsed.is_integer():
+                raise HTTPException(
+                    status_code=400,
+                    detail={"code": 2, "message": f"{label}必须是整数"},
+                )
+            number = int(parsed)
+            if number < low or number > high:
+                raise HTTPException(
+                    status_code=400,
+                    detail={"code": 2, "message": f"{label}必须在 {low}–{high} 之间"},
+                )
+            updates.setdefault("writing", {}).setdefault("multi_turn", {})[field] = number
+        targets: list[Path] = []
+        try:
+            if updates:
+                targets.append(save_ui_config(updates))
+            if removals:
+                targets.append(remove_ui_config(removals))
+        except OSError as exc:
+            raise HTTPException(
+                status_code=500,
+                detail={"code": 3, "message": f"配置写入失败：{exc.strerror or exc}"},
+            ) from exc
+        state = _generation_status(load_config(config_path))
+        state["saved_to"] = str(targets[-1] if targets else DEFAULT_UI_CONFIG_PATH)
+        return state
 
     @app.post("/api/ui/comfy/health")
     def ui_comfy_health(body: dict | None = None) -> dict:
