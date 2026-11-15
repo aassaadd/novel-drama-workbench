@@ -26,6 +26,7 @@ from ..models.ids import new_id, now_iso
 from ..store import ProjectStore
 from ..store.settings_store import SettingsStore
 from ..text.titles import strip_index_prefix
+from .cast_sync import sync_chapter_cast
 from .service import (
     _act_validation,
     _characters_payload,
@@ -781,6 +782,76 @@ def _to_outline_act(act: dict, origin: dict, beats_per_chapter: int, chapter_wor
     return built
 
 
+def _sync_expand_cast(
+    store: ProjectStore,
+    config: AppConfig,
+    adapter,
+    chapter: dict,
+    chapter_pos: int,
+    dry_run: bool,
+    on_progress,
+    characters: list[dict],
+    act_pos: int,
+    act_total: int,
+) -> tuple[list[str], list[str], list[dict]]:
+    """给扩充/续写新生成的单章做角色设定（复用已有卡，缺失就新建）。
+
+    参数:
+        store: 工程。
+        config: 本机配置。
+        adapter: 写作适配器。
+        chapter: 工作对象的章节（节拍已生成，会被原地写入 character_ids）。
+        chapter_pos: 章序号（用于提示与进度显示）。
+        dry_run: True 时不写 characters.json，新角色只留在内存里。
+        on_progress: 进度回调。
+        characters: 当前内存角色表。
+        act_pos: 幕序号。
+        act_total: 幕总数。
+
+    返回:
+        `(新建姓名列表, 复用姓名列表, 更新后的角色表)`。
+    """
+    title = chapter.get("title") or f"第{chapter_pos}章"
+    _progress(
+        on_progress,
+        {
+            "type": "batch",
+            "unit": "cast",
+            "phase": "cast",
+            "index": chapter_pos,
+            "total": chapter_pos,
+            "name": title,
+            "act_index": act_pos,
+            "act_total": act_total,
+            "chapter_index": chapter_pos,
+            "chapter": title,
+            "message": f"第 {chapter_pos} 章《{title}》角色设定",
+        },
+    )
+    report = sync_chapter_cast(
+        store,
+        config,
+        chapter,
+        adapter=adapter,
+        persist=not dry_run,
+        chapter_index=chapter_pos,
+    )
+    if dry_run:
+        known = {str(item.get("id")) for item in characters}
+        for item in report.get("new_characters") or []:
+            if str(item.get("id")) not in known:
+                characters.append(item)
+    else:
+        characters = [
+            item for item in store.load_characters()["characters"] if item.get("role") != "narrator"
+        ]
+    created = list(report.get("created") or [])
+    reused = list(report.get("reused") or [])
+    summary = f"第 {chapter_pos} 章《{title}》角色设定完成：新建 {len(created)}，复用 {len(reused)}"
+    _progress(on_progress, {"type": "notice", "message": summary})
+    return created, reused, characters
+
+
 def _renumber(bible: dict, store: ProjectStore, dry_run: bool = False) -> None:
     """按幕顺序重排大纲章序号，并同步已有章节文件的 index 字段。
 
@@ -963,6 +1034,8 @@ def expand_outline(
     _progress(on_progress, {"type": "batch", "unit": "expand", "index": 1, "total": 1, "name": placement})
 
     new_blocks: list[dict] = []
+    cast_created_total = 0
+    cast_reused_total = 0
     if mode == "after_chapter":
         count = max(1, int(new_chapters or expected_chapters))
         block = {"title": anchor_act_obj.get("title") or "新增章", "summary": "", "chapters": []}
@@ -999,6 +1072,22 @@ def expand_outline(
                 beats_before=(offset - 1) * expected_beats,
                 beat_total=planned_beats,
             )
+            # 节拍生成后立刻做角色设定：复用已有卡，缺失的当场新建并绑定到节拍
+            created, reused, characters = _sync_expand_cast(
+                store,
+                config,
+                adapter,
+                chapter,
+                int(chapter.get("index") or offset),
+                dry_run,
+                on_progress,
+                characters,
+                anchor_act,
+                len(acts),
+            )
+            cast_created_total += len(created)
+            cast_reused_total += len(reused)
+            meta["characters"] = _characters_payload(characters)
         block["chapters"] = chapters
         new_blocks.append(block)
     else:
@@ -1055,6 +1144,22 @@ def expand_outline(
                     beats_before=(chapter_pos - 1) * expected_beats,
                     beat_total=planned_beats,
                 )
+                # 节拍生成后立刻做角色设定：复用已有卡，缺失的当场新建并绑定到节拍
+                created, reused, characters = _sync_expand_cast(
+                    store,
+                    config,
+                    adapter,
+                    chapter,
+                    chapter_pos,
+                    dry_run,
+                    on_progress,
+                    characters,
+                    act_pos,
+                    len(work_acts),
+                )
+                cast_created_total += len(created)
+                cast_reused_total += len(reused)
+                meta["characters"] = _characters_payload(characters)
             new_blocks.append(act)
 
     # 插入：新内容先转成设定库结构，再按模式拼接；已有对象原样保留
@@ -1193,5 +1298,7 @@ def expand_outline(
         "ignored_character_refs": ignored_character_refs,
         "bound_characters": bound_stats["characters"],
         "bound_character_refs": bound_stats["refs"],
+        "characters_created": cast_created_total,
+        "characters_reused": cast_reused_total,
         "dry_run": dry_run,
     }

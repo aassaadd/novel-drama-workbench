@@ -22,6 +22,7 @@ from ..store.settings_store import SettingsStore
 from ..text.context import ContextAssembler
 from ..text.dialogue import normalize_dialogue
 from ..text.titles import strip_index_prefix
+from .cast_sync import sync_chapter_cast
 from .editing import INSTRUCTION_LIMIT, STALE_WARNING, _usage_payload
 from .service import (
     DEFAULT_CHAPTER_WORDS,
@@ -855,6 +856,56 @@ def _check_outline_indexes(outline_indexes: list[int], file_indexes: list[int]) 
     return max(list(outline_indexes) + list(file_indexes) + [0]) + 1
 
 
+def _sync_built_act_cast(
+    store: ProjectStore,
+    config: AppConfig,
+    adapter,
+    chapters: list[dict],
+    dry_run: bool,
+    characters: list[dict],
+) -> tuple[list[str], list[str], list[dict]]:
+    """给本次续写新生成的章节逐章做角色设定（复用已有卡，缺失就新建）。
+
+    参数:
+        store: 工程。
+        config: 本机配置。
+        adapter: 写作适配器。
+        chapters: `_build_outline_act` 产出的章节（节拍已生成，会被原地写入 character_ids）。
+        dry_run: True 时不写 characters.json，新建角色只留在内存里供后续幕使用。
+        characters: 当前内存角色表（可含旁白，内部按需过滤）。
+
+    返回:
+        `(新建姓名列表, 复用姓名列表, 更新后的角色表)`。
+
+    异常:
+        AdapterError: 某章角色设定失败；调用方应终止本次续写，避免出现没有角色的大纲。
+        ValueError: 章节没有节拍。
+    """
+    created: list[str] = []
+    reused: list[str] = []
+    for chapter in chapters:
+        report = sync_chapter_cast(
+            store,
+            config,
+            chapter,
+            adapter=adapter,
+            persist=not dry_run,
+            chapter_index=int(chapter.get("index") or 0) or None,
+        )
+        created.extend(report.get("created") or [])
+        reused.extend(report.get("reused") or [])
+        if dry_run:
+            known = {str(item.get("id")) for item in characters}
+            for item in report.get("new_characters") or []:
+                if str(item.get("id")) not in known:
+                    characters.append(item)
+        else:
+            characters = [
+                item for item in store.load_characters()["characters"] if item.get("role") != "narrator"
+            ]
+    return created, reused, characters
+
+
 def continue_outline(
     store: ProjectStore,
     config: AppConfig,
@@ -962,6 +1013,8 @@ def continue_outline(
     built_chapters: list[dict] = []
     applied = 0
     error: str | None = None
+    cast_created_total = 0
+    cast_reused_total = 0
 
     for act_offset in range(new_act_count):
         act_no = len(existing_acts) + act_offset + 1
@@ -992,6 +1045,19 @@ def continue_outline(
             break
 
         built = _build_outline_act(act, act_no, first_index, count, beats_per_chapter, chapter_words)
+        # 节拍生成后立刻做角色设定：复用已有角色卡，缺失的当场新建并绑定到节拍
+        try:
+            cast_created, cast_reused, characters = _sync_built_act_cast(
+                store, config, adapter, built["chapters"], dry_run, characters
+            )
+        except (AdapterError, ValueError) as exc:
+            error = f"第 {act_no} 幕角色设定失败：{exc}"
+            break
+        cast_created_total += len(cast_created)
+        cast_reused_total += len(cast_reused)
+        char_rows = _characters_payload(characters)
+        # 后续幕能看到本幕新建的角色，避免下一幕重复造人
+        req.metadata["characters"] = char_rows
         built_acts.append(built)
         built_chapters.extend(built["chapters"])
         done_lines.append(f"第 {act_no} 幕《{built.get('title')}》：{built.get('summary') or ''}")
@@ -1018,6 +1084,8 @@ def continue_outline(
             {"index": item.get("index"), "title": item.get("title"), "summary": item.get("summary")}
             for item in built_chapters
         ],
+        "characters_created": cast_created_total,
+        "characters_reused": cast_reused_total,
         "provider": getattr(adapter, "model", "") or "offline-writing",
         "settings_revision": bible.get("settings_revision"),
         "applied": applied,

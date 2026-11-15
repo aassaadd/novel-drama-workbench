@@ -202,6 +202,12 @@ function outlineProgressText(data, totals = {}) {
       current: chaptersTotal ? `全书共 ${chaptersTotal} 章` : '',
     };
   }
+  if (phase === 'cast') {
+    return {
+      stage: `第 ${actIndex}/${actsTotal} 幕 · 第 ${chapterIndex} 章 · 角色设定（复用已有卡，缺失就新建）`,
+      current: data.chapter || data.name ? `《${data.chapter || data.name}》` : '',
+    };
+  }
   if (phase === 'beats') {
     return {
       stage: `第 ${actIndex}/${actsTotal} 幕 · 第 ${chapterIndex}/${chaptersTotal} 章 · 第 ${Math.max(
@@ -2642,7 +2648,10 @@ function bindingSummary(result) {
   const bound = Number(result.bound_characters || 0);
   const refs = Number(result.bound_character_refs || 0);
   const ignored = Number(result.ignored_character_refs || 0);
-  return `角色绑定：${mode} · 绑定 ${bound} 个角色（${refs} 处节拍引用）· 忽略 ${ignored} 个非法引用`;
+  const created = Number(result.characters_created || 0);
+  const reused = Number(result.characters_reused || 0);
+  const cast = created || reused ? ` · 角色设定新建 ${created} / 复用 ${reused}` : '';
+  return `角色绑定：${mode} · 绑定 ${bound} 个角色（${refs} 处节拍引用）· 忽略 ${ignored} 个非法引用${cast}`;
 }
 
 /** AI 生成大纲：参数确认后直接生成并落盘（生成结果整份替换大纲，不动已落章正文） */

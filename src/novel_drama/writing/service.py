@@ -50,6 +50,7 @@ _TOOL_PER_ITEM_TOKENS = {
     "outline_acts": 900,
     "outline_chapters": 700,
     "outline_beats": 450,
+    "character_sync": 900,
     "premise": 600,
     "style": 600,
 }

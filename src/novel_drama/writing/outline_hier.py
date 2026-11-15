@@ -22,7 +22,9 @@ from ..config import AppConfig
 from ..models.ids import new_id, now_iso
 from ..store import ProjectStore
 from ..store.settings_store import SettingsStore
+from ..store.world_store import WorldStore
 from ..text.titles import strip_index_prefix
+from .cast_sync import sync_chapter_cast
 from .service import (
     _act_validation,
     _characters_payload,
@@ -31,7 +33,7 @@ from .service import (
     _tolerance,
     _tool_max_tokens,
     _validation_report,
-    bind_outline_characters,
+    bind_outline_context,
     build_writing_adapter,
     check_golden_three,
     outline_binding_stats,
@@ -468,6 +470,109 @@ def _normalize_beats(payload: dict, expected: int, chapter_words: int, beats_per
     return rows
 
 
+def _sync_chapter_cast(
+    store: ProjectStore,
+    config: AppConfig,
+    adapter,
+    chapter: dict,
+    chapter_pos: int,
+    dry_run: bool,
+    on_progress,
+    act_pos: int,
+    act_total: int,
+) -> dict:
+    """给单章做角色设定：复用已有角色卡，缺失的当场新建并绑定到节拍。
+
+    参数:
+        store: 工程。
+        config: 本机配置。
+        adapter: 写作适配器。
+        chapter: 大纲章节（节拍已生成，会被原地写入 character_ids 与 cast_synced）。
+        chapter_pos: 全文章序号。
+        dry_run: True 时只预览，不写 characters.json。
+        on_progress: 进度回调。
+        act_pos: 幕序号。
+        act_total: 幕总数。
+
+    返回:
+        `{created, reused, cast, beat_ids}`（见 `sync_chapter_cast`）。
+
+    异常:
+        AdapterError: 本章角色设定失败（由调用方决定是否记为该章失败）。
+    """
+    title = chapter.get("title") or f"第{chapter_pos}章"
+    _progress(
+        on_progress,
+        {
+            "type": "batch",
+            "unit": "cast",
+            "phase": "cast",
+            "index": chapter_pos,
+            "total": chapter_pos,
+            "name": title,
+            "act_index": act_pos,
+            "act_total": act_total,
+            "chapter_index": chapter_pos,
+            "chapter": title,
+            "message": f"第 {chapter_pos} 章《{title}》角色设定",
+        },
+    )
+    report = sync_chapter_cast(
+        store,
+        config,
+        chapter,
+        adapter=adapter,
+        persist=not dry_run,
+        chapter_index=chapter_pos,
+    )
+    created = list(report.get("created") or [])
+    reused = list(report.get("reused") or [])
+    summary = (
+        f"第 {chapter_pos} 章《{title}》角色设定完成：新建 {len(created)}，复用 {len(reused)}"
+        + (f"（新建：{'、'.join(created)}）" if created else "")
+    )
+    logger.info(summary)
+    _progress(on_progress, {"type": "notice", "message": summary})
+    return report
+
+
+def _merge_cast_characters(store: ProjectStore, report: dict, dry_run: bool, characters: list[dict]) -> list[dict]:
+    """把角色设定结果合进本次生成使用的内存角色表。
+
+    参数:
+        store: 工程。
+        report: `sync_chapter_cast` 的返回值。
+        dry_run: True 表示新建角色没有落盘，需要直接合并内存对象。
+        characters: 当前内存角色表（不含旁白）。
+
+    返回:
+        合并后的角色表。
+    """
+    if dry_run:
+        known = {str(item.get("id")) for item in characters}
+        for item in report.get("new_characters") or []:
+            if str(item.get("id")) not in known:
+                characters.append(item)
+        return characters
+    return [item for item in store.load_characters()["characters"] if item.get("role") != "narrator"]
+
+
+def _bind_outline_characters(store: ProjectStore, bible: dict, characters: list[dict]) -> dict:
+    """按给定角色表绑定大纲里的世界与 POV（不重新读盘）。
+
+    参数:
+        store: 工程（只读取 worlds.json）。
+        bible: 设定库 dict（就地修改）。
+        characters: 本次生成使用的角色表（含新建角色）。
+
+    返回:
+        `bind_outline_context` 的统计结果。
+    """
+    world_store = WorldStore(store.root)
+    worlds = world_store.list_worlds() if world_store.exists() else []
+    return bind_outline_context(bible, worlds, characters)
+
+
 def generate_hierarchical_outline(
     store: ProjectStore,
     config: AppConfig,
@@ -767,12 +872,47 @@ def generate_hierarchical_outline(
     beats_expected = max(1, int(beats_per_chapter))
     beats_total = chapter_total * beats_expected
     beats_done = 0
+    chars_done = 0
+    cast_created_total = 0
+    cast_reused_total = 0
     total_units = max(1, act_total + chapter_total + beats_total)
     _progress(on_progress, {"type": "stage", "stage": "beats", "total": chapter_total, "beats_total": beats_total})
     for act_pos, act in enumerate(work["acts"], start=1):
         for chapter in act.get("chapters") or []:
             chapter_pos += 1
             if chapter.get("beats") and len(chapter["beats"]) == beats_expected:
+                # 续跑：节拍已齐但可能还没做角色设定，补做一次
+                if not chapter.get("cast_synced"):
+                    try:
+                        report = _sync_chapter_cast(
+                            store, config, adapter, chapter, chapter_pos, dry_run, on_progress, act_pos, act_total
+                        )
+                    except AdapterError as exc:
+                        if (exc.detail or {}).get("gate"):
+                            raise
+                        chapter["status"] = "failed"
+                        chapter["error"] = _error_text(exc)
+                        failures.append(
+                            _failure(
+                                "chapter",
+                                chapter["error"],
+                                act_pos,
+                                act.get("title") or f"第{act_pos}幕",
+                                chapter_pos,
+                                chapter.get("title") or f"第{chapter_pos}章",
+                            )
+                        )
+                    else:
+                        cast_created_total += len(report.get("created") or [])
+                        cast_reused_total += len(report.get("reused") or [])
+                        chapter["cast_synced"] = True
+                        chapter["cast_created"] = list(report.get("created") or [])
+                        chapter["cast_reused"] = list(report.get("reused") or [])
+                        chapter["status"] = "done"
+                        chapter["error"] = None
+                        characters = _merge_cast_characters(store, report, dry_run, characters)
+                        char_rows = _characters_payload(characters)
+                        chars_done += 1
                 beats_done += len(chapter["beats"])
                 continue
             chapter_title = chapter.get("title") or f"第{chapter_pos}章"
@@ -925,6 +1065,18 @@ def generate_hierarchical_outline(
                 chapter["character_arcs"] = _normalize_character_arcs(
                     payload, {str(item.get("id")) for item in char_rows if item.get("id")}
                 )
+                # 节拍完成后立刻对齐角色卡：复用已有、补建缺失，并绑定到每个节拍
+                cast_report = _sync_chapter_cast(
+                    store, config, adapter, chapter, chapter_pos, dry_run, on_progress, act_pos, act_total
+                )
+                cast_created_total += len(cast_report.get("created") or [])
+                cast_reused_total += len(cast_report.get("reused") or [])
+                chapter["cast_synced"] = True
+                chapter["cast_created"] = list(cast_report.get("created") or [])
+                chapter["cast_reused"] = list(cast_report.get("reused") or [])
+                characters = _merge_cast_characters(store, cast_report, dry_run, characters)
+                char_rows = _characters_payload(characters)
+                chars_done += 1
                 chapter["status"] = "done"
                 chapter["error"] = None
                 beats_done += len(beats)
@@ -978,7 +1130,7 @@ def generate_hierarchical_outline(
     stats = sanitize_outline_character_ids(bible, characters)
     ignored_character_refs = int(stats["dropped"])
     if binding == "auto":
-        bind_outline_characters(store, bible)
+        _bind_outline_characters(store, bible, characters)
     if ignored_character_refs:
         suffix = "已回落到本章 POV" if binding == "auto" else "binding=none 不自动选角"
         message = f"已忽略 {ignored_character_refs} 个无法识别的角色引用（{suffix}）"
@@ -1011,6 +1163,10 @@ def generate_hierarchical_outline(
         "ignored_character_refs": ignored_character_refs,
         "bound_characters": bound_stats["characters"],
         "bound_character_refs": bound_stats["refs"],
+        "cast_chapters": chars_done,
+        "characters_created": cast_created_total,
+        "characters_reused": cast_reused_total,
+        "characters_total": len(characters),
         "golden_three": golden,
         "dry_run": dry_run,
         "failures": failures,
