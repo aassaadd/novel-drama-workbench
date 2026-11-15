@@ -7,18 +7,54 @@ import logging
 
 from fastapi import HTTPException, Query
 
-from novel_drama.interface.cli.commands.line import chapter_consistency
-
-logger = logging.getLogger(__name__)
-
+from novel_drama.application.production.line_edit import (
+    chapter_consistency,
+    edit_line_text,
+    line_split_impact,
+    merge_lines,
+    merge_narrations,
+    replace_line_texts,
+    revert_line_params,
+    set_lines,
+    split_line_at,
+    split_lines,
+)
 from novel_drama.application.production.line_query import chapter_lines, line_diff
 from novel_drama.infrastructure.config import load_config
 from novel_drama.interface.http import use_cases
-from novel_drama.interface.http.deps import run_cli, store_for
-from novel_drama.interface.http.routers.common import (
-    _require,
-    _respond,
-)
+from novel_drama.interface.http.deps import store_for
+from novel_drama.interface.http.routers.common import _require
+
+logger = logging.getLogger(__name__)
+
+#: 请求体字段 → (台词行字段, 类型转换)；与 `line set` 的参数类型保持一致
+_LINE_FIELD_MAP: dict[str, tuple[str, type]] = {
+    "speaker": ("speaker_id", str),
+    "kind": ("kind", str),
+    "emotion": ("emotion", str),
+    "emotion_intensity": ("emotion_intensity", float),
+    "speed": ("speed", float),
+    "pause_before_ms": ("pause_before_ms", int),
+    "pause_after_ms": ("pause_after_ms", int),
+    "text": ("text", str),
+    "delivery_note": ("delivery_note", str),
+}
+
+
+def _line_updates(body: dict) -> dict:
+    """从请求体提取实际给出的行字段。
+
+    参数:
+        body: 请求体，只传实际改动的字段。
+
+    返回:
+        `{台词行字段: 值}`；类型与 `line set` 的命令行参数一致（float/int/str）。
+    """
+    return {
+        field: convert(body[key])
+        for key, (field, convert) in _LINE_FIELD_MAP.items()
+        if body.get(key) is not None
+    }
 
 
 def register_voice_line_routes(app, project_root: str | None = None, config_path: str | None = None) -> None:
@@ -34,20 +70,9 @@ def register_voice_line_routes(app, project_root: str | None = None, config_path
     """
     _store = store_for(project_root)
 
-    def _cli(*argv: str):
-        """按 `serve --config` 的同一份配置执行 CLI。
-
-        参数:
-            argv: 不含 `--config` 的参数串。
-
-        返回:
-            `actions.CliResult`。
-        """
-        return run_cli(config_path, *argv)
-
     @app.post("/api/ui/lines/replace")
     def replace_line_text(body: dict) -> dict:
-        """在本章台词里做查找替换（逐行走 `line edit`，保证正文同步）。
+        """在本章台词里做查找替换（逐行同步正文）。
 
         参数:
             body: `{path, chapter, find, replace, whole?, case_sensitive?}`。
@@ -65,26 +90,9 @@ def register_voice_line_routes(app, project_root: str | None = None, config_path
             raise HTTPException(status_code=400, detail={"code": 2, "message": "查找内容不能为空"})
         replacement = str(body.get("replace") or "")
         store = _store(path)
-        payload = store.load_chapter(chapter_id)
-        replaced = 0
-        failed = 0
-        matched = 0
-        for scene in payload.get("scenes") or []:
-            for line in scene.get("lines") or []:
-                text = str(line.get("text") or "")
-                if find not in text:
-                    continue
-                matched += 1
-                new_text = text.replace(find, replacement)
-                result = _cli(
-                    "--project", str(store.root), "--json",
-                    "line", "edit", "--chapter", chapter_id, "--line", line.get("id"), "--text", new_text,
-                )
-                if result.code == 0:
-                    replaced += 1
-                else:
-                    failed += 1
-        return {"replaced": replaced, "failed": failed, "total_matched": matched}
+        return use_cases.call(
+            lambda: replace_line_texts(store, chapter_id, find, replacement)
+        )
 
     @app.get("/api/ui/lines")
     def ui_lines(
@@ -157,22 +165,14 @@ def register_voice_line_routes(app, project_root: str | None = None, config_path
             chapter="章节 ID",
             line="行 ID",
         )
-        argv = ["--project", body["path"], "line", "set", "--chapter", body["chapter"], "--line", body["line"]]
-        mapping = {
-            "speaker": "--speaker",
-            "kind": "--kind",
-            "emotion": "--emotion",
-            "emotion_intensity": "--emotion-intensity",
-            "speed": "--speed",
-            "pause_before_ms": "--pause-before",
-            "pause_after_ms": "--pause-after",
-            "text": "--text",
-            "delivery_note": "--delivery-note",
-        }
-        for key, flag in mapping.items():
-            if body.get(key) is not None:
-                argv += [flag, str(body[key])]
-        return _respond(_cli(*argv))
+        store = _store(body["path"])
+        result = use_cases.call(
+            lambda: set_lines(
+                store, body["chapter"], [body["line"]], _line_updates(body), batch=False
+            )
+        )
+        # 与旧接口一致：单行修改返回终端文案（该路由原本不带 --json）
+        return {"text": result["text"]}
 
     @app.post("/api/ui/line/set-batch")
     def ui_line_set_batch(body: dict) -> dict:
@@ -196,32 +196,13 @@ def register_voice_line_routes(app, project_root: str | None = None, config_path
         lines = [str(item).strip() for item in (body.get("lines") or []) if str(item).strip()]
         if not lines:
             raise HTTPException(status_code=400, detail={"code": 2, "message": "没有选中任何行"})
-        argv = [
-            "--project",
-            body["path"],
-            "--json",
-            "line",
-            "set",
-            "--chapter",
-            body["chapter"],
-            "--lines",
-            ",".join(lines),
-        ]
-        mapping = {
-            "speaker": "--speaker",
-            "kind": "--kind",
-            "emotion": "--emotion",
-            "emotion_intensity": "--emotion-intensity",
-            "speed": "--speed",
-            "pause_before_ms": "--pause-before",
-            "pause_after_ms": "--pause-after",
-            "text": "--text",
-            "delivery_note": "--delivery-note",
-        }
-        for key, flag in mapping.items():
-            if body.get(key) is not None:
-                argv += [flag, str(body[key])]
-        return _respond(_cli(*argv))
+        store = _store(body["path"])
+        result = use_cases.call(
+            lambda: set_lines(
+                store, body["chapter"], lines, _line_updates(body), batch=True
+            )
+        )
+        return result["payload"]
 
     @app.post("/api/ui/line/merge")
     def ui_line_merge(body: dict) -> dict:
@@ -245,19 +226,9 @@ def register_voice_line_routes(app, project_root: str | None = None, config_path
         lines = [str(item).strip() for item in (body.get("lines") or []) if str(item).strip()]
         if len(lines) < 2:
             raise HTTPException(status_code=400, detail={"code": 2, "message": "至少选择两行才能合并"})
-        return _respond(
-            _cli(
-                "--project",
-                body["path"],
-                "--json",
-                "line",
-                "merge",
-                "--chapter",
-                body["chapter"],
-                "--lines",
-                ",".join(lines),
-            )
-        )
+        store = _store(body["path"])
+        result = use_cases.call(lambda: merge_lines(store, body["chapter"], lines))
+        return result["payload"]
 
     @app.post("/api/ui/line/merge-narration")
     def ui_line_merge_narration(body: dict) -> dict:
@@ -276,15 +247,19 @@ def register_voice_line_routes(app, project_root: str | None = None, config_path
             path="工程目录",
             chapter="章节 ID",
         )
-        argv = ["--project", body["path"], "--json", "line", "merge-narration", "--chapter", body["chapter"]]
         scenes = body.get("scenes") or ([body["scene"]] if body.get("scene") else [])
-        for scene in scenes:
-            argv += ["--scene", str(scene)]
-        if body.get("max_chars") is not None:
-            argv += ["--max-chars", str(int(body["max_chars"]))]
-        if body.get("dry_run", True):
-            argv.append("--dry-run")
-        return _respond(_cli(*argv))
+        max_chars = int(body["max_chars"]) if body.get("max_chars") is not None else 120
+        store = _store(body["path"])
+        result = use_cases.call(
+            lambda: merge_narrations(
+                store,
+                body["chapter"],
+                scene_ids=[str(item) for item in scenes],
+                max_chars=max_chars,
+                dry_run=bool(body.get("dry_run", True)),
+            )
+        )
+        return result["payload"]
 
     @app.post("/api/ui/line/edit")
     def ui_line_edit(body: dict) -> dict:
@@ -300,21 +275,11 @@ def register_voice_line_routes(app, project_root: str | None = None, config_path
             line="行 ID",
             text="新文本",
         )
-        return _respond(
-            _cli(
-                "--project",
-                body["path"],
-                "--json",
-                "line",
-                "edit",
-                "--chapter",
-                body["chapter"],
-                "--line",
-                body["line"],
-                "--text",
-                body["text"],
-            )
+        store = _store(body["path"])
+        result = use_cases.call(
+            lambda: edit_line_text(store, body["chapter"], body["line"], body["text"])
         )
+        return result["payload"]
 
     @app.post("/api/ui/line/revert")
     def ui_line_revert(body: dict) -> dict:
@@ -326,9 +291,22 @@ def register_voice_line_routes(app, project_root: str | None = None, config_path
             chapter="章节 ID",
             line="行 ID",
         )
-        return _respond(
-            _cli("--project", body["path"], "--json", "line", "revert", "--chapter", body["chapter"], "--line", body["line"])
+        store = _store(body["path"])
+        result = use_cases.call(
+            lambda: revert_line_params(
+                store, body["chapter"], body["line"], load_config(config_path)
+            )
         )
+        if not result["snapshot_available"]:
+            # 沿用旧语义（CLI 退出码 1）：无参数快照属于「拒绝执行」，409 且不改盘
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": 1,
+                    "message": json.dumps(result["payload"], ensure_ascii=False, indent=2),
+                },
+            )
+        return result["payload"]
 
     @app.post("/api/ui/line/split")
     def ui_line_split(body: dict) -> dict:
@@ -339,12 +317,16 @@ def register_voice_line_routes(app, project_root: str | None = None, config_path
             path="工程目录",
             chapter="章节 ID",
         )
-        argv = ["--project", body["path"], "--json", "line", "split", "--chapter", body["chapter"]]
-        if body.get("force"):
-            argv.append("--force")
-        if body.get("keep_manual"):
-            argv.append("--keep-manual")
-        return _respond(_cli(*argv))
+        store = _store(body["path"])
+        result = use_cases.call(
+            lambda: split_lines(
+                store,
+                body["chapter"],
+                force=bool(body.get("force")),
+                keep_manual=bool(body.get("keep_manual")),
+            )
+        )
+        return result["payload"]
 
     @app.post("/api/ui/line/split-at")
     def ui_line_split_at(body: dict) -> dict:
@@ -363,21 +345,13 @@ def register_voice_line_routes(app, project_root: str | None = None, config_path
             chapter="章节 ID",
             line="行 ID",
         )
-        return _respond(
-            _cli(
-                "--project",
-                body["path"],
-                "--json",
-                "line",
-                "split-at",
-                "--chapter",
-                body["chapter"],
-                "--line",
-                body["line"],
-                "--offset",
-                str(int(body.get("offset") or 0)),
+        store = _store(body["path"])
+        result = use_cases.call(
+            lambda: split_line_at(
+                store, body["chapter"], body["line"], int(body.get("offset") or 0)
             )
         )
+        return result["payload"]
 
     @app.post("/api/ui/line/split/impact")
     def ui_line_split_impact(body: dict) -> dict:
@@ -388,7 +362,10 @@ def register_voice_line_routes(app, project_root: str | None = None, config_path
             path="工程目录",
             chapter="章节 ID",
         )
-        argv = ["--project", body["path"], "--json", "line", "split", "--chapter", body["chapter"], "--impact"]
-        if body.get("keep_manual"):
-            argv.append("--keep-manual")
-        return _respond(_cli(*argv))
+        store = _store(body["path"])
+        result = use_cases.call(
+            lambda: line_split_impact(
+                store, body["chapter"], keep_manual=bool(body.get("keep_manual"))
+            )
+        )
+        return result["payload"]

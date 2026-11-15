@@ -8,6 +8,7 @@ from pathlib import Path
 
 from fastapi import HTTPException, Query
 
+from novel_drama.application.production.line_edit import chapter_consistency
 from novel_drama.application.story.edit_chapter import (
     edit_chapter,
     restore_chapter_version,
@@ -22,7 +23,6 @@ from novel_drama.application.story.summarize_chapter import (
 )
 from novel_drama.composition import AdapterError, ProjectStore
 from novel_drama.infrastructure.config import load_config
-from novel_drama.interface.cli.commands.line import chapter_consistency
 from novel_drama.interface.http import use_cases
 from novel_drama.interface.http.deps import run_cli, store_for
 from novel_drama.interface.http.routers.common import (
