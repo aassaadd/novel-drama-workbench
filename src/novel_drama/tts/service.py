@@ -13,9 +13,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from ..cleanup import remove_dir_quietly
+from ..domain.speech.rules.params import line_fingerprint
 from . import sidecar
 from .errors import BAD_OUTPUT, TtsError
-from .fingerprint import line_fingerprint
 from .registry import build_providers
 from .routing import fallback_chain, resolve_lock, route
 from .types import Requirement, SynthesisRequest, VoiceRef

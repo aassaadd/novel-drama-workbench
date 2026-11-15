@@ -9,6 +9,7 @@ from __future__ import annotations
 import copy
 
 from .cli_common import EXIT_OK, _emit, _resolve_store
+from .domain.speech.rules.params import FP_FIELDS
 from .store.groups_store import (
     GroupsStore,
     apply_group,
@@ -17,7 +18,6 @@ from .store.groups_store import (
     detect,
 )
 from .tts import line_state
-from .tts.fingerprint import FP_FIELDS
 
 
 def _derive_states(store, config, chapter: dict) -> dict[str, str]:

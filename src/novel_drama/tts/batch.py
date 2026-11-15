@@ -18,10 +18,10 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+from ..domain.speech.rules.params import line_fingerprint
 from ..orchestration.pipeline import is_line_stale
 from . import alignment, cache, line_state, reuse, sidecar
 from .errors import TtsError
-from .fingerprint import line_fingerprint
 from .service import split_text
 
 

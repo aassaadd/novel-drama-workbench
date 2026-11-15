@@ -14,7 +14,7 @@ import json
 import os
 from pathlib import Path
 
-from .fingerprint import line_fingerprint
+from ..domain.speech.rules.params import line_fingerprint
 
 # 当前侧车结构版本；写入时缺省补这个值
 SIDECAR_VERSION = 2

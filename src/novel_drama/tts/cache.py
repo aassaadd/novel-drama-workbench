@@ -21,7 +21,7 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .fingerprint import normalize_value
+from ..domain.speech.rules.params import normalize_value
 
 # 缓存结构版本：签名规则或存储结构变化时 +1，旧文件按空缓存处理
 CACHE_SCHEMA_VERSION = 3

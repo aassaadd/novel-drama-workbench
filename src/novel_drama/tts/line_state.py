@@ -13,64 +13,27 @@
 
 from __future__ import annotations
 
-import difflib
 from pathlib import Path
 
+from ..domain.speech.rules.line_state import (
+    resolve_line_state as _domain_resolve_line_state,
+)
+from ..domain.speech.rules.params import (
+    PENDING_STATES,
+    REVERT_FIELDS,
+    SCOPES,
+    SELECTABLE_STATES,
+    STATUS_FILTER_ALIASES,
+    normalize_value,
+)
+from ..domain.speech.rules.params import (
+    PERSISTED_STATES as PERSISTED_STATES,
+)
 from ..models import entities
 from . import sidecar
-from .fingerprint import line_fingerprint, normalize_value
 
-# 允许落盘的状态；`stale` / `skipped` 是派生态，写盘即视为非法
-PERSISTED_STATES: tuple[str, ...] = ("pending", "queued", "running", "ready", "failed")
-
-# 可被 `--status` 筛选的派生状态；`unknown` 是历史遗留的「未识别说话人」伪状态，不算派生状态
-SELECTABLE_STATES: tuple[str, ...] = ("pending", "stale", "failed", "ready")
-STATUS_FILTER_ALIASES: tuple[str, ...] = SELECTABLE_STATES + ("unknown",)
-
-# 需要重跑的三态：`--scope pending` 与 `line list --status pending,stale,failed`
-# 必须共用这一份定义，否则「筛选计数」与「plan 计数」会各算一套
-PENDING_STATES: tuple[str, ...] = ("pending", "stale", "failed")
-
-# 生成范围选择器（见 docs/tts-line-state-and-seams.md §5）
-SCOPES: tuple[str, ...] = ("selected", "pending", "scene", "chapter")
-
-# 能从行上重建的参数：其余字段（provider_id/model_version/variant_id/切分参数）沿用快照
-_LINE_FIELDS: tuple[str, ...] = ("text", "emotion", "emotion_intensity", "speed", "delivery_note", "target_duration_ms")
-
-# 撤回时回滚的字段；text 是创作成果，明确不回滚
-REVERT_FIELDS: tuple[str, ...] = ("emotion", "emotion_intensity", "speed", "delivery_note")
-
-# 字段展示名
-FIELD_LABELS: dict[str, str] = {
-    "text": "文本",
-    "emotion": "情绪",
-    "emotion_intensity": "强度",
-    "voice_id": "音色",
-    "variant_id": "音色变体",
-    "speaker_id": "说话人",
-    "speed": "语速",
-    "delivery_note": "交付说明",
-    "provider_id": "引擎",
-    "model_version": "模型版本",
-    "chunk_limit": "切分上限",
-    "chunk_silence_ms": "接缝静音",
-    "edge_trim_ms": "接缝裁切",
-    "edge_trim_max_ms": "裁切上限",
-    "keep_min_ms": "保留气口",
-    "silence_threshold_dbfs": "静音阈值",
-    "hard_split_ratio": "硬切折扣",
-}
-
-# 差异分组：(组名, 字段列表)，顺序即输出顺序
-# 刻意不含 instruct：它是「交付说明 / 情绪」收敛出来的中间结果，展示它等于把黑盒抛给用户
-DIFF_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("文本", ("text",)),
-    ("情绪", ("emotion", "emotion_intensity")),
-    ("音色", ("voice_id", "variant_id")),
-    ("演绎", ("speed", "delivery_note")),
-    ("引擎", ("provider_id", "model_version")),
-    ("切分", ("chunk_limit", "chunk_silence_ms", "edge_trim_ms", "edge_trim_max_ms", "keep_min_ms", "silence_threshold_dbfs", "hard_split_ratio")),
-)
+# 状态常量与派生状态筛选规则已下沉到 `domain.speech.rules.params`，
+# 此处按原名引入，供 CLI/Web 等旧调用方继续通过 `line_state.<NAME>` 使用。
 
 
 def _instruct_for(line: dict) -> str | None:
@@ -334,104 +297,6 @@ def engine_params(config) -> dict:
     }
 
 
-def current_params(line: dict, snapshot_params: dict | None = None, engine: dict | None = None) -> dict:
-    """用行上的当前值重建参数快照，用于与侧车快照比对。
-
-    参数:
-        line: 台词行。
-        snapshot_params: 侧车里的 `params`，作为底稿。
-        engine: 当前配置导出的引擎侧参数（`engine_params`），覆盖底稿同名字段。
-
-    返回:
-        参数字典：行级 5 个字段取自当前行，`instruct` 按当前行重新收敛，
-        引擎侧字段以当前配置为准，其余（provider/model/音色）沿用底稿。
-    """
-    params = dict(snapshot_params or {})
-    params.update(engine or {})
-    for field in _LINE_FIELDS:
-        params[field] = line.get(field)
-    params["instruct"] = _instruct_for(line)
-    return params
-
-
-def _text_delta(old: str | None, new: str | None) -> str:
-    """统计两段文本的增删字数。
-
-    参数:
-        old: 快照里的文本。
-        new: 当前文本。
-
-    返回:
-        形如 `+12/−3 字` 的摘要。
-    """
-    matcher = difflib.SequenceMatcher(None, old or "", new or "")
-    added = removed = 0
-    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-        if tag == "insert":
-            added += j2 - j1
-        elif tag == "delete":
-            removed += i2 - i1
-        elif tag == "replace":
-            added += j2 - j1
-            removed += i2 - i1
-    return f"+{added}/−{removed} 字"
-
-
-def _format_value(field: str, value) -> str:
-    """把一个字段值格式化成给人看的样子。
-
-    参数:
-        field: 字段名。
-        value: 字段值。
-
-    返回:
-        人类可读文本；None 显示为「空」。
-    """
-    if value is None or value == "":
-        return "空"
-    if field == "delivery_note":
-        return f"「{value}」"
-    if isinstance(value, float):
-        return f"{value:g}"
-    return str(value)
-
-
-def diff_params(before: dict, after: dict) -> list[dict]:
-    """逐字段比对两组参数，输出「改 N」条目。
-
-    参数:
-        before: 生成时的参数（侧车快照）。
-        after: 当前参数（`current_params` 的结果）。
-
-    返回:
-        `[{group, field, label, from, to, text}]`；无差异时为空列表。
-        `instruct` 不参与展示：它是交付说明/情绪的收敛结果，展示它会让用户看不出自己改了什么。
-    """
-    changes: list[dict] = []
-    for group, fields in DIFF_GROUPS:
-        for field in fields:
-            old = before.get(field)
-            new = after.get(field)
-            if normalize_value(old) == normalize_value(new):
-                continue
-            if field == "text":
-                summary = f"文本 {_text_delta(old, new)}"
-            else:
-                label = FIELD_LABELS.get(field, field)
-                summary = f"{label} {_format_value(field, old)} → {_format_value(field, new)}"
-            changes.append(
-                {
-                    "group": group,
-                    "field": field,
-                    "label": FIELD_LABELS.get(field, field),
-                    "from": old,
-                    "to": new,
-                    "text": summary,
-                }
-            )
-    return changes
-
-
 def resolve_line_state(
     line: dict,
     characters: dict[str, dict] | None = None,
@@ -443,6 +308,12 @@ def resolve_line_state(
 ) -> dict:
     """计算一条台词的展示状态（七态模型）。
 
+    判定规则已下沉到 `domain.speech.rules.line_state`；这里只负责把三样外部事实准备好：
+
+    - 产物是否存在（按 `root` + `tts.asset_id` 检查）；
+    - 该行是否仍在队列里（`live_ids`）；
+    - 说话人展示名与风格指令（`entities.speaker_display_name` / `_instruct_for`）。
+
     参数:
         line: 台词行。
         characters: `{角色 ID: 角色}`；用于音色绑定变更判定。
@@ -450,104 +321,25 @@ def resolve_line_state(
         root: 工程根目录；给出时会检查音频产物是否还存在。
         live_ids: 当前队列里活跃的行 ID 集合；`None` 视为没有活跃批次。
         engine: 当前配置导出的引擎侧参数（`engine_params`）；改裁切参数后据此判 stale。
-        skip_kinds: 不参与配音的行类型，默认空（配置项待后续阶段接入）。
+        skip_kinds: 不参与配音的行类型，默认空。
 
     返回:
-        `{"state", "persisted", "reason", "changes"}`：
-        `state` 为七态之一，`persisted` 为落盘值，`changes` 为 `diff_params` 的结果。
+        `{"state", "persisted", "reason", "changes"}`。
     """
-    tts = line.get("tts") or {}
-    asked = tts.get("status") or "pending"
-    text = (line.get("text") or "").strip()
-
-    if not text or (skip_kinds and line.get("kind") in skip_kinds):
-        return {"state": "skipped", "persisted": asked, "reason": "empty_text", "changes": []}
-
-    if asked in ("queued", "running"):
-        # 僵尸态降级：队列里已经没有这条了，说明上次进程被中断
-        if live_ids and line.get("id") in live_ids:
-            return {"state": asked, "persisted": asked, "reason": "active", "changes": []}
-        return {"state": "pending", "persisted": asked, "reason": "zombie", "changes": []}
-
-    if asked == "failed":
-        return {"state": "failed", "persisted": asked, "reason": "last_failed", "changes": []}
-
-    if asked != "ready":
-        return {"state": "pending", "persisted": asked, "reason": "not_generated", "changes": []}
-
-    asset = _asset_path(root, tts.get("asset_id"))
-    if root is not None and asset is not None and not asset.exists():
-        return {"state": "pending", "persisted": asked, "reason": "asset_missing", "changes": []}
-
-    if snapshot is not None:
-        current = current_params(line, snapshot.get("params"), engine)
-        if line_fingerprint(current) != snapshot.get("fingerprint"):
-            return {
-                "state": "stale",
-                "persisted": asked,
-                "reason": "param_changed",
-                "changes": diff_params(snapshot.get("params") or {}, current),
-            }
-    elif tts.get("synthesized_revision") != line.get("revision"):
-        # 旧侧车（无指纹）走 revision 兜底，与改造前行为一致
-        return {"state": "stale", "persisted": asked, "reason": "revision_changed", "changes": []}
-
-    # 真人录音不依赖 TTS 音色/侧车参数：正文 revision 已在上方校验，直接算就绪。
-    if tts.get("adapter") == "human":
-        return {"state": "ready", "persisted": asked, "reason": "human_take", "changes": []}
-
-    # 说话人是否变过：换了人就把音频标为过期，避免留着旧音色的音频还显示「就绪」。
-    # 新侧车直接记 speaker_id；旧侧车没有该字段时，按音频音色反推归属者兜底。
-    current_speaker = line.get("speaker_id")
-    snapshot_speaker = (snapshot.get("params") or {}).get("speaker_id") if snapshot else None
-    used_voice = tts.get("voice_id")
-    if snapshot is not None and not snapshot_speaker and used_voice:
-        owners = [
-            character_id
-            for character_id, character in (characters or {}).items()
-            if ((character or {}).get("voice_binding") or {}).get("voice_id") == used_voice
-        ]
-        if owners and current_speaker not in owners:
-            snapshot_speaker = owners[0]
-    if snapshot_speaker and current_speaker != snapshot_speaker:
-        before_name = entities.speaker_display_name(snapshot_speaker, characters or {})
-        after_name = entities.speaker_display_name(current_speaker, characters or {})
-        return {
-            "state": "stale",
-            "persisted": asked,
-            "reason": "speaker_changed",
-            "changes": [
-                {
-                    "group": "音色",
-                    "field": "speaker_id",
-                    "label": FIELD_LABELS["speaker_id"],
-                    "from": snapshot_speaker,
-                    "to": current_speaker,
-                    "text": f"说话人 {before_name} → {after_name}",
-                }
-            ],
-        }
-
-    binding = ((characters or {}).get(line.get("speaker_id")) or {}).get("voice_binding") or {}
-    if binding.get("voice_id") and tts.get("voice_id") != binding.get("voice_id"):
-        return {
-            "state": "stale",
-            "persisted": asked,
-            "reason": "voice_rebound",
-            "changes": [
-                {
-                    "group": "音色",
-                    "field": "voice_id",
-                    "label": FIELD_LABELS["voice_id"],
-                    "from": tts.get("voice_id"),
-                    "to": binding.get("voice_id"),
-                    "text": f"音色 {_format_value('voice_id', tts.get('voice_id'))} → "
-                    f"{_format_value('voice_id', binding.get('voice_id'))}",
-                }
-            ],
-        }
-
-    return {"state": "ready", "persisted": asked, "reason": "matched", "changes": []}
+    asset = _asset_path(root, (line.get("tts") or {}).get("asset_id"))
+    missing_asset = bool(root is not None and asset is not None and not asset.exists())
+    live = bool(live_ids) and line.get("id") in live_ids
+    return _domain_resolve_line_state(
+        line,
+        characters,
+        snapshot,
+        live=live,
+        missing_asset=missing_asset,
+        engine=engine,
+        instruct=_instruct_for(line),
+        skip_kinds=skip_kinds,
+        speaker_name=lambda speaker_id: entities.speaker_display_name(speaker_id, characters or {}),
+    )
 
 
 def revert_line(
