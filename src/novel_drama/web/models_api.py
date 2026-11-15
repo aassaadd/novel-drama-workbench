@@ -23,7 +23,8 @@ from pathlib import Path
 from fastapi import HTTPException
 
 from ..adapters.comfyui import LocalComfyGateway
-from ..adapters.llm import OmlxWritingAdapter, last_llm_call
+from ..adapters.llm import OmlxWritingAdapter
+from ..adapters.observability import last_llm_call
 from ..domain.production.rules.thinking_policy import (
     STAGE_CONFIG_PREFIX,
     resolve_thinking,

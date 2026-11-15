@@ -1,51 +1,16 @@
-"""写作适配的模块级工具：调用摘要记录、采样能力探测、SSE 增量解析与 HTTP 响应包装。
+"""写作适配的模块级工具：采样能力探测、SSE 增量解析与 HTTP 响应包装。
 
 这些常量与函数被 `catalog`、`omlx` 共用，独立成模块避免两边各存一份。
+最近一次调用摘要见 `adapters/observability/model_call_recorder`。
 """
 
 from __future__ import annotations
 
 import logging
-import threading
 import urllib.request
 
 #: 日志：每次写作 LLM HTTP 调用记录地址、状态码、耗时与返回片段
 logger = logging.getLogger(__name__)
-
-#: 最近一次写作 LLM 调用摘要（进程级），供任务页 / 设置页随时自查
-_LAST_CALL: dict = {}
-_LAST_CALL_LOCK = threading.Lock()
-
-
-#: 最近一次请求的上下文/提示词/输出空间统计（进程级）
-_LAST_BUDGET: dict = {}
-
-
-def last_llm_call() -> dict:
-    """返回最近一次写作 LLM HTTP 调用摘要（含上下文与提示词占用）。
-
-    返回:
-        `{at, url, status, elapsed_ms, ok, finish_reason, tool_calls, snippet, error,
-        context_limit, prompt_tokens, max_tokens, task}`；尚未调用时为空 dict。
-    """
-    with _LAST_CALL_LOCK:
-        result = dict(_LAST_CALL)
-        result.update(_LAST_BUDGET)
-        return result
-
-
-def _record_budget_stats(**fields) -> None:
-    """覆盖写入最近一次请求的上下文/提示词/输出空间统计（进程内）。"""
-    with _LAST_CALL_LOCK:
-        _LAST_BUDGET.clear()
-        _LAST_BUDGET.update(fields)
-
-
-def _record_llm_call(**fields) -> None:
-    """覆盖写入最近一次调用摘要（进程内）。"""
-    with _LAST_CALL_LOCK:
-        _LAST_CALL.clear()
-        _LAST_CALL.update(fields)
 
 
 def _call_snippet(data: dict | None, limit: int = 300) -> tuple[str, str, int]:

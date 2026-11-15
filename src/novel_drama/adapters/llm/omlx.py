@@ -27,6 +27,7 @@ from ...domain.production.rules.thinking_policy import resolve_thinking
 from ...domain.production.rules.watchdog import apply_context_limit, watchdog_tokens
 from ...domain.production.rules.watchdog import describe as describe_watchdog
 from ..errors import AdapterError, ErrorCode
+from ..observability import record_budget_stats, record_model_call
 from .catalog import ModelCatalogMixin
 from .contracts import TextGenChunk, TextGenRequest, TextGenResult, Usage
 from .helpers import (
@@ -43,8 +44,6 @@ from .helpers import (
     _call_snippet,
     _HttpResponse,
     _log_reasoning,
-    _record_budget_stats,
-    _record_llm_call,
     _split_delta,
     _to_float,
     logger,
@@ -514,7 +513,7 @@ class OmlxWritingAdapter(ModelCatalogMixin):
             logger.info("看门狗 max_tokens task=%s %s", str(req.task or ""), note)
         elif available is not None:
             payload["max_tokens"] = available
-        _record_budget_stats(
+        record_budget_stats(
             at=time.strftime("%Y-%m-%dT%H:%M:%S"),
             task=str(req.task or ""),
             model=self.model,
@@ -770,7 +769,7 @@ class OmlxWritingAdapter(ModelCatalogMixin):
         except AdapterError as exc:
             detail = exc.detail if isinstance(exc.detail, dict) else {}
             elapsed = int((time.monotonic() - started) * 1000)
-            _record_llm_call(
+            record_model_call(
                 at=time.strftime("%Y-%m-%dT%H:%M:%S"),
                 url=url,
                 status=detail.get("status"),
@@ -791,7 +790,7 @@ class OmlxWritingAdapter(ModelCatalogMixin):
             raise
         elapsed = int((time.monotonic() - started) * 1000)
         snippet, finish, call_count = _call_snippet(data)
-        _record_llm_call(
+        record_model_call(
             at=time.strftime("%Y-%m-%dT%H:%M:%S"),
             url=url,
             status=200,

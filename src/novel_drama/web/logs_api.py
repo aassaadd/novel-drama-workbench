@@ -2,12 +2,12 @@
 
 职责边界：
 - 记录哪些请求：所有带副作用的接口（POST / PATCH / PUT / DELETE），
-  以及它们内部的 CLI 调用与 LLM 调用（由 `oplog` 的钩子按 trace 串起来）；
+  以及它们内部的 CLI 调用与 LLM 调用（由 `observability` 的钩子按 trace 串起来）；
 - 记录哪些字段：时间、工程、动作、目标、参数摘要、结果、耗时、失败原因，
   以及出错时的异常堆栈；
 - 不记录：只读 GET 接口与日志接口自身，避免刷屏。
 
-日志写入在 `oplog` 里异步完成，本模块只负责组装记录与提供查询接口。
+日志写入在 `observability` 里异步完成，本模块只负责组装记录与提供查询接口。
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ import traceback
 from fastapi import HTTPException, Query
 from starlette.responses import Response
 
-from .. import oplog
+from ..adapters import observability
 from ..infrastructure.config import load_config
 
 #: 需要记录日志的 HTTP 方法（只读 GET 不记）
@@ -312,8 +312,8 @@ def register_logs_routes(app, config_path: str | None = None) -> None:
         config = load_config(config_path)
     except Exception:  # noqa: BLE001 - 配置异常不阻断服务启动
         config = None
-    oplog.configure(config)
-    oplog.install_llm_hooks()
+    observability.configure(config)
+    observability.install_llm_hooks()
 
     @app.middleware("http")
     async def _oplog_middleware(request, call_next):
@@ -339,14 +339,14 @@ def register_logs_routes(app, config_path: str | None = None) -> None:
         project = str(
             body.get("path") or body.get("project") or body.get("dir") or request.query_params.get("path") or ""
         )
-        trace_id = request.headers.get("X-Ndw-Trace") or oplog.new_trace_id()
+        trace_id = request.headers.get("X-Ndw-Trace") or observability.new_trace_id()
         started = time.monotonic()
 
-        with oplog.bind_request(trace_id, project, label):
+        with observability.bind_request(trace_id, project, label):
             try:
                 response = await call_next(request)
             except BaseException as exc:  # noqa: BLE001 - 记录后原样抛出
-                oplog.record_op(
+                observability.record_op(
                     action=action,
                     label=label,
                     target=_target_of(body),
@@ -357,8 +357,8 @@ def register_logs_routes(app, config_path: str | None = None) -> None:
                     error=str(exc),
                     detail={
                         "http": {"method": method, "path": path, "status": 500, "content_type": content_type},
-                        "params": oplog.redact(_clean_params(body, dict(request.query_params))),
-                        "steps": oplog.collect_steps(),
+                        "params": observability.redact(_clean_params(body, dict(request.query_params))),
+                        "steps": observability.collect_steps(),
                         "error": {"message": str(exc), "traceback": traceback.format_exc()},
                     },
                     trace_id=trace_id,
@@ -387,7 +387,7 @@ def register_logs_routes(app, config_path: str | None = None) -> None:
                 error_text = _response_error(raw_body)
             except Exception:  # noqa: BLE001 - 取错误文本失败不影响响应
                 error_text = ""
-            oplog.record_op(
+            observability.record_op(
                 action=action,
                 label=label,
                 target=_target_of(body),
@@ -398,8 +398,8 @@ def register_logs_routes(app, config_path: str | None = None) -> None:
                 error=error_text,
                 detail={
                     "http": {"method": method, "path": path, "status": status_code, "content_type": content_type},
-                    "params": oplog.redact(_clean_params(body, dict(request.query_params))),
-                    "steps": oplog.collect_steps(),
+                    "params": observability.redact(_clean_params(body, dict(request.query_params))),
+                    "steps": observability.collect_steps(),
                 },
                 trace_id=trace_id,
             )
@@ -421,7 +421,7 @@ def register_logs_routes(app, config_path: str | None = None) -> None:
         offset: int = Query(0, ge=0),
     ) -> dict:
         """查询日志列表（最新在前，返回浅层字段）。"""
-        return oplog.query(
+        return observability.query(
             kind=(kind or "").strip(),
             project=(project or "").strip(),
             keyword=(q or "").strip(),
@@ -438,7 +438,7 @@ def register_logs_routes(app, config_path: str | None = None) -> None:
         line: int = Query(..., ge=0, description="行号（0 基）"),
     ) -> dict:
         """按「分卷 + 行号」读取一条完整日志（含完整提示词与返回文本）。"""
-        record = oplog.get_record(file, line)
+        record = observability.get_record(file, line)
         if record is None:
             raise HTTPException(status_code=404, detail="日志记录不存在（可能已被滚动清理）")
         return record
@@ -446,18 +446,18 @@ def register_logs_routes(app, config_path: str | None = None) -> None:
     @app.get("/api/logs/stats")
     def log_stats() -> dict:
         """日志目录占用、分卷列表与磁盘上限。"""
-        return oplog.stats()
+        return observability.stats()
 
     @app.get("/api/logs/facets")
     def log_facets(days: int = Query(7, ge=1, le=90)) -> dict:
         """最近若干天出现过的工程（筛选下拉用）。"""
-        return oplog.facets(days)
+        return observability.facets(days)
 
     @app.post("/api/logs/clear")
     def clear_logs() -> dict:
         """清空全部日志（用户主动操作）。"""
-        removed = oplog.clear_logs()
-        oplog.record_op(
+        removed = observability.clear_logs()
+        observability.record_op(
             action="log.clear",
             label="清空日志",
             summary=f"删除 {removed.get('removed', 0)} 个文件",

@@ -10,10 +10,16 @@
 - 判定窗口：`max(1.5 × 目标字数, 400)` 字，上限 `WINDOW_MAX_CHARS`（调研 2.2 / 6.3）；
 - S1 后缀周期重复：长度 6–120 字的片段连续出现 3 次（调研 2.2；vLLM 官方
   `min_count≥2` 机制 + 社区检测器用 3 次）；
-- S2 n-gram 覆盖率：12 字 shingle 在窗口内出现 ≥3 次，覆盖字符占比 ≥30%
-  （调研 2.2，推断值）；
-- S3 句级重复：去标点后同一句（≥6 字）在窗口内出现 ≥3 次（调研 2.2，推断值）；
+- S2 n-gram 覆盖率：12 字 shingle 出现 ≥3 次，覆盖字符占比 ≥30%
+  **且最长连续重复 ≥60 字**（tt1 实测标定，见下方常量注释）；
+- S3 句级重复：去标点后同一句（≥6 字）在相邻几句里出现 ≥3 次
+  （tt1 实测标定：不加「紧凑」约束会把正常口头禅误判）；
 - 压缩率（S4）调研建议先在中文小说域标定，默认关闭，本模块不实现。
+
+检查点固定在 `CHECK_EVERY_CHARS` 的整数倍上，并只对「文本前缀」判定，
+因此结论与上游流式分片的粗细无关（同一文本重复跑、不同分片跑结果一致）。
+
+调参原则：宁可漏判，也不误杀正常正文（误杀会导致截断、续写甚至整节重写）。
 
 任一信号命中即止损；`DegenerationDetected.keep_index` 给出「截到循环起点前一句」
 的保留长度，调用方据此做局部续写，而不是整轮丢弃。
@@ -41,12 +47,19 @@ SUFFIX_REPEATS = 3
 SHINGLE_SIZE = 12
 #: S2：shingle 判定为重复的最少出现次数
 SHINGLE_MIN_COUNT = 3
-#: S2：重复 shingle 覆盖字符占比的硬止损阈值（20%–30% 为软告警，本模块只做硬止损）
+#: S2：重复 shingle 覆盖字符占比的硬止损阈值（调研 2.2 为 20%–30% 软告警，
+#: 这里只做硬止损）。tt1 实测：25 章正常正文最高覆盖 4.2%，退化草稿 24%–63%。
 SHINGLE_COVERAGE_STOP = 0.30
+#: S2：重复片段必须连续覆盖的最短长度（字）。tt1 实测正常正文最长连续重复 28 字、
+#: 退化草稿最短 36 字；取 60 留出两倍余量，宁可漏判也不误杀正常正文。
+SHINGLE_MIN_SPAN = 60
 #: S3：参与句级重复判定的最短句长（去标点后）
 SENTENCE_MIN_CHARS = 6
 #: S3：同一句出现次数达到该值即止损
 SENTENCE_STOP_COUNT = 3
+#: S3：两次出现之间最多隔几句。正常行文里同一句会隔很远再次出现（tt1 实测紧凑连串
+#: 次数恒为 1），只有退化时才会在相邻几句里反复出现。
+SENTENCE_MAX_GAP = 2
 
 _SENTENCE_PATTERN = re.compile(r"[^。！？!?…\n]+[。！？!?…]*|[。！？!?…]+|\n+")
 _STRIP_CHARS = " \u3000\t\r\n「」『』“”\"'‘’（）()《》【】[]…—"
@@ -165,14 +178,18 @@ def _suffix_loop_start(text: str) -> tuple[int, int] | None:
     return None
 
 
-def _shingle_loop_start(text: str) -> tuple[int, float] | None:
-    """S2：检测窗口内 12 字 shingle 的重复覆盖率。
+def _shingle_loop_start(text: str) -> tuple[int, float, int] | None:
+    """S2：检测窗口内 12 字 shingle 的重复覆盖率与最长连续重复长度。
+
+    两个条件同时满足才算退化：覆盖率 ≥ `SHINGLE_COVERAGE_STOP`，
+    且连续被覆盖的长度 ≥ `SHINGLE_MIN_SPAN`。只看覆盖率会被「常用短语散落
+    重复」推高（tt1 正常正文最高 4.2%，但模板化文本很容易上 30%）。
 
     参数:
         text: 判定窗口内的文本。
 
     返回:
-        `(循环起点下标, 覆盖率)`；未达硬止损阈值时 None。
+        `(循环起点下标, 覆盖率, 最长连续重复字数)`；未达硬止损阈值时 None。
     """
     length = len(text)
     if length < SHINGLE_SIZE * SHINGLE_MIN_COUNT:
@@ -197,27 +214,44 @@ def _shingle_loop_start(text: str) -> tuple[int, float] | None:
     coverage = sum(covered) / length
     if coverage < SHINGLE_COVERAGE_STOP:
         return None
-    return loop_start, coverage
+    longest = 0
+    current = 0
+    for flag in covered:
+        current = current + 1 if flag else 0
+        if current > longest:
+            longest = current
+    if longest < SHINGLE_MIN_SPAN:
+        return None
+    return loop_start, coverage, longest
 
 
 def _sentence_loop_start(text: str) -> tuple[int, str, int] | None:
-    """S3：检测同一句（去标点后 ≥6 字）在窗口内出现 ≥3 次。
+    """S3：检测同一句（去标点后 ≥6 字）在相邻几句里反复出现。
+
+    只在「紧凑」时才算退化：连续 `SENTENCE_STOP_COUNT` 次出现之间最多隔
+    `SENTENCE_MAX_GAP` 句。正常正文里同一句往往隔很远再现（tt1 实测紧凑连串
+    恒为 1），不加这个约束会把正常的口头禅/动作描写误判成退化。
 
     参数:
         text: 判定窗口内的文本。
 
     返回:
-        `(循环起点下标, 句子片段, 出现次数)`；未命中时 None。
+        `(循环起点下标, 句子片段, 连续出现次数)`；未命中时 None。
     """
     rows = _sentences_with_offsets(text)
-    starts: dict[str, list[int]] = {}
-    for key, start, _end in rows:
+    positions: dict[str, list[tuple[int, int]]] = {}
+    for index, (key, start, _end) in enumerate(rows):
         if len(key) < SENTENCE_MIN_CHARS:
             continue
-        starts.setdefault(key, []).append(start)
-    for key, positions in starts.items():
-        if len(positions) >= SENTENCE_STOP_COUNT:
-            return positions[1], key[:20], len(positions)
+        positions.setdefault(key, []).append((index, start))
+    for key, rows_for_key in positions.items():
+        if len(rows_for_key) < SENTENCE_STOP_COUNT:
+            continue
+        run = 1
+        for (prev_index, _prev_start), (cur_index, cur_start) in zip(rows_for_key, rows_for_key[1:]):
+            run = run + 1 if cur_index - prev_index <= SENTENCE_MAX_GAP + 1 else 1
+            if run >= SENTENCE_STOP_COUNT:
+                return cur_start, key[:20], run
     return None
 
 
@@ -251,10 +285,15 @@ class DegenerationGuard:
         self.reason = ""
         #: 循环片段在本轮文本里的起点（0 表示未知 / 从开头开始）
         self.loop_start = 0
+        #: 已检查到的固定位置（始终是 check_every 的整数倍）
         self._checked = 0
 
     def feed(self, delta: str) -> str | None:
-        """追加一段增量，达到检查步长时检测。
+        """追加一段增量，在固定的检查位置上检测。
+
+        检查点固定在 `check_every` 的整数倍，且对「文本前缀」判定，因此结果只取
+        决于文本内容与该步长，与上游分片的粗细无关（不会因为一次到 37 字、
+        一次到 400 字而算出不同的覆盖率）。
 
         参数:
             delta: 新到的文本增量。
@@ -266,32 +305,64 @@ class DegenerationGuard:
             self.text += delta
         if self.reason:
             return self.reason
-        if len(self.text) - self._checked < self.check_every:
-            return None
-        self._checked = len(self.text)
-        self.reason = self.detect()
-        return self.reason or None
+        return self._check_until(len(self.text), include_tail=False)
 
     def check_all(self) -> str | None:
-        """对当前全部文本立即检测一次（非流式生成用）。
+        """对当前全部文本做完整检测（非流式生成与流结束时用）。
+
+        先补齐所有固定检查点，再对文本末尾补一次；因此流式与非流式对同一段
+        文本给出一致结论。
 
         返回:
             可读原因；正常时 None。
         """
-        self._checked = len(self.text)
         if self.reason:
             return self.reason
-        self.reason = self.detect()
-        return self.reason or None
+        reason = self._check_until(len(self.text), include_tail=True)
+        self._checked = len(self.text)
+        return reason
+
+    def _check_until(self, end: int, include_tail: bool) -> str | None:
+        """按固定网格检查到 end，可选再检查一次末尾。
+
+        参数:
+            end: 本次要检查到的文本长度（未对齐部分不参与网格检查）。
+            include_tail: 是否对 end 处的内容额外检查一次（流结束 / 非流式）。
+
+        返回:
+            可读原因；正常时 None。
+        """
+        while self._checked + self.check_every <= end:
+            self._checked += self.check_every
+            self.reason = self.detect_at(self._checked)
+            if self.reason:
+                return self.reason
+        if include_tail and end > self._checked:
+            self.reason = self.detect_at(end)
+            if self.reason:
+                return self.reason
+        return None
 
     def detect(self) -> str:
-        """依次执行 S1 / S2 / S3，命中即返回可读原因。
+        """对当前全部文本检测一次（兼容直接调用）。
+
+        返回:
+            可读原因；正常时返回空串。
+        """
+        return self.detect_at(len(self.text))
+
+    def detect_at(self, end: int) -> str:
+        """在指定的文本前缀上执行 S1 / S2 / S3。
+
+        参数:
+            end: 只看 `self.text[:end]`，保证不同分片下检查点一致。
 
         返回:
             可读原因；正常时返回空串。命中时同时更新 `loop_start`。
         """
-        tail = self.text[-self.window_chars :]
-        base = len(self.text) - len(tail)
+        prefix = self.text[:end]
+        tail = prefix[-self.window_chars :]
+        base = len(prefix) - len(tail)
         if len(tail) < SUFFIX_MIN_PERIOD * SUFFIX_REPEATS:
             return ""
 
@@ -302,31 +373,32 @@ class DegenerationGuard:
                 start, period = suffix
                 loop_start = base + start
                 # 在全文范围内继续往回走，定位整段循环真正的起点（窗口外的重复也要截掉）
-                unit = self.text[-period:]
-                while loop_start - period >= 0 and self.text[loop_start - period : loop_start] == unit:
+                unit = prefix[-period:]
+                while loop_start - period >= 0 and prefix[loop_start - period : loop_start] == unit:
                     loop_start -= period
                 self.loop_start = loop_start
-                snippet = self.text[loop_start : loop_start + 20].replace("\n", " ")
+                snippet = prefix[loop_start : loop_start + 20].replace("\n", " ")
                 return f"同一段连续重复 {SUFFIX_REPEATS} 次（「{snippet}」）"
 
-        # S2：n-gram 覆盖率（长周期、换名字重演同一场也能抓到）
+        # S2：n-gram 覆盖率 + 连续重复长度（长周期、换名字重演同一场也能抓到）
         if "shingle" in self.signals:
             shingle = _shingle_loop_start(tail)
             if shingle is not None:
-                start, coverage = shingle
+                start, coverage, longest = shingle
                 self.loop_start = base + start
                 return (
                     f"最近 {len(tail)} 字里 {SHINGLE_SIZE} 字片段重复覆盖率 "
-                    f"{int(coverage * 100)}%（阈值 {int(SHINGLE_COVERAGE_STOP * 100)}%）"
+                    f"{int(coverage * 100)}%、最长连续重复 {longest} 字"
+                    f"（阈值：覆盖率 ≥{int(SHINGLE_COVERAGE_STOP * 100)}% 且连续 ≥{SHINGLE_MIN_SPAN} 字）"
                 )
 
-        # S3：句级重复（对话体最直观的信号）
+        # S3：句级重复（相邻几句里反复出现才算）
         if "sentence" in self.signals:
             sentence = _sentence_loop_start(tail)
             if sentence is not None:
                 start, snippet, count = sentence
                 self.loop_start = base + start
-                return f"同一句出现 {count} 次（「{snippet}」）"
+                return f"同一句在相邻几句里连续出现 {count} 次（「{snippet}」）"
         return ""
 
     def exception(self, chars: int | None = None) -> DegenerationDetected:

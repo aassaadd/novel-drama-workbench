@@ -1824,12 +1824,12 @@ def _init_oplog(config, args) -> None:
         无。
     """
     try:
-        from . import oplog
+        from .adapters import observability
 
-        oplog.configure(config)
-        oplog.install_llm_hooks()
+        observability.configure(config)
+        observability.install_llm_hooks()
         if not os.environ.get("NDW_LOG_TRACE"):
-            os.environ["NDW_LOG_TRACE"] = oplog.new_trace_id()
+            os.environ["NDW_LOG_TRACE"] = observability.new_trace_id()
         project = str(getattr(args, "project", "") or "")
         if project and not os.environ.get("NDW_LOG_PROJECT"):
             os.environ["NDW_LOG_PROJECT"] = project

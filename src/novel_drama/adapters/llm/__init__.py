@@ -10,7 +10,6 @@ from .contracts import (
     Usage,
     WritingAdapter,
 )
-from .helpers import last_llm_call
 from .offline import OfflineWritingAdapter
 from .omlx import OmlxWritingAdapter
 from .unavailable import UnavailableWritingAdapter
@@ -25,5 +24,4 @@ __all__ = [
     "UnavailableWritingAdapter",
     "Usage",
     "WritingAdapter",
-    "last_llm_call",
 ]

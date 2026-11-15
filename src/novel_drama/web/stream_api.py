@@ -24,6 +24,7 @@ from fastapi import HTTPException
 from fastapi.responses import StreamingResponse
 
 from ..adapters.errors import AdapterError
+from ..adapters.observability import set_llm_abort_reason
 from ..adapters.persistence import ProjectStore
 from ..application.cast.character_plan import (
     generate_from_plan,
@@ -46,7 +47,6 @@ from ..application.story.outline_hierarchical import generate_hierarchical_outli
 from ..application.story.settings_generate import generate_worlds
 from ..cancel import GenerationCanceled
 from ..infrastructure.config import load_config
-from ..oplog import set_llm_abort_reason
 from .job_tracker import UiJob
 
 #: SSE 响应头：禁用缓存与反向代理缓冲，保证逐条到达浏览器

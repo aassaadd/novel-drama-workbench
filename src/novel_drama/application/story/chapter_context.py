@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 from ...adapters.llm.contracts import TextGenRequest, TextGenResult
+from ...adapters.observability import set_llm_abort_reason
 from ...adapters.persistence import ProjectStore
 from ...adapters.persistence.settings_store import SettingsStore
 from ...adapters.persistence.world_store import WorldStore
 from ...application.story.world import worlds_digest
 from ...infrastructure.config import AppConfig
 from ...models import entities
-from ...oplog import set_llm_abort_reason
 from ..support.llm_calls import _characters_payload, build_writing_adapter
 from .apply_outline import _chapter_beats
 from .chapter_limits import DEFAULT_CHAPTER_WORDS

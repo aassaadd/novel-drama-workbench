@@ -135,9 +135,9 @@ def _record_cli(args: list[str], result: CliResult, started: float) -> None:
         无。
     """
     try:
-        from .. import oplog
+        from ..adapters import observability
 
-        oplog.record_cli(
+        observability.record_cli(
             argv=args,
             code=result.code,
             duration_ms=int((time.monotonic() - started) * 1000),
@@ -201,15 +201,15 @@ def _run_process(args: list[str]) -> CliResult:
     env.setdefault("PYTHONIOENCODING", "utf-8")
     # 把 trace / 工程 / 操作名透传给子进程：子进程里的 LLM 调用日志归到同一次操作
     try:
-        from .. import oplog
+        from ..adapters import observability
 
-        ctx = oplog.current_trace()
+        ctx = observability.current_trace()
         env["NDW_LOG_TRACE"] = str(ctx.get("trace_id") or "")
         if ctx.get("project"):
             env["NDW_LOG_PROJECT"] = str(ctx["project"])
         if ctx.get("action"):
             env["NDW_LOG_ACTION"] = str(ctx["action"])
-        env["NDW_LOG_DIR"] = str(oplog.log_dir())
+        env["NDW_LOG_DIR"] = str(observability.log_dir())
     except Exception:  # noqa: BLE001 - 日志上下文缺失不影响命令执行
         pass
     try:

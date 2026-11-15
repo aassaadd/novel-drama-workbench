@@ -8,10 +8,10 @@ from dataclasses import replace
 
 from ...adapters.errors import AdapterError, ErrorCode
 from ...adapters.llm.contracts import Message, TextGenRequest, TextGenResult
+from ...adapters.observability import set_llm_call_reason
 from ...adapters.persistence import ProjectStore
 from ...domain.production.rules.watchdog import describe as describe_watchdog
 from ...models.ids import now_iso
-from ...oplog import set_llm_call_reason
 from .chapter_context import stream_text
 from .chapter_limits import MAX_LOCAL_CONTINUATIONS
 from .chapter_text import (

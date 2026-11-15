@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 from test_chapter_resume import (
@@ -81,9 +82,9 @@ def test_guard_detects_suffix_loop() -> None:
 
 
 def test_guard_detects_sentence_repeat_and_shingle() -> None:
-    """同句出现 3 次、12 字片段覆盖率超阈值都能单独触发。"""
+    """同句在相邻几句里反复出现、12 字片段长距离重复都能单独触发。"""
     repeated_sentence = "他说这话的时候没有看任何人。"
-    # 用来自正常长文的填充把覆盖率压到阈值以下，确保命中的是「同句 3 次」
+    # 用正常长文填充，确保命中的是「同句紧凑重复」而不是 S2
     filler = [
         "雨声压下来，檐下的水线连成一片。",
         "她把伞收起来，靠在门框边，水顺着伞骨流到砖缝里。",
@@ -96,20 +97,72 @@ def test_guard_detects_sentence_repeat_and_shingle() -> None:
     ]
     sentence_guard = DegenerationGuard(1200)
     text = (
-        filler[0] + repeated_sentence + filler[1] + filler[2] + repeated_sentence
-        + filler[3] + filler[4] + filler[5] + repeated_sentence + filler[6] + filler[7]
+        filler[0] + repeated_sentence + filler[1] + repeated_sentence
+        + filler[2] + repeated_sentence + filler[3] + filler[4]
     )
     reason = sentence_guard.feed(text) or sentence_guard.check_all()
-    assert reason and f"同一句出现 {SENTENCE_STOP_COUNT} 次" in reason
+    assert reason and f"连续出现 {SENTENCE_STOP_COUNT} 次" in reason
 
+    # 长于阈值的一段正文整体重演：覆盖率与连续重复长度同时超标
+    block = (
+        "他把窗推开一条缝，湿冷的风挤进来，桌上的纸角被掀起又落下。"
+        "她没有抬头，只把杯子往他那边推了推，热气在两人之间散开。"
+        "楼道里的灯闪了两下才稳住，脚步声从远处慢慢过来又过去。"
+    )
     shingle_guard = DegenerationGuard(1200)
-    # 不是首尾周期重复，但同一 12 字片段在窗口内出现 3 次、覆盖占比超阈值
-    block = "他把窗推开一条缝，湿冷的风挤进来。"
     reason = shingle_guard.feed(
-        "夜里很安静。" + block + "她放下杯子。" + block + "楼道里有人走过。" + block + "天亮之前谁都没再开口。"
+        "夜里很安静。" + block + "她放下杯子，去关窗。" + block
+        + "天亮之前谁都没有再开口。" + block + "雨停的时候，巷口已经有了车声。"
     ) or shingle_guard.check_all()
-    assert reason and "覆盖率" in reason
+    assert reason and "覆盖率" in reason and "最长连续重复" in reason
     assert SHINGLE_COVERAGE_STOP == 0.30
+
+
+def test_detection_is_independent_of_chunking() -> None:
+    """同一段文本按不同分片喂入，结论必须完全一致（消除偶发失败）。"""
+    expected: tuple[bool, str] | None = None
+    for chunk in (13, 37, 120, 400, 1_000_000):
+        guard = DegenerationGuard(1200)
+        reason = ""
+        for start in range(0, len(LOOP_TEXT), chunk):
+            hit = guard.feed(LOOP_TEXT[start : start + chunk])
+            if hit:
+                reason = hit
+                break
+        if not reason:
+            reason = guard.check_all() or ""
+        result = (bool(reason), reason)
+        if expected is None:
+            expected = result
+        assert result == expected, f"chunk={chunk} 结果不一致：{result} != {expected}"
+
+    # 同一分片重复跑多次也必须一致（不能有集合/字典顺序导致的随机）
+    runs = []
+    for _ in range(3):
+        guard = DegenerationGuard(1200)
+        reason = ""
+        for start in range(0, len(NORMAL_TEXT), 61):
+            reason = guard.feed(NORMAL_TEXT[start : start + 61]) or reason
+        runs.append((reason, guard.check_all() or ""))
+    assert runs[0] == runs[1] == runs[2]
+
+
+def test_real_normal_chapter_is_not_killed() -> None:
+    """真实正常正文（tt1 第 5 章，约 4700 字）不得被判为退化。"""
+    path = Path(__file__).parent / "fixtures" / "degeneration_normal_chapter.txt"
+    content = path.read_text(encoding="utf-8").strip()
+    assert len(content) > 4000
+    words = sum(1 for char in content if not char.isspace())
+
+    for chunk in (37, 120, 400):
+        guard = DegenerationGuard(max(200, words // 4))
+        reason = ""
+        for start in range(0, len(content), chunk):
+            reason = guard.feed(content[start : start + chunk]) or reason
+            if reason:
+                break
+        assert not reason, f"正常正文被误判（chunk={chunk}）：{reason}"
+        assert guard.check_all() is None, "整章复检也不应命中"
 
 
 def test_normal_text_is_not_killed() -> None:
