@@ -5,12 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..domain.production.rules.thinking_policy import collect_overrides
 from ..infrastructure.config import REPO_ROOT, AppConfig
 from .comfyui import LocalComfyGateway
 from .comfyui.contracts import ComfyGateway
 from .errors import AdapterError, ErrorCode
-from .llm import OmlxWritingAdapter, WritingAdapter
+from .llm import WritingAdapter
+from .llm.factory import build_writing_adapter
 from .sfx import PlaceholderSfxAdapter
 from .sfx.contracts import SfxAdapter
 from .tts import PlaceholderTtsAdapter, ProviderTtsAdapter
@@ -54,21 +54,8 @@ def build_adapters(config: AppConfig, project_settings: dict | None = None) -> A
     names = config.adapters
     project_settings = project_settings or {}
 
-    writing_name = names.get("writing", "omlx")
-    if writing_name != "omlx":
-        raise AdapterError(ErrorCode.INVALID_INPUT, f"未知写作适配器: {writing_name}（当前仅支持 omlx）")
-    omlx_settings = dict(config.get("omlx", {}) or {})
-    # 工程设置里为 null / 空串 / 空列表表示「未定制」，必须继承本机配置；
-    # 否则新建工程的 endpoint=None 会把 config 里的地址覆盖成空串，写作直接不可用。
-    project_writing = {
-        key: value
-        for key, value in (project_settings.get("writing") or {}).items()
-        if value not in (None, "", [])
-    }
-    omlx_settings.update(project_writing)
-    # 思考按调用点覆盖：没有覆盖项即系统自动，回落到内置清单
-    omlx_settings["thinking_stages"] = collect_overrides(config)
-    writing = OmlxWritingAdapter(omlx_settings)
+    # 写作适配器只从工厂构造：保留「工程设置空值继承本机配置」和思考覆盖的唯一实现
+    writing = build_writing_adapter(config, project_settings)
 
     # 默认走真实 provider：只有显式写 placeholder 才会落到占位实现，避免静默降级
     tts_name = names.get("tts", "auto")

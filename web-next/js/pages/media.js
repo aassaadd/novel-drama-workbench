@@ -6,7 +6,7 @@ import { esc, icon, toast, fmtDuration, openDialog, closeDialog } from '../dom.j
 import { getJSON, postJSON, fileUrl } from '../api.js';
 import { labelOf, ENUMS } from '../enums.js';
 import { openProgress } from '../progress.js';
-import { confirmLlm, llmErrorText } from '../llm.js';
+import { runLlm } from '../llm.js';
 import { modeSwitchHTML, bindModeSwitch, getGenMode } from '../gen-mode.js';
 import { state, resetProject } from '../store.js';
 import { railbar, topbar, chapterCtx, goChapter, goProjects, emptyProjectHTML } from '../shell.js';
@@ -418,29 +418,55 @@ function openRunKindDialog(kind, button) {
  * @param {HTMLElement} button 触发的按钮，用于展示忙碌态
  */
 async function runMedia(kind, force, button) {
-  if (kind === 'sfx') {
-    const check = await confirmLlm({
-      action: 'media.sfx',
-      params: { path: state.path, chapter: state.chapterId, count: 1, regen: force },
-    });
-    if (!check.ok) {
-      if (check.error) toast(llmErrorText(check), 'bad', 3600);
-      return;
-    }
-  }
   const oldText = button.textContent;
   const label = labelOf('media_tab', kind, '素材');
   button.disabled = true;
   button.textContent = '生成中…';
-  const panel = openProgress({
-    title: `正在${force ? '重新生成' : '生成'}本章${label}…`,
-    hint: force
-      ? '忽略已有产物，覆盖本章同类型全部条目'
-      : '只生成待生成 / 失败的条目，已完成条目会跳过',
-    stage: '已提交生成请求，等待本机模型返回…',
-  });
-  panel.update({ percent: null });
   try {
+    if (kind === 'sfx') {
+      // 音效含模型提示词改写：走统一总线的可取消进度卡
+      const result = await runLlm({
+        action: 'media.sfx',
+        params: { path: state.path, chapter: state.chapterId, count: 1, regen: force },
+        title: `正在${force ? '重新生成' : '生成'}本章${label}…`,
+        hint: `${force ? '忽略已有产物，覆盖本章同类型全部条目' : '只生成待生成 / 失败的条目，已完成条目会跳过'} · 可随时取消`,
+        stage: '已提交生成请求，等待本机模型返回…',
+        request: ({ callId, signal }) =>
+          postJSON(
+            '/api/ui/media/run',
+            {
+              path: state.path,
+              chapter: state.chapterId,
+              kind,
+              force,
+            },
+            { timeout: 0, callId, signal }
+          ),
+        finish: async (data) => {
+          const made = (data?.generated || []).length || data?.count || 0;
+          await loadChapter(state.path, state.chapterId);
+          repaint();
+          const text = `${force ? '已重新生成' : '已生成'}本章${label}${made ? ` ${made} 条` : ''}`;
+          toast(`${text}，列表已刷新`, 'ok', 4200);
+          return {
+            message: text,
+            detail: '素材列表已刷新，可在本页逐条试听或查看。',
+            actions: [{ label: '查看列表', primary: true, onClick: () => repaint() }],
+          };
+        },
+      });
+      if (!result) return;
+      return;
+    }
+    // 配图 / 视频是本地合成，不属于 LLM 调用，保持原有长任务进度与超时
+    const panel = openProgress({
+      title: `正在${force ? '重新生成' : '生成'}本章${label}…`,
+      hint: force
+        ? '忽略已有产物，覆盖本章同类型全部条目'
+        : '只生成待生成 / 失败的条目，已完成条目会跳过',
+      stage: '已提交生成请求，等待本机合成…',
+    });
+    panel.update({ percent: null });
     const result = await postJSON(
       '/api/ui/media/run',
       {
@@ -464,12 +490,9 @@ async function runMedia(kind, force, button) {
     toast(`${message}，列表已刷新`, 'ok', 4200);
   } catch (error) {
     toast(error.message, 'bad', 5200);
+  } finally {
     button.disabled = false;
     button.textContent = oldText;
-    panel.fail({
-      message: `${label}生成失败：${error.message}`,
-      retry: () => void runMedia(kind, force, button),
-    });
   }
 }
 

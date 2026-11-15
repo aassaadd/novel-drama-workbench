@@ -4,10 +4,10 @@
  * 主区是选中角色的档案表单；音色绑定在 V4 音色视图里完成。
  */
 import { esc, icon, toast, openDialog, closeDialog } from '../dom.js';
-import { getJSON, patchJSON, postJSON, fileUrl, streamJSON } from '../api.js';
+import { canceledError, getJSON, patchJSON, postJSON, fileUrl, streamJSON } from '../api.js';
 import { selectHTML, labelOf, isEnumValue, ENUMS } from '../enums.js';
 import { openProgress } from '../progress.js';
-import { confirmLlm, llmErrorText } from '../llm.js';
+import { runLlm, runLlmStream } from '../llm.js';
 import { modeSwitchHTML, bindModeSwitch } from '../gen-mode.js';
 import { state, resetProject } from '../store.js';
 import { railbar, topbar, goChapter, goProjects } from '../shell.js';
@@ -1823,90 +1823,78 @@ function openAiFill() {
  * @param {'fill'|'regen'} [mode] 生成方式：fill 只补缺失，regen 重新生成并覆盖
  */
 async function runDescriptionFill(item, mask, resultHost, mode = 'fill') {
-  const check = await confirmLlm({
-    action: 'characters.describe',
-    params: { path: state.path, character: item.id || '', regen: mode === 'regen' },
-  });
-  if (!check.ok) {
-    if (check.error) toast(llmErrorText(check), 'bad', 3600);
-    return;
-  }
   const regen = mode === 'regen';
-  const aborter = new AbortController();
-  const panel = openProgress({
-    title: regen ? `正在重新生成「${item.name}」的档案…` : `正在补全「${item.name}」的档案…`,
-    hint: regen
-      ? '重新生成音色描述、外貌描述与负向提示词，并覆盖已有内容'
-      : '只补缺失的音色描述、外貌描述与负向提示词，已有内容不会被覆盖',
-    stage: '正在分析缺失字段…',
-    onStop: async () => {
-      aborter.abort();
-      panel.note('正在停止：当前字段生成结束后中断，已写入的字段会保留');
-    },
-  });
-  panel.update({ percent: null });
-  let settled = false;
   try {
-    await streamJSON(
-      '/api/ui/characters/descriptions/fill/stream',
-      { path: state.path, names: [item.name], overwrite: regen },
-      (event, data) => {
-        if (!data) return;
-        if (event === 'total') {
-          panel.update({
-            stage: `共 ${Number(data.total || 0)} 个角色待处理`,
-            current: `待补全 ${Number(data.pending || 0)} · 跳过 ${Number(data.skipped || 0)}`,
-          });
-        } else if (event === 'batch') {
-          const index = Number(data.index || 1);
-          const total = Number(data.total || 1) || 1;
-          panel.update({
-            stage: `${regen ? '正在重新生成' : '正在补全'} ${data.name || item.name}…`,
-            percent: Math.round(((index - 1) / total) * 100),
-            current: `第 ${index} / ${total} 个`,
-          });
-        } else if (event === 'chars') {
-          panel.update({ current: `${data.name || item.name} · 已接收 ${Number(data.chars || 0)} 字` });
-        } else if (event === 'item') {
-          const status = String(data.status || '');
-          const text =
-            status === 'done'
-              ? `${data.name}：已补 ${Number(data.fields || 0)} 个字段`
-              : status === 'skipped'
-                ? `${data.name}：跳过（${data.reason || '无需补全'}）`
-                : `${data.name}：失败（${data.message || '未知原因'}）`;
-          panel.update({ current: text });
-        } else if (event === 'done') {
-          settled = true;
-          const result = data.result || {};
-          const updated = result.updated || [];
-          const failures = result.failures || [];
-          panel.update({ percent: 100 });
-          // 流式返回的模型原文保留在灰色一行里，结束时不覆盖（摘要放到 message/detail）
-          panel.finish({
-            message: result.overwrite
-              ? `已重新生成并覆盖 ${updated.length} 个角色${failures.length ? `，${failures.length} 个失败` : ''}`
-              : `补全完成：更新 ${updated.length} 个角色${failures.length ? `，${failures.length} 个失败` : ''}`,
-            detail: result.summary || '',
-            actions: [
-              { label: '重新读取档案', primary: true, onClick: () => void loadAll(state.path).then(repaint) },
-            ],
-          });
-          renderFillResult(resultHost, result);
-          void loadAll(state.path).then(repaint);
-          toast(updated.length ? '角色档案已补全' : '没有需要补全的字段', 'ok');
-        } else if (event === 'error') {
-          settled = true;
-          panel.fail({ message: data.message || '补全失败', retry: () => void runDescriptionFill(item, mask, resultHost, mode) });
-        }
-      }, { signal: aborter.signal });
-    if (!settled) panel.fail({ message: '连接已中断，没有收到补全结果', retry: () => void runDescriptionFill(item, mask, resultHost, mode) });
+    const result = await runLlmStream({
+      action: 'characters.describe',
+      params: { path: state.path, character: item.id || '', regen },
+      title: regen ? `正在重新生成「${item.name}」的档案…` : `正在补全「${item.name}」的档案…`,
+      hint: regen
+        ? '重新生成音色描述、外貌描述与负向提示词，并覆盖已有内容 · 可随时取消'
+        : '只补缺失的音色描述、外貌描述与负向提示词，已有内容不会被覆盖 · 可随时取消',
+      stage: '正在分析缺失字段…',
+      stream: async ({ callId, signal, panel }) => {
+        let done = null;
+        await streamJSON(
+          '/api/ui/characters/descriptions/fill/stream',
+          { path: state.path, names: [item.name], overwrite: regen },
+          (event, data) => {
+            if (!data) return;
+            if (event === 'total') {
+              panel.update({
+                stage: `共 ${Number(data.total || 0)} 个角色待处理`,
+                current: `待补全 ${Number(data.pending || 0)} · 跳过 ${Number(data.skipped || 0)}`,
+              });
+            } else if (event === 'batch') {
+              const index = Number(data.index || 1);
+              const total = Number(data.total || 1) || 1;
+              panel.update({
+                stage: `${regen ? '正在重新生成' : '正在补全'} ${data.name || item.name}…`,
+                percent: Math.round(((index - 1) / total) * 100),
+                current: `第 ${index} / ${total} 个`,
+              });
+            } else if (event === 'chars') {
+              panel.update({ current: `${data.name || item.name} · 已接收 ${Number(data.chars || 0)} 字` });
+            } else if (event === 'item') {
+              const status = String(data.status || '');
+              const text =
+                status === 'done'
+                  ? `${data.name}：已补 ${Number(data.fields || 0)} 个字段`
+                  : status === 'skipped'
+                    ? `${data.name}：跳过（${data.reason || '无需补全'}）`
+                    : `${data.name}：失败（${data.message || '未知原因'}）`;
+              panel.update({ current: text });
+            } else if (event === 'done') {
+              done = data.result || {};
+            } else if (event === 'error') {
+              // 抛回 runLlmStream，由统一失败卡展示原因与重试
+              throw new Error(data.message || '补全失败');
+            }
+          },
+          { signal, callId }
+        );
+        if (!done) throw new Error('连接已中断，没有收到补全结果');
+        return done;
+      },
+      finish: (data) => {
+        const updated = data.updated || [];
+        const failures = data.failures || [];
+        renderFillResult(resultHost, data);
+        void loadAll(state.path).then(repaint);
+        toast(updated.length ? '角色档案已补全' : '没有需要补全的字段', 'ok');
+        return {
+          message: data.overwrite
+            ? `已重新生成并覆盖 ${updated.length} 个角色${failures.length ? `，${failures.length} 个失败` : ''}`
+            : `补全完成：更新 ${updated.length} 个角色${failures.length ? `，${failures.length} 个失败` : ''}`,
+          detail: data.summary || '',
+          actions: [
+            { label: '重新读取档案', primary: true, onClick: () => void loadAll(state.path).then(repaint) },
+          ],
+        };
+      },
+    });
+    if (!result) return;
   } catch (error) {
-    if (aborter.signal.aborted) {
-      if (!settled) panel.finish({ message: '已停止补全：已写入的字段会保留' });
-      return;
-    }
-    if (!settled) panel.fail({ message: `补全失败：${error.message}`, retry: () => void runDescriptionFill(item, mask, resultHost, mode) });
     if (resultHost) resultHost.innerHTML = `<div class="dlg-note bad">${esc(error.message)}</div>`;
   }
 }
@@ -2037,53 +2025,56 @@ function openAiGenerate() {
  * @returns {Promise<Array<object>>} 角色预览行
  */
 async function runCharacterGenerate(count, brief, resultHost, mode = 'fill') {
-  const check = await confirmLlm({
-    action: 'characters.generate',
-    params: { path: state.path, count, mode },
-  });
-  if (!check.ok) {
-    if (check.error) toast(llmErrorText(check), 'bad', 3600);
-    return [];
-  }
   const regen = mode === 'regen';
-  const aborter = new AbortController();
-  const panel = openProgress({
-    title: regen ? `正在重新生成 ${count} 个角色名单…` : `正在生成缺失角色（目标 ${count} 个）…`,
-    hint: regen ? brief || '忽略已有角色，重新生成完整名单' : brief || '跳过与已有角色同名的行，只生成缺失角色',
-    stage: '已提交生成请求，等待模型返回…',
-    onStop: async () => {
-      aborter.abort();
-      panel.note('正在停止：当前批次结束后中断，已生成的行会保留');
-    },
-  });
-  panel.update({ percent: null });
-  let settled = false;
   let rows = [];
   // 已有角色名来自 loadAll 写入的模块级 characters，与左侧列表同源
   const existingNames = new Set(
     (characters || []).map((item) => String(item.name || '').trim()).filter(Boolean)
   );
   try {
-    await streamJSON('/api/ui/characters/generate/stream', { path: state.path, count, brief }, (event, data) => {
-      if (!data) return;
-      if (event === 'batch') {
-        const index = Number(data.index || 1);
-        const total = Number(data.total || 1) || 1;
-        panel.update({
-          stage: `正在生成第 ${index}/${total} 批角色…`,
-          percent: index > 1 ? Math.round(((index - 1) / total) * 100) : null,
-          current: `第 ${index} / ${total} 批`,
-        });
-      } else if (event === 'chars') {
-        const batch = Number(data.batch || data.index || 1);
-        const total = Number(data.total || 1) || 1;
-        panel.update({
-          percent: null,
-          current: `第 ${batch}/${total} 批 · 已接收 ${Number(data.chars || 0)} 字`,
-        });
-      } else if (event === 'done') {
-        settled = true;
-        const raw = (data.result?.characters || []).map((row) => ({ ...row }));
+    const data = await runLlmStream({
+      action: 'characters.generate',
+      params: { path: state.path, count, mode },
+      title: regen ? `正在重新生成 ${count} 个角色名单…` : `正在生成缺失角色（目标 ${count} 个）…`,
+      hint: `${regen ? '忽略已有角色，重新生成完整名单' : '跳过与已有角色同名的行，只生成缺失角色'} · 可随时取消`,
+      stage: '已提交生成请求，等待模型返回…',
+      stream: async ({ callId, signal, panel }) => {
+        let result = null;
+        await streamJSON(
+          '/api/ui/characters/generate/stream',
+          { path: state.path, count, brief },
+          (event, eventData) => {
+            if (!eventData) return;
+            if (event === 'batch') {
+              const index = Number(eventData.index || 1);
+              const total = Number(eventData.total || 1) || 1;
+              panel.update({
+                stage: `正在生成第 ${index}/${total} 批角色…`,
+                percent: index > 1 ? Math.round(((index - 1) / total) * 100) : null,
+                current: `第 ${index} / ${total} 批`,
+              });
+            } else if (event === 'chars') {
+              const batch = Number(eventData.batch || eventData.index || 1);
+              const total = Number(eventData.total || 1) || 1;
+              panel.update({
+                percent: null,
+                current: `第 ${batch}/${total} 批 · 已接收 ${Number(eventData.chars || 0)} 字`,
+              });
+            } else if (event === 'done') {
+              result = eventData.result || {};
+            } else if (event === 'canceled') {
+              throw canceledError('已取消角色名单生成');
+            } else if (event === 'error') {
+              throw new Error(eventData.message || '角色生成失败');
+            }
+          },
+          { signal, callId }
+        );
+        if (!result) throw new Error('连接已中断，没有收到角色生成结果');
+        return result;
+      },
+      finish: (result) => {
+        const raw = (result.characters || []).map((row) => ({ ...row }));
         let skipped = 0;
         if (regen) {
           rows = raw;
@@ -2101,46 +2092,19 @@ async function runCharacterGenerate(count, brief, resultHost, mode = 'fill') {
             return true;
           });
         }
-        panel.update({ percent: 100, current: skipped ? `已跳过 ${skipped} 个同名角色` : '' });
-        // 非流式结果摘要：让进度浮层显示最近一条模型返回内容
-        panel.note(rows[0] ? `${rows[0].name || ''} / ${rows[0].one_line || ''}` : `已返回 ${raw.length} 个角色`);
-        panel.finish({
+        toast(`已生成 ${rows.length} 个角色预览`, 'ok');
+        return {
           message: regen
             ? `角色名单已重新生成：${rows.length} 个待勾选`
             : `缺失角色生成完成：${rows.length} 个待勾选${skipped ? ` · 已跳过 ${skipped} 个同名角色` : ''}`,
           detail: '在弹窗里勾选后点「追加选中角色」才会写入 characters.json。',
-        });
-        toast(`已生成 ${rows.length} 个角色预览`, 'ok');
-      } else if (event === 'canceled') {
-        settled = true;
-        panel.fail({ message: '已停止生成', detail: '任务已在任务队列中取消，已接收的内容不会写入角色表。' });
-      } else if (event === 'error') {
-        settled = true;
-        panel.fail({
-          message: data.message || '角色生成失败',
-          retry: () => void runCharacterGenerate(count, brief, resultHost, mode),
-        });
-      }
-    }, { signal: aborter.signal });
-    if (!settled) {
-      panel.fail({
-        message: '连接已中断，没有收到角色生成结果',
-        retry: () => void runCharacterGenerate(count, brief, resultHost, mode),
-      });
-    }
+        };
+      },
+    });
+    if (!data) return [];
   } catch (error) {
-    if (aborter.signal.aborted) {
-      if (!settled) panel.finish({ message: '已停止生成：已生成的角色行会保留，可重新勾选' });
-      return rows;
-    }
-    if (!settled) {
-      panel.fail({
-        message: `角色生成失败：${error.message}`,
-        retry: () => void runCharacterGenerate(count, brief, resultHost, mode),
-      });
-    }
     if (resultHost) resultHost.innerHTML = `<div class="dlg-note bad">${esc(error.message)}</div>`;
-    throw error;
+    return [];
   }
   return rows;
 }
@@ -2265,43 +2229,47 @@ function showBackfillWarnings(warnings) {
 /** 全剧补齐音色描述：只补缺失 / draft，回落告警随结果一起展示 */
 async function openCastBackfill() {
   if (!state.path) return toast('先打开一个工程', 'warn');
-  const check = await confirmLlm({ action: 'cast.backfill', params: { path: state.path } });
-  if (!check.ok) {
-    if (check.error) toast(llmErrorText(check), 'bad', 3600);
-    return;
-  }
-  const panel = openProgress({
-    title: '正在补齐音色描述…',
-    hint: '只为缺失或仍是规则草稿的角色调用写作模型，已有正式描述不覆盖',
-    stage: '正在逐个角色生成音色描述…',
-  });
-  panel.update({ percent: null });
   try {
-    const result = await postJSON('/api/ui/cast/backfill', {
-      path: state.path,
-      all: false,
-      force: false,
+    const result = await runLlm({
+      action: 'cast.backfill',
+      params: { path: state.path },
+      title: '正在补齐音色描述…',
+      hint: '只为缺失或仍是规则草稿的角色调用写作模型，已有正式描述不覆盖 · 可随时取消',
+      stage: '正在逐个角色生成音色描述…',
+      request: ({ callId, signal }) =>
+        postJSON(
+          '/api/ui/cast/backfill',
+          {
+            path: state.path,
+            all: false,
+            force: false,
+          },
+          { timeout: 0, callId, signal }
+        ),
+      finish: (data) => {
+        const changed = Number(data?.changed || 0);
+        const warnings = Array.isArray(data?.warnings) ? data.warnings : [];
+        if (warnings.length) showBackfillWarnings(warnings);
+        toast(
+          changed ? `已补齐 ${changed} 个角色的音色描述` : '没有需要补齐的音色描述',
+          warnings.length ? 'warn' : 'ok'
+        );
+        return {
+          message: changed ? `已补齐 ${changed} 个角色的音色描述` : '没有需要补齐的音色描述',
+          detail: warnings.length
+            ? `其中 ${warnings.length} 个角色回落为规则模板，原因可逐条查看`
+            : '全部由模型生成',
+          actions: warnings.length
+            ? [{ label: '查看回落原因', primary: true, onClick: () => showBackfillWarnings(warnings) }]
+            : [],
+        };
+      },
     });
-    const changed = Number(result?.changed || 0);
-    const warnings = Array.isArray(result?.warnings) ? result.warnings : [];
-    panel.finish({
-      message: changed ? `已补齐 ${changed} 个角色的音色描述` : '没有需要补齐的音色描述',
-      detail: warnings.length
-        ? `其中 ${warnings.length} 个角色回落为规则模板，原因可逐条查看`
-        : '全部由模型生成',
-      actions: warnings.length
-        ? [{ label: '查看回落原因', primary: true, onClick: () => showBackfillWarnings(warnings) }]
-        : [],
-    });
-    if (warnings.length) showBackfillWarnings(warnings);
-    toast(
-      changed ? `已补齐 ${changed} 个角色的音色描述` : '没有需要补齐的音色描述',
-      warnings.length ? 'warn' : 'ok'
-    );
+    if (!result) return;
     await loadAll(state.path);
     repaint();
-  } catch (error) {
-    panel.fail({ message: `补齐音色描述失败：${error.message}`, retry: () => void openCastBackfill() });
+  } catch {
+    // 进度卡已展示失败原因与重试入口
   }
 }
 

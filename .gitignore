@@ -47,3 +47,4 @@ config/config.annotate_check.yaml
 var/annotate_check_*
 var/annotate_preview_*.log
 var/preview_markup.txt
+var/tmp

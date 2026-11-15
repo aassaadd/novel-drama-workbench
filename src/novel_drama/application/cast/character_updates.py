@@ -170,7 +170,7 @@ def propose_character_updates(
     focus = [item for item in characters if str(item.get("id")) in focus_ids] or characters
     settings = SettingsStore(store.root)
     bible = settings.ensure()
-    adapter = build_writing_adapter(config, bible)
+    adapter = build_writing_adapter(config, bible, action="character.updates")
     state_brief = [
         {
             "character_id": item.get("id"),

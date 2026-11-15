@@ -195,7 +195,7 @@ def plan_characters(
     context = _project_context(work, bible, existing, worlds)
     prompt = f"{context}\n\n任务：{ask}" if context else ask
 
-    adapter = build_writing_adapter(config, bible)
+    adapter = build_writing_adapter(config, bible, action="characters.generate")
     req = TextGenRequest(
         task="character",
         system="你是中文小说的人物编辑，人物必须与给定的作品设定一致，只按工具参数输出名单，不要解释。",
@@ -336,7 +336,7 @@ def generate_from_plan(
     work = project.get("work") or {}
     world_store = WorldStore(store.root)
     worlds = world_store.list_worlds() if world_store.exists() else []
-    adapter = build_writing_adapter(config, bible)
+    adapter = build_writing_adapter(config, bible, action="characters.generate")
     context = _project_context(work, bible, store.load_characters()["characters"], worlds)
     brief_text = str(plan.get("brief") or "").strip()
     known_names = {str(item.get("name") or "").strip() for item in store.load_characters()["characters"]}
@@ -503,7 +503,7 @@ def fill_character_descriptions(
     world_store = WorldStore(store.root)
     worlds = world_store.list_worlds() if world_store.exists() else []
     context = _project_context(work, bible, characters, worlds)
-    adapter = build_writing_adapter(config, bible)
+    adapter = build_writing_adapter(config, bible, action="characters.describe")
 
     wanted: list[dict] = []
     steps: list[dict] = []

@@ -76,7 +76,7 @@ def generate_worlds(
     bible = settings_store.load_or_none() or {}
     project = store.load_project()
     work = project.get("work") or {}
-    adapter = build_writing_adapter(config, bible)
+    adapter = build_writing_adapter(config, bible, action="world.generate")
     brief_text = str(brief or "").strip()
 
     world_store = WorldStore(store.root)
@@ -239,7 +239,7 @@ def generate_settings(store: ProjectStore, config: AppConfig, step: str, overwri
     project = store.load_project()
     work = project.get("work") or {}
     skeleton = settings_store.build_skeleton(work)
-    adapter = build_writing_adapter(config, bible)
+    adapter = build_writing_adapter(config, bible, action="setting.step")
 
     label = {"premise": "故事梗概", "style": "文风设定"}[step]
     allowed = {"premise": PREMISE_FIELDS, "style": STYLE_FIELDS}[step]
@@ -417,7 +417,7 @@ def generate_section(
 
     project = store.load_project()
     work = project.get("work") or {}
-    adapter = build_writing_adapter(config, bible)
+    adapter = build_writing_adapter(config, bible, action="setting.section")
     brief_text = str(brief or "").strip()
     work_payload = {"title": work.get("title"), "author": work.get("author"), "genre": work.get("genre") or []}
 
@@ -503,7 +503,7 @@ def polish_field(
 
     bible = SettingsStore(store.root).load_or_none() or {}
     work = store.load_project().get("work") or {}
-    adapter = build_writing_adapter(config, bible)
+    adapter = build_writing_adapter(config, bible, action="setting.polish")
     # 润色要贴合作品文风：把项目设定与字段上下文一并交给模型
     prompt_parts: list[str] = []
     project_context = _project_context(work, bible)

@@ -28,7 +28,7 @@ from ..production.lines_source import chapter_view
 #: - title/what: 弹窗标题与「这次做什么」
 #: - stages: 涉及的思考阶段（可多个）
 #: - seconds: 单次调用的大致秒数；None 表示视内容长度而定
-#: - cancelable: 是否能中途停止
+#: - cancelable: 取消后是否保留已完成内容（所有动作都可取消）
 #: - calls: `(store, config, ctx) -> int`
 #: - at_least: 次数只是下限
 ACTIONS: dict[str, dict[str, Any]] = {}
@@ -54,7 +54,7 @@ def _action(
         what: 这次做什么（用户能读懂的一句话）。
         stages: 思考阶段键，用于解析是否开启思考。
         seconds: 单次调用大致秒数；None 表示视内容长度而定。
-        cancelable: 是否能中途停止。
+        cancelable: 取消后是否保留已完成内容（所有动作都可取消）。
         calls: 次数计算函数。
         at_least: 次数是否为下限。
         seconds_text: 自定义耗时文案（为空时按 seconds 生成）。
@@ -556,6 +556,53 @@ def _seconds_text(spec: dict, calls: int) -> str:
     return f"约 {max(1, round(total / 60))} 分钟（估计）"
 
 
+def _eta_ms(spec: dict, calls: int) -> int:
+    """按单次调用秒数与次数估算总耗时（毫秒）。
+
+    参数:
+        spec: 动作登记项。
+        calls: 模型调用次数。
+
+    返回:
+        预计总耗时毫秒数；无法估算（seconds 为空或调用次数为 0）时返回 0。
+    """
+    seconds = spec.get("seconds")
+    if not seconds or calls <= 0:
+        return 0
+    return int(seconds) * calls * 1000
+
+
+def action_spec(action: str) -> dict:
+    """读取一个已登记动作的静态定义。
+
+    参数:
+        action: 动作键（见 `ACTIONS`）。
+
+    返回:
+        动作登记项。
+
+    异常:
+        ValueError: 动作未登记。
+    """
+    spec = ACTIONS.get(str(action or ""))
+    if not spec:
+        raise ValueError(f"未知的模型动作：{action}")
+    return spec
+
+
+def action_label(action: str) -> str:
+    """读取动作标题，供错误文案与进度卡使用。
+
+    参数:
+        action: 动作键。
+
+    返回:
+        中文标题；未登记时回退为动作键本身。
+    """
+    spec = ACTIONS.get(str(action or ""))
+    return str((spec or {}).get("title") or action or "模型任务")
+
+
 def llm_plan(store: ProjectStore, config, action: str, ctx: dict | None = None) -> dict:
     """返回一个模型动作的事实清单。
 
@@ -579,6 +626,7 @@ def llm_plan(store: ProjectStore, config, action: str, ctx: dict | None = None) 
     thinking, thinking_text = _thinking_text(config, tuple(spec["stages"]))
     cancelable = bool(spec["cancelable"])
     calls_text = "0 次（不会调用模型）" if calls == 0 else f"{'至少 ' if spec.get('at_least') else ''}{calls} 次"
+    eta_ms = _eta_ms(spec, calls)
     return {
         "action": action,
         "title": spec["title"],
@@ -588,13 +636,14 @@ def llm_plan(store: ProjectStore, config, action: str, ctx: dict | None = None) 
         "calls_text": calls_text,
         "at_least": bool(spec.get("at_least")),
         "seconds_text": _seconds_text(spec, calls),
+        "eta_ms": eta_ms,
         "thinking": thinking,
         "thinking_text": thinking_text,
         "cancelable": cancelable,
         "cancel_text": (
-            "可以中途停止：当前这次模型调用结束后生效，已完成内容保留"
+            "可随时取消：已完成内容保留"
             if cancelable
-            else "不能中途取消：需要等待本次模型调用完成"
+            else "可随时取消：未完成的本次调用不写产物"
         ),
         "estimate_note": "次数与耗时是估算；实际会受篇幅、校验重写与网络情况影响。",
     }

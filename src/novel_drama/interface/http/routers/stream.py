@@ -45,6 +45,13 @@ from novel_drama.application.story.outline_hierarchical import (
     generate_hierarchical_outline,
 )
 from novel_drama.application.story.settings_generate import generate_worlds
+from novel_drama.application.support.llm_cancel import (
+    LlmCancelled,
+    current_call_id,
+    release as release_call,
+    reset_current_call_id,
+    set_current_call_id,
+)
 from novel_drama.cancel import GenerationCanceled
 from novel_drama.composition import AdapterError, ProjectStore, set_llm_abort_reason
 from novel_drama.infrastructure.config import load_config
@@ -341,6 +348,9 @@ def _stream_response(task, job=None, hint=None) -> StreamingResponse:
 
     def worker() -> None:
         """后台生成线程。"""
+        # 线程不自动继承 ContextVar：把路由阶段的 call_id 显式带进来
+        call_id = current_call_id()
+        token = set_current_call_id(call_id)
         if job:
             job.start("已提交生成请求")
             # 流式任务没有可预估的总量：显示「进行中」，不要停在 0%
@@ -369,6 +379,10 @@ def _stream_response(task, job=None, hint=None) -> StreamingResponse:
                     "resume": resume,
                 }
             events.put(("canceled", payload))
+        except LlmCancelled:
+            if job:
+                job.cancel("用户已取消本次模型调用")
+            events.put(("canceled", {"message": "已取消本次模型调用"}))
         except AdapterError as exc:
             if job:
                 job.fail(f"生成失败：{exc.message}", current=_failure_current(exc))
@@ -379,6 +393,9 @@ def _stream_response(task, job=None, hint=None) -> StreamingResponse:
                 job.fail(message)
             events.put(("error", {"message": message}))
         finally:
+            reset_current_call_id(token)
+            # 本次流式调用结束：释放取消令牌，避免进程内无限累积
+            release_call(call_id)
             events.put(None)
 
     thread = threading.Thread(target=worker, name="ndw-sse", daemon=True)
@@ -447,6 +464,9 @@ def _progress_response(task, job=None) -> StreamingResponse:
 
     def worker() -> None:
         """后台生成线程。"""
+        # 线程不自动继承 ContextVar：把路由阶段的 call_id 显式带进来
+        call_id = current_call_id()
+        token = set_current_call_id(call_id)
         if job:
             job.start("已提交生成请求")
         try:
@@ -478,6 +498,10 @@ def _progress_response(task, job=None) -> StreamingResponse:
                     "resume": resume,
                 }
             events.put(("canceled", payload))
+        except LlmCancelled:
+            if job:
+                job.cancel("用户已取消本次模型调用")
+            events.put(("canceled", {"message": "已取消本次模型调用"}))
         except AdapterError as exc:
             if job:
                 job.fail(f"生成失败：{exc.message}", current=_failure_current(exc))
@@ -488,6 +512,9 @@ def _progress_response(task, job=None) -> StreamingResponse:
                 job.fail(message)
             events.put(("error", {"message": message}))
         finally:
+            reset_current_call_id(token)
+            # 本次流式调用结束：释放取消令牌，避免进程内无限累积
+            release_call(call_id)
             events.put(None)
 
     thread = threading.Thread(target=worker, name="ndw-sse-progress", daemon=True)

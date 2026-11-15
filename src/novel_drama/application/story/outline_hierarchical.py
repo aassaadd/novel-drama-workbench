@@ -149,7 +149,7 @@ def generate_hierarchical_outline(
     work_info = project.get("work") or {}
     characters = [item for item in store.load_characters()["characters"] if item.get("role") != "narrator"]
     char_rows = _characters_payload(characters)
-    adapter = build_writing_adapter(config, bible)
+    adapter = build_writing_adapter(config, bible, action="outline.generate")
     context = _project_context(work_info, bible, char_rows)
     failures: list[dict] = []
 

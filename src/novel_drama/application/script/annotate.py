@@ -100,7 +100,7 @@ def suggest_script(
     if not scenes_payload:
         raise ValueError(f"章节 {chapter_id} 的场景里没有任何台词行：先执行 ndw line split")
 
-    adapter = build_writing_adapter(config, bible)
+    adapter = build_writing_adapter(config, bible, action="script.suggest")
     work_info = store.load_project().get("work") or {}
     context = _project_context(work_info, bible, characters)
     base_parts = [context] if context else []

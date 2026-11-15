@@ -83,7 +83,7 @@ def expand_outline(
     work_info = project.get("work") or {}
     characters = [item for item in store.load_characters()["characters"] if item.get("role") != "narrator"]
     char_rows = _characters_payload(characters)
-    adapter = build_writing_adapter(config, bible)
+    adapter = build_writing_adapter(config, bible, action="outline.expand")
 
     # 推断默认值：优先沿用参数，其次取已有大纲里最常见的规模
     inferred_chapters = _most_common([len(act.get("chapters") or []) for act in acts], 5)

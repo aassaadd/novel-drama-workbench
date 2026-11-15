@@ -23,7 +23,7 @@ from fastapi import HTTPException
 
 from novel_drama.composition import (
     LocalComfyGateway,
-    OmlxWritingAdapter,
+    build_omlx_writing_adapter,
     comfy_media,
     comfy_models,
     last_llm_call,
@@ -915,7 +915,7 @@ def register_models_routes(app, config_path: str | None = None) -> None:
         """
         config = load_config(config_path)
         settings, model = resolve_llm_settings(config, body, allow_empty_model=True)
-        adapter = OmlxWritingAdapter(settings)
+        adapter = build_omlx_writing_adapter(settings)
         started = time.monotonic()
         limits = adapter.fetch_model_limits(model or None, timeout_s=2.0)
         latency = int((time.monotonic() - started) * 1000)
@@ -988,7 +988,7 @@ def register_models_routes(app, config_path: str | None = None) -> None:
         """
         config = load_config(config_path)
         settings, _model = resolve_llm_settings(config, body)
-        adapter = OmlxWritingAdapter(settings)
+        adapter = build_omlx_writing_adapter(settings)
         started = time.monotonic()
         try:
             catalog = adapter.fetch_model_catalog(timeout_s=2.0)
@@ -1030,7 +1030,7 @@ def register_models_routes(app, config_path: str | None = None) -> None:
         """
         config = load_config(config_path)
         settings, model = resolve_llm_settings(config, body)
-        adapter = OmlxWritingAdapter(settings)
+        adapter = build_omlx_writing_adapter(settings)
         started = time.monotonic()
         try:
             limits = adapter.fetch_model_limits(model or None, timeout_s=2.0)

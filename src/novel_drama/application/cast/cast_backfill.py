@@ -66,7 +66,11 @@ def backfill_cast(
     warnings: list[dict] = []
 
     if want_profiles:
-        adapter = build_writing_adapter(config, SettingsStore(store.root).load_or_none() or {})
+        adapter = build_writing_adapter(
+            config,
+            SettingsStore(store.root).load_or_none() or {},
+            action="cast.backfill",
+        )
         for character in table.get("characters") or []:
             profile = character.get("voice_profile") or {}
             # status=draft 表示上次只回落到规则模板，默认允许重试补齐，不要求用户加 --force

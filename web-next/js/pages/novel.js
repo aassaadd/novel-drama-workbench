@@ -7,8 +7,8 @@
  * 视觉与交互沿用 web-next 既有规范（卡片、chip、ed-head、vw-body、弹窗）。
  */
 import { esc, fmtClock, icon, toast, openDialog, closeDialog, reuseListHTML } from '../dom.js';
-import { getJSON, postJSON, streamJSON } from '../api.js';
-import { confirmLlm, fetchLlmPlan, llmErrorText } from '../llm.js';
+import { getJSON, postJSON, streamJSON, canceledError } from '../api.js';
+import { fetchLlmPlan, runLlm, runLlmStream } from '../llm.js';
 import { labelOf, ENUMS, selectHTML } from '../enums.js';
 import { openProgress, watchProgress } from '../progress.js';
 import { modeSwitchHTML, bindModeSwitch } from '../gen-mode.js';
@@ -1938,25 +1938,35 @@ function addArcRow() {
 async function detectUpdates() {
   const hit = findOutlineChapter(ui.sel.id);
   if (!hit) return;
-  const check = await confirmLlm({
-    action: 'character.updates',
-    params: { path: cache.path, chapter: hit.chapter.id },
-  });
-  if (!check.ok) {
-    if (check.error) toast(llmErrorText(check), 'bad', 3600);
-    return;
-  }
   try {
-    cache.updates = await postJSON('/api/ui/chapters/character-updates', {
-      path: cache.path,
-      chapter: hit.chapter.id,
+    const data = await runLlm({
+      action: 'character.updates',
+      params: { path: cache.path, chapter: hit.chapter.id },
+      title: '正在检测角色状态回流…',
+      hint: '只生成提案，不写角色卡 · 可随时取消',
+      request: ({ callId, signal }) =>
+        postJSON(
+          '/api/ui/chapters/character-updates',
+          { path: cache.path, chapter: hit.chapter.id },
+          { timeout: 0, callId, signal }
+        ),
+      finish: (result) => {
+        const count = (result?.updates || []).length;
+        return {
+          message: count ? `检测到 ${count} 个角色状态变化，请逐条确认` : '没有检测到需要回流的角色变化',
+          detail: '结果只做预览；勾选后点「确认写入角色卡」才会改角色状态。',
+        };
+      },
     });
+    // null 表示用户在确认框或进度卡上取消了本次调用
+    if (!data) return;
+    cache.updates = data;
     cache.updatesChapter = hit.chapter.id;
     refreshBindingCards();
     const count = (cache.updates?.updates || []).length;
     toast(count ? `检测到 ${count} 个角色状态变化，请逐条确认` : '没有检测到需要回流的角色变化', count ? 'ok' : 'warn');
-  } catch (error) {
-    toast(`检测失败：${error.message}`, 'bad', 3600);
+  } catch {
+    // 进度卡已展示失败原因与重试入口，这里不再重复弹错
   }
 }
 
@@ -1994,25 +2004,34 @@ async function applyUpdates() {
 async function checkConsistency() {
   const hit = findOutlineChapter(ui.sel.id);
   if (!hit) return;
-  const check = await confirmLlm({
-    action: 'consistency',
-    params: { path: cache.path, chapter: hit.chapter.id },
-  });
-  if (!check.ok) {
-    if (check.error) toast(llmErrorText(check), 'bad', 3600);
-    return;
-  }
   try {
-    cache.consistency = await postJSON('/api/ui/chapters/consistency', {
-      path: cache.path,
-      chapter: hit.chapter.id,
+    const data = await runLlm({
+      action: 'consistency',
+      params: { path: cache.path, chapter: hit.chapter.id },
+      title: '正在检查角色一致性…',
+      hint: '只出问题清单，不改正文 · 可随时取消',
+      request: ({ callId, signal }) =>
+        postJSON(
+          '/api/ui/chapters/consistency',
+          { path: cache.path, chapter: hit.chapter.id },
+          { timeout: 0, callId, signal }
+        ),
+      finish: (result) => {
+        const total = Number(result?.counts?.total || 0);
+        return {
+          message: total ? `发现 ${total} 个角色一致性问题` : '没有发现角色一致性问题',
+          detail: '检查结果只列问题，不会修改正文或角色卡。',
+        };
+      },
     });
+    if (!data) return;
+    cache.consistency = data;
     cache.consistencyChapter = hit.chapter.id;
     refreshBindingCards();
     const total = Number(cache.consistency?.counts?.total || 0);
     toast(total ? `发现 ${total} 个角色一致性问题` : '没有发现角色一致性问题', total ? 'warn' : 'ok');
-  } catch (error) {
-    toast(`检查失败：${error.message}`, 'bad', 3600);
+  } catch {
+    // 进度卡已展示失败原因与重试入口
   }
 }
 
@@ -2620,14 +2639,6 @@ function openWorldGenerate() {
         const count = Number(mask.querySelector('#wg-count').value) || 1;
         if (!brief) return toast('先写一句方向', 'warn');
         const mode = modeOf();
-        const check = await confirmLlm({
-          action: 'world.generate',
-          params: { path: cache.path, count },
-        });
-        if (!check.ok) {
-          if (check.error) toast(llmErrorText(check), 'bad', 3600);
-          return;
-        }
         closeDialog();
         runWorldGenerate(brief, count, mode);
       });
@@ -2642,79 +2653,81 @@ function openWorldGenerate() {
  * @param {'fill'|'regen'} [mode] 只补缺失 / 重新生成
  */
 async function runWorldGenerate(brief, count, mode = 'fill') {
-  const panel = openProgress({
-    title: `正在${mode === 'fill' ? '补缺失' : '重新生成'}世界设定…`,
-    hint: `${brief} · ${mode === 'fill' ? '跳过与现有世界重名的条目' : '忽略现有条目重新生成预览'}`,
-    stage: '已提交生成请求，等待模型返回…',
-  });
-  panel.update({ percent: null });
-  let settled = false;
   try {
-    await streamJSON(
-      '/api/ui/worlds/generate/stream',
-      { path: cache.path, brief, count, overwrite: mode === 'regen' },
-      (event, data) => {
-        if (event === 'batch') {
-          const index = Number(data.index || 1);
-          const total = Number(data.total || 1) || 1;
-          panel.update({
-            stage: `正在生成第 ${index}/${total} 批世界条目…`,
-            percent: index > 1 ? Math.round(((index - 1) / total) * 100) : null,
-            current: `第 ${index} / ${total} 批`,
-          });
-        } else if (event === 'chars') {
-          const index = Number(data.batch || data.index || 1);
-          const total = Number(data.total || 1) || 1;
-          panel.update({
-            percent: null,
-            current: `第 ${index}/${total} 批 · 已接收 ${Number(data.chars || 0)} 字`,
-          });
-        } else if (event === 'done') {
-          settled = true;
-          const all = data?.result?.worlds || [];
-          panel.update({ percent: 100 });
-          // 只补缺失：过滤掉与现有世界重名的条目，避免重复写入
-          const existingNames = new Set(cache.worlds.map((item) => String(item.name || '').trim()));
-          const worlds = mode === 'fill' ? all.filter((item) => !existingNames.has(String(item.name || '').trim())) : all;
-          const skipped = all.length - worlds.length;
-          panel.note(worlds.map((item) => item.name).filter(Boolean).join('、') || '模型已返回世界条目');
-          if (!worlds.length) {
-            panel.finish({
-              message: skipped ? `生成结果与现有 ${skipped} 个世界重名，已全部跳过` : '模型没有返回可用的世界条目',
-              detail: '要覆盖现有条目请选「重新生成」后重试。',
-            });
-            return;
-          }
-          ui.worldPreview = worlds;
-          previewPicked = new Set(worlds.map((_, index) => index));
-          panel.finish({
-            message: `世界生成完成：${worlds.length} 个条目待采用${skipped ? `，跳过重名 ${skipped} 个` : ''}`,
-            detail: '预览里勾选后点「采用选中」才会写入世界。',
-            actions: [
-              {
-                label: '查看预览',
-                primary: true,
-                onClick: () => renderWorldPreview(),
-              },
-            ],
-          });
-          renderWorldPreview();
-        } else if (event === 'canceled') {
-          settled = true;
-          panel.fail({ message: '已停止生成', detail: '任务已在任务队列中取消，已接收的内容不会写入世界库。' });
-        } else if (event === 'error') {
-          settled = true;
-          panel.fail({ message: data?.message || '世界生成失败', retry: () => runWorldGenerate(brief, count, mode) });
+    await runLlmStream({
+      action: 'world.generate',
+      params: { path: cache.path, count },
+      title: `正在${mode === 'fill' ? '补缺失' : '重新生成'}世界设定…`,
+      hint: `${brief} · ${mode === 'fill' ? '跳过与现有世界重名的条目' : '忽略现有条目重新生成预览'}`,
+      stage: '已提交生成请求，等待模型返回…',
+      stream: async ({ callId, signal, panel }) => {
+        let result = null;
+        await streamJSON(
+          '/api/ui/worlds/generate/stream',
+          { path: cache.path, brief, count, overwrite: mode === 'regen' },
+          (event, data) => {
+            if (event === 'batch') {
+              const index = Number(data.index || 1);
+              const total = Number(data.total || 1) || 1;
+              panel.update({
+                stage: `正在生成第 ${index}/${total} 批世界条目…`,
+                percent: index > 1 ? Math.round(((index - 1) / total) * 100) : null,
+                current: `第 ${index} / ${total} 批`,
+              });
+            } else if (event === 'chars') {
+              const index = Number(data.batch || data.index || 1);
+              const total = Number(data.total || 1) || 1;
+              panel.update({
+                percent: null,
+                current: `第 ${index}/${total} 批 · 已接收 ${Number(data.chars || 0)} 字`,
+              });
+            } else if (event === 'done') {
+              result = data?.result || {};
+              panel.update({ percent: 100 });
+              panel.note(
+                (result.worlds || []).map((item) => item.name).filter(Boolean).join('、') || '模型已返回世界条目'
+              );
+            } else if (event === 'canceled') {
+              throw canceledError('已取消世界生成');
+            } else if (event === 'error') {
+              throw new Error(data?.message || '世界生成失败');
+            }
+          },
+          { signal, callId }
+        );
+        if (!result) throw new Error('连接已中断，没有收到世界生成结果');
+        return result;
+      },
+      finish: (result) => {
+        const all = result.worlds || [];
+        // 只补缺失：过滤掉与现有世界重名的条目，避免重复写入
+        const existingNames = new Set(cache.worlds.map((item) => String(item.name || '').trim()));
+        const worlds = mode === 'fill' ? all.filter((item) => !existingNames.has(String(item.name || '').trim())) : all;
+        const skipped = all.length - worlds.length;
+        if (!worlds.length) {
+          return {
+            message: skipped ? `生成结果与现有 ${skipped} 个世界重名，已全部跳过` : '模型没有返回可用的世界条目',
+            detail: '要覆盖现有条目请选「重新生成」后重试。',
+          };
         }
-      }
-    );
-    if (!settled) {
-      panel.fail({ message: '连接已中断，没有收到世界生成结果', retry: () => runWorldGenerate(brief, count, mode) });
-    }
-  } catch (error) {
-    if (!settled) {
-      panel.fail({ message: `世界生成失败：${error.message}`, retry: () => runWorldGenerate(brief, count, mode) });
-    }
+        ui.worldPreview = worlds;
+        previewPicked = new Set(worlds.map((_, index) => index));
+        renderWorldPreview();
+        return {
+          message: `世界生成完成：${worlds.length} 个条目待采用${skipped ? `，跳过重名 ${skipped} 个` : ''}`,
+          detail: '预览里勾选后点「采用选中」才会写入世界。',
+          actions: [
+            {
+              label: '查看预览',
+              primary: true,
+              onClick: () => renderWorldPreview(),
+            },
+          ],
+        };
+      },
+    });
+  } catch {
+    // 进度卡已展示失败原因与重试入口
   }
 }
 
@@ -2864,22 +2877,6 @@ function openOutlineGenerate() {
         const brief = mask.querySelector('#og-brief').value.trim();
         if (brief) body.brief = brief;
         const mode = modeOf();
-        // 「只补缺失」且已有大纲时不会调用模型，不弹假提示
-        if (!(mode === 'fill' && outlineCounts().acts > 0)) {
-          const check = await confirmLlm({
-            action: 'outline.generate',
-            params: {
-              path: cache.path,
-              acts: body.acts,
-              chapters_per_act: body.chapters_per_act,
-              beats_per_chapter: body.beats_per_chapter,
-            },
-          });
-          if (!check.ok) {
-            if (check.error) toast(llmErrorText(check), 'bad', 3600);
-            return;
-          }
-        }
         closeDialog();
         runOutlineGenerate(body, mode);
       });
@@ -2919,16 +2916,17 @@ async function runOutlineGenerate(body, mode = 'regen') {
     return;
   }
   const totalActs = Number(body.acts || 3);
-  const panel = openProgress({
-    title: `正在${mode === 'fill' ? '补缺失' : '重新生成'}分层大纲…`,
-    hint: `${totalActs} 幕 × ${Number(body.chapters_per_act || 3)} 章 × ${Number(
-      body.beats_per_chapter || 4
-    )} 个节拍 · 每章约 ${Number(body.words || 3000)} 字${mode === 'fill' ? ' · 保留现有大纲' : ' · 覆盖现有大纲'}`,
-    stage: '已提交生成请求，正在拆解幕结构…',
-  });
-  panel.update({ percent: null });
-  let settled = false;
-  const finishWithOutline = async (result) => {
+  const outlineTitle = `正在${mode === 'fill' ? '补缺失' : '重新生成'}分层大纲…`;
+  const outlineHint = `${totalActs} 幕 × ${Number(body.chapters_per_act || 3)} 章 × ${Number(
+    body.beats_per_chapter || 4
+  )} 个节拍 · 每章约 ${Number(body.words || 3000)} 字${mode === 'fill' ? ' · 保留现有大纲' : ' · 覆盖现有大纲'}`;
+  /**
+   * 大纲生成完成后的收尾：刷新目录、定位第一章，并返回进度卡结果文案。
+   * @param {object} result 后端返回
+   * @param {object} panel 进度面板（用于补充一行说明）
+   * @returns {Promise<{message: string, detail?: string, actions?: Array<object>}>} 收尾文案
+   */
+  const finishWithOutline = async (result, panel) => {
     cache.outline = await getJSON('/api/ui/outline', { path: cache.path });
     const counts = outlineCounts();
     const first = outlineChapters()[0];
@@ -2958,14 +2956,14 @@ async function runOutlineGenerate(body, mode = 'regen') {
         },
       });
       actions.push({ label: '稍后手动调整', onClick: (close) => close() });
-      panel.finish({
+      return {
         message: `大纲已生成：${counts.acts} 幕 / ${counts.chapters} 章 / ${counts.beats} 个节拍（有越界）`,
         detail: [summary, bindingSummary(result)].filter(Boolean).join('；'),
         actions,
-      });
-      return;
+      };
     }
-    panel.finish({
+    toast('大纲已生成', 'ok');
+    return {
       message: `大纲已生成：${counts.acts} 幕 / ${counts.chapters} 章 / ${counts.beats} 个节拍`,
       detail: [
         result?.failures?.length ? `有 ${result.failures.length} 个批次失败，可在目录里补生成。` : summary,
@@ -2974,86 +2972,87 @@ async function runOutlineGenerate(body, mode = 'regen') {
         .filter(Boolean)
         .join('；'),
       actions: [{ label: '查看大纲', primary: true, onClick: () => paint() }],
-    });
-    toast('大纲已生成', 'ok');
+    };
   };
   try {
-    const totals = {
-      acts: totalActs,
-      chapters: totalActs * Number(body.chapters_per_act || 3),
-      beats: totalActs * Number(body.chapters_per_act || 3) * Number(body.beats_per_chapter || 4),
-    };
-    await streamJSON('/api/ui/outline/hierarchical/stream', body, (event, data) => {
-      if (!data) return;
-      if (event === 'batch') {
-        const info = outlineProgressText(data, totals);
-        panel.update({
-          stage: info.stage,
-          current: info.current,
-          // 后端给了整体百分比就按它走；否则在首项显示「进行中」
-          percent: typeof data.percent === 'number' ? data.percent : null,
-        });
-      } else if (event === 'chars') {
-        const info = outlineProgressText(data, totals);
-        const chars = Number(data.chars || 0);
-        panel.update({
-          percent: null,
-          stage: info.stage,
-          current: `${info.current ? `${info.current} · ` : ''}已接收 ${chars} 字`,
-        });
-      } else if (event === 'stage') {
-        // 阶段切换：幕 → 章 → 节拍，先把主文案切到新阶段，避免沿用上一阶段的单位
-        const stage = String(data.stage || '');
-        const names = { acts: '规划幕结构', chapters: '逐幕生成章节', beats: '逐章生成节拍' };
-        if (names[stage]) panel.update({ stage: names[stage], percent: null, current: '' });
-      } else if (event === 'rewrite') {
-        const level = data.level === 'chapters' ? '章' : data.level === 'beats' ? '节拍' : '幕';
-        // 章/节拍层重写带的是幕内章序号：补上幕序号，避免与全局章号混淆
-        const who = data.chapter
-          ? `第 ${data.index || '?'} 幕 · 第 ${data.chapter_index || ''} 章《${data.chapter}》`
-          : `第 ${data.index || '?'} 幕`;
-        panel.update({
-          percent: null,
-          stage: `第 ${data.attempt} 次重写 ${who}（${level}层）：按设定纠正中…`,
-          current: data.reason || '',
-        });
-        panel.note(`第 ${data.attempt} 次重写 · ${level}层 · ${who} · ${data.reason || ''}`);
-      } else if (event === 'done') {
-        settled = true;
-        panel.update({ percent: 100 });
-        void finishWithOutline(data.result || {}).catch((error) =>
-          panel.fail({
-            message: `大纲已生成，但刷新目录失败：${error.message}`,
-            retry: () => runOutlineGenerate(body, mode),
-          })
+    await runLlmStream({
+      action: 'outline.generate',
+      params: {
+        path: cache.path,
+        acts: body.acts,
+        chapters_per_act: body.chapters_per_act,
+        beats_per_chapter: body.beats_per_chapter,
+      },
+      title: outlineTitle,
+      hint: outlineHint,
+      stage: '已提交生成请求，正在拆解幕结构…',
+      stream: async ({ callId, signal, panel }) => {
+        const totals = {
+          acts: totalActs,
+          chapters: totalActs * Number(body.chapters_per_act || 3),
+          beats: totalActs * Number(body.chapters_per_act || 3) * Number(body.beats_per_chapter || 4),
+        };
+        let result = null;
+        await streamJSON(
+          '/api/ui/outline/hierarchical/stream',
+          body,
+          (event, data) => {
+            if (!data) return;
+            if (event === 'batch') {
+              const info = outlineProgressText(data, totals);
+              panel.update({
+                stage: info.stage,
+                current: info.current,
+                // 后端给了整体百分比就按它走；否则在首项显示「进行中」
+                percent: typeof data.percent === 'number' ? data.percent : null,
+              });
+            } else if (event === 'chars') {
+              const info = outlineProgressText(data, totals);
+              const chars = Number(data.chars || 0);
+              panel.update({
+                percent: null,
+                stage: info.stage,
+                current: `${info.current ? `${info.current} · ` : ''}已接收 ${chars} 字`,
+              });
+            } else if (event === 'stage') {
+              // 阶段切换：幕 → 章 → 节拍，先把主文案切到新阶段，避免沿用上一阶段的单位
+              const stage = String(data.stage || '');
+              const names = { acts: '规划幕结构', chapters: '逐幕生成章节', beats: '逐章生成节拍' };
+              if (names[stage]) panel.update({ stage: names[stage], percent: null, current: '' });
+            } else if (event === 'rewrite') {
+              const level = data.level === 'chapters' ? '章' : data.level === 'beats' ? '节拍' : '幕';
+              // 章/节拍层重写带的是幕内章序号：补上幕序号，避免与全局章号混淆
+              const who = data.chapter
+                ? `第 ${data.index || '?'} 幕 · 第 ${data.chapter_index || ''} 章《${data.chapter}》`
+                : `第 ${data.index || '?'} 幕`;
+              panel.update({
+                percent: null,
+                stage: `第 ${data.attempt} 次重写 ${who}（${level}层）：按设定纠正中…`,
+                current: data.reason || '',
+              });
+              panel.note(`第 ${data.attempt} 次重写 · ${level}层 · ${who} · ${data.reason || ''}`);
+            } else if (event === 'done') {
+              result = data.result || {};
+              panel.update({ percent: 100 });
+            } else if (event === 'canceled') {
+              throw canceledError('已取消大纲生成');
+            } else if (event === 'error') {
+              throw new Error(data.message || '大纲生成失败');
+            }
+          },
+          { signal, callId }
         );
-      } else if (event === 'canceled') {
-        settled = true;
-        panel.fail({ message: '已停止生成', detail: '任务已在任务队列中取消，已接收的内容不会写入大纲。' });
-      } else if (event === 'error') {
-        settled = true;
-        // 可续跑时只补失败幕：复用后端保留的已完成幕
-        const canResume = Boolean(data.resume || data.retryable);
-        const gateStuck = /「(章|节拍)」层|「章」|「节拍」/.test(String(data.message || ''));
-        panel.fail({
-          message: data.message || '大纲生成失败',
-          detail: data.detail || '',
-          current: canResume
-            ? gateStuck
-              ? '已合格的幕与章已保留；点「重试」从当前层继续'
-              : '已成功的幕已保留；点「重试」只补失败幕'
-            : '',
-          retry: () => runOutlineGenerate(canResume ? { ...body, resume: true } : body, mode),
-        });
-      }
+        if (!result) throw new Error('连接已中断，没有收到大纲结果');
+        try {
+          return await finishWithOutline(result, panel);
+        } catch (error) {
+          throw new Error(`大纲已生成，但刷新目录失败：${error.message}`);
+        }
+      },
+      finish: (summary) => summary,
     });
-    if (!settled) {
-      panel.fail({ message: '连接已中断，没有收到大纲结果', retry: () => runOutlineGenerate(body, mode) });
-    }
-  } catch (error) {
-    if (!settled) {
-      panel.fail({ message: `大纲生成失败：${error.message}`, retry: () => runOutlineGenerate(body, mode) });
-    }
+  } catch {
+    // 进度卡已展示失败原因与重试入口
   }
 }
 
@@ -3149,20 +3148,6 @@ function openOutlineExpand() {
         }
         const brief = mask.querySelector('#oe-brief').value.trim();
         if (brief) body.brief = brief;
-        const check = await confirmLlm({
-          action: 'outline.expand',
-          params: {
-            path: cache.path,
-            new_acts: body.new_acts,
-            new_chapters: body.new_chapters || 0,
-            chapters_per_act: body.chapters_per_act,
-            beats_per_chapter: body.beats_per_chapter,
-          },
-        });
-        if (!check.ok) {
-          if (check.error) toast(llmErrorText(check), 'bad', 3600);
-          return;
-        }
         closeDialog();
         runOutlineExpand(body);
       });
@@ -3176,13 +3161,6 @@ function openOutlineExpand() {
  */
 async function runOutlineExpand(body) {
   const label = { after_act: '某幕后扩充', after_chapter: '某章后扩充', append: '结局后续写' }[body.mode] || '大纲扩充';
-  const panel = openProgress({
-    title: `正在${label}…`,
-    hint: '只新增，不改动已有幕、章、节拍与已写正文',
-    stage: '已提交请求，正在生成新增内容…',
-  });
-  panel.update({ percent: null });
-  let settled = false;
   const chapterCount = Number(body.new_chapters || body.chapters_per_act || 0);
   const totals = {
     acts: Number(body.new_acts || 1),
@@ -3192,63 +3170,78 @@ async function runOutlineExpand(body) {
       Number(body.beats_per_chapter || 0),
   };
   try {
-    await streamJSON('/api/ui/outline/expand/stream', body, (event, data) => {
-      if (!data) return;
-      if (event === 'batch') {
-        // unit=expand 是插入位置说明；其余是逐幕/逐章生成
-        if (data.unit === 'expand') {
-          panel.note(String(data.name || ''));
-          return;
-        }
-        const info = outlineProgressText(data, totals);
-        panel.update({
-          stage: info.stage,
-          current: info.current,
-          percent: typeof data.percent === 'number' ? data.percent : null,
-        });
-      } else if (event === 'chars') {
-        const info = outlineProgressText(data, totals);
-        panel.update({
-          percent: null,
-          stage: info.stage,
-          current: `${info.current ? `${info.current} · ` : ''}已接收 ${Number(data.chars || 0)} 字`,
-        });
-      } else if (event === 'rewrite') {
-        const level = data.level === 'chapters' ? '章' : data.level === 'beats' ? '节拍' : '幕';
-        // 章/节拍层重写带的是幕内章序号：补上幕序号，避免与全局章号混淆
-        const who = data.chapter
-          ? `第 ${data.index || '?'} 幕 · 第 ${data.chapter_index || ''} 章《${data.chapter}》`
-          : `第 ${data.index || '?'} 幕`;
-        panel.update({
-          percent: null,
-          stage: `第 ${data.attempt} 次重写 ${who}（${level}层）：按设定纠正中…`,
-          current: data.reason || '',
-        });
-        panel.note(`第 ${data.attempt} 次重写 · ${level}层 · ${who} · ${data.reason || ''}`);
-      } else if (event === 'done') {
-        settled = true;
-        panel.update({ percent: 100 });
-        void finishWithExpand(data.result || {}, panel).catch((error) =>
-          panel.fail({ message: `扩充已生成，但刷新目录失败：${error.message}`, retry: () => runOutlineExpand(body) })
+    await runLlmStream({
+      action: 'outline.expand',
+      params: {
+        path: cache.path,
+        new_acts: body.new_acts,
+        new_chapters: body.new_chapters || 0,
+        chapters_per_act: body.chapters_per_act,
+        beats_per_chapter: body.beats_per_chapter,
+      },
+      title: `正在${label}…`,
+      hint: '只新增，不改动已有幕、章、节拍与已写正文',
+      stage: '已提交请求，正在生成新增内容…',
+      stream: async ({ callId, signal, panel }) => {
+        let result = null;
+        await streamJSON(
+          '/api/ui/outline/expand/stream',
+          body,
+          (event, data) => {
+            if (!data) return;
+            if (event === 'batch') {
+              // unit=expand 是插入位置说明；其余是逐幕/逐章生成
+              if (data.unit === 'expand') {
+                panel.note(String(data.name || ''));
+                return;
+              }
+              const info = outlineProgressText(data, totals);
+              panel.update({
+                stage: info.stage,
+                current: info.current,
+                percent: typeof data.percent === 'number' ? data.percent : null,
+              });
+            } else if (event === 'chars') {
+              const info = outlineProgressText(data, totals);
+              panel.update({
+                percent: null,
+                stage: info.stage,
+                current: `${info.current ? `${info.current} · ` : ''}已接收 ${Number(data.chars || 0)} 字`,
+              });
+            } else if (event === 'rewrite') {
+              const level = data.level === 'chapters' ? '章' : data.level === 'beats' ? '节拍' : '幕';
+              // 章/节拍层重写带的是幕内章序号：补上幕序号，避免与全局章号混淆
+              const who = data.chapter
+                ? `第 ${data.index || '?'} 幕 · 第 ${data.chapter_index || ''} 章《${data.chapter}》`
+                : `第 ${data.index || '?'} 幕`;
+              panel.update({
+                percent: null,
+                stage: `第 ${data.attempt} 次重写 ${who}（${level}层）：按设定纠正中…`,
+                current: data.reason || '',
+              });
+              panel.note(`第 ${data.attempt} 次重写 · ${level}层 · ${who} · ${data.reason || ''}`);
+            } else if (event === 'done') {
+              result = data.result || {};
+              panel.update({ percent: 100 });
+            } else if (event === 'canceled') {
+              throw canceledError('已取消大纲扩充');
+            } else if (event === 'error') {
+              throw new Error(data.message || '扩充失败');
+            }
+          },
+          { signal, callId }
         );
-      } else if (event === 'canceled') {
-        settled = true;
-        panel.fail({ message: '已停止生成', detail: '任务已取消，未写入任何新增内容。' });
-      } else if (event === 'error') {
-        settled = true;
-        panel.fail({
-          message: data.message || '扩充失败',
-          detail: data.detail || '',
-          current: data.resume ? '新增内容未写入；点「重试」重新生成这一批' : '',
-          retry: () => runOutlineExpand(body),
-        });
-      }
+        if (!result) throw new Error('连接已中断，没有收到扩充结果');
+        try {
+          return await finishWithExpand(result, panel);
+        } catch (error) {
+          throw new Error(`扩充已生成，但刷新目录失败：${error.message}`);
+        }
+      },
+      finish: (summary) => summary,
     });
-    if (!settled) {
-      panel.fail({ message: '连接已中断，没有收到扩充结果', retry: () => runOutlineExpand(body) });
-    }
-  } catch (error) {
-    if (!settled) panel.fail({ message: `扩充失败：${error.message}`, retry: () => runOutlineExpand(body) });
+  } catch {
+    // 进度卡已展示失败原因与重试入口
   }
 }
 
@@ -3275,7 +3268,8 @@ async function finishWithExpand(result, panel) {
   if (out.length) {
     toast('新增部分有幕超出允许区间，已标注在摘要里', 'warn', 5200);
   }
-  panel.finish({
+  toast(`${result.label || '扩充'}完成`, 'ok');
+  return {
     message: `${result.label || '扩充'}完成：新增 ${inserted.length} 章，全书 ${counts.acts} 幕 / ${counts.chapters} 章 / ${counts.beats} 个节拍`,
     detail: [
       summary + (total.acts ? `（全书现为 ${total.acts} 幕 / ${total.chapters} 章 / ${total.beats} 个节拍）` : ''),
@@ -3289,8 +3283,7 @@ async function finishWithExpand(result, panel) {
         ? [{ label: '打开新增章节', onClick: () => { ui.sel = { kind: 'chapter', id: first.chapter_id }; paint(); loadBody(first.chapter_id); } }]
         : []),
     ],
-  });
-  toast(`${result.label || '扩充'}完成`, 'ok');
+  };
 }
 
 /** AI 补设定分区：预览字段后合并写入（世界观归世界模块，不走这里） */
@@ -3320,11 +3313,6 @@ function openSettingGenerate(section) {
         const seed = seedText ? Number(seedText) : null;
         if (seedText && !Number.isInteger(seed)) return toast('种子必须是整数', 'warn');
         const mode = modeOf();
-        const check = await confirmLlm({ action: 'setting.section', params: { path: cache.path } });
-        if (!check.ok) {
-          if (check.error) toast(llmErrorText(check), 'bad', 3600);
-          return;
-        }
         closeDialog();
         runSettingGenerate(section, label, brief, seed, mode);
       });
@@ -3341,47 +3329,46 @@ function openSettingGenerate(section) {
  * @param {'fill'|'regen'} mode 只补缺失 / 重新生成
  */
 async function runSettingGenerate(section, label, brief, seed = null, mode = 'regen') {
-  const panel = openProgress({
-    title: `正在${mode === 'fill' ? '补缺失' : '重新生成'}${label}…`,
-    hint: `${mode === 'fill' ? '保留已有字段，只生成空缺' : '已有字段会被新结果覆盖'} · 温度取设置页「写作」分组${
-      seed === null ? ' · 未固定种子' : ` · 种子 ${seed}`
-    }`,
-    stage: '已提交生成请求，等待模型返回…',
-  });
-  panel.update({ percent: null });
   try {
-    // 生成可能持续数十秒：不设前端超时，避免把仍在跑的生成误判为失败
-    const data = await postJSON(
-      '/api/ui/setting/generate',
-      { path: cache.path, section, brief, seed: seed === null ? undefined : seed, overwrite: mode !== 'fill' },
-      { timeout: 0 }
-    );
-    const fields = data?.fields || data || {};
-    const count = Object.keys(fields).length;
-    const skipped = Array.isArray(data?.skipped) ? data.skipped.length : 0;
-    // 非流式入口也要展示最近一条模型返回内容（一行灰色小字）
-    panel.note(fields.logline || fields.summary || fields.tone || fields.premise || '模型已返回字段');
-    panel.finish({
-      message:
-        mode === 'fill'
-          ? `${label}补缺失完成：${count} 个字段，跳过已有 ${skipped} 个`
-          : `${label}重新生成完成：${count} 个字段待确认`,
-      detail: '确认后点「写入设定」才会覆盖对应字段。',
-      actions: [
-        { label: '查看字段', primary: true, onClick: () => openSettingPreview(section, label, fields) },
-        // 明确的重新生成入口：不关闭浮层时也能直接再抽一版
-        { label: '重新生成', onClick: (close) => {
-          close();
-          runSettingGenerate(section, label, brief, seed, 'regen');
-        } },
-      ],
+    const data = await runLlm({
+      action: 'setting.section',
+      params: { path: cache.path },
+      title: `正在${mode === 'fill' ? '补缺失' : '重新生成'}${label}…`,
+      hint: `${mode === 'fill' ? '保留已有字段，只生成空缺' : '已有字段会被新结果覆盖'} · 可随时取消${
+        seed === null ? ' · 未固定种子' : ` · 种子 ${seed}`
+      }`,
+      request: ({ callId, signal }) =>
+        postJSON(
+          '/api/ui/setting/generate',
+          { path: cache.path, section, brief, seed: seed === null ? undefined : seed, overwrite: mode !== 'fill' },
+          { timeout: 0, callId, signal }
+        ),
+      finish: (result) => {
+        const fields = result?.fields || result || {};
+        const count = Object.keys(fields).length;
+        const skipped = Array.isArray(result?.skipped) ? result.skipped.length : 0;
+        // 非流式入口也要展示最近一条模型返回内容（一行灰色小字）
+        openSettingPreview(section, label, fields);
+        return {
+          message:
+            mode === 'fill'
+              ? `${label}补缺失完成：${count} 个字段，跳过已有 ${skipped} 个`
+              : `${label}重新生成完成：${count} 个字段待确认`,
+          detail: '确认后点「写入设定」才会覆盖对应字段。',
+          actions: [
+            { label: '查看字段', primary: true, onClick: () => openSettingPreview(section, label, fields) },
+            // 明确的重新生成入口：不关闭浮层时也能直接再抽一版
+            { label: '重新生成', onClick: (close) => {
+              close();
+              runSettingGenerate(section, label, brief, seed, 'regen');
+            } },
+          ],
+        };
+      },
     });
-    openSettingPreview(section, label, fields);
-  } catch (error) {
-    panel.fail({
-      message: `生成失败：${error.message}`,
-      retry: () => runSettingGenerate(section, label, brief, seed, mode),
-    });
+    if (!data) return;
+  } catch {
+    // 进度卡已展示失败原因与重试入口
   }
 }
 
@@ -3887,129 +3874,159 @@ async function openCastCaptureDialog(scope = {}) {
       .slice(0, 8)
       .map((row) => `第 ${Number(row.index || 0)} 章《${row.title || ''}》`)
       .join('、') + (rows.length > 8 ? ` 等 ${rows.length} 章` : '');
-  const check = await confirmLlm({
-    action: 'cast.capture',
-    params,
-    plan,
-    title: chapterId ? `补角色识别 · 第 ${Number(rows[0]?.index || 0)} 章` : `补角色识别 · 第 ${actIndex || '?'} 幕`,
-    confirmLabel: '开始补跑',
-    extraHTML: list
-      ? `<div class="hint" style="line-height:1.6">待补章节：${esc(list)}</div>`
-      : '',
-  });
-  if (!check.ok) return;
-  await runCastCapture({ ...params, count });
+  await runCastCapture(
+    { ...params, count },
+    {
+      plan,
+      title: chapterId ? `补角色识别 · 第 ${Number(rows[0]?.index || 0)} 章` : `补角色识别 · 第 ${actIndex || '?'} 幕`,
+      extraHTML: list ? `<div class="hint" style="line-height:1.6">待补章节：${esc(list)}</div>` : '',
+    }
+  );
 }
 
 /**
  * 执行手动补跑：轮询任务进度，逐章展示识别结果，支持中途停止。
  * @param {{path: string, chapter?: string, act?: string, act_index?: number, count?: number, seconds?: number}} body
+ * @param {{plan?: object, title?: string, extraHTML?: string}} [options] 确认弹窗配置
  */
-async function runCastCapture(body) {
+async function runCastCapture(body, options = {}) {
   const total = Number(body.count || 0);
-  const panel = openProgress({
-    title: `正在补角色识别 · ${body.chapter ? '本章' : '本幕'}`,
-    hint: `只做角色识别，不写正文；本次共 ${total} 章，可在当前章节结束后停止`,
-    stage: '正在启动补跑…',
-    onStop: async () => {
-      try {
-        const data = await postJSON('/api/ui/cast/capture/cancel', { path: body.path });
-        panel.note(`已请求停止：${data?.job?.note || '当前章节识别结束后生效'}`);
-      } catch (error) {
-        toast(`停止失败：${error.message}`, 'bad', 3600);
-      }
-    },
-  });
-  let job = null;
   try {
-    job = (await postJSON('/api/ui/cast/capture/start', body))?.job || null;
-  } catch (error) {
-    panel.fail({ message: `补跑启动失败：${error.message}` });
-    return;
-  }
-  if (!job) {
-    panel.fail({ message: '补跑启动失败：没有返回任务信息' });
-    return;
-  }
-  const jobId = job.job_id;
-  let errors = 0;
-  /** 读一次任务进度；结束后汇总逐章结果 */
-  const tick = async () => {
-    let current = null;
-    try {
-      current = (await getJSON('/api/ui/cast/capture/job', { path: body.path }))?.job || null;
-      errors = 0;
-    } catch (error) {
-      errors += 1;
-      if (errors >= 4) {
-        panel.fail({ message: `读取补跑进度失败：${error.message}` });
-        return;
-      }
-      panel.update({ stage: `暂时读不到进度（${error.message}），正在重试…` });
-      window.setTimeout(tick, 1500);
-      return;
-    }
-    if (!current || current.job_id !== jobId) {
-      panel.fail({ message: '补跑任务已被新的任务替换，请回列表查看最新状态' });
-      return;
-    }
-    const items = current.items || [];
-    const done = Number(current.done || 0);
-    const failed = Number(current.failed || 0);
-    const skipped = Number(current.skipped || 0);
-    const totalNow = Number(current.total || total || 0);
-    if (current.status === 'running') {
-      const cur = current.current || {};
-      panel.update({
-        stage: cur.title
-          ? `第 ${Number(cur.position || 0)}/${totalNow} 章 · 第 ${Number(cur.index || 0)} 章《${cur.title}》`
-          : `已完成 ${done}/${totalNow} 章`,
-        percent: totalNow ? Math.round((done / totalNow) * 100) : null,
-      });
-      const last = [...items].reverse().find((item) => item.status === 'captured' || item.status === 'failed');
-      if (last) {
-        panel.note(
-          last.status === 'failed'
-            ? `第 ${Number(last.index || 0)} 章失败：${last.error || '未知原因'}`
-            : `第 ${Number(last.index || 0)} 章：${last.message || '已完成'}`
-        );
-      }
-      window.setTimeout(tick, 1500);
-      return;
-    }
-    await refreshCastStatus();
-    const detail = items
-      .map((item) => {
-        const head = `第 ${Number(item.index || 0)} 章《${item.title || ''}》`;
-        if (item.status === 'failed') return `${head}：失败 · ${item.error || '未知原因'}`;
-        if (item.status === 'skipped') return `${head}：${item.error || '已跳过'}`;
-        return `${head}：${item.message || '已完成'}`;
-      })
-      .join('；');
-    if (current.status === 'failed') {
-      panel.fail({ message: current.note || '补跑失败', detail });
-      toast('角色识别补跑失败，已在进度面板列出原因', 'bad', 4200);
-      return;
-    }
-    const label = { succeeded: '补跑完成', partial: '部分完成', canceled: '已停止' }[current.status] || '补跑结束';
-    panel.finish({
-      message: `${label}：完成 ${done}/${totalNow} 章${failed ? ` · 失败 ${failed}` : ''}${
-        skipped ? ` · 跳过 ${skipped}` : ''
-      }`,
-      detail,
-      actions: [
-        {
-          label: '看角色表',
-          primary: true,
-          onClick: () => {
-            window.location.hash = `#/p/${encodeURIComponent(cache.path)}/characters`;
+    await runLlmStream({
+      action: 'cast.capture',
+      params: { path: body.path, chapter: body.chapter, act: body.act, act_index: body.act_index },
+      plan: options.plan || null,
+      title: options.title || `补角色识别 · ${body.chapter ? '本章' : '本幕'}`,
+      hint: `只做角色识别，不写正文；本次共 ${total} 章，可在当前章节结束后停止`,
+      extraHTML: options.extraHTML || '',
+      confirmLabel: '开始补跑',
+      stage: '正在启动补跑…',
+      stream: async ({ callId, signal, panel }) => {
+        // 取消时通知后端停止补跑任务（每个章节结束后生效）
+        signal.addEventListener(
+          'abort',
+          () => {
+            void postJSON('/api/ui/cast/capture/cancel', { path: body.path }).catch(() => {});
           },
-        },
-      ],
+          { once: true }
+        );
+        /**
+         * 等待下一次轮询；取消时立刻结束等待。
+         * @param {number} ms 毫秒
+         * @returns {Promise<void>}
+         */
+        const wait = (ms) =>
+          new Promise((resolve, reject) => {
+            if (signal.aborted) return reject(canceledError('已取消补跑'));
+            const timer = window.setTimeout(() => {
+              signal.removeEventListener('abort', onAbort);
+              resolve();
+            }, ms);
+            /** 用户取消：清掉定时器并结束等待 */
+            function onAbort() {
+              window.clearTimeout(timer);
+              signal.removeEventListener('abort', onAbort);
+              reject(canceledError('已取消补跑'));
+            }
+            signal.addEventListener('abort', onAbort, { once: true });
+          });
+        let job = null;
+        try {
+          job = (await postJSON('/api/ui/cast/capture/start', body, { callId, signal }))?.job || null;
+        } catch (error) {
+          if (error?.canceled || signal.aborted) throw canceledError('已取消补跑');
+          throw new Error(`补跑启动失败：${error.message}`);
+        }
+        if (!job) throw new Error('补跑启动失败：没有返回任务信息');
+        const jobId = job.job_id;
+        let errors = 0;
+        for (;;) {
+          let current = null;
+          try {
+            current = (await getJSON('/api/ui/cast/capture/job', { path: body.path }, { signal }))?.job || null;
+            errors = 0;
+          } catch (error) {
+            if (error?.canceled || signal.aborted) throw canceledError('已取消补跑');
+            errors += 1;
+            if (errors >= 4) throw new Error(`读取补跑进度失败：${error.message}`);
+            panel.update({ stage: `暂时读不到进度（${error.message}），正在重试…` });
+            await wait(1500);
+            continue;
+          }
+          if (!current || current.job_id !== jobId) {
+            throw new Error('补跑任务已被新的任务替换，请回列表查看最新状态');
+          }
+          const items = current.items || [];
+          const done = Number(current.done || 0);
+          const failed = Number(current.failed || 0);
+          const skipped = Number(current.skipped || 0);
+          const totalNow = Number(current.total || total || 0);
+          if (current.status === 'running') {
+            const cur = current.current || {};
+            panel.update({
+              stage: cur.title
+                ? `第 ${Number(cur.position || 0)}/${totalNow} 章 · 第 ${Number(cur.index || 0)} 章《${cur.title}》`
+                : `已完成 ${done}/${totalNow} 章`,
+              percent: totalNow ? Math.round((done / totalNow) * 100) : null,
+            });
+            const last = [...items].reverse().find((item) => item.status === 'captured' || item.status === 'failed');
+            if (last) {
+              panel.note(
+                last.status === 'failed'
+                  ? `第 ${Number(last.index || 0)} 章失败：${last.error || '未知原因'}`
+                  : `第 ${Number(last.index || 0)} 章：${last.message || '已完成'}`
+              );
+            }
+            await wait(1500);
+            continue;
+          }
+          await refreshCastStatus();
+          const detail = items
+            .map((item) => {
+              const head = `第 ${Number(item.index || 0)} 章《${item.title || ''}》`;
+              if (item.status === 'failed') return `${head}：失败 · ${item.error || '未知原因'}`;
+              if (item.status === 'skipped') return `${head}：${item.error || '已跳过'}`;
+              return `${head}：${item.message || '已完成'}`;
+            })
+            .join('；');
+          if (current.status === 'failed') {
+            panel.note(detail);
+            throw new Error(current.note || '补跑失败');
+          }
+          const label = { succeeded: '补跑完成', partial: '部分完成', canceled: '已停止' }[current.status] || '补跑结束';
+          return {
+            status: current.status,
+            note: current.note || '',
+            summary: {
+              message: `${label}：完成 ${done}/${totalNow} 章${failed ? ` · 失败 ${failed}` : ''}${
+                skipped ? ` · 跳过 ${skipped}` : ''
+              }`,
+              detail,
+              actions: [
+                {
+                  label: '看角色表',
+                  primary: true,
+                  onClick: () => {
+                    window.location.hash = `#/p/${encodeURIComponent(cache.path)}/characters`;
+                  },
+                },
+              ],
+            },
+          };
+        }
+      },
+      finish: (data) => {
+        toast(
+          `${data.summary.message}${data.note ? ` · ${data.note}` : ''}`,
+          data.status === 'succeeded' ? 'ok' : 'warn',
+          3600
+        );
+        return data.summary;
+      },
     });
-    toast(`${label}：${current.note || ''}`, current.status === 'succeeded' ? 'ok' : 'warn', 3600);
-  };
-  void tick();
+  } catch {
+    toast('角色识别补跑失败，已在进度面板列出原因', 'bad', 4200);
+  }
 }
 
 /**
@@ -4129,21 +4146,6 @@ async function openGenerateDialog(hasBody, prefill = {}) {
           beats_per_round: Number(mask.querySelector('#gen-beats').value) || null,
           max_rounds: Number(mask.querySelector('#gen-rounds').value) || null,
         };
-        const check = await confirmLlm({
-          action: 'chapter.generate',
-          params: {
-            path: cache.path,
-            chapter: hit.chapter.id,
-            regen: body.regen,
-            multi_turn: body.multi_turn,
-            beats_per_round: body.beats_per_round || 0,
-            max_rounds: body.max_rounds || 0,
-          },
-        });
-        if (!check.ok) {
-          if (check.error) toast(llmErrorText(check), 'bad', 3600);
-          return;
-        }
         runBtn.disabled = true;
         runBtn.textContent = '正在检查视角…';
         try {
@@ -4172,8 +4174,8 @@ async function openGenerateDialog(hasBody, prefill = {}) {
  * 执行正文生成（SSE）；进度走统一浮层，完成后可刷新正文。
  * @param {object} body 生成参数
  * @param {boolean} [hadBody] 打开弹窗时本章是否已有正文
- * @param {{resumeNote?: string, mode?: 'generate'|'compress'|'rewrite'|'supplement', note?: string}} [options]
- *   mode 由「超纲/不足后用户点击动作」传入；note 说明本次动作的来源（如压缩/补写/重写原因）
+ * @param {{resumeNote?: string, mode?: 'generate'|'compress'|'rewrite'|'supplement', note?: string, confirm?: boolean}} [options]
+ *   mode 由「超纲/不足后用户点击动作」传入；note 说明本次动作的来源（如压缩/补写/重写原因）；confirm=false 用于已确认过的自动续跑
  */
 async function runGenerate(body, hadBody = false, options = {}) {
   const mode = options.mode || 'generate';
@@ -4222,47 +4224,86 @@ async function runGenerate(body, hadBody = false, options = {}) {
           : `${body.beats_per_round ? `每轮 ${Number(body.beats_per_round)} 个节拍` : '每轮节拍数自动分配'} · 最多 ${Number(
               body.max_rounds || 8
             )} 轮${body.regen ? ' · 覆盖现有正文' : ''}`;
-  const aborter = new AbortController();
-  const panel = openProgress({
-    title: panelTitle,
-    hint: panelHint,
-    stage: '已提交生成请求，等待模型返回…',
-    stream: true,
-    onStop: async () => {
-      // 断开流后服务端会在下一个增量处中断，已完成轮次保留为断点
-      aborter.abort();
-      panel.note('正在停止：当前片段结束后中断，已完成的轮次会保留');
-    },
-  });
-  panel.update({ percent: null });
-  if (options.resumeNote) panel.note(`自动续跑：${options.resumeNote}`);
-  if (options.note) panel.note(options.note);
-  let settled = false;
+  const llmAction =
+    mode === 'compress'
+      ? 'chapter.compress'
+      : mode === 'rewrite'
+        ? 'chapter.rewrite'
+        : mode === 'supplement'
+          ? 'chapter.supplement'
+          : 'chapter.generate';
   try {
-    await streamJSON(
-      '/api/ui/chapter/generate/stream',
-      { ...body, mode },
-      (event, data) => {
-      if (event === 'start') {
-        panel.update({ stage: '模型正在写作…', percent: null });
-      } else if (event === 'delta') {
-        // 进度口径：轮次 + 已接收字数，超长或退化中止时也能看出仍在推进
-        const chars = Number(data?.chars || 0);
-        const round = Number(data?.round || 0);
-        const roundsTotal = Number(data?.rounds_total || 0);
-        if (chars || round) {
-          panel.update({
-            stage: round
-              ? `第 ${round}/${roundsTotal || round} 轮 · 已接收 ${chars} 字`
-              : `已接收 ${chars} 字`,
-          });
-        }
-        panel.append(data?.text || '');
-      } else if (event === 'done') {
-        settled = true;
-        // 正文生成前可能补跑过角色识别：完成后同步刷新章节状态
-        void refreshCastStatus();
-        const result = data?.result || {};
+    await runLlmStream({
+      action: llmAction,
+      params: {
+        path: cache.path,
+        chapter: body.chapter,
+        regen: body.regen,
+        multi_turn: body.multi_turn,
+        beats_per_round: body.beats_per_round || 0,
+        max_rounds: body.max_rounds || 0,
+        mode,
+      },
+      confirm: options.confirm !== false,
+      title: panelTitle,
+      hint: panelHint,
+      stage: '已提交生成请求，等待模型返回…',
+      stream: async ({ callId, signal, panel }) => {
+        if (options.resumeNote) panel.note(`自动续跑：${options.resumeNote}`);
+        if (options.note) panel.note(options.note);
+        let result = null;
+        await streamJSON(
+          '/api/ui/chapter/generate/stream',
+          { ...body, mode },
+          (event, data) => {
+            if (event === 'start') {
+              panel.update({ stage: '模型正在写作…', percent: null });
+            } else if (event === 'delta') {
+              // 进度口径：轮次 + 已接收字数，超长或退化中止时也能看出仍在推进
+              const chars = Number(data?.chars || 0);
+              const round = Number(data?.round || 0);
+              const roundsTotal = Number(data?.rounds_total || 0);
+              if (chars || round) {
+                panel.update({
+                  stage: round
+                    ? `第 ${round}/${roundsTotal || round} 轮 · 已接收 ${chars} 字`
+                    : `已接收 ${chars} 字`,
+                });
+              }
+              panel.append(data?.text || '');
+            } else if (event === 'done') {
+              result = data?.result || {};
+              panel.update({ percent: 100 });
+              const doneResume = result.resume || {};
+              if (doneResume.resumed) {
+                panel.note(
+                  `断点续写：沿用前 ${Number(doneResume.reused_rounds || 0)} 轮已写正文，从第 ${Number(
+                    doneResume.from_round || 0
+                  )} 轮继续`
+                );
+              }
+              if (result.overshoot_note) panel.note(result.overshoot_note);
+              (Array.isArray(result.notices) ? result.notices : []).forEach((text) => panel.note(`自动处理：${text}`));
+              // 正文生成前可能补跑过角色识别：完成后同步刷新章节状态
+              void refreshCastStatus();
+            } else if (event === 'canceled') {
+              throw canceledError('已取消正文生成');
+            } else if (event === 'error') {
+              if (data?.code === 'BINDING_POV_MISSING') {
+                // 后端兜底阻断：用共用弹窗补视角，保存后自动续跑（已确认过，不再重复确认）
+                openPovSetupDialog([findOutlineChapter(body.chapter)?.chapter || { id: body.chapter, title: '' }], () =>
+                  runGenerate(body, hadBody, { resumeNote: '视角设置完成后已自动重试生成', confirm: false })
+                );
+              }
+              throw new Error(data?.message || '生成失败');
+            }
+          },
+          { signal, callId }
+        );
+        if (!result) throw new Error('连接已中断，没有收到生成结果');
+        return result;
+      },
+      finish: (result) => {
         const words = Number(result.word_count || result.words || 0);
         const beats = `${Number(result.beats_done || 0)}/${Number(result.beats_total || 0)}`;
         const deviationData = result.word_deviation || {};
@@ -4298,24 +4339,11 @@ async function runGenerate(body, hadBody = false, options = {}) {
                   action.label ||
                   (action.id === 'compress' ? '按目标字数压缩' : action.id === 'supplement' ? '补写' : '重写'),
                 primary: action.id === 'compress' || action.id === 'supplement',
-                onClick: async (close) => {
-                  const llmAction =
-                    action.id === 'supplement'
-                      ? 'chapter.supplement'
-                      : action.id === 'compress'
-                        ? 'chapter.compress'
-                        : 'chapter.rewrite';
-                  const check = await confirmLlm({
-                    action: llmAction,
-                    params: { path: cache.path, chapter: body.chapter, mode: action.id },
-                  });
-                  if (!check.ok) {
-                    if (check.error) toast(llmErrorText(check), 'bad', 3600);
-                    return;
-                  }
+                onClick: (close) => {
                   close();
                   const actionBody =
                     action.id === 'supplement' ? { ...body, mode: action.id } : { ...body, regen: true, mode: action.id };
+                  // 新一轮动作由 runGenerate 内部的统一封装重新确认（按 chapter.compress / rewrite / supplement 计次）
                   runGenerate(actionBody, true, {
                     note: `按你的选择执行「${action.label}」：原 ${words} 字，目标 ${Number(
                       deviationData.target || 0
@@ -4324,9 +4352,6 @@ async function runGenerate(body, hadBody = false, options = {}) {
                 },
               }))
             : [];
-        if (resumeLine) panel.note(resumeLine);
-        if (overshootNote) panel.note(overshootNote);
-        notices.forEach((text) => panel.note(`自动处理：${text}`));
         const modeLabel =
           result.mode === 'compress'
             ? '压缩完成'
@@ -4335,7 +4360,7 @@ async function runGenerate(body, hadBody = false, options = {}) {
               : result.mode === 'supplement'
                 ? '补写完成'
                 : '正文生成完成';
-        panel.finish({
+        return {
           message: `${modeLabel}：${words} 字 · 节拍 ${beats}${result.status ? ` · ${labelOf('chapter_status', result.status, '状态未知')}` : ''}`,
           detail: [
             options.resumeNote ? `自动续跑：${options.resumeNote}` : '',
@@ -4362,39 +4387,11 @@ async function runGenerate(body, hadBody = false, options = {}) {
               },
             },
           ],
-        });
-      } else if (event === 'canceled') {
-        settled = true;
-        // 后端会在取消时说明断点情况（已完成轮次已保存），有文案就原样展示
-        panel.fail({
-          message: '已停止生成',
-          detail: data?.message || '任务已在任务队列中取消，已接收的内容不会写入正文。',
-        });
-      } else if (event === 'error') {
-        settled = true;
-        if (data?.code === 'BINDING_POV_MISSING') {
-          // 后端兜底阻断：同样用共用弹窗，保存后自动重试生成
-          panel.fail({
-            message: data?.message || '本章还没有指定视角人物',
-            detail: '请先选择视角人物或显式使用全知视角；保存后会自动重试生成。',
-          });
-          openPovSetupDialog([findOutlineChapter(body.chapter)?.chapter || { id: body.chapter, title: '' }], () =>
-            runGenerate(body, hadBody, { resumeNote: '视角设置完成后已自动重试生成' })
-          );
-          return;
-        }
-        panel.fail({ message: data?.message || '生成失败', retry: () => runGenerate(body, hadBody, options) });
-      }
-    }, { signal: aborter.signal });
-    if (!settled) {
-      panel.fail({ message: '连接已中断，没有收到生成结果', retry: () => runGenerate(body, hadBody, options) });
-    }
-  } catch (error) {
-    if (aborter.signal.aborted) {
-      panel.finish({ message: '已停止生成：已完成的轮次会保留，下次生成会自动从断点继续' });
-      return;
-    }
-    if (!settled) panel.fail({ message: `生成失败：${error.message}`, retry: () => runGenerate(body, hadBody, options) });
+        };
+      },
+    });
+  } catch {
+    // 进度卡已展示失败原因与重试入口
   }
 }
 
@@ -4764,14 +4761,6 @@ async function openActGenerateDialog(act, actIndex, prefill = {}) {
       runBtn.addEventListener('click', async () => {
         if (runBtn.disabled) return;
         const mode = modeOf();
-        const check = await confirmLlm({
-          action: 'act.generate',
-          params: { path: cache.path, act: act.id || '', act_index: actIndex, regen: mode === 'regen' },
-        });
-        if (!check.ok) {
-          if (check.error) toast(llmErrorText(check), 'bad', 3600);
-          return;
-        }
         runBtn.disabled = true;
         runBtn.textContent = '正在检查视角…';
         try {
@@ -4798,7 +4787,7 @@ async function openActGenerateDialog(act, actIndex, prefill = {}) {
  * @param {object} act 幕对象
  * @param {number} actIndex 幕序号（从 1 开始）
  * @param {'fill'|'regen'} mode 只补缺失 / 重新生成已有正文
- * @param {{resumeNote?: string}} [options] 自动补救说明（如视角设置后自动续跑）
+ * @param {{resumeNote?: string, confirm?: boolean}} [options] 自动补救说明（如视角设置后自动续跑）；confirm=false 跳过确认
  */
 async function runActGenerate(act, actIndex, mode, options = {}) {
   const total = (act.chapters || []).length;
@@ -4807,47 +4796,7 @@ async function runActGenerate(act, actIndex, mode, options = {}) {
   const succeededIds = [];
   /** 自动补救说明（校验重试等），必须出现在最终结果里 */
   const autoNotes = new Set();
-  let settled = false;
   let jobId = '';
-  const aborter = new AbortController();
-  const panel = openProgress({
-    title: `正在生成第 ${actIndex} 幕正文…`,
-    hint: `共 ${total} 章 · 按章节顺序 · ${mode === 'regen' ? '重新生成已有正文' : '只补缺失'}`,
-    stage: '已提交生成请求，准备第 1 章…',
-    onStop: async () => {
-      // 停止只终止后续章节：已生成完成的章已由单章链路落盘
-      if (!jobId) {
-        aborter.abort();
-        finishStopped();
-        return;
-      }
-      await postJSON('/api/ui/jobs/cancel', { path: cache.path, id: jobId });
-      window.setTimeout(() => {
-        if (!settled) {
-          aborter.abort();
-          finishStopped();
-        }
-      }, 3000);
-    },
-  });
-  panel.update({ percent: 0 });
-  if (options.resumeNote) panel.note(`自动续跑：${options.resumeNote}`);
-
-  /** 本地兜底：停止后即使没收到 canceled 事件，也给出明确结果 */
-  function finishStopped() {
-    if (settled) return;
-    settled = true;
-    panel.fail({
-      message: '已停止生成',
-      detail: [
-        `已完成章节已保存。本次已处理：成功 ${counters.succeeded} 章 / 跳过 ${counters.skipped} 章 / 失败 ${counters.failed} 章`,
-        options.resumeNote ? `自动续跑：${options.resumeNote}` : '',
-        autoNotes.size ? `自动处理：${[...autoNotes].join('；')}` : '',
-      ]
-        .filter(Boolean)
-        .join('；'),
-    });
-  }
 
   /**
    * 生成结束后局部刷新：只更新左侧目录、当前幕统计与当前正文卡，不整页重绘。
@@ -4890,179 +4839,163 @@ async function runActGenerate(act, actIndex, mode, options = {}) {
   }
 
   try {
-    await streamJSON(
-      '/api/ui/act/generate/stream',
-      {
-        path: cache.path,
-        act: act.id || '',
-        act_index: actIndex,
-        mode,
-      },
-      (event, data) => {
-        if (event === 'start') {
-          jobId = data?.job_id || '';
-          panel.update({ stage: '已提交生成请求，准备第 1 章…', percent: 0 });
-        } else if (event === 'act_start') {
-          panel.update({ stage: `本幕共 ${Number(data?.total || total)} 章 · 按章节顺序生成`, percent: 0 });
-        } else if (event === 'chapter_start') {
-          const index = Number(data?.index || 1);
-          const count = Number(data?.total || total);
-          panel.update({
-            stage: `第 ${index}/${count} 章 · 正在生成《${data?.title || ''}》`,
-            percent: Math.round(((index - 1) / Math.max(1, count)) * 100),
-            current: '',
-          });
-        } else if (event === 'delta') {
-          panel.append(data?.text || '');
-        } else if (event === 'chapter_skip') {
-          counters.skipped += 1;
-          panel.note(
-            `第 ${Number(data?.index || 0)}/${Number(data?.total || total)} 章《${data?.title || ''}》已有正文，已跳过`
-          );
-        } else if (event === 'chapter_done') {
-          counters.succeeded += 1;
-          if (data?.chapter_id) succeededIds.push(data.chapter_id);
-          const count = Number(data?.total || total);
-          const index = Number(data?.index || 0);
-          panel.update({
-            stage: `第 ${index}/${count} 章《${data?.title || ''}》完成 · ${Number(data?.words || 0)} 字`,
-            percent: Math.round((index / Math.max(1, count)) * 100),
-            current: '',
-          });
-          (data?.notices || []).forEach((text) => {
-            const line = `第 ${index} 章《${data?.title || ''}》：${text}`;
-            autoNotes.add(line);
-            panel.note(`自动处理：${line}`);
-          });
-        } else if (event === 'chapter_error') {
-          counters.failed += 1;
-          failures.push({
-            index: Number(data?.index || 0),
-            title: data?.title || '',
-            code: data?.code || '',
-            message: data?.message || '未知原因',
-          });
-        } else if (event === 'done') {
-          settled = true;
-          // 整幕生成可能逐章补跑过角色识别：完成后同步刷新章节状态
-          void refreshCastStatus();
-          const result = data?.result || {};
-          const failedRows = (result.chapters || []).filter((row) => row.status === 'failed');
-          const groups = groupActFailures(failedRows.length ? failedRows : failures);
-          const povChapters = failedRows
-            .filter((row) => row.code === 'BINDING_POV_MISSING')
-            .map(
-              (row) =>
-                (act.chapters || []).find((chapter) => String(chapter.id) === String(row.chapter_id)) ||
-                (row.chapter_id ? { id: row.chapter_id, index: row.index, title: row.title } : null)
-            )
-            .filter(Boolean);
-          const actions = [];
-          if (povChapters.length) {
-            // 点击真正打开可编辑的视角弹窗，保存后自动重跑整幕
-            actions.push({
-              label: `去设置视角（${povChapters.length} 章）`,
-              primary: true,
-              onClick: (closePanel) => {
-                closePanel?.();
-                // 已成功的章已有正文，补完视角后按「只补缺失」续跑，避免重复生成
-                openPovSetupDialog(povChapters, () =>
-                  runActGenerate(act, actIndex, 'fill', { resumeNote: '补齐视角后按「只补缺失」自动续跑' })
+    await runLlmStream({
+      action: 'act.generate',
+      params: { path: cache.path, act: act.id || '', act_index: actIndex, regen: mode === 'regen' },
+      confirm: options.confirm !== false,
+      title: `正在生成第 ${actIndex} 幕正文…`,
+      hint: `共 ${total} 章 · 按章节顺序 · ${mode === 'regen' ? '重新生成已有正文' : '只补缺失'}`,
+      stage: '已提交生成请求，准备第 1 章…',
+      stream: async ({ callId, signal, panel }) => {
+        if (options.resumeNote) panel.note(`自动续跑：${options.resumeNote}`);
+        // 取消时先通知后端停止整幕任务（已完成章节已由单章链路落盘）
+        signal.addEventListener(
+          'abort',
+          () => {
+            if (!jobId) return;
+            void postJSON('/api/ui/jobs/cancel', { path: cache.path, id: jobId }).catch(() => {});
+          },
+          { once: true }
+        );
+        let result = null;
+        await streamJSON(
+          '/api/ui/act/generate/stream',
+          {
+            path: cache.path,
+            act: act.id || '',
+            act_index: actIndex,
+            mode,
+          },
+          (event, data) => {
+            if (event === 'start') {
+              jobId = data?.job_id || '';
+              panel.update({ stage: '已提交生成请求，准备第 1 章…', percent: 0 });
+            } else if (event === 'act_start') {
+              panel.update({ stage: `本幕共 ${Number(data?.total || total)} 章 · 按章节顺序生成`, percent: 0 });
+            } else if (event === 'chapter_start') {
+              const index = Number(data?.index || 1);
+              const count = Number(data?.total || total);
+              panel.update({
+                stage: `第 ${index}/${count} 章 · 正在生成《${data?.title || ''}》`,
+                percent: Math.round(((index - 1) / Math.max(1, count)) * 100),
+                current: '',
+              });
+            } else if (event === 'delta') {
+              panel.append(data?.text || '');
+            } else if (event === 'chapter_skip') {
+              counters.skipped += 1;
+              panel.note(
+                `第 ${Number(data?.index || 0)}/${Number(data?.total || total)} 章《${data?.title || ''}》已有正文，已跳过`
+              );
+            } else if (event === 'chapter_done') {
+              counters.succeeded += 1;
+              if (data?.chapter_id) succeededIds.push(data.chapter_id);
+              const count = Number(data?.total || total);
+              const index = Number(data?.index || 0);
+              panel.update({
+                stage: `第 ${index}/${count} 章《${data?.title || ''}》完成 · ${Number(data?.words || 0)} 字`,
+                percent: Math.round((index / Math.max(1, count)) * 100),
+                current: '',
+              });
+              (data?.notices || []).forEach((text) => {
+                const line = `第 ${index} 章《${data?.title || ''}》：${text}`;
+                autoNotes.add(line);
+                panel.note(`自动处理：${line}`);
+              });
+            } else if (event === 'chapter_error') {
+              counters.failed += 1;
+              failures.push({
+                index: Number(data?.index || 0),
+                title: data?.title || '',
+                code: data?.code || '',
+                message: data?.message || '未知原因',
+              });
+            } else if (event === 'done') {
+              result = data?.result || {};
+              panel.update({ percent: 100 });
+              // 整幕生成可能逐章补跑过角色识别：完成后同步刷新章节状态
+              void refreshCastStatus();
+            } else if (event === 'canceled') {
+              throw canceledError('已取消整幕生成');
+            } else if (event === 'error') {
+              if (data?.code === 'BINDING_POV_MISSING') {
+                // 配置类阻断：打开共用视角弹窗，保存后按「只补缺失」续跑（不再重复确认）
+                openPovSetupDialog(act.chapters || [], () =>
+                  runActGenerate(act, actIndex, 'fill', {
+                    resumeNote: '补齐视角后按「只补缺失」自动续跑',
+                    confirm: false,
+                  })
                 );
-              },
-            });
-          }
+              }
+              throw new Error(data?.message || '整幕生成失败');
+            }
+          },
+          { signal, callId }
+        );
+        if (!result) throw new Error('连接已中断，没有收到整幕生成结果');
+        return result;
+      },
+      finish: (result) => {
+        const failedRows = (result.chapters || []).filter((row) => row.status === 'failed');
+        const groups = groupActFailures(failedRows.length ? failedRows : failures);
+        const povChapters = failedRows
+          .filter((row) => row.code === 'BINDING_POV_MISSING')
+          .map(
+            (row) =>
+              (act.chapters || []).find((chapter) => String(chapter.id) === String(row.chapter_id)) ||
+              (row.chapter_id ? { id: row.chapter_id, index: row.index, title: row.title } : null)
+          )
+          .filter(Boolean);
+        const actions = [];
+        if (povChapters.length) {
+          // 点击真正打开可编辑的视角弹窗，保存后自动重跑整幕
           actions.push({
-            label: '刷新目录与正文',
-            primary: !povChapters.length,
-            onClick: () => refreshAfterAct(succeededIds),
-          });
-          // 自动补救必须留在结果里：优先用结果行的 notices，缺失时回退到流式阶段收集的说明
-          const resultNotes = [];
-          (result.chapters || []).forEach((row) => {
-            (row.notices || []).forEach((text) => {
-              resultNotes.push(`第 ${Number(row.index || 0)} 章《${row.title || ''}》：${text}`);
-            });
-          });
-          autoNotes.forEach((text) => {
-            if (!resultNotes.includes(text)) resultNotes.push(text);
-          });
-          const detailParts = [];
-          if (options.resumeNote) detailParts.push(`自动续跑：${options.resumeNote}`);
-          if (resultNotes.length) detailParts.push(`自动处理：${resultNotes.join('；')}`);
-          detailParts.push(actFailureDetail(groups));
-          panel.finish({
-            message: `整幕生成完成：成功 ${Number(result.succeeded || 0)} 章 / 跳过 ${Number(
-              result.skipped || 0
-            )} 章 / 失败 ${Number(result.failed || 0)} 章`,
-            detail: detailParts.filter(Boolean).join('；'),
-            actions,
-          });
-          if (succeededIds.length) void refreshAfterAct(succeededIds, true);
-        } else if (event === 'canceled') {
-          settled = true;
-          const result = data?.result || {};
-          const stats = result.total
-            ? `成功 ${Number(result.succeeded || 0)} 章 / 跳过 ${Number(result.skipped || 0)} 章 / 失败 ${Number(
-                result.failed || 0
-              )} 章`
-            : `成功 ${counters.succeeded} 章 / 跳过 ${counters.skipped} 章 / 失败 ${counters.failed} 章`;
-          panel.fail({
-            message: '已停止生成',
-            detail: [
-              `已完成章节已保存。本次已处理：${stats}`,
-              options.resumeNote ? `自动续跑：${options.resumeNote}` : '',
-              autoNotes.size ? `自动处理：${[...autoNotes].join('；')}` : '',
-            ]
-              .filter(Boolean)
-              .join('；'),
-          });
-          if (succeededIds.length) void refreshAfterAct(succeededIds, true);
-        } else if (event === 'error') {
-          settled = true;
-          const groups = groupActFailures(failures);
-          panel.fail({
-            message: data?.message || '整幕生成失败',
-            detail: groups.length ? actFailureDetail(groups) : '',
-            // 配置类阻断给可点击入口：直接打开共用视角弹窗，保存后按「只补缺失」续跑
-            actions:
-              data?.code === 'BINDING_POV_MISSING'
-                ? [
-                    {
-                      label: '去设置本幕视角',
-                      primary: true,
-                      onClick: (closePanel) => {
-                        closePanel?.();
-                        openPovSetupDialog(act.chapters || [], () =>
-                          runActGenerate(act, actIndex, 'fill', { resumeNote: '补齐视角后按「只补缺失」自动续跑' })
-                        );
-                      },
-                    },
-                  ]
-                : [],
-            retry: () => runActGenerate(act, actIndex, mode),
+            label: `去设置视角（${povChapters.length} 章）`,
+            primary: true,
+            onClick: (closePanel) => {
+              closePanel?.();
+              // 已成功的章已有正文，补完视角后按「只补缺失」续跑，避免重复生成
+              openPovSetupDialog(povChapters, () =>
+                runActGenerate(act, actIndex, 'fill', {
+                  resumeNote: '补齐视角后按「只补缺失」自动续跑',
+                  confirm: false,
+                })
+              );
+            },
           });
         }
+        actions.push({
+          label: '刷新目录与正文',
+          primary: !povChapters.length,
+          onClick: () => refreshAfterAct(succeededIds),
+        });
+        // 自动补救必须留在结果里：优先用结果行的 notices，缺失时回退到流式阶段收集的说明
+        const resultNotes = [];
+        (result.chapters || []).forEach((row) => {
+          (row.notices || []).forEach((text) => {
+            resultNotes.push(`第 ${Number(row.index || 0)} 章《${row.title || ''}》：${text}`);
+          });
+        });
+        autoNotes.forEach((text) => {
+          if (!resultNotes.includes(text)) resultNotes.push(text);
+        });
+        const detailParts = [];
+        if (options.resumeNote) detailParts.push(`自动续跑：${options.resumeNote}`);
+        if (resultNotes.length) detailParts.push(`自动处理：${resultNotes.join('；')}`);
+        detailParts.push(actFailureDetail(groups));
+        return {
+          message: `整幕生成完成：成功 ${Number(result.succeeded || 0)} 章 / 跳过 ${Number(
+            result.skipped || 0
+          )} 章 / 失败 ${Number(result.failed || 0)} 章`,
+          detail: detailParts.filter(Boolean).join('；'),
+          actions,
+        };
       },
-      { signal: aborter.signal }
-    );
-    if (!settled) {
-      settled = true;
-      panel.fail({
-        message: '连接已中断，没有收到整幕生成结果',
-        detail: `本次已处理：成功 ${counters.succeeded} 章 / 跳过 ${counters.skipped} 章 / 失败 ${counters.failed} 章`,
-        retry: () => runActGenerate(act, actIndex, mode),
-      });
-    }
-  } catch (error) {
-    // 主动停止后断开连接属于预期路径，不当作失败重复提示
-    if (settled) return;
-    settled = true;
-    panel.fail({
-      message: `整幕生成失败：${error.message}`,
-      detail: `本次已处理：成功 ${counters.succeeded} 章 / 跳过 ${counters.skipped} 章 / 失败 ${counters.failed} 章`,
-      retry: () => runActGenerate(act, actIndex, mode),
     });
+  } catch {
+    // 进度卡已展示失败原因与重试入口
+  } finally {
+    if (succeededIds.length) void refreshAfterAct(succeededIds, true);
   }
 }
 
@@ -5101,17 +5034,6 @@ function openContinueDialog(retry = false) {
           // 重新生成时才作废旧草稿并重抽
           retry: mode === 'regen',
         };
-        // 「只补缺失」且已有草稿时不会调用模型，不弹假提示
-        if (mode === 'regen' || !hasDraft) {
-          const check = await confirmLlm({
-            action: 'chapter.continue',
-            params: { path: cache.path, chapter: hit.chapter.id },
-          });
-          if (!check.ok) {
-            if (check.error) toast(llmErrorText(check), 'bad', 3600);
-            return;
-          }
-        }
         closeDialog();
         runContinue(body, mode);
       });
@@ -5153,57 +5075,57 @@ async function runContinue(body, mode = 'regen') {
     });
     return;
   }
-  const aborter = new AbortController();
-  const panel = openProgress({
-    title: body.retry ? '正在重新生成续写草稿…' : '正在生成续写草稿…',
-    hint: `本轮约 ${Number(body.words || 0)} 字${body.retry ? ' · 覆盖旧草稿' : ''}`,
-    stage: '已提交续写请求，等待模型返回…',
-    stream: true,
-    onStop: async () => {
-      aborter.abort();
-      panel.note('正在停止：当前片段结束后中断，已接收草稿会保留');
-    },
-  });
-  panel.update({ percent: null });
-  let settled = false;
   try {
-    await streamJSON('/api/ui/chapter/continue/stream', body, (event, data) => {
-      if (event === 'start') {
-        panel.update({ stage: '模型正在续写…', percent: null });
-      } else if (event === 'delta') {
-        panel.append(data?.text || '');
-      } else if (event === 'done') {
-        settled = true;
-        const result = data?.result || {};
-        panel.finish({
-          message: `续写完成：+${Number(result.added_words || 0)} 字，已存为草稿`,
-          detail: '草稿不会自动写入正文，确认后可应用。',
-          actions: [
-            {
-              label: '应用草稿',
-              primary: true,
-              onClick: async () => {
-                try {
-                  await applyDraft(body.chapter);
-                } catch {
-                  // applyDraft 内部已给出失败提示
-                }
-              },
+    await runLlmStream({
+      action: 'chapter.continue',
+      params: { path: cache.path, chapter: body.chapter },
+      title: body.retry ? '正在重新生成续写草稿…' : '正在生成续写草稿…',
+      hint: `本轮约 ${Number(body.words || 0)} 字${body.retry ? ' · 覆盖旧草稿' : ''}`,
+      stage: '已提交续写请求，等待模型返回…',
+      stream: async ({ callId, signal, panel }) => {
+        let result = null;
+        await streamJSON(
+          '/api/ui/chapter/continue/stream',
+          body,
+          (event, data) => {
+            if (event === 'start') {
+              panel.update({ stage: '模型正在续写…', percent: null });
+            } else if (event === 'delta') {
+              panel.append(data?.text || '');
+            } else if (event === 'done') {
+              result = data?.result || {};
+              panel.update({ percent: 100 });
+            } else if (event === 'canceled') {
+              throw canceledError('已取消续写');
+            } else if (event === 'error') {
+              throw new Error(data?.message || '续写失败');
+            }
+          },
+          { signal, callId }
+        );
+        if (!result) throw new Error('连接已中断，没有收到续写结果');
+        return result;
+      },
+      finish: (result) => ({
+        message: `续写完成：+${Number(result.added_words || 0)} 字，已存为草稿`,
+        detail: '草稿不会自动写入正文，确认后可应用。',
+        actions: [
+          {
+            label: '应用草稿',
+            primary: true,
+            onClick: async () => {
+              try {
+                await applyDraft(body.chapter);
+              } catch {
+                // applyDraft 内部已给出失败提示
+              }
             },
-          ],
-        });
-      } else if (event === 'error') {
-        settled = true;
-        panel.fail({ message: data?.message || '续写失败', retry: () => runContinue(body) });
-      }
-    }, { signal: aborter.signal });
-    if (!settled) panel.fail({ message: '连接已中断，没有收到续写结果', retry: () => runContinue(body) });
-  } catch (error) {
-    if (aborter.signal.aborted) {
-      panel.finish({ message: '已停止续写：已接收草稿会保留，可稍后重新生成' });
-      return;
-    }
-    if (!settled) panel.fail({ message: `续写失败：${error.message}`, retry: () => runContinue(body) });
+          },
+        ],
+      }),
+    });
+  } catch {
+    // 进度卡已展示失败原因与重试入口
   }
 }
 

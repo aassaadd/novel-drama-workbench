@@ -446,8 +446,10 @@ def register_voice_voices_routes(app, project_root: str | None = None, config_pa
         if manual:
             result = {"profile": None, "source": "manual", "note": None, "prompt": manual}
         else:
-            adapters = build_adapters(cfg, store.settings())
-            built = voice_design.build_profile(adapters.writing, character, cfg)
+            from ....application.support.llm_calls import build_writing_adapter
+
+            adapter = build_writing_adapter(cfg, store.settings(), action="voice.design.preview")
+            built = voice_design.build_profile(adapter, character, cfg)
             result = {**built, "prompt": built["profile"]["design_prompt"]}
         return {
             **result,

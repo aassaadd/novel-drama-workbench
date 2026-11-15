@@ -18,6 +18,7 @@ from novel_drama.adapters.comfyui.workflow import (
 )
 from novel_drama.adapters.errors import AdapterError, ErrorCode
 from novel_drama.adapters.llm import OmlxWritingAdapter
+from novel_drama.adapters.llm.factory import build_omlx_writing_adapter
 from novel_drama.adapters.media import (
     JianyingExportError,
     add_cue,
@@ -118,6 +119,7 @@ __all__ = [
     "ImportsStore",
     "LocalComfyGateway",
     "OmlxWritingAdapter",
+    "build_omlx_writing_adapter",
     "ProjectStore",
     "QueueStore",
     "SchemaValidationError",

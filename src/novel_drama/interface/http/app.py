@@ -83,6 +83,59 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
 
     app = FastAPI(title="novel-drama-workbench", version=__version__)
 
+    @app.middleware("http")
+    async def _llm_call_context(request, call_next):
+        """把前端带来的 LLM call_id 写入请求上下文。
+
+        参数:
+            request: Starlette 请求。
+            call_next: 下游处理函数。
+
+        返回:
+            下游响应。
+
+        说明:
+            只认请求头 `X-LLM-Call-Id`；SSE 工作线程在 `_stream_response` 里
+            会显式继承该值，因此流式请求同样能命中取消。
+        """
+        from novel_drama.application.support.llm_cancel import (
+            release as release_call,
+            reset_current_call_id,
+            set_current_call_id,
+        )
+
+        call_id = request.headers.get("X-LLM-Call-Id") or ""
+        token = set_current_call_id(call_id)
+        try:
+            response = await call_next(request)
+        except Exception:
+            # 请求异常结束：模型调用不会再有分片，释放取消令牌
+            release_call(call_id)
+            raise
+        finally:
+            reset_current_call_id(token)
+        # SSE 响应在后台线程结束时释放；其它请求到这里就代表本次调用已结束
+        if call_id and "text/event-stream" not in (response.headers.get("content-type") or ""):
+            release_call(call_id)
+        return response
+
+    from novel_drama.application.support.llm_cancel import LlmCancelled
+
+    @app.exception_handler(LlmCancelled)
+    def _llm_cancelled_handler(request, exc):
+        """用户取消不算服务端错误，返回 499 避免刷 500 日志。
+
+        参数:
+            request: 请求。
+            exc: `LlmCancelled`。
+
+        返回:
+            JSONResponse(499)。
+        """
+        from fastapi.responses import JSONResponse
+
+        return JSONResponse(status_code=499, content={"detail": "已取消本次模型调用"})
+
     @app.on_event("shutdown")
     def _shutdown_tts_batches() -> None:
         """Web 服务退出时回收本次启动的配音批次，避免留下无主 CLI/worker 进程。"""

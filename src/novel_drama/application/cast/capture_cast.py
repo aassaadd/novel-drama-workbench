@@ -236,7 +236,7 @@ def capture_chapter_cast(
 
     existing = list(characters) if characters is not None else _existing_characters(store)
     if adapter is None:
-        adapter = build_writing_adapter(config, bible)
+        adapter = build_writing_adapter(config, bible, action="cast.capture")
     payload = adapter.generate_tool(_build_request(bible, entry, existing), _cast_tool(), timeout_s=180)
     rows = normalize_cast(payload if isinstance(payload, dict) else {})
     before_pending = load_pending(store)

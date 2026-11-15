@@ -7,47 +7,33 @@ import json
 import re
 from dataclasses import replace
 
-from ...adapters.errors import AdapterError, ErrorCode
-from ...adapters.llm import OfflineWritingAdapter
+from ...adapters.errors import AdapterError
 from ...adapters.llm.contracts import TextGenRequest
-from ...domain.production.rules.thinking_policy import collect_overrides, step_stage
+from ...domain.production.rules.thinking_policy import step_stage
 from ...infrastructure.config import AppConfig
 from ..story.setting_spec import CHOICE_ALIASES
 from .llm_schemas import _gen_tool
 
 
-def build_writing_adapter(config: AppConfig, settings: dict | None = None):
-    """按配置装配写作适配器。
+def build_writing_adapter(config: AppConfig, settings: dict | None = None, *, action: str):
+    """装配写作适配器并绑定到指定动作。
 
     参数:
         config: 本机配置。
         settings: 工程设置（透传给实现，可选）。
+        action: 动作键（必须已在 `llm_plan.ACTIONS` 登记）。
 
     返回:
-        实现 `WritingAdapter` 协议的实例。
+        绑定动作的 `BusWritingAdapter`；调用仍走统一总线。
 
     异常:
-        AdapterError(INVALID_INPUT): 配置名未知。
+        AdapterError(INVALID_INPUT): 动作未登记或配置名未知。
     """
-    # 配置里适配器写在 adapters.writing；providers.writing 是旧键，保留兼容
-    name = str(config.get("adapters.writing") or config.get("providers.writing") or "").strip()
-    if not name:
-        # 不能默认回落到离线假数据：配置缺失必须明确报错，避免假结果写进正式产物
-        raise AdapterError(
-            ErrorCode.INVALID_INPUT,
-            "未配置写作模型（adapters.writing）：请在设置页选择 omlx 并填写真实服务地址与模型；"
-            "离线适配器只能显式配置为 offline 时使用",
-        )
-    if name in ("offline", "offline-writing"):
-        return OfflineWritingAdapter(config.get("writing.offline") or settings or {})
-    if name == "omlx":
-        from ...adapters.llm import OmlxWritingAdapter
+    from .llm_bus import LlmBus
 
-        # 思考：全局开关 + 强度 + 设置页按调用点覆盖（没有覆盖项即系统自动）
-        settings = dict(config.get("omlx") or {})
-        settings["thinking_stages"] = collect_overrides(config)
-        return OmlxWritingAdapter(settings)
-    raise AdapterError(ErrorCode.INVALID_INPUT, f"未知写作适配器: {name}（可选 offline / omlx）")
+    # 兼容旧调用方的 `adapter.generate(...)` 写法，但执行路径已统一到总线
+    return LlmBus(config, settings).bind(action)
+
 
 def _characters_payload(characters: list[dict]) -> list[dict]:
     """裁剪角色表供提示词使用。

@@ -59,7 +59,7 @@ def generate_characters(
     existing_characters = store.load_characters()["characters"]
     world_store = WorldStore(store.root)
     worlds = world_store.list_worlds() if world_store.exists() else []
-    adapter = build_writing_adapter(config, bible)
+    adapter = build_writing_adapter(config, bible, action="characters.generate")
     brief_text = str(brief or "").strip()
 
     ask = f"为《{work.get('title') or '未命名'}》生成人物设定：根据需求自行判断需要几个角色（至少 1 名主角，其余按剧情需要决定数量与定位），不要凑数。"

@@ -203,7 +203,7 @@ def continue_outline(
     char_rows = _characters_payload(characters)
     logline = (bible.get("premise") or {}).get("logline")
     genre = work.get("genre") or []
-    adapter = build_writing_adapter(config, bible)
+    adapter = build_writing_adapter(config, bible, action="outline.expand")
 
     context_lines = [
         f"为《{work.get('title') or '未命名'}》续写大纲：接着第 {start_index - 1} 章之后新增 {chapters} 章，"

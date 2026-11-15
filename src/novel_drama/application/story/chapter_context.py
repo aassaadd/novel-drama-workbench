@@ -42,7 +42,7 @@ def build_chapter_context(store: ProjectStore, config: AppConfig, chapter: dict)
     chapter_words = int(sum(int(beat.get("target_words") or 0) for beat in beats) or config.get("writing.default_chapter_words") or 1200)
     if chapter_words <= 0:
         chapter_words = DEFAULT_CHAPTER_WORDS
-    adapter = build_writing_adapter(config, bible)
+    adapter = build_writing_adapter(config, bible, action="chapter.generate")
 
     entry = settings_store.find_outline_chapter(bible, chapter.get("id"), index=int(chapter.get("index") or 0))
     world_ids = list((entry or {}).get("world_ids") or [])

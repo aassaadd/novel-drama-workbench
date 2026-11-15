@@ -61,11 +61,12 @@ function clock(seconds) {
  * @param {string} [options.hint] 副标题（说明本次会做什么）
  * @param {string} [options.stage] 初始阶段文案
  * @param {boolean} [options.stream] 是否展示实时输出区
- * @param {() => void|Promise<void>} [options.onStop] 传入时在浮层显示「停止」按钮，点击调用该回调
+ * @param {() => void|Promise<void>} [options.onStop] 传入时在浮层显示「取消」按钮，点击调用该回调
  * @returns {{
  *   update: (patch: {stage?: string, percent?: number|null, current?: string, detail?: string}) => void,
  *   append: (text: string) => void,
  *   finish: (result: {message?: string, detail?: string, actions?: Array<{label: string, primary?: boolean, onClick: Function}>}) => void,
+ *   cancel: (result?: {message?: string, detail?: string}) => void,
  *   fail: (result: {message: string, detail?: string, retry?: Function}) => void,
  *   close: () => void
  * }} 控制器
@@ -83,7 +84,7 @@ export function openProgress({ title, hint = '', stage = '准备中…', stream 
       <span class="prog-title">${esc(title)}</span>
       <span class="prog-time mono">00:00</span>
       <button class="prog-stop btn sm danger" type="button" data-prog-stop hidden
-        title="停止本次生成：已完成的章节与产物会保留">停止</button>
+        title="取消本次模型调用：已完成并落盘的内容会保留">取消</button>
       <button class="prog-close" type="button" data-prog-close
         title="收起进度面板（不会中断后台生成）">${icon('x', 12)}</button>
     </div>
@@ -146,8 +147,14 @@ export function openProgress({ title, hint = '', stage = '准备中…', stream 
     el.stop.hidden = true;
     card.classList.remove('indeterminate');
     card.classList.add(kind);
-    el.spinner.classList.add(kind === 'done' ? 'ok' : 'bad');
-    el.spinner.innerHTML = icon(kind === 'done' ? 'check' : 'warn', 13);
+    if (kind === 'canceled') {
+      // 取消是正常结果：不套用失败样式
+      el.spinner.classList.add('muted');
+      el.spinner.innerHTML = icon('x', 13);
+    } else {
+      el.spinner.classList.add(kind === 'done' ? 'ok' : 'bad');
+      el.spinner.innerHTML = icon(kind === 'done' ? 'check' : 'warn', 13);
+    }
     el.time.textContent = clock((Date.now() - startedAt) / 1000);
   };
 
@@ -181,13 +188,13 @@ export function openProgress({ title, hint = '', stage = '准备中…', stream 
     el.stop.addEventListener('click', async () => {
       if (!running || el.stop.disabled) return;
       el.stop.disabled = true;
-      el.stop.textContent = '正在停止…';
+      el.stop.textContent = '正在取消…';
       try {
         await onStop();
       } catch (error) {
-        toast(`停止失败：${error.message}`, 'bad', 3600);
+        toast(`取消失败：${error.message}`, 'bad', 3600);
         el.stop.disabled = false;
-        el.stop.textContent = '停止';
+        el.stop.textContent = '取消';
       }
     });
   }
@@ -311,6 +318,31 @@ export function openProgress({ title, hint = '', stage = '准备中…', stream 
         button.addEventListener('click', () => action.onClick?.(close));
         el.actions.appendChild(button);
       }
+      const done = document.createElement('button');
+      done.type = 'button';
+      done.className = 'btn sm';
+      done.textContent = '关闭';
+      done.addEventListener('click', close);
+      el.actions.appendChild(done);
+    },
+
+    /**
+     * 取消结束：正常收尾，不显示失败样式，不弹红色错误。
+     * @param {{message?: string, detail?: string}} result
+     */
+    cancel(result = {}) {
+      settle('canceled');
+      el.stage.textContent = '已取消';
+      el.percent.textContent = '已取消';
+      el.current.textContent = '';
+      el.bar.style.width = '0%';
+      el.live.hidden = true;
+      el.result.hidden = false;
+      el.result.className = 'prog-result';
+      el.result.innerHTML = `${icon('x', 12)} ${esc(result.message || '已取消本次模型调用')}${
+        result.detail ? `<div class="prog-detail hint">${esc(result.detail)}</div>` : ''
+      }`;
+      el.actions.innerHTML = '';
       const done = document.createElement('button');
       done.type = 'button';
       done.className = 'btn sm';

@@ -346,6 +346,16 @@ def test_llm_plan_counts_and_thinking(tmp_path: Path) -> None:
     assert capture["calls"] == 2
     assert capture["calls_text"] == "2 次"
 
+    # 预计耗时只用于展示；LLM 不设额外总超时，取消由 call_id 控制
+    updates = llm_plan(store, config, "character.updates", {"chapter": chapter_id})
+    assert updates["calls"] == 1
+    assert updates["eta_ms"] == 25_000
+    assert "timeout_ms" not in updates
+    assert "timeout_text" not in updates
+
+    # 无法估算耗时的流式入口同样不推导超时
+    assert single["eta_ms"] == 0
+
     with pytest.raises(ValueError):
         llm_plan(store, config, "cast.check", {})
 

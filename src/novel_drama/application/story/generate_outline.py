@@ -70,7 +70,7 @@ def generate_outline(
     project = store.load_project()
     work = project.get("work") or {}
     characters = store.load_characters()["characters"]
-    adapter = build_writing_adapter(config, bible)
+    adapter = build_writing_adapter(config, bible, action="outline.generate")
 
     # 工具参数里的 character_ids 需要真实 id，把角色表一并写进提示词
     char_rows = _characters_payload(characters)

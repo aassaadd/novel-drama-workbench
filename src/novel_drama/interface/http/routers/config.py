@@ -23,8 +23,8 @@ from novel_drama.application.story.work_meta import (
 )
 from novel_drama.composition import (
     WORKSPACE_INDEX,
-    OmlxWritingAdapter,
     ProjectStore,
+    build_omlx_writing_adapter,
     comfy_media,
     list_workspaces,
 )
@@ -549,7 +549,7 @@ def register_config_routes(app, project_root: str | None = None, config_path: st
             settings, submitted_model = resolve_llm_settings(
                 load_config(config_path), body, allow_empty_model=True
             )
-            adapter = OmlxWritingAdapter(settings)
+            adapter = build_omlx_writing_adapter(settings)
             catalog = adapter.fetch_model_catalog(timeout_s=2.0)
             ids = [str(item.get("id")) for item in catalog.get("models") or []]
             if not catalog.get("ok"):

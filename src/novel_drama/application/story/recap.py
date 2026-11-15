@@ -120,7 +120,7 @@ def update_rolling_summary(
     rolling = store.load_rolling_summary()
     previous_book = str(rolling.get("book_summary") or "").strip()
     if adapter is None:
-        adapter = build_writing_adapter(config)
+        adapter = build_writing_adapter(config, action="chapter.continue")
 
     excerpt = _chapter_excerpt(content)
     req = TextGenRequest(

@@ -8,13 +8,59 @@ export const DEFAULT_TIMEOUT_MS = 12000;
 
 /**
  * 生成一条可识别超时的中文错误。
+ *
+ * 只用于非 LLM 的普通接口：LLM 调用不设总超时（`timeout: 0`），
+ * 用户通过进度卡「取消」终止；超时仅在普通接口上出现。
+ *
  * @param {number} ms 超时毫秒数
  * @returns {Error} 带 timeout 标记的错误
  */
 function timeoutError(ms) {
-  const error = new Error(`请求超时（${Math.round(ms / 1000)} 秒内没有响应），请确认后端服务正常后重试`);
+  const seconds = Math.round(ms / 1000);
+  const error = new Error(
+    `请求超时（${seconds} 秒内没有响应）：接口可能过载或卡住；` +
+      '若其它普通接口也超时，再检查后端服务是否正常。'
+  );
   error.timeout = true;
+  error.timeoutMs = ms;
   return error;
+}
+
+/**
+ * 生成一条可识别的取消错误（用户点进度卡「取消」或页面主动断开）。
+ * @param {string} [message] 中文提示
+ * @returns {Error} 带 canceled 标记的错误
+ */
+export function canceledError(message = '已取消本次请求') {
+  const error = new Error(message);
+  error.canceled = true;
+  return error;
+}
+
+/**
+ * 把外部 AbortSignal 接到内部控制器上，并区分「超时」与「用户取消」。
+ * @param {AbortController} controller 内部控制器
+ * @param {AbortSignal|null|undefined} signal 外部信号
+ * @returns {() => void} 清理监听
+ */
+function linkAbortSignal(controller, signal) {
+  if (!signal) return () => {};
+  const onAbort = () => controller.abort();
+  if (signal.aborted) controller.abort();
+  else signal.addEventListener('abort', onAbort, { once: true });
+  return () => signal.removeEventListener('abort', onAbort);
+}
+
+/**
+ * 组装请求头；LLM 调用统一携带 call_id，后端据此注册取消令牌。
+ * @param {Record<string,string>} base 基础头
+ * @param {{callId?: string, json?: boolean}} [options] 选项
+ * @returns {Record<string,string>} 请求头
+ */
+function buildHeaders(base, options = {}) {
+  const headers = { ...base };
+  if (options.callId) headers['X-LLM-Call-Id'] = String(options.callId);
+  return headers;
 }
 
 /**
@@ -24,7 +70,10 @@ function timeoutError(ms) {
  */
 function networkError(error) {
   if (error?.name === 'AbortError') return error;
-  const message = error instanceof TypeError ? '无法连接本地服务，请确认后端已启动' : error?.message || '网络异常';
+  const message =
+    error instanceof TypeError
+      ? '无法连接本地服务（后端可能未启动或端口不通），请确认后端已启动后重试'
+      : error?.message || '网络异常';
   const wrapped = new Error(message);
   wrapped.cause = error;
   return wrapped;
@@ -52,7 +101,8 @@ function extractMessage(detail, status, payload) {
  * GET 请求。
  * @param {string} url 接口路径
  * @param {Record<string, string|number|undefined|null>} [params] 查询参数
- * @param {{ timeout?: number }} [options] timeout 毫秒；传 0 表示不设置超时
+ * @param {{ timeout?: number, signal?: AbortSignal, callId?: string }} [options]
+ *   timeout 毫秒；传 0 表示不设置超时（LLM 默认）。signal 用于用户取消。
  * @returns {Promise<any>}
  */
 export async function getJSON(url, params = {}, options = {}) {
@@ -63,15 +113,22 @@ export async function getJSON(url, params = {}, options = {}) {
   const target = query.toString() ? `${url}?${query.toString()}` : url;
   const timeout = options.timeout === undefined ? DEFAULT_TIMEOUT_MS : Number(options.timeout) || 0;
   const controller = new AbortController();
+  const unlink = linkAbortSignal(controller, options.signal);
   const timer = timeout > 0 ? window.setTimeout(() => controller.abort(), timeout) : null;
   let response;
   try {
-    response = await fetch(target, { headers: { Accept: 'application/json' }, signal: controller.signal });
+    response = await fetch(target, {
+      headers: buildHeaders({ Accept: 'application/json' }, options),
+      signal: controller.signal,
+    });
   } catch (error) {
-    if (error?.name === 'AbortError') throw timeoutError(timeout);
+    if (error?.name === 'AbortError') {
+      throw options.signal?.aborted ? canceledError() : timeoutError(timeout);
+    }
     throw networkError(error);
   } finally {
     if (timer) window.clearTimeout(timer);
+    unlink();
   }
   const text = await response.text();
   let payload = null;
@@ -94,26 +151,34 @@ export async function getJSON(url, params = {}, options = {}) {
  * @param {string} method HTTP 方法
  * @param {string} url 接口路径
  * @param {object} body 请求体
- * @param {{ timeout?: number }} [options] timeout 毫秒；传 0 表示不设置超时（长任务可放宽）
+ * @param {{ timeout?: number, signal?: AbortSignal, callId?: string }} [options]
+ *   timeout 毫秒；传 0 表示不设置超时（LLM 默认）。signal 用于用户取消。
  * @returns {Promise<any>}
  */
 export async function sendJSON(method, url, body = {}, options = {}) {
   const timeout = options.timeout === undefined ? DEFAULT_TIMEOUT_MS : Number(options.timeout) || 0;
   const controller = new AbortController();
+  const unlink = linkAbortSignal(controller, options.signal);
   const timer = timeout > 0 ? window.setTimeout(() => controller.abort(), timeout) : null;
   let response;
   try {
     response = await fetch(url, {
       method,
-      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      headers: buildHeaders(
+        { 'Content-Type': 'application/json', Accept: 'application/json' },
+        options
+      ),
       body: JSON.stringify(body),
       signal: controller.signal,
     });
   } catch (error) {
-    if (error?.name === 'AbortError') throw timeoutError(timeout);
+    if (error?.name === 'AbortError') {
+      throw options.signal?.aborted ? canceledError() : timeoutError(timeout);
+    }
     throw networkError(error);
   } finally {
     if (timer) window.clearTimeout(timer);
+    unlink();
   }
   const text = await response.text();
   let payload = null;
@@ -135,7 +200,8 @@ export async function sendJSON(method, url, body = {}, options = {}) {
  * POST JSON 请求。
  * @param {string} url 接口路径
  * @param {object} body 请求体
- * @param {{ timeout?: number }} [options] 超时配置
+ * @param {{ timeout?: number, signal?: AbortSignal, callId?: string }} [options]
+ *   timeout 毫秒；传 0 表示不设置超时（LLM 默认）。signal 用于用户取消。
  * @returns {Promise<any>}
  */
 export async function postJSON(url, body = {}, options = {}) {
@@ -158,13 +224,17 @@ export async function patchJSON(url, body = {}, options = {}) {
  * @param {string} url 接口路径
  * @param {object} body 请求体
  * @param {(event: string, data: any) => void} onEvent 事件回调（start / delta / done / error）
- * @param {{signal?: AbortSignal}} [options] 可选：传入 AbortSignal 以便页面主动断开长流
+ * @param {{signal?: AbortSignal, callId?: string}} [options]
+ *   signal 用于页面主动断开长流；callId 透传给后端注册取消令牌
  * @returns {Promise<void>}
  */
 export async function streamJSON(url, body, onEvent, options = {}) {
   const response = await fetch(url, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
+    headers: buildHeaders(
+      { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
+      options
+    ),
     body: JSON.stringify(body),
     signal: options.signal,
   });

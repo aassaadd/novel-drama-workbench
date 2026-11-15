@@ -11,7 +11,7 @@ import { esc, icon, toast, openDialog, closeDialog } from '../dom.js';
 import { labelOf, ENUMS } from '../enums.js';
 import { getJSON, postJSON } from '../api.js';
 import { openProgress } from '../progress.js';
-import { confirmLlm, llmErrorText } from '../llm.js';
+import { runLlm } from '../llm.js';
 import { modeSwitchHTML, bindModeSwitch, getGenMode } from '../gen-mode.js';
 import { state, resetProject } from '../store.js';
 import { railbar, topbar, emptyProjectHTML, goProjects } from '../shell.js';
@@ -663,27 +663,42 @@ async function onRootClick(event) {
     if (order.indexOf(from) > order.indexOf(to)) {
       return toast('「从」阶段必须排在「到」阶段之前', 'warn');
     }
-    const check = await confirmLlm({
-      action: 'produce.run',
-      params: { path: state.path, from_stage: from, to_stage: to },
-    });
-    if (!check.ok) {
-      if (check.error) toast(llmErrorText(check), 'bad', 3600);
-      return;
-    }
     button.disabled = true;
     try {
-      const result = await postJSON('/api/ui/produce', {
-        path: state.path,
-        chapter: '',
-        from,
-        to,
-        force,
-        no_resume: noResume,
+      const result = await runLlm({
+        action: 'produce.run',
+        params: { path: state.path, from_stage: from, to_stage: to },
+        title: '正在启动全链路编排…',
+        hint: '后台进程启动后会继续执行 · 可在进度卡取消',
+        stage: '正在提交编排任务…',
+        request: ({ callId, signal }) =>
+          postJSON(
+            '/api/ui/produce',
+            {
+              path: state.path,
+              chapter: '',
+              from,
+              to,
+              force,
+              no_resume: noResume,
+            },
+            { timeout: 0, callId, signal }
+          ),
+        finish: (data) => {
+          toast(`编排已启动（pid ${data.pid || '—'}），进度见浮层`, 'ok', 4200);
+          watchProduceProgress(from, to, mode);
+          window.setTimeout(() => refresh({ silent: true }), 1500);
+          return {
+            message: '任务已启动',
+            detail: '后台编排会继续执行，进度见另一张任务卡；需要停止时点「取消」。',
+            actions: [{ label: '查看进度', primary: true, onClick: () => watchProduceProgress(from, to, mode) }],
+          };
+        },
       });
-      toast(`编排已启动（pid ${result.pid || '—'}），进度见浮层`, 'ok', 4200);
-      watchProduceProgress(from, to, mode);
-      window.setTimeout(() => refresh({ silent: true }), 1500);
+      if (!result) {
+        button.disabled = false;
+        return;
+      }
     } catch (error) {
       toast(error.message, 'bad', 4800);
       button.disabled = false;
@@ -705,6 +720,27 @@ function watchProduceProgress(from, to, mode = 'fill') {
     title: regen ? '正在强制重跑全链路编排…' : '正在补齐缺失阶段的编排…',
     hint: `${labelOf('produce_stage', from, '阶段')} → ${labelOf('produce_stage', to, '阶段')}${regen ? ' · 忽略已有产物' : ' · 已完成阶段会跳过'}`,
     stage: '后台进程已启动，正在读取编排记录…',
+    onStop: async () => {
+      // 后台编排不是单次模型调用：取消最新的运行中 produce 任务，并停止轮询
+      stopped = true;
+      if (timer) window.clearTimeout(timer);
+      try {
+        const jobs = await getJSON('/api/ui/queue', { path: state.path });
+        const mine = (jobs || [])
+          .filter((item) => item.kind === 'produce' && ['running', 'queued', 'pending'].includes(item.status))
+          .sort((a, b) => Date.parse(b.created_at || 0) - Date.parse(a.created_at || 0))[0];
+        if (mine) {
+          await postJSON('/api/ui/jobs/cancel', { path: state.path, id: mine.id, force: false });
+        }
+      } catch {
+        // 取消失败不改变本地已停止轮询的事实；可到任务队列手动重试
+      }
+      panel.cancel({
+        message: '已取消全链路编排',
+        detail: '已完成阶段保留；未开始的阶段不会执行。',
+      });
+      void refresh({ silent: true });
+    },
   });
   panel.update({ percent: 0 });
   const startedMs = Date.now();

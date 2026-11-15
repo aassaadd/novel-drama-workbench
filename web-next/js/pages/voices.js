@@ -6,7 +6,7 @@ import { esc, icon, toast, openDialog, fmtDuration } from '../dom.js';
 import { getJSON, postJSON } from '../api.js';
 import { labelOf } from '../enums.js';
 import { openProgress } from '../progress.js';
-import { confirmLlm, llmErrorText } from '../llm.js';
+import { runLlm } from '../llm.js';
 import { modeSwitchHTML, bindModeSwitch } from '../gen-mode.js';
 import { state, resetProject } from '../store.js';
 import { railbar, topbar, goChapter, goProjects, emptyProjectHTML, checkConsistency, resplitBannerHTML, onResplit } from '../shell.js';
@@ -550,62 +550,58 @@ function openVoiceDesign() {
     if (mode === 'fill' && promptNode.value.trim()) {
       return toast('已有音色描述，已保留；要覆盖请选重新生成', 'info', 3200);
     }
-    const check = await confirmLlm({
-      action: 'voice.design.preview',
-      params: { path: state.path, character: character.id || '' },
-    });
-    if (!check.ok) {
-      if (check.error) toast(llmErrorText(check), 'bad', 3600);
-      return;
-    }
     const idleLabel = mode === 'fill' ? '补缺失' : '重新生成描述';
     button.disabled = true;
     button.textContent = '生成中…';
-    const panel = openProgress({
-      title:
-        mode === 'fill'
-          ? `正在补全「${character.name}」的音色描述…`
-          : `正在重新生成「${character.name}」的音色描述…`,
-      hint:
-        mode === 'fill'
-          ? '只补缺失：文本框为空时才调用模型生成描述'
-          : '忽略文本框旧内容，按角色档案重新生成描述',
-      stage: '正在调用写作模型…',
-    });
-    panel.update({ percent: null });
     try {
-      // regen 不传 prompt，让后端忽略旧文本、按档案重新生成
-      const result = await postJSON('/api/ui/voices/design/preview', {
-        path: state.path,
-        character_id: character.id,
+      const result = await runLlm({
+        action: 'voice.design.preview',
+        params: { path: state.path, character: character.id || '' },
+        title:
+          mode === 'fill'
+            ? `正在补全「${character.name}」的音色描述…`
+            : `正在重新生成「${character.name}」的音色描述…`,
+        hint:
+          mode === 'fill'
+            ? '只补缺失：文本框为空时才调用模型生成描述 · 可随时取消'
+            : '忽略文本框旧内容，按角色档案重新生成描述 · 可随时取消',
+        stage: '正在调用写作模型…',
+        request: ({ callId, signal }) =>
+          postJSON(
+            '/api/ui/voices/design/preview',
+            {
+              path: state.path,
+              character_id: character.id,
+            },
+            { timeout: 0, callId, signal }
+          ),
+        finish: (data) => {
+          profile = data.profile || null;
+          promptNode.value = data.prompt || promptNode.value;
+          if (data.candidates) mask.querySelector('#vd-count').value = String(data.candidates);
+          profileHost.innerHTML = `
+            <div class="summary-line"><span>描述来源</span>
+              <span class="right">${data.source === 'manual' ? '手动改写' : '按角色档案生成'}</span></div>
+            ${
+              data.note
+                ? `<div class="dlg-note warn" style="margin-top:6px">${esc(data.note)}</div>`
+                : ''
+            }
+            ${
+              data.script
+                ? `<div class="hint" style="margin-top:6px">试听台词：${esc(data.script)}</div>`
+                : ''
+            }`;
+          toast('音色描述已生成', 'ok');
+          return {
+            message: mode === 'fill' ? '音色描述已补全' : '音色描述已重新生成',
+            detail: '已写回文本框，可直接抽卡或手动改写。',
+          };
+        },
       });
-      profile = result.profile || null;
-      promptNode.value = result.prompt || promptNode.value;
-      if (result.candidates) mask.querySelector('#vd-count').value = String(result.candidates);
-      profileHost.innerHTML = `
-        <div class="summary-line"><span>描述来源</span>
-          <span class="right">${result.source === 'manual' ? '手动改写' : '按角色档案生成'}</span></div>
-        ${
-          result.note
-            ? `<div class="dlg-note warn" style="margin-top:6px">${esc(result.note)}</div>`
-            : ''
-        }
-        ${
-          result.script
-            ? `<div class="hint" style="margin-top:6px">试听台词：${esc(result.script)}</div>`
-            : ''
-        }`;
-      // 非流式结果：把模型返回的描述压成一行显示在进度浮层
-      panel.note(String(result.prompt || '').slice(0, 80));
-      panel.finish({
-        message: mode === 'fill' ? '音色描述已补全' : '音色描述已重新生成',
-        detail: '已写回文本框，可直接抽卡或手动改写。',
-      });
-      toast('音色描述已生成', 'ok');
+      if (!result) return;
     } catch (error) {
-      toast(error.message, 'bad', 4600);
       profileHost.innerHTML = `<div class="dlg-note bad">${esc(error.message)}</div>`;
-      panel.fail({ message: `生成音色描述失败：${error.message}` });
     } finally {
       button.disabled = false;
       button.textContent = idleLabel;

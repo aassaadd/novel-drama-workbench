@@ -30,6 +30,25 @@ def register_models_http_routes(app, project_root: str | None = None, config_pat
         cfg = load_config(config_path) if config_path else load_config()
         return {"styles": load_styles(comfy_media.templates_dir(cfg))}
 
+    @app.post("/api/ui/llm/cancel")
+    def ui_llm_cancel(body: dict | None = None) -> dict:
+        """取消一次正在进行的模型调用。
+
+        参数:
+            body: `{call_id}`。
+
+        返回:
+            `{ok, call_id, cancelled}`；未命中或调用已结束时 `cancelled=false`，
+            接口本身仍返回成功，方便前端重试与并发点击。
+
+        说明:
+            取消是正常结果，不是错误；总线下个分片会抛出 `LlmCancelled`。
+        """
+        from novel_drama.application.support.llm_cancel import cancel as cancel_llm
+
+        call_id = str((body or {}).get("call_id") or "").strip()
+        return {"ok": True, "call_id": call_id, "cancelled": cancel_llm(call_id)}
+
     @app.get("/api/ui/llm/plan")
     def ui_llm_plan(
         path: str = Query(...),

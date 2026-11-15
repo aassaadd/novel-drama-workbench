@@ -471,9 +471,9 @@ def _run_item(store, cfg: AppConfig, job: dict, item: dict, position: int, total
     if not meta:
         adapter = None
         try:
-            from ..adapters import build_adapters
+            from ..application.support.llm_calls import build_writing_adapter
 
-            adapter = build_adapters(cfg, store.settings()).writing
+            adapter = build_writing_adapter(cfg, store.settings(), action="cast.backfill")
         except Exception:  # noqa: BLE001 - 适配器不可用时由 build_profile 回退规则模板
             adapter = None
         built = voice_design.build_profile(adapter, character, cfg)

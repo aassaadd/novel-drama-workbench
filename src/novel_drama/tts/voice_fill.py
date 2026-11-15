@@ -1044,9 +1044,9 @@ def _run_bind(store, job: dict, item: dict, position: int, total: int, pool: dic
 def _writing_adapter(cfg: AppConfig, store):
     """构造写作适配器（失败时由 build_profile 回退规则模板）。"""
     try:
-        from ..adapters import build_adapters
+        from ..application.support.llm_calls import build_writing_adapter
 
-        return build_adapters(cfg, store.settings()).writing
+        return build_writing_adapter(cfg, store.settings(), action="cast.backfill")
     except Exception:  # noqa: BLE001 - 适配器不可用不阻断生成
         return None
 

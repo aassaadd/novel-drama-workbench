@@ -215,7 +215,11 @@ def check_chapter_consistency(
         f"角色卡：{json.dumps(brief, ensure_ascii=False)}\n\n"
         f"本章正文：\n{content[:excerpt_chars]}"
     )
-    adapter = build_writing_adapter(config, SettingsStore(store.root).ensure())
+    adapter = build_writing_adapter(
+        config,
+        SettingsStore(store.root).ensure(),
+        action="consistency",
+    )
     req = TextGenRequest(
         task="consistency",
         system="你是小说角色一致性审校，只输出问题 JSON，不改写正文。",

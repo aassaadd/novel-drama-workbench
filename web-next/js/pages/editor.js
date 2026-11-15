@@ -4,10 +4,10 @@
  * 所有写操作都转调现有 /api/ui/*，前端不复制业务规则。
  */
 import { esc, icon, toast, openDialog, closeDialog, openMenu, fmtDuration, fmtClock, fmtBytes, impactListHTML, reuseListHTML } from '../dom.js';
-import { getJSON, postJSON, streamJSON, fileUrl } from '../api.js';
+import { getJSON, postJSON, streamJSON, fileUrl, canceledError } from '../api.js';
 import { labelOf, selectHTML } from '../enums.js';
 import { openProgress, watchProgress } from '../progress.js';
-import { confirmLlm, llmErrorText } from '../llm.js';
+import { runLlmStream } from '../llm.js';
 import { modeSwitchHTML, bindModeSwitch } from '../gen-mode.js';
 import {
   state,
@@ -3028,14 +3028,6 @@ function scriptPreviewHTML(preview, markupPath) {
  * @param {'fill'|'regen'} [mode] fill 只补缺失 / 失败批次（resume=true），regen 从头生成
  */
 async function runScriptSuggest(mask, mode = 'fill') {
-  const check = await confirmLlm({
-    action: 'script.suggest',
-    params: { path: state.path, chapter: state.chapterId, mode },
-  });
-  if (!check.ok) {
-    if (check.error) toast(llmErrorText(check), 'bad', 3600);
-    return;
-  }
   const resume = mode === 'fill';
   const progress = mask.querySelector('#sa-progress');
   const buttons = mask.querySelectorAll('[data-sa="preview"], [data-sa="refresh"], [data-sa="adopt"], [data-sa="discard"]');
@@ -3044,99 +3036,91 @@ async function runScriptSuggest(mask, mode = 'fill') {
     progress.innerHTML = `<div class="dlg-note">正在生成标注预览…<span id="sa-progress-text"></span></div>`;
   }
   const label = mask.querySelector('#sa-progress-text');
-  const aborter = new AbortController();
-  const panel = openProgress({
-    title: resume ? '正在补齐缺失批次的标注预览…' : '正在重新生成全部标注预览…',
-    hint: resume
-      ? '只补做缺失 / 失败的镜头批次，已完成批次会跳过；本次不写入本集'
-      : '忽略已有批次，按镜头重新生成全部标注；本次不写入本集',
-    stage: '已提交生成请求，等待模型返回…',
-    onStop: async () => {
-      aborter.abort();
-      panel.note('正在停止：当前批次结束后中断，已完成批次会保留');
-    },
-  });
-  panel.update({ percent: null });
-  let settled = false;
   try {
-    await streamJSON(
-      '/api/ui/script/suggest/stream',
-      { path: state.path, chapter: state.chapterId, apply: false, dry_run: true, resume },
-      (event, data) => {
-        if (!data) return;
-        if (event === 'batch') {
-          // 后端 index 是 1 基批次序号；进度只表示已完成批次，done 时才到 100%
-          const total = Math.max(1, Number(data.total) || 1);
-          const index = Math.min(Math.max(1, Number(data.index) || 1), total);
-          const text = ` 第 ${index}/${total} 批（镜头 ${Number(data.start) + 1}–${Number(data.end)}）`;
-          if (label) label.textContent = text;
-          panel.update({
-            stage: `正在标注第 ${index}/${total} 批镜头…`,
-            percent: total > 1 ? Math.round(((index - 1) / total) * 100) : 0,
-            current: `镜头 ${Number(data.start) + 1}–${Number(data.end)}`,
-          });
-        } else if (event === 'chars') {
-          const text = ` 已接收 ${Number(data.chars || 0)} 字`;
-          if (label) label.textContent = text;
-          panel.update({ current: `已接收 ${Number(data.chars || 0)} 字` });
-        } else if (event === 'done') {
-          settled = true;
-          const result = data.result || {};
-          const failures = result.failures || [];
-          panel.update({ percent: 100 });
-          // 结果摘要：优先取模型返回的标注文本开头，便于确认最近一批内容
-          const markupLine = String(result.markup || '')
-            .replace(/\s+/g, ' ')
-            .trim()
-            .slice(0, 80);
-          panel.note(
-            markupLine || (failures.length ? `仍有 ${failures.length} 个批次失败` : '全部批次已完成')
-          );
-          panel.finish({
-            message: failures.length
-              ? `预览已生成，${failures.length} 个批次失败`
-              : '预览已生成，还没有写入本集标注文件',
-            detail: failures.length
-              ? '失败批次补齐后才能写入本集；可点「重试失败批次」只补做失败部分。'
-              : '在弹窗里按镜头查看；点「写入本集标注文件（采纳）」才会保存到本集，不写入则本集标注保持原样。',
-            actions: failures.length
-              ? [
-                  {
-                    label: '重试失败批次',
-                    primary: true,
-                    onClick: () => void runScriptSuggestResume(mask),
-                  },
-                ]
-              : [],
-          });
-          mask._saPreview = {
-            markup: String(result.markup || ''),
-            failures,
-            warnings: result.warnings || [],
-          };
-        } else if (event === 'error') {
-          settled = true;
-          panel.fail({
-            message: data.message || '标注生成失败',
-            retry: () => void runScriptSuggest(mask, mode),
-          });
-        }
-      }, { signal: aborter.signal });
-    if (!settled) {
-      panel.fail({ message: '连接已中断，没有收到标注结果', retry: () => void runScriptSuggest(mask, mode) });
-    }
-    if (settled && mask._saPreview) {
-      toast('已生成标注预览（还没有写入本集）', 'ok');
-    }
+    const data = await runLlmStream({
+      action: 'script.suggest',
+      params: { path: state.path, chapter: state.chapterId, mode },
+      title: resume ? '正在补齐缺失批次的标注预览…' : '正在重新生成全部标注预览…',
+      hint: resume
+        ? '只补做缺失 / 失败的镜头批次，已完成批次会跳过；本次不写入本集'
+        : '忽略已有批次，按镜头重新生成全部标注；本次不写入本集',
+      stage: '已提交生成请求，等待模型返回…',
+      stream: async ({ callId, signal, panel }) => {
+        let result = null;
+        await streamJSON(
+          '/api/ui/script/suggest/stream',
+          { path: state.path, chapter: state.chapterId, apply: false, dry_run: true, resume },
+          (event, payload) => {
+            if (!payload) return;
+            if (event === 'batch') {
+              // 后端 index 是 1 基批次序号；进度只表示已完成批次，done 时才到 100%
+              const total = Math.max(1, Number(payload.total) || 1);
+              const index = Math.min(Math.max(1, Number(payload.index) || 1), total);
+              const text = ` 第 ${index}/${total} 批（镜头 ${Number(payload.start) + 1}–${Number(payload.end)}）`;
+              if (label) label.textContent = text;
+              panel.update({
+                stage: `正在标注第 ${index}/${total} 批镜头…`,
+                percent: total > 1 ? Math.round(((index - 1) / total) * 100) : 0,
+                current: `镜头 ${Number(payload.start) + 1}–${Number(payload.end)}`,
+              });
+            } else if (event === 'chars') {
+              const text = ` 已接收 ${Number(payload.chars || 0)} 字`;
+              if (label) label.textContent = text;
+              panel.update({ current: `已接收 ${Number(payload.chars || 0)} 字` });
+            } else if (event === 'done') {
+              result = payload.result || {};
+              panel.update({ percent: 100 });
+              // 结果摘要：优先取模型返回的标注文本开头，便于确认最近一批内容
+              const failures = result.failures || [];
+              const markupLine = String(result.markup || '')
+                .replace(/\s+/g, ' ')
+                .trim()
+                .slice(0, 80);
+              panel.note(
+                markupLine || (failures.length ? `仍有 ${failures.length} 个批次失败` : '全部批次已完成')
+              );
+            } else if (event === 'canceled') {
+              throw canceledError('已取消标注生成');
+            } else if (event === 'error') {
+              throw new Error(payload.message || '标注生成失败');
+            }
+          },
+          { signal, callId }
+        );
+        if (!result) throw new Error('连接已中断，没有收到标注结果');
+        return result;
+      },
+      finish: (result) => {
+        const failures = result.failures || [];
+        mask._saPreview = {
+          markup: String(result.markup || ''),
+          failures,
+          warnings: result.warnings || [],
+        };
+        return {
+          message: failures.length
+            ? `预览已生成，${failures.length} 个批次失败`
+            : '预览已生成，还没有写入本集标注文件',
+          detail: failures.length
+            ? '失败批次补齐后才能写入本集；可点「重试失败批次」只补做失败部分。'
+            : '在弹窗里按镜头查看；点「写入本集标注文件（采纳）」才会保存到本集，不写入则本集标注保持原样。',
+          actions: failures.length
+            ? [
+                {
+                  label: '重试失败批次',
+                  primary: true,
+                  onClick: () => void runScriptSuggestResume(mask),
+                },
+              ]
+            : [],
+        };
+      },
+    });
+    if (data) toast('已生成标注预览（还没有写入本集）', 'ok');
     await loadScriptAnnotate(mask);
   } catch (error) {
-    if (aborter.signal.aborted) {
-      if (!settled) panel.finish({ message: '已停止标注：已完成批次会保留，可稍后补齐缺失批次' });
-      return;
-    }
-    toast(error.message, 'bad', 4600);
     if (progress) progress.innerHTML = `<div class="dlg-note bad">${esc(error.message)}</div>`;
-    if (!settled) panel.fail({ message: `标注生成失败：${error.message}`, retry: () => void runScriptSuggest(mask, mode) });
+    toast(error.message, 'bad', 4600);
   } finally {
     buttons.forEach((button) => (button.disabled = false));
   }
@@ -3147,45 +3131,48 @@ async function runScriptSuggest(mask, mode = 'fill') {
  * @param {HTMLElement} mask 弹窗根节点
  */
 async function runScriptSuggestResume(mask) {
-  const check = await confirmLlm({
-    action: 'script.suggest',
-    params: { path: state.path, chapter: state.chapterId, mode: 'fill' },
-  });
-  if (!check.ok) {
-    if (check.error) toast(llmErrorText(check), 'bad', 3600);
-    return;
-  }
-  const panel = openProgress({
-    title: '正在重试失败批次…',
-    hint: '只补做上次失败的镜头批次，已完成批次会跳过；本次不写入本集',
-    stage: '已提交重试请求…',
-  });
-  panel.update({ percent: null });
   try {
-    await streamJSON(
-      '/api/ui/script/suggest/stream',
-      { path: state.path, chapter: state.chapterId, apply: false, dry_run: true, resume: true },
-      (event, data) => {
-        if (event === 'done') {
-          const result = data?.result || {};
-          const failures = result.failures || [];
-          panel.finish({
-            message: failures.length ? `仍有 ${failures.length} 个批次失败` : '失败批次已补齐',
-            detail: '预览已更新，可在弹窗里按镜头查看；确认后再写入本集。',
-          });
-          mask._saPreview = {
-            markup: String(result.markup || ''),
-            failures,
-            warnings: result.warnings || [],
-          };
-        } else if (event === 'error') {
-          panel.fail({ message: data?.message || '重试失败', retry: () => void runScriptSuggestResume(mask) });
-        }
-      }
-    );
-    await loadScriptAnnotate(mask);
-  } catch (error) {
-    panel.fail({ message: `重试失败：${error.message}`, retry: () => void runScriptSuggestResume(mask) });
+    const data = await runLlmStream({
+      action: 'script.suggest',
+      params: { path: state.path, chapter: state.chapterId, mode: 'fill' },
+      title: '正在重试失败批次…',
+      hint: '只补做上次失败的镜头批次，已完成批次会跳过；本次不写入本集',
+      stage: '已提交重试请求…',
+      stream: async ({ callId, signal }) => {
+        let result = null;
+        await streamJSON(
+          '/api/ui/script/suggest/stream',
+          { path: state.path, chapter: state.chapterId, apply: false, dry_run: true, resume: true },
+          (event, payload) => {
+            if (event === 'done') {
+              result = payload?.result || {};
+            } else if (event === 'canceled') {
+              throw canceledError('已取消标注重试');
+            } else if (event === 'error') {
+              throw new Error(payload?.message || '重试失败');
+            }
+          },
+          { signal, callId }
+        );
+        if (!result) throw new Error('连接已中断，没有收到标注结果');
+        return result;
+      },
+      finish: (result) => {
+        const failures = result.failures || [];
+        mask._saPreview = {
+          markup: String(result.markup || ''),
+          failures,
+          warnings: result.warnings || [],
+        };
+        return {
+          message: failures.length ? `仍有 ${failures.length} 个批次失败` : '失败批次已补齐',
+          detail: '预览已更新，可在弹窗里按镜头查看；确认后再写入本集。',
+        };
+      },
+    });
+    if (data) await loadScriptAnnotate(mask);
+  } catch {
+    // 进度卡已展示失败原因与重试入口
   }
 }
 
