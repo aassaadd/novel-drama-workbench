@@ -13,7 +13,6 @@ from pathlib import Path
 from fastapi import HTTPException
 
 from novel_drama.composition import ProjectStore
-from novel_drama.interface.http.cli_bridge import fail_body, run
 
 #: 单行重录串行锁：同一时间只允许一个重录，避免两个进程同时改同一章
 _RERUN_LOCK = threading.Lock()
@@ -30,38 +29,6 @@ RERUN_PID_NAME = "web-tts.pid"
 def _now() -> str:
     """当前 UTC 时间（ISO 8601），落进进度文件用。"""
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def _cli(config_path: str | None, *argv: str):
-    """按 `serve --config` 的同一份配置执行 CLI。
-
-    参数:
-        config_path: 本机配置文件路径；为空时读默认配置。
-        argv: 不含 `--config` 的参数串。
-
-    返回:
-        `actions.CliResult`。
-    """
-    if config_path and "--config" not in argv:
-        return run("--config", config_path, *argv)
-    return run(*argv)
-
-
-def _respond(result):
-    """把 CLI 结果转成 HTTP 响应；失败时抛带中文说明的 HTTPException。
-
-    参数:
-        result: `actions.CliResult`。
-
-    返回:
-        CLI 的 JSON 负载。
-
-    异常:
-        HTTPException: CLI 退出码非 0。
-    """
-    if result.code != 0:
-        raise HTTPException(status_code=result.status, detail=fail_body(result))
-    return result.payload if result.payload is not None else {"text": result.text}
 
 
 def _store(path: str | None) -> ProjectStore:

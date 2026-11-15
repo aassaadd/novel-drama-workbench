@@ -12,6 +12,7 @@ from novel_drama.application.production.timeline import (
     build_chapter_timeline,
     silence_events,
 )
+from novel_drama.application.production.tts_plan import plan_batch_preview
 from novel_drama.composition import (
     ProjectStore,
     build_schedule,
@@ -379,7 +380,7 @@ def _write_progress(path: str | None, payload: dict) -> None:
 
 def cmd_tts_batch(args, config: AppConfig) -> int:
     """行级批量合成：单并发、可控批次、失败逐行记录不中断；支持跨章节与断点续跑。"""
-    from novel_drama.tts.batch import history_avg_ms_per_line, plan_batch, run_chapters
+    from novel_drama.tts.batch import history_avg_ms_per_line, run_chapters
 
     store = _resolve_store(args, config)
     chapter_ids = _target_chapters(store, args)
@@ -403,189 +404,17 @@ def cmd_tts_batch(args, config: AppConfig) -> int:
             )
 
     if args.dry_run:
-        from novel_drama.tts import line_state
-        from novel_drama.tts import reuse as reuse_plan
-        from novel_drama.tts.batch import history_avg_ms_per_line
-
-        service = _tts_service(args, config)
-        avg_ms = history_avg_ms_per_line(store.root)
-        lines: list[str] = []
-        total = 0
-        lines_total = 0
-        skipped_unknown = 0
-        unknown_rows: list[dict] = []
-        # 影响清单：给页面列出「本次会动到哪些场景/行」，最多 300 条，避免整本工程一次返回过大
-        items: list[dict] = []
-        item_limit = 300
-        per_chapter: list[dict] = []
-        # 复用计划汇总：沿用 / 缓存命中 / 重新合成 / 跳过 / 阻塞
-        reuse_total = {
-            "keep": 0,
-            "reuse": 0,
-            "regenerate": 0,
-            "blocked": 0,
-            "skipped": 0,
-            "reused_audio_ms": 0,
-            "saved_ms_estimate": 0,
-            "avg_ms_per_line": avg_ms,
-        }
-        reuse_items: list[dict] = []
-        try:
-            for chapter in chapters:
-                characters_table = store.load_characters()
-                chapter_characters = characters_table["characters"]
-                snapshots = line_state.load_snapshots(store.root, chapter)
-                engine = line_state.engine_params(config)
-                live_ids = line_state.live_line_ids(store)
-                voices = store.load_voices()
-                checker = reuse_plan.changed_checker(
-                    service, store, characters_table, chapter, voices=voices
-                )
-                rows = plan_batch(
-                    chapter,
-                    chapter_characters,
-                    scene_ids=args.scene,
-                    include_ready=include_ready,
-                    limit=args.limit,
-                    snapshots=snapshots,
-                    root=store.root,
-                    engine=engine,
-                    live_ids=live_ids,
-                    line_ids=line_ids,
-                    changed_checker=checker,
-                )
-                chapter_lines = sum(
-                    1
-                    for scene in chapter.get("scenes") or []
-                    if not args.scene or scene.get("id") in args.scene
-                    for line in scene.get("lines") or []
-                    if (line.get("text") or "").strip()
-                )
-                locator = _line_locator(chapter)
-                if skip_ids:
-                    kept = []
-                    for row in rows:
-                        line = row["line"]
-                        if line.get("id") not in skip_ids:
-                            kept.append(row)
-                            continue
-                        scene_no, line_no = locator.get(str(line.get("id")), (0, 0))
-                        unknown_rows.append(
-                            {
-                                "chapter_id": chapter.get("id"),
-                                "chapter_title": chapter.get("title"),
-                                "scene_id": row.get("scene_id"),
-                                "scene_index": scene_no,
-                                "line_id": line.get("id"),
-                                "line_index": line_no,
-                                "speaker_id": line.get("speaker_id"),
-                                "text": line.get("text"),
-                            }
-                        )
-                    skipped_unknown += len(rows) - len(kept)
-                    rows = kept
-                total += len(rows)
-                lines_total += chapter_lines
-
-                # 复用计划：只看状态不够，还要判断「过期行是否已有同签名音频可复用」
-                states = line_state.chapter_states(
-                    chapter,
-                    {item["id"]: item for item in chapter_characters},
-                    snapshots,
-                    root=store.root,
-                    live_ids=live_ids,
-                    engine=engine,
-                )
-                plan = reuse_plan.plan_reuse(
-                    service,
-                    store,
-                    chapter,
-                    rows,
-                    characters_table=characters_table,
-                    snapshots=snapshots,
-                    engine=engine,
-                    live_ids=live_ids,
-                    states=states,
-                    avg_ms_per_line=avg_ms,
-                    voices=voices,
-                )
-                for key in ("keep", "reuse", "regenerate", "blocked", "skipped", "reused_audio_ms", "saved_ms_estimate"):
-                    reuse_total[key] += int(plan.get(key) or 0)
-                item_by_line = {}
-                for plan_item in plan.get("items") or []:
-                    item_by_line[plan_item.get("line_id")] = plan_item
-                    if len(reuse_items) < item_limit:
-                        reuse_items.append(plan_item)
-
-                per_chapter.append(
-                    {
-                        "chapter_id": chapter.get("id"),
-                        "title": chapter.get("title"),
-                        "rows": len(rows),
-                        "lines_total": chapter_lines,
-                        "skipped": max(0, chapter_lines - len(rows)),
-                        "reuse": {
-                            "keep": plan.get("keep"),
-                            "reuse": plan.get("reuse"),
-                            "regenerate": plan.get("regenerate"),
-                            "blocked": plan.get("blocked"),
-                        },
-                    }
-                )
-                for row in rows:
-                    line = row["line"]
-                    lines.append(
-                        f"{chapter.get('id')}  {line['id']}  {line.get('speaker_id')}  {line['text'][:24]}"
-                    )
-                    if len(items) < item_limit:
-                        scene_no, line_no = locator.get(str(line.get("id")), (0, 0))
-                        plan_item = item_by_line.get(line.get("id")) or {}
-                        items.append(
-                            {
-                                "chapter_id": chapter.get("id"),
-                                "chapter_title": chapter.get("title"),
-                                "scene_id": row.get("scene_id"),
-                                "scene_index": scene_no,
-                                "line_id": line.get("id"),
-                                "line_index": line_no,
-                                "speaker_id": line.get("speaker_id"),
-                                "text": line.get("text"),
-                                "has_audio": bool((line.get("tts") or {}).get("asset_id")),
-                                "decision": plan_item.get("decision"),
-                                "reuse_reason": plan_item.get("reason"),
-                                "changes": (plan_item.get("changes") or [])[:3],
-                            }
-                        )
-        finally:
-            service.close()
-        head = f"[dry-run] 待合成 {total} 行（{len(chapters)} 章，跳过 {max(0, lines_total - total)} 行"
-        if skipped_unknown:
-            head += f"，其中说话人未识别 {skipped_unknown} 行"
-        reuse_note = (
-            f"｜复用 {reuse_total['keep'] + reuse_total['reuse']} 行"
-            f"（沿用已有 {reuse_total['keep']}，缓存命中 {reuse_total['reuse']}）"
-            f"，重新合成 {reuse_total['regenerate']} 行"
+        preview = plan_batch_preview(
+            store,
+            config,
+            chapter_ids,
+            include_ready=include_ready,
+            skip_ids=skip_ids,
+            line_ids=line_ids,
+            scenes=args.scene,
+            limit=args.limit,
         )
-        if reuse_total["saved_ms_estimate"]:
-            reuse_note += f"，预计省 {reuse_total['saved_ms_estimate'] / 1000:.1f}s"
-        _emit(
-            args,
-            head + f"）：{reuse_note}\n" + "\n".join(lines),
-            {
-                "rows": total,
-                "chapters": chapter_ids,
-                "per_chapter": per_chapter,
-                "lines_total": lines_total,
-                "skipped": max(0, lines_total - total),
-                "skipped_unknown": skipped_unknown,
-                "unknown_rows": unknown_rows,
-                "unknown_line_ids": sorted(skip_ids),
-                "items": items,
-                "items_truncated": total > len(items),
-                "assets": sum(1 for item in items if item["has_audio"]),
-                "reuse": {**reuse_total, "items": reuse_items, "items_truncated": len(reuse_items) >= item_limit},
-            },
-        )
+        _emit(args, preview["head"] + "\n" + "\n".join(preview["lines"]), preview["payload"])
         return EXIT_OK
 
     service = _tts_service(args, config)

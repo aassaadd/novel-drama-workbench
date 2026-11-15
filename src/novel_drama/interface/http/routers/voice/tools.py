@@ -21,9 +21,17 @@ from pathlib import Path
 
 from fastapi import HTTPException, Request
 
-from novel_drama.composition import ProjectStore, QueueStore
+from novel_drama.application.production.timeline import build_chapter_timeline
+from novel_drama.application.production.tts_plan import plan_batch_preview
+from novel_drama.composition import (
+    ProjectStore,
+    QueueStore,
+    check_cast,
+    unresolved_speaker_lines,
+)
 from novel_drama.infrastructure.config import load_config
-from novel_drama.interface.http.cli_bridge import fail_body, run
+from novel_drama.interface.http import use_cases
+from novel_drama.tts import TtsService
 
 #: 单行重录串行锁：同一时间只允许一个重录，避免两个进程同时改同一章
 _RERUN_LOCK = threading.Lock()
@@ -42,36 +50,23 @@ def _now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _cli(config_path: str | None, *argv: str):
-    """按 `serve --config` 的同一份配置执行 CLI。
+def _rebuild_timeline(store: ProjectStore, chapter_id: str) -> bool:
+    """录音 / 版本变化后重建章节时间轴。
 
     参数:
-        config_path: 本机配置文件路径；为空时读默认配置。
-        argv: 不含 `--config` 的参数串。
+        store: 工程。
+        chapter_id: 章节 ID。
 
     返回:
-        `actions.CliResult`。
+        True 表示重建成功；工程还没有时间轴或重建失败时为 False（不影响本次操作结果）。
     """
-    if config_path and "--config" not in argv:
-        return run("--config", config_path, *argv)
-    return run(*argv)
-
-
-def _respond(result):
-    """把 CLI 结果转成 HTTP 响应；失败时抛带中文说明的 HTTPException。
-
-    参数:
-        result: `actions.CliResult`。
-
-    返回:
-        CLI 的 JSON 负载。
-
-    异常:
-        HTTPException: CLI 退出码非 0。
-    """
-    if result.code != 0:
-        raise HTTPException(status_code=result.status, detail=fail_body(result))
-    return result.payload if result.payload is not None else {"text": result.text}
+    if not store.timeline_path(chapter_id).exists():
+        return False
+    try:
+        build_chapter_timeline(store, chapter_id)
+        return True
+    except Exception:  # noqa: BLE001 - 重建失败不阻断正在完成的录音/版本操作
+        return False
 
 
 def _store(path: str | None) -> ProjectStore:
@@ -585,10 +580,7 @@ def register_voice_tools_routes(app, config_path: str | None = None) -> None:
                     },
                 )
 
-            timeline_rebuilt = False
-            if store.timeline_path(chapter_id).exists():
-                timeline = _cli(config_path, "--project", str(store.root), "--json", "timeline", "build", "--chapter", chapter_id)
-                timeline_rebuilt = timeline.code == 0
+            timeline_rebuilt = _rebuild_timeline(store, chapter_id)
             active = tts.get("asset_id")
             return {
                 "ok": True,
@@ -638,10 +630,7 @@ def register_voice_tools_routes(app, config_path: str | None = None) -> None:
             return {"ok": True, "line_id": line_id, "changed": False, "timeline_rebuilt": False}
         target["tts"] = {"status": "pending"}
         store.save_chapter(chapter)
-        timeline_rebuilt = False
-        if store.timeline_path(chapter_id).exists():
-            timeline = _cli(config_path, "--project", str(store.root), "--json", "timeline", "build", "--chapter", chapter_id)
-            timeline_rebuilt = timeline.code == 0
+        timeline_rebuilt = _rebuild_timeline(store, chapter_id)
         return {"ok": True, "line_id": line_id, "changed": True, "timeline_rebuilt": timeline_rebuilt}
 
     @app.post("/api/ui/line/audio/upload")
@@ -747,10 +736,7 @@ def register_voice_tools_routes(app, config_path: str | None = None) -> None:
                 "created_at": _now(),
             }
             _save_takes(store, takes)
-            timeline_rebuilt = False
-            if store.timeline_path(chapter).exists():
-                result = _cli(config_path, "--project", str(store.root), "--json", "timeline", "build", "--chapter", chapter)
-                timeline_rebuilt = result.code == 0
+            timeline_rebuilt = _rebuild_timeline(store, chapter)
             return {
                 "ok": True,
                 "line_id": line,
@@ -821,10 +807,7 @@ def register_voice_tools_routes(app, config_path: str | None = None) -> None:
             tts.update({"adapter": "human", "provider_id": "human", "voice_id": None, "variant_id": None})
         target["tts"] = tts
         store.save_chapter(chapter_data)
-        timeline_rebuilt = False
-        if store.timeline_path(chapter_id).exists():
-            result = _cli(config_path, "--project", str(store.root), "--json", "timeline", "build", "--chapter", chapter_id)
-            timeline_rebuilt = result.code == 0
+        timeline_rebuilt = _rebuild_timeline(store, chapter_id)
         return {
             "ok": True,
             "line_id": line_id,
@@ -874,10 +857,7 @@ def register_voice_tools_routes(app, config_path: str | None = None) -> None:
         if was_active:
             target["tts"] = {"status": "pending"}
             store.save_chapter(chapter_data)
-        timeline_rebuilt = False
-        if was_active and store.timeline_path(chapter_id).exists():
-            result = _cli(config_path, "--project", str(store.root), "--json", "timeline", "build", "--chapter", chapter_id)
-            timeline_rebuilt = result.code == 0
+        timeline_rebuilt = was_active and _rebuild_timeline(store, chapter_id)
         active = (target.get("tts") or {}).get("asset_id")
         return {
             "ok": True,
@@ -1039,42 +1019,34 @@ def register_voice_tools_routes(app, config_path: str | None = None) -> None:
         """
         store = _store(path)
         if scope == "all":
-            target_args = ["--all-chapters"]
+            chapter_ids = [item["id"] for item in store.list_chapters()]
+            if not chapter_ids:
+                raise HTTPException(
+                    status_code=412,
+                    detail={"code": 4, "message": "[PRECONDITION] 工程里还没有章节"},
+                )
         else:
             if not chapter:
                 raise HTTPException(status_code=400, detail="补齐本章需要 chapter 参数")
-            target_args = ["--chapter", chapter]
-        result = _cli(
-            config_path,
-            "--project",
-            str(store.root),
-            "--json",
-            "tts",
-            "batch",
-            *target_args,
-            "--dry-run",
-            "--skip-cast-check",
-            "--skip-unknown-speakers",
+            chapter_ids = [chapter]
+        config = load_config(config_path)
+        # 说话人无法归属的行不参与预演，与「补齐」正式执行时跳过的口径一致
+        skip_ids = {
+            row["line_id"] for row in unresolved_speaker_lines(store, chapter_ids)
+        }
+        plan = use_cases.call(
+            lambda: plan_batch_preview(store, config, chapter_ids, skip_ids=skip_ids)["payload"]
         )
-        if result.code != 0:
-            # 计划读不出来时必须把 CLI 的中文说明透给页面：
-            # 页面只显示「HTTP 500」时用户无从判断是没切分、缺音色还是模型没就绪。
-            message = (result.stderr or result.text or "").strip()
-            if result.code == 2:
-                message = "补齐接口的参数未被识别（页面可能还是旧版本）：请刷新页面后重试。"
-            if not message:
-                message = f"读取补齐计划失败（CLI 退出码 {result.code}）"
-            raise HTTPException(status_code=result.status, detail={"code": result.code, "message": message})
-        plan = result.payload if isinstance(result.payload, dict) else {}
         total = int(plan.get("rows") or 0)
         unknown_rows = plan.get("unknown_rows") or []
         unknown_total = int(plan.get("skipped_unknown") or len(unknown_rows))
         unknown_ids = set(plan.get("unknown_line_ids") or [row.get("line_id") for row in unknown_rows])
         avg = _avg_ms_per_line(store)
-        providers = _cli(config_path, "--json", "tts", "providers")
-        rows: list[dict] = []
-        if providers.code == 0 and isinstance(providers.payload, dict):
-            rows = providers.payload.get("providers") or []
+        service = TtsService(config, config.project_root or None)
+        try:
+            rows = service.doctor()
+        finally:
+            service.close()
         usable = [item for item in rows if item.get("enabled") and item.get("available")]
         ready = bool(usable)
         ready_reason = ""
@@ -1082,13 +1054,11 @@ def register_voice_tools_routes(app, config_path: str | None = None) -> None:
             ready_reason = "还没有可用的配音模型：请到「设置 → 本机环境与模型」确认配音模型已下载并就绪。"
 
         # 音色检查按同一范围做：只看本章时不要把别的章节的缺失算成本章阻断项
-        cast_args = ["--project", str(store.root), "--json", "cast", "check"]
-        if scope != "all" and chapter:
-            cast_args += ["--chapter", chapter]
-        cast = _cli(config_path, *cast_args)
-        findings: list[dict] = []
-        if isinstance(cast.payload, dict):
-            findings = cast.payload.get("findings") or []
+        try:
+            gate = check_cast(store, chapter) if scope != "all" and chapter else check_cast(store)
+            findings: list[dict] = list(gate.get("findings") or [])
+        except Exception:  # noqa: BLE001 - 检查失败只表示「查不出问题」，与原先透传空结果一致
+            findings = []
         labels = _chapter_labels(store)
         lines_total = int(plan.get("lines_total") or 0)
         # 阻断项逐条给出「名称 / 涉及章节或数量 / 原因 / 下一步」，页面不再只显示一句结论
