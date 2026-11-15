@@ -11,11 +11,8 @@ import logging
 from fastapi import HTTPException
 
 from ..adapters.errors import AdapterError, ErrorCode
-from ..adapters.persistence import ProjectStore
-from ..bgm.registry import build_providers, pick_provider
-from ..infrastructure.config import load_config
-from ..media.bgm import load_cues
-from ..media.music import (
+from ..adapters.media.bgm import load_cues
+from ..adapters.media.music import (
     LONG_BED_SECONDS,
     MODE_BED,
     MODE_LABELS,
@@ -24,6 +21,9 @@ from ..media.music import (
     render_bgm,
     resolve_mode,
 )
+from ..adapters.persistence import ProjectStore
+from ..bgm.registry import build_providers, pick_provider
+from ..infrastructure.config import load_config
 
 logger = logging.getLogger(__name__)
 

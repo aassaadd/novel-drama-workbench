@@ -13,8 +13,8 @@ from __future__ import annotations
 import hashlib
 import json
 
-from ..models import new_id
-from ..models.entities import provisional_line_duration_ms, speaker_display_name
+from ...models import new_id
+from ...models.entities import provisional_line_duration_ms, speaker_display_name
 
 # 关键图默认展示时长
 DEFAULT_IMAGE_HOLD_MS = 3000

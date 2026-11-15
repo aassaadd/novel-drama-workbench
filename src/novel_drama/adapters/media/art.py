@@ -14,13 +14,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ..adapters.persistence import ProjectStore
-from ..adapters.persistence.settings_store import SettingsStore
-from ..adapters.persistence.world_store import WorldStore
-from ..application.story.world import build_art_prompt
-from ..infrastructure.config import AppConfig
-from ..models.ids import now_iso
-from .comfy_media import resolve_aspect, seed_for
+from ...domain.story.rules.art_prompt import build_art_prompt
+from ...infrastructure.config import AppConfig
+from ...models.ids import now_iso
+from ..comfyui.media import resolve_aspect, seed_for
+from ..persistence import ProjectStore
+from ..persistence.settings_store import SettingsStore
+from ..persistence.world_store import WorldStore
 from .generate import render_image
 
 #: 角色设定图支持的档位（fullbody 是头像与三视图的母图）

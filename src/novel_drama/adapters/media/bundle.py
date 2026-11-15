@@ -15,8 +15,8 @@ import json
 import subprocess
 from pathlib import Path
 
-from ..adapters.persistence import ProjectStore
-from ..models.ids import new_id, now_iso
+from ...models.ids import new_id, now_iso
+from ..persistence import ProjectStore
 from .export import write_export
 
 

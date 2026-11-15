@@ -14,9 +14,9 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from novel_drama.adapters import build_adapters  # noqa: E402
+from novel_drama.adapters.media import build_timeline  # noqa: E402
 from novel_drama.adapters.persistence import ProjectStore, validate  # noqa: E402
 from novel_drama.infrastructure.config import load_config  # noqa: E402
-from novel_drama.media import build_timeline  # noqa: E402
 from novel_drama.models import entities  # noqa: E402
 from novel_drama.models.ids import new_id  # noqa: E402
 from novel_drama.orchestration import GpuQueue  # noqa: E402
@@ -118,7 +118,7 @@ def main() -> int:
         check(done["error"]["code"] == "NOT_IMPLEMENTED", "失败错误码为 NOT_IMPLEMENTED")
 
         # BGM 短素材按时间槽循环填充：loop=true 时 end_ms 取槽时长，而不是补静音
-        from novel_drama.media.mixer import plan_mix
+        from novel_drama.adapters.media.mixer import plan_mix
 
         dummy_asset = Path(tmp) / "loop_asset.wav"
         dummy_asset.write_bytes(b"placeholder")

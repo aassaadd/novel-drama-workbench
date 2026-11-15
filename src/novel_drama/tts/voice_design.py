@@ -448,7 +448,7 @@ def _finish_meta(meta: dict, target: Path, missing_reason: str | None = None) ->
 def _probe_ms(path: Path) -> int:
     """探测音频时长（毫秒）；失败返回 0。"""
     try:
-        from ..media.ffmpeg import probe_duration_ms
+        from ..adapters.media.ffmpeg import probe_duration_ms
 
         return int(probe_duration_ms(path, "ffprobe") or 0)
     except Exception:  # noqa: BLE001 - 时长只用于展示，失败不影响主流程

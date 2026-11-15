@@ -23,6 +23,8 @@ from pathlib import Path
 from fastapi import HTTPException
 
 from ..adapters.comfyui import LocalComfyGateway
+from ..adapters.comfyui import media as comfy_media
+from ..adapters.comfyui import models as comfy_models
 from ..adapters.llm import OmlxWritingAdapter
 from ..adapters.observability import last_llm_call
 from ..domain.production.rules.thinking_policy import (
@@ -38,7 +40,6 @@ from ..infrastructure.config import (
     remove_ui_config,
     save_ui_config,
 )
-from ..media import comfy_media, comfy_models
 from ..tts import model_store
 
 #: 本模块日志：配置键等排查信息只写日志，不回显到界面

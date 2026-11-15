@@ -17,17 +17,15 @@ import shutil
 import time
 from pathlib import Path
 
-from ..adapters.comfyui import LocalComfyGateway
-from ..adapters.errors import AdapterError, ErrorCode
-from ..adapters.persistence import ProjectStore
-from ..cleanup import remove_dir_quietly, remove_stale_temp_dirs
-from ..domain.story.rules.chapter_rules import bump_revision
-from ..infrastructure.config import AppConfig
-from ..models.ids import now_iso
-from ..orchestration.gpu_queue import GpuLock
-from ..sfx import SfxError
-from . import comfy_models
-from .comfy_media import (
+from ...cleanup import remove_dir_quietly, remove_stale_temp_dirs
+from ...domain.story.rules.chapter_rules import bump_revision
+from ...infrastructure.config import AppConfig
+from ...models.ids import now_iso
+from ...orchestration.gpu_queue import GpuLock
+from ...sfx import SfxError
+from ..comfyui import LocalComfyGateway
+from ..comfyui import models as comfy_models
+from ..comfyui.media import (
     build_prompt,
     load_manifest,
     manifest_entries,
@@ -36,6 +34,8 @@ from .comfy_media import (
     seed_for,
     templates_dir,
 )
+from ..errors import AdapterError, ErrorCode
+from ..persistence import ProjectStore
 from .generate import probe_duration_ms, render_image, render_sfx, render_video
 from .references import (
     appearance_digest,

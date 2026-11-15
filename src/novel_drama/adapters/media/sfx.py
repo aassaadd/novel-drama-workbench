@@ -14,11 +14,11 @@ import threading
 import time
 from pathlib import Path
 
-from ..sfx import SfxError, SfxRequest
-from ..sfx.naming import build_stem
-from ..sfx.prompting import finalize_prompt
-from ..sfx.registry import build_providers, pick_provider
-from ..sfx.types import BAD_REQUEST
+from ...sfx import SfxError, SfxRequest
+from ...sfx.naming import build_stem
+from ...sfx.prompting import finalize_prompt
+from ...sfx.registry import build_providers, pick_provider
+from ...sfx.types import BAD_REQUEST
 from .generate import render_sfx
 
 #: 音效产物目录（provider 路线，与 CLI 一致）

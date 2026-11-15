@@ -18,8 +18,8 @@ import json
 import re
 from pathlib import Path
 
-from ..adapters.errors import AdapterError, ErrorCode
-from ..infrastructure.config import REPO_ROOT, AppConfig
+from ...infrastructure.config import REPO_ROOT, AppConfig
+from ..errors import AdapterError, ErrorCode
 
 #: 模板目录缺省值（相对仓库根目录）
 DEFAULT_TEMPLATES_DIR = "config/comfy"

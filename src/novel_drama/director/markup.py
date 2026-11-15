@@ -479,7 +479,7 @@ def parse_markup(
     info_counts: dict[tuple[str, str], int] = {}
     templates = _template_ids(settings)
     template_image = templates["image"]
-    from ..media.comfy_media import resolve_aspect
+    from ..adapters.comfyui.media import resolve_aspect
 
     # 画幅与宽高统一按工程 output.aspect_ratio 解析（模板 size_map 是宽高唯一来源）
     aspect = resolve_aspect(settings, "image")

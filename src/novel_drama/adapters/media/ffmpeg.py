@@ -6,7 +6,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from ..adapters.errors import AdapterError, ErrorCode
+from ..errors import AdapterError, ErrorCode
 
 
 def binary_available(name: str = "ffmpeg") -> bool:

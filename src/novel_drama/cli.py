@@ -14,6 +14,9 @@ from pathlib import Path
 
 from . import __version__
 from .adapters import AdapterError, ErrorCode, build_adapters
+from .adapters.media import load_cues, plan_mix, render_mix, run_media
+from .adapters.media.runner import plan_media
+from .adapters.media.timeline_builder import build_timeline, summarize_timeline
 from .adapters.persistence import (
     ProjectStore,
     QueueStore,
@@ -102,9 +105,6 @@ from .cli_writing import (
     cmd_script_suggest,
 )
 from .infrastructure.config import AppConfig, load_config
-from .media import load_cues, plan_mix, render_mix, run_media
-from .media.runner import plan_media
-from .media.timeline_builder import build_timeline, summarize_timeline
 from .models import entities
 from .models.ids import now_iso
 from .orchestration import GpuQueue
@@ -263,7 +263,7 @@ def cmd_doctor(args, config: AppConfig) -> int:
     except ImportError:
         add("pyyaml", False, "未安装：pip install pyyaml")
 
-    from .media.ffmpeg import binary_available
+    from .adapters.media.ffmpeg import binary_available
 
     add("ffmpeg", binary_available(config.get("ffmpeg.binary", "ffmpeg")), "混音/导出需要（M4）")
 

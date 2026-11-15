@@ -838,7 +838,7 @@ def _check_bgm(store, chapters: list[dict], strict: bool) -> list[dict]:
     返回:
         findings 列表。
     """
-    from ...media.bgm import load_cues
+    from ..media.bgm import load_cues
 
     findings: list[dict] = []
     for chapter in chapters:

@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+from .adapters.media.music import MODE_LABELS, render_bgm
 from .cli_common import EXIT_OK, _emit, _resolve_store
 from .infrastructure.config import AppConfig
-from .media.music import MODE_LABELS, render_bgm
 
 
 def cmd_bgm_generate(args, config: AppConfig) -> int:

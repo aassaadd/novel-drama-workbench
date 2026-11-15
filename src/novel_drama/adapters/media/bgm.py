@@ -11,8 +11,8 @@ import os
 import shutil
 from pathlib import Path
 
-from ..models import new_id
-from ..models.enum_check import check_bgm
+from ...models import new_id
+from ...models.enum_check import check_bgm
 
 _TEMPLATE = {"schema_version": 1, "chapter_id": None, "cues": []}
 

@@ -55,7 +55,7 @@ def materialize_media(chapter: dict, script: dict, settings: dict | None = None)
         {"sfx_added", "sfx_updated", "image_added", "image_updated",
          "video_added", "video_updated", "scenes"}。
     """
-    from ..media.comfy_media import resolve_aspect
+    from ..adapters.comfyui.media import resolve_aspect
 
     # 画幅与宽高统一按工程 output.aspect_ratio 解析（模板 size_map 是宽高唯一来源）
     aspect = resolve_aspect(settings or {}, "image")

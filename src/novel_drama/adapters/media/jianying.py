@@ -20,7 +20,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from .comfy_media import project_ratio
+from ..comfyui.media import project_ratio
 
 # 剪映 5.9 基线字段：低版本草稿可被高版本剪映打开并自动升级
 JY_VERSION = 360000

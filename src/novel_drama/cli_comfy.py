@@ -11,6 +11,9 @@ import shutil
 from pathlib import Path
 
 from .adapters.comfyui import LocalComfyGateway
+from .adapters.comfyui import media as comfy_media
+from .adapters.comfyui import models as comfy_models
+from .adapters.comfyui.workflow import ComfyWorkflowError, convert_ui_workflow
 from .adapters.errors import AdapterError
 from .cli_common import (
     EXIT_FAILED,
@@ -21,8 +24,6 @@ from .cli_common import (
     _emit,
 )
 from .infrastructure.config import AppConfig
-from .media import comfy_media, comfy_models
-from .media.comfy_workflow import ComfyWorkflowError, convert_ui_workflow
 
 #: 导入模板时必须出现的占位符（按用途）
 _IMPORT_REQUIRED = {

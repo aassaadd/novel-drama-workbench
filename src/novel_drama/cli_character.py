@@ -9,6 +9,7 @@ import json
 import sys
 from pathlib import Path
 
+from .adapters.media.art import render_character_sheet
 from .application.cast.character_crud import (
     UPDATE_FIELDS,
     append_characters,
@@ -18,7 +19,6 @@ from .application.cast.character_crud import (
 from .application.cast.generate_characters import generate_characters
 from .cli_common import PreconditionError, _emit, _resolve_store, cast_hint
 from .infrastructure.config import AppConfig
-from .media.art import render_character_sheet
 from .models import entities
 
 

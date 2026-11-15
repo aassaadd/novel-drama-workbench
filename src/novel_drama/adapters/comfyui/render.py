@@ -13,22 +13,22 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
-from ..adapters.persistence import ProjectStore
-from ..infrastructure.config import AppConfig
-from .comfy_media import (
+from ...infrastructure.config import AppConfig
+from ..media.runner import (
+    _check_models,
+    _comfy_gateway,
+    _provider,
+    _release_comfy,
+    _submit_and_fetch,
+)
+from ..persistence import ProjectStore
+from .media import (
     build_prompt,
     load_manifest,
     resolve_aspect,
     resolve_template,
     seed_for,
     templates_dir,
-)
-from .runner import (
-    _check_models,
-    _comfy_gateway,
-    _provider,
-    _release_comfy,
-    _submit_and_fetch,
 )
 
 

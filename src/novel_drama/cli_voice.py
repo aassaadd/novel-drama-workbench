@@ -43,7 +43,7 @@ def _build_variant(args, store: ProjectStore, name: str) -> dict:
     """
     import shutil
 
-    from .media.ffmpeg import probe_duration_ms
+    from .adapters.media.ffmpeg import probe_duration_ms
 
     source = args.source
     tags = args.emotion_tag or ["default"]

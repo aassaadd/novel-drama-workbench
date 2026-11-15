@@ -150,7 +150,7 @@ def _speech_intervals(path: Path) -> list[tuple[float, float]]:
     异常:
         HTTPException: ffmpeg 缺失或执行失败。
     """
-    from ..media.ffmpeg import run
+    from ..adapters.media.ffmpeg import run
 
     try:
         result = run(
@@ -172,7 +172,7 @@ def _speech_intervals(path: Path) -> list[tuple[float, float]]:
         hours, minutes, seconds = duration_match.groups()
         total = int(hours) * 3600 + int(minutes) * 60 + float(seconds)
     if not total:
-        from ..media.ffmpeg import probe_duration_ms
+        from ..adapters.media.ffmpeg import probe_duration_ms
 
         total = probe_duration_ms(path) / 1000
     intervals: list[tuple[float, float]] = []
@@ -196,7 +196,7 @@ def _convert_upload(raw: Path, target: Path) -> None:
     异常:
         HTTPException: 转码失败。
     """
-    from ..media.ffmpeg import run
+    from ..adapters.media.ffmpeg import run
 
     try:
         run(
@@ -222,7 +222,7 @@ def _cut_segment(source: Path, target: Path, start_s: float, end_s: float) -> in
     返回:
         片段时长（毫秒）。
     """
-    from ..media.ffmpeg import probe_duration_ms, run
+    from ..adapters.media.ffmpeg import probe_duration_ms, run
 
     run(
         [

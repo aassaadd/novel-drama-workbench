@@ -24,8 +24,10 @@ from pathlib import Path
 from fastapi import HTTPException
 
 from .. import __version__
+from ..adapters.comfyui import media as comfy_media
 from ..adapters.errors import AdapterError
 from ..adapters.llm import OmlxWritingAdapter
+from ..adapters.media.references import collect_references
 from ..adapters.persistence import ProjectStore, list_workspaces
 from ..adapters.persistence.project_store import WORKSPACE_INDEX
 from ..adapters.persistence.queue_store import QueueStore
@@ -56,8 +58,6 @@ from ..application.story.summarize_chapter import apply_summary, summarize_chapt
 from ..application.story.world_crud import remove_world, upsert_worlds
 from ..cli_line import chapter_consistency
 from ..infrastructure.config import DEFAULT_UI_CONFIG_PATH, load_config
-from ..media import comfy_media
-from ..media.references import collect_references
 from ..models.ids import now_iso
 from . import use_cases
 from .actions import fail_body, run
@@ -1768,7 +1768,7 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
     @app.get("/api/ui/styles")
     def ui_styles():
         """固定画面风格预设（写实 / 动漫 / 古风等），图片与视频共用。"""
-        from ..media.styles import load_styles
+        from ..adapters.media.styles import load_styles
 
         cfg = load_config(config_path) if config_path else load_config()
         return {"styles": load_styles(comfy_media.templates_dir(cfg))}
@@ -5222,7 +5222,7 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         import base64
         import binascii
 
-        from ..media.ffmpeg import binary_available, probe_duration_ms, run
+        from ..adapters.media.ffmpeg import binary_available, probe_duration_ms, run
 
         raw = str(body.get("audio_base64") or "").strip()
         if "," in raw and raw.startswith("data:"):
@@ -5270,7 +5270,7 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         }
         original = ref_dir / f"{variant_id}.orig.wav"
         if wanted:
-            from ..media.denoise import denoise_wav
+            from ..adapters.media.denoise import denoise_wav
 
             shutil.copyfile(raw_wav, original)
             result = denoise_wav(raw_wav, out, conf, cfg.get("ffmpeg.binary", "ffmpeg"))

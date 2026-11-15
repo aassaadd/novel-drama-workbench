@@ -13,7 +13,7 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-from ..media.ffmpeg import probe_duration_ms, run
+from ..adapters.media.ffmpeg import probe_duration_ms, run
 
 DEFAULTS = {
     "enabled": True,

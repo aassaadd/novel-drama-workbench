@@ -15,15 +15,8 @@ import json
 import os
 from pathlib import Path
 
-from ..adapters.persistence import ProjectStore, validate
-from ..adapters.persistence.settings_store import SettingsStore
-from ..application.script.annotate import suggest_script
-from ..application.story.apply_outline import apply_outline
-from ..application.story.generate_chapter import generate_chapter
-from ..application.story.generate_outline import generate_outline
-from ..application.story.summarize_chapter import summarize_chapter
-from ..infrastructure.config import AppConfig
-from ..media import (
+from ..adapters.comfyui.media import load_manifest, templates_dir
+from ..adapters.media import (
     concat_voice,
     export_bundle,
     plan_concat,
@@ -32,9 +25,16 @@ from ..media import (
     render_mix,
     run_media,
 )
-from ..media.comfy_media import load_manifest, templates_dir
-from ..media.mux import mux as run_mux
-from ..media.timeline_builder import build_timeline, summarize_timeline
+from ..adapters.media.mux import mux as run_mux
+from ..adapters.media.timeline_builder import build_timeline, summarize_timeline
+from ..adapters.persistence import ProjectStore, validate
+from ..adapters.persistence.settings_store import SettingsStore
+from ..application.script.annotate import suggest_script
+from ..application.story.apply_outline import apply_outline
+from ..application.story.generate_chapter import generate_chapter
+from ..application.story.generate_outline import generate_outline
+from ..application.story.summarize_chapter import summarize_chapter
+from ..infrastructure.config import AppConfig
 from ..models.ids import new_id, now_iso
 
 # 阶段顺序（也是依赖顺序）

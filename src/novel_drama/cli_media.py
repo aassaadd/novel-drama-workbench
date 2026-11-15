@@ -7,17 +7,8 @@ import os
 import sys
 from pathlib import Path
 
-from .adapters.persistence import ProjectStore, validate
-from .cli_common import (
-    EXIT_FAILED,
-    EXIT_OK,
-    PreconditionError,
-    _emit,
-    _resolve_store,
-    _tts_service,
-)
-from .infrastructure.config import AppConfig
-from .media import (
+from .adapters.comfyui.media import load_manifest, templates_dir
+from .adapters.media import (
     add_cue,
     build_schedule,
     build_timeline,
@@ -33,7 +24,16 @@ from .media import (
     sync_cues_from_plans,
     write_export,
 )
-from .media.comfy_media import load_manifest, templates_dir
+from .adapters.persistence import ProjectStore, validate
+from .cli_common import (
+    EXIT_FAILED,
+    EXIT_OK,
+    PreconditionError,
+    _emit,
+    _resolve_store,
+    _tts_service,
+)
+from .infrastructure.config import AppConfig
 from .models.ids import now_iso
 
 
@@ -695,7 +695,7 @@ def cmd_mux(args, config: AppConfig) -> int:
     if plan["blockers"]:
         raise PreconditionError("；".join(plan["blockers"]))
 
-    from .media import mux as run_mux
+    from .adapters.media import mux as run_mux
 
     result = run_mux(plan)
     _emit(
@@ -774,7 +774,7 @@ def cmd_export(args, config: AppConfig) -> int:
         print(f"[warn] 音色/BGM 编排提示 {len(cast_warnings)} 条：{detail}", file=sys.stderr)
     silences = _silence_events(store, chapter["id"])
     if getattr(args, "format", "srt") == "jianying":
-        from .media import JianyingExportError, export_jianying
+        from .adapters.media import JianyingExportError, export_jianying
 
         try:
             result = export_jianying(
@@ -815,7 +815,7 @@ def cmd_export(args, config: AppConfig) -> int:
         _emit(args, "\n".join(lines), result)
         return EXIT_OK
     if getattr(args, "format", "srt") == "bundle":
-        from .media import export_bundle
+        from .adapters.media import export_bundle
 
         result = export_bundle(
             store,
@@ -865,7 +865,7 @@ def cmd_bgm(args, config: AppConfig) -> int:
         _emit(args, f"已加入 BGM cue: {cue['id']}  {cue['asset_id']}  start={cue['start_ms']}ms  gain={cue['gain_db']}dB", cue)
         return EXIT_OK
     if args.action == "clear":
-        from .media import save_cues
+        from .adapters.media import save_cues
 
         save_cues(store.root, args.chapter, [])
         _emit(args, f"已清空 {args.chapter} 的 BGM cue", {"chapter": args.chapter})

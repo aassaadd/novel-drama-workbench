@@ -9,8 +9,8 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from ..adapters.persistence import ProjectStore, SettingsStore, WorldStore
-from ..models.entities import NARRATOR_ID, UNKNOWN_SPEAKER_ID
+from ...models.entities import NARRATOR_ID, UNKNOWN_SPEAKER_ID
+from ..persistence import ProjectStore, SettingsStore, WorldStore
 
 logger = logging.getLogger(__name__)
 

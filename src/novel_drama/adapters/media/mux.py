@@ -12,8 +12,8 @@ import json
 import subprocess
 from pathlib import Path
 
-from ..cleanup import remove_dir_quietly
-from .comfy_media import resolve_aspect
+from ...cleanup import remove_dir_quietly
+from ..comfyui.media import resolve_aspect
 
 # 默认编码参数（画布宽高由工程画幅推导，不在此留默认值）
 CODEC = {"video": "libx264", "audio": "aac", "fps": 24, "pix_fmt": "yuv420p"}

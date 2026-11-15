@@ -173,7 +173,7 @@ def _safe_duration(path: Path) -> int:
         时长毫秒。
     """
     try:
-        from ..media.ffmpeg import probe_duration_ms
+        from ..adapters.media.ffmpeg import probe_duration_ms
 
         return int(probe_duration_ms(path) or 0)
     except Exception:  # noqa: BLE001 - 探测失败不应阻断版本列表
@@ -969,8 +969,8 @@ def register_voice_tools_routes(app, config_path: str | None = None) -> None:
                 handle.write(payload)
                 raw_path = Path(handle.name)
             try:
-                from ..media.ffmpeg import binary_available
-                from ..media.ffmpeg import run as ffmpeg_run
+                from ..adapters.media.ffmpeg import binary_available
+                from ..adapters.media.ffmpeg import run as ffmpeg_run
 
                 if not binary_available("ffmpeg"):
                     raise HTTPException(status_code=500, detail="未找到 ffmpeg，无法转码录音（macOS 可用 brew install ffmpeg）")

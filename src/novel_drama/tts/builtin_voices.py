@@ -266,7 +266,7 @@ def _normalize(src: Path, target: Path) -> None:
     异常:
         Exception: ffmpeg 缺失或转码失败时抛出，由调用方回退。
     """
-    from ..media.ffmpeg import run
+    from ..adapters.media.ffmpeg import run
 
     run(["ffmpeg", "-v", "error", "-y", "-i", str(src), "-ac", "1", "-ar", "24000", "-c:a", "pcm_s16le", str(target)])
     src.unlink(missing_ok=True)
@@ -282,7 +282,7 @@ def _probe_duration_ms(path: Path) -> int:
         毫秒数或 0。
     """
     try:
-        from ..media.ffmpeg import probe_duration_ms
+        from ..adapters.media.ffmpeg import probe_duration_ms
 
         return probe_duration_ms(path)
     except Exception:

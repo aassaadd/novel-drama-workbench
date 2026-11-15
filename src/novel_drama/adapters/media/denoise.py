@@ -13,7 +13,7 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 
-from ..adapters.errors import AdapterError
+from ..errors import AdapterError
 from .ffmpeg import binary_available, run
 
 DEFAULT_ENGINE = "ffmpeg_afftdn"
