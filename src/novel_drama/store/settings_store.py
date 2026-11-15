@@ -215,19 +215,27 @@ class SettingsStore:
             beat["extra_characters"] = list(dict.fromkeys(str(item) for item in extra_characters if str(item)))
         return beat
 
-    def find_outline_chapter(self, bible: dict, chapter_id: str) -> dict | None:
+    def find_outline_chapter(self, bible: dict, chapter_id: str, index: int | None = None) -> dict | None:
         """在大纲中按章节 ID 查找条目。
+
+        ID 对不上时可按章节序号兜底：旧工程重新生成过大纲后，设定库章节 ID
+        与已有章节文件 ID 会不一致，只按 ID 查会误判成「大纲里没有本章」。
 
         参数:
             bible: 设定库 dict。
             chapter_id: 章节 ID。
+            index: 章节序号（1 起）；提供时作为兜底匹配。
 
         返回:
             大纲章节条目；找不到返回 None。
         """
-        for act in (bible.get("outline") or {}).get("acts") or []:
-            for item in act.get("chapters") or []:
-                if item.get("id") == chapter_id:
+        entries = [item for act in (bible.get("outline") or {}).get("acts") or [] for item in act.get("chapters") or []]
+        for item in entries:
+            if item.get("id") == chapter_id:
+                return item
+        if index:
+            for item in entries:
+                if int(item.get("index") or 0) == int(index):
                     return item
         return None
 

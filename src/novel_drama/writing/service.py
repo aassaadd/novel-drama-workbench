@@ -644,7 +644,7 @@ def _chapter_beats(bible: dict, chapter: dict, settings_store: SettingsStore) ->
     返回:
         节拍列表（至少一项）。
     """
-    entry = settings_store.find_outline_chapter(bible, chapter["id"])
+    entry = settings_store.find_outline_chapter(bible, chapter["id"], index=int(chapter.get("index") or 0))
     if entry and entry.get("beats"):
         return entry["beats"]
     outline = (chapter.get("outline") or "").strip()
@@ -678,7 +678,7 @@ def build_chapter_context(store: ProjectStore, config: AppConfig, chapter: dict)
         chapter_words = DEFAULT_CHAPTER_WORDS
     adapter = build_writing_adapter(config, bible)
 
-    entry = settings_store.find_outline_chapter(bible, chapter.get("id"))
+    entry = settings_store.find_outline_chapter(bible, chapter.get("id"), index=int(chapter.get("index") or 0))
     world_ids = list((entry or {}).get("world_ids") or [])
     world_store = WorldStore(store.root)
     world_context = _worlds_digest(world_store.find_many(world_ids) if (world_ids and world_store.exists()) else [], world_ids)
@@ -950,6 +950,17 @@ def generate_chapter(
         regen = True
     if (chapter.get("content") or "").strip() and not regen and not dry_run:
         raise ValueError(f"章节 {chapter_id} 已有正文；确认重写请加 --regen")
+
+    # 节拍先于角色同步存在的历史章节：正文生成前补一次 cast-only 识别（每章一次性）。
+    # 失败不阻断正文，但必须把原因透传给页面/任务通知，不能静默。
+    if not dry_run:
+        from .cast_capture import ensure_chapter_cast
+
+        try:
+            ensure_chapter_cast(store, config, chapter_id, on_notice=notify, on_progress=on_progress)
+        except Exception as exc:  # noqa: BLE001 - 角色识别失败不影响正文生成，但要透传原因
+            notify(f"角色识别补跑失败：{getattr(exc, 'message', None) or exc}；本章继续按现有节拍绑定生成")
+            logger.warning("角色识别补跑失败：%s", exc)
 
     context = build_chapter_context(store, config, chapter)
     bible = context["bible"]
@@ -1769,6 +1780,14 @@ def supplement_chapter(
     content = (chapter.get("content") or "").strip()
     if not content:
         raise ValueError(f"章节 {chapter_id} 还没有正文，无法补写；请先生成正文")
+
+    # 补写会新增台词，同样需要角色绑定；未同步时先补一次识别（每章一次性）
+    try:
+        from .cast_capture import ensure_chapter_cast
+
+        ensure_chapter_cast(store, config, chapter_id, on_notice=on_notice, on_progress=on_progress)
+    except Exception as exc:  # noqa: BLE001 - 角色识别失败不阻断补写，但记录原因
+        logger.warning("补写前角色识别失败：%s", exc)
 
     context = build_chapter_context(store, config, chapter)
     beats = context["beats"] or []

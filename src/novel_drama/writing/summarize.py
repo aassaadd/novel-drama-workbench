@@ -551,6 +551,18 @@ def _apply_preview(
     if entry is not None:
         settings_store.save(bible)
 
+    # 反推大纲会重排节拍，角色绑定不能只靠 POV：未同步时按同一套规则补一次识别
+    cast_report: dict = {}
+    if entry is not None and entry.get("beats"):
+        try:
+            from .cast_capture import ensure_chapter_cast
+
+            cast_report = ensure_chapter_cast(store, None, chapter_id, adapter=context.get("adapter"))
+            if cast_report.get("message"):
+                warnings.append(cast_report["message"])
+        except Exception as exc:  # noqa: BLE001 - 补跑失败不影响已落盘的标题/摘要/节拍
+            warnings.append(f"角色识别补跑失败：{getattr(exc, 'message', None) or exc}")
+
     return {
         "applied": True,
         "chapter_id": chapter_id,
@@ -560,6 +572,7 @@ def _apply_preview(
         "replaced_beats": replaced_beats,
         "warnings": warnings,
         "rounds": rounds,
+        "cast": cast_report,
     }
 
 

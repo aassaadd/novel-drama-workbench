@@ -10,6 +10,7 @@
 import { esc, icon, toast, openDialog, closeDialog } from '../dom.js';
 import { getJSON, postJSON } from '../api.js';
 import { openProgress } from '../progress.js';
+import { confirmLlm, llmErrorText } from '../llm.js';
 import { modeSwitchHTML, bindModeSwitch, getGenMode } from '../gen-mode.js';
 import { state, resetProject } from '../store.js';
 import { railbar, topbar, emptyProjectHTML, goProjects } from '../shell.js';
@@ -717,6 +718,14 @@ async function onRootClick(event) {
     const order = PRODUCE_STAGES.map(([key]) => key);
     if (order.indexOf(from) > order.indexOf(to)) {
       return toast('「从」阶段必须排在「到」阶段之前', 'warn');
+    }
+    const check = await confirmLlm({
+      action: 'produce.run',
+      params: { path: state.path, from_stage: from, to_stage: to },
+    });
+    if (!check.ok) {
+      if (check.error) toast(llmErrorText(check), 'bad', 3600);
+      return;
     }
     button.disabled = true;
     try {

@@ -207,6 +207,72 @@ def save_pending(store: ProjectStore, pending: dict) -> None:
     )
 
 
+def promote_pending(store: ProjectStore, key: str, *, role: str = "supporting") -> dict:
+    """把待定角色立即建卡，并从待定队列移除。
+
+    建卡字段与 `apply_chapter_cast()` 的第二次出现路径一致（同一个 `_new_character`），
+    不修改任何已建角色；若同名角色已存在，只从待定队列移除。
+
+    参数:
+        store: 工程。
+        key: 待定队列键（归一化姓名）；也接受直接传姓名。
+        role: 新建角色时的定位，默认配角。
+
+    返回:
+        `{created, character, pending}`；created=False 表示复用了已有角色卡。
+
+    异常:
+        ValueError: 待定角色不存在或已被处理。
+    """
+    pending = load_pending(store)
+    norm = key if key in pending else _norm(key)
+    record = pending.get(norm)
+    if not record:
+        raise ValueError("待定角色不存在或已处理，请刷新后重试")
+
+    characters = [
+        item for item in store.load_characters().get("characters") or [] if item.get("role") != "narrator"
+    ]
+    _, by_name = _index_characters(characters)
+    existing = by_name.get(_norm(record.get("name")))
+    if existing is not None:
+        character = existing
+        created = False
+    else:
+        row = dict(record)
+        row["role"] = role if role in ROLES else "supporting"
+        row["beats"] = []
+        row["_chapter"] = record.get("chapter")
+        character = _new_character(row)
+        characters.append(character)
+        created = True
+    pending.pop(norm, None)
+    _persist(store, characters, pending)
+    return {"created": created, "character": character, "pending": pending}
+
+
+def discard_pending(store: ProjectStore, key: str) -> dict:
+    """从待定队列丢弃一个候选人，不影响已建角色与节拍绑定。
+
+    参数:
+        store: 工程。
+        key: 待定队列键（归一化姓名）；也接受直接传姓名。
+
+    返回:
+        `{discarded, pending}`。
+
+    异常:
+        ValueError: 待定角色不存在或已被处理。
+    """
+    pending = load_pending(store)
+    norm = key if key in pending else _norm(key)
+    record = pending.pop(norm, None)
+    if record is None:
+        raise ValueError("待定角色不存在或已处理，请刷新后重试")
+    save_pending(store, pending)
+    return {"discarded": record.get("name") or key, "pending": pending}
+
+
 def created_in_chapter(store: ProjectStore, chapter_index: int) -> list[dict]:
     """读取某章新建的角色（界面「本章新建」）。
 

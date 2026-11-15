@@ -7,6 +7,7 @@ import { esc, icon, toast, openDialog, closeDialog, openMenu, fmtDuration, fmtCl
 import { getJSON, postJSON, streamJSON, fileUrl } from '../api.js';
 import { ENUMS, selectHTML } from '../enums.js';
 import { openProgress, watchProgress } from '../progress.js';
+import { confirmLlm, llmErrorText } from '../llm.js';
 import { modeSwitchHTML, bindModeSwitch } from '../gen-mode.js';
 import {
   state,
@@ -3013,6 +3014,14 @@ function scriptPreviewHTML(preview, markupPath) {
  * @param {'fill'|'regen'} [mode] fill 只补缺失 / 失败批次（resume=true），regen 从头生成
  */
 async function runScriptSuggest(mask, mode = 'fill') {
+  const check = await confirmLlm({
+    action: 'script.suggest',
+    params: { path: state.path, chapter: state.chapterId, mode },
+  });
+  if (!check.ok) {
+    if (check.error) toast(llmErrorText(check), 'bad', 3600);
+    return;
+  }
   const resume = mode === 'fill';
   const progress = mask.querySelector('#sa-progress');
   const buttons = mask.querySelectorAll('[data-sa="preview"], [data-sa="refresh"], [data-sa="adopt"], [data-sa="discard"]');
@@ -3021,12 +3030,17 @@ async function runScriptSuggest(mask, mode = 'fill') {
     progress.innerHTML = `<div class="dlg-note">正在生成标注预览…<span id="sa-progress-text"></span></div>`;
   }
   const label = mask.querySelector('#sa-progress-text');
+  const aborter = new AbortController();
   const panel = openProgress({
     title: resume ? '正在补齐缺失批次的标注预览…' : '正在重新生成全部标注预览…',
     hint: resume
       ? '只补做缺失 / 失败的镜头批次，已完成批次会跳过；本次不写入本集'
       : '忽略已有批次，按镜头重新生成全部标注；本次不写入本集',
     stage: '已提交生成请求，等待模型返回…',
+    onStop: async () => {
+      aborter.abort();
+      panel.note('正在停止：当前批次结束后中断，已完成批次会保留');
+    },
   });
   panel.update({ percent: null });
   let settled = false;
@@ -3093,8 +3107,7 @@ async function runScriptSuggest(mask, mode = 'fill') {
             retry: () => void runScriptSuggest(mask, mode),
           });
         }
-      }
-    );
+      }, { signal: aborter.signal });
     if (!settled) {
       panel.fail({ message: '连接已中断，没有收到标注结果', retry: () => void runScriptSuggest(mask, mode) });
     }
@@ -3103,6 +3116,10 @@ async function runScriptSuggest(mask, mode = 'fill') {
     }
     await loadScriptAnnotate(mask);
   } catch (error) {
+    if (aborter.signal.aborted) {
+      if (!settled) panel.finish({ message: '已停止标注：已完成批次会保留，可稍后补齐缺失批次' });
+      return;
+    }
     toast(error.message, 'bad', 4600);
     if (progress) progress.innerHTML = `<div class="dlg-note bad">${esc(error.message)}</div>`;
     if (!settled) panel.fail({ message: `标注生成失败：${error.message}`, retry: () => void runScriptSuggest(mask, mode) });
@@ -3116,6 +3133,14 @@ async function runScriptSuggest(mask, mode = 'fill') {
  * @param {HTMLElement} mask 弹窗根节点
  */
 async function runScriptSuggestResume(mask) {
+  const check = await confirmLlm({
+    action: 'script.suggest',
+    params: { path: state.path, chapter: state.chapterId, mode: 'fill' },
+  });
+  if (!check.ok) {
+    if (check.error) toast(llmErrorText(check), 'bad', 3600);
+    return;
+  }
   const panel = openProgress({
     title: '正在重试失败批次…',
     hint: '只补做上次失败的镜头批次，已完成批次会跳过；本次不写入本集',

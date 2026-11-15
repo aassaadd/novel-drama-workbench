@@ -197,11 +197,14 @@ class OfflineWritingAdapter:
             text = self._character(meta)
         elif task == "polish":
             text = self._polish(meta)
+        elif task == "cast_capture":
+            # 角色识别补跑：离线不造角色，返回空 cast 让调用方走「未识别到」分支
+            text = json.dumps({"cast": []}, ensure_ascii=False)
         elif task == "freeform":
             text = self._freeform(req)
         else:
             raise ValueError(
-                f"离线写作不支持的 task={task!r}（可选 outline/chapter/chapter_compress/chapter_supplement/summarize/recap/character_updates/consistency/script/image_prompt/setting/character/polish/freeform）"
+                f"离线写作不支持的 task={task!r}（可选 outline/chapter/chapter_compress/chapter_supplement/summarize/recap/character_updates/consistency/script/image_prompt/setting/character/polish/cast_capture/freeform）"
             )
         return TextGenResult(
             text=text,
@@ -248,6 +251,9 @@ class OfflineWritingAdapter:
             except Exception:  # 进度是旁路信息，不打断生成
                 pass
         name = str(((tool or {}).get("function") or {}).get("name") or "")
+        if name == "emit_cast":
+            # 角色识别补跑：离线不造角色，返回空列表让调用方走「未识别到」分支
+            return {"cast": []}
         # 单人物规则输出多包一层 {"characters": [...]}，而工具参数要求平铺
         if name == "emit_character" and isinstance(payload.get("characters"), list) and payload["characters"]:
             return payload["characters"][0]

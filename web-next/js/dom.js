@@ -169,8 +169,8 @@ export function toast(message, kind = 'info', timeout = 3200) {
 }
 
 let activeDialog = null;
-/** 打开弹窗前的焦点，关闭后还原 */
-let dialogReturnFocus = null;
+/** 弹窗栈：支持二次确认叠在上层，关闭后回到下层 */
+const dialogStack = [];
 
 /**
  * 取弹窗内可 Tab 到的元素（按 DOM 顺序，过滤不可见/禁用）。
@@ -191,12 +191,14 @@ function dialogFocusables(mask) {
  * @param {string} options.body 内容 HTML
  * @param {string} options.foot 底部 HTML（按钮带 data-dlg-close 可自动关闭）
  * @param {boolean} [options.wide] 宽版
+ * @param {boolean} [options.stacked] 叠在上一个弹窗之上（用于二次确认），关闭后回到上一个
  * @param {() => void} [options.onMount] 挂载后回调
+ * @param {() => void} [options.onClose] 关闭后回调（确认、取消、Esc、点遮罩都会触发一次）
  * @returns {HTMLElement} 弹窗根节点
  */
-export function openDialog({ title, body, foot = '', wide = false, onMount }) {
-  closeDialog(false);
-  dialogReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+export function openDialog({ title, body, foot = '', wide = false, stacked = false, onMount, onClose }) {
+  if (!stacked) closeAllDialogs(false);
+  const returnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   const mask = document.createElement('div');
   mask.className = 'dlg-mask';
   mask.innerHTML = `
@@ -234,6 +236,7 @@ export function openDialog({ title, body, foot = '', wide = false, onMount }) {
     }
   });
   document.body.appendChild(mask);
+  dialogStack.push({ mask, returnFocus, onClose });
   activeDialog = mask;
   onMount?.(mask);
   // 焦点落在第一个可操作项：优先正文控件，其次底部按钮（先取消后确认），最后关闭按钮。
@@ -254,18 +257,30 @@ export function openDialog({ title, body, foot = '', wide = false, onMount }) {
 }
 
 /**
- * 关闭当前弹窗。
+ * 关闭当前弹窗（只关最上层；叠层关闭后回到下一个弹窗）。
  * @param {boolean} [restoreFocus] 是否把焦点还原到打开前的元素（默认还原）
  */
 export function closeDialog(restoreFocus = true) {
-  if (activeDialog) {
-    activeDialog.remove();
-    activeDialog = null;
+  const entry = dialogStack.pop();
+  if (!entry) return;
+  entry.mask.remove();
+  try {
+    entry.onClose?.();
+  } catch {
+    // 关闭回调失败不影响弹窗清理
   }
-  if (restoreFocus && dialogReturnFocus?.isConnected) {
-    dialogReturnFocus.focus({ preventScroll: true });
+  activeDialog = dialogStack.length ? dialogStack[dialogStack.length - 1].mask : null;
+  if (restoreFocus && entry.returnFocus?.isConnected) {
+    entry.returnFocus.focus({ preventScroll: true });
   }
-  dialogReturnFocus = null;
+}
+
+/**
+ * 关闭全部弹窗。
+ * @param {boolean} [restoreFocus] 是否还原焦点
+ */
+export function closeAllDialogs(restoreFocus = true) {
+  while (dialogStack.length) closeDialog(restoreFocus);
 }
 
 // Esc 统一关弹窗，业务层不用各自监听

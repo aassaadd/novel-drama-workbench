@@ -97,6 +97,19 @@
           "default": [],
           "description": "本章涉及的世界条目 ID（worlds.json）；空数组表示沿用主世界"
         },
+        "cast_synced": {
+          "type": "boolean",
+          "description": "本章节拍是否已做过角色识别（含补跑）；true 后正文生成不再重复触发"
+        },
+        "cast_synced_at": { "type": "string", "format": "date-time" },
+        "cast_created": { "type": "array", "items": { "type": "string", "maxLength": 60 } },
+        "cast_reused": { "type": "array", "items": { "type": "string", "maxLength": 60 } },
+        "cast_extras": { "type": "array", "items": { "type": "string", "maxLength": 60 } },
+        "cast_pending": {
+          "type": "array",
+          "items": { "type": "string", "maxLength": 60 },
+          "description": "首次出现、进入待定队列的角色（第二次出现时建卡）"
+        },
         "origin": { "$ref": "#/$defs/origin" }
       }
     },

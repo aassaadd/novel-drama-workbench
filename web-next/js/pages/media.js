@@ -6,6 +6,7 @@ import { esc, icon, toast, fmtDuration, openDialog, closeDialog } from '../dom.j
 import { getJSON, postJSON, fileUrl } from '../api.js';
 import { labelOf } from '../enums.js';
 import { openProgress } from '../progress.js';
+import { confirmLlm, llmErrorText } from '../llm.js';
 import { modeSwitchHTML, bindModeSwitch, getGenMode } from '../gen-mode.js';
 import { state, resetProject } from '../store.js';
 import { railbar, topbar, chapterCtx, goChapter, goProjects, emptyProjectHTML } from '../shell.js';
@@ -413,6 +414,16 @@ function openRunKindDialog(kind, button) {
  * @param {HTMLElement} button 触发的按钮，用于展示忙碌态
  */
 async function runMedia(kind, force, button) {
+  if (kind === 'sfx') {
+    const check = await confirmLlm({
+      action: 'media.sfx',
+      params: { path: state.path, chapter: state.chapterId, count: 1, regen: force },
+    });
+    if (!check.ok) {
+      if (check.error) toast(llmErrorText(check), 'bad', 3600);
+      return;
+    }
+  }
   const oldText = button.textContent;
   const label = TAB_LABEL[kind] || kind;
   button.disabled = true;

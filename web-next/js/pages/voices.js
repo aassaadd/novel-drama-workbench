@@ -5,6 +5,7 @@
 import { esc, icon, toast, openDialog, fmtDuration } from '../dom.js';
 import { getJSON, postJSON } from '../api.js';
 import { openProgress } from '../progress.js';
+import { confirmLlm, llmErrorText } from '../llm.js';
 import { modeSwitchHTML, bindModeSwitch } from '../gen-mode.js';
 import { state, resetProject } from '../store.js';
 import { railbar, topbar, goChapter, goProjects, emptyProjectHTML, checkConsistency, resplitBannerHTML, onResplit } from '../shell.js';
@@ -557,6 +558,14 @@ function openVoiceDesign() {
     const mode = descModeOf();
     if (mode === 'fill' && promptNode.value.trim()) {
       return toast('已有音色描述，已保留；要覆盖请选重新生成', 'info', 3200);
+    }
+    const check = await confirmLlm({
+      action: 'voice.design.preview',
+      params: { path: state.path, character: character.id || '' },
+    });
+    if (!check.ok) {
+      if (check.error) toast(llmErrorText(check), 'bad', 3600);
+      return;
     }
     const idleLabel = mode === 'fill' ? '补缺失' : '重新生成描述';
     button.disabled = true;

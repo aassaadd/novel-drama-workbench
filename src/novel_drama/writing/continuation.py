@@ -892,6 +892,11 @@ def _apply_built_act_cast(
             chapter_index=int(chapter.get("index") or 0) or None,
             chapter_title=chapter.get("title") or "",
         )
+        # 标记写回章节，随后续写结果一起落库；正文生成不再重复补跑
+        chapter["cast_synced"] = True
+        chapter["cast_created"] = list(report.get("created") or [])
+        chapter["cast_reused"] = list(report.get("reused") or [])
+        chapter["cast_extras"] = list(report.get("extras") or [])
         created.extend(report.get("created") or [])
         reused.extend(report.get("reused") or [])
         characters = list(report.get("characters") or characters)

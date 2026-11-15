@@ -3977,6 +3977,231 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
             )
         return {"character": character, "chapters": rows, "voices": voices}
 
+    @app.get("/api/ui/llm/plan")
+    def ui_llm_plan(
+        path: str = Query(...),
+        action: str = Query(...),
+        chapter: str = "",
+        act: str = "",
+        act_index: int = 0,
+        count: int = 0,
+        regen: bool = False,
+        multi_turn: bool = False,
+        beats_per_round: int = 0,
+        max_rounds: int = 0,
+        mode: str = "",
+        character: str = "",
+        acts: int = 0,
+        chapters_per_act: int = 0,
+        beats_per_chapter: int = 0,
+        new_acts: int = 0,
+        new_chapters: int = 0,
+        from_stage: str = "",
+        to_stage: str = "",
+    ) -> dict:
+        """返回某个模型动作的事实清单（次数、阶段、思考、能否取消）。
+
+        参数:
+            path: 工程根目录。
+            action: 动作键。
+            chapter / act / act_index: 作用范围。
+            count / regen / multi_turn / beats_per_round / max_rounds / mode: 生成参数。
+            character: 单个角色 ID（角色档案补全）。
+            acts / chapters_per_act / beats_per_chapter / new_acts / new_chapters: 大纲规模。
+
+        返回:
+            统一确认弹窗所需字段。
+
+        异常:
+            HTTPException 400: 动作未登记。
+        """
+        from .llm_plan import llm_plan
+
+        store = _store(path)
+        ctx = {
+            "chapter": chapter,
+            "act": act,
+            "act_index": act_index,
+            "count": count,
+            "regen": regen,
+            "multi_turn": multi_turn,
+            "beats_per_round": beats_per_round,
+            "max_rounds": max_rounds,
+            "mode": mode,
+            "character": character,
+            "acts": acts,
+            "chapters_per_act": chapters_per_act,
+            "beats_per_chapter": beats_per_chapter,
+            "new_acts": new_acts,
+            "new_chapters": new_chapters,
+            "from_stage": from_stage,
+            "to_stage": to_stage,
+        }
+        try:
+            return llm_plan(store, load_config(config_path), action, ctx)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"code": 2, "message": str(exc)})
+
+    @app.get("/api/ui/cast/capture-plan")
+    def ui_cast_capture_plan(
+        path: str = Query(...),
+        chapter: str = "",
+        act: str = "",
+        act_index: int = 0,
+    ) -> dict:
+        """列出仍需补跑角色识别的章节（生成弹窗提前如实提示，不写盘）。
+
+        参数:
+            path: 工程根目录。
+            chapter: 只检查这一章（单章弹窗）。
+            act: 只检查这一幕（整幕弹窗）。
+            act_index: 幕序号兜底（幕 ID 缺失时使用）。
+
+        返回:
+            `{chapters, count, seconds, seconds_per_chapter}`。
+        """
+        from ..writing.cast_capture import cast_capture_plan
+
+        return cast_capture_plan(
+            _store(path),
+            chapter_id=chapter or None,
+            act_id=act or None,
+            act_index=act_index or None,
+        )
+
+    @app.get("/api/ui/cast/pending")
+    def ui_cast_pending(path: str = Query(...)) -> dict:
+        """读取待定角色队列（含出现次数与归属线索，只读）。
+
+        参数:
+            path: 工程根目录。
+
+        返回:
+            `{items, count}`。
+        """
+        from ..writing.cast_capture import pending_overview
+
+        return pending_overview(_store(path))
+
+    @app.post("/api/ui/cast/pending/promote")
+    def ui_cast_pending_promote(body: dict) -> dict:
+        """把待定角色立即建卡（沿用角色对齐的建卡字段）。
+
+        参数:
+            body: `{path, key, role?}`。
+
+        返回:
+            `{ok, created, character, pending}`。
+        """
+        from ..writing.cast_sync import promote_pending
+
+        key = str(body.get("key") or "").strip()
+        if not key:
+            raise HTTPException(status_code=400, detail={"code": 2, "message": "缺少待定角色标识"})
+        try:
+            result = promote_pending(_store(body.get("path")), key, role=str(body.get("role") or "supporting"))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"code": 2, "message": str(exc)})
+        return {"ok": True, **result}
+
+    @app.post("/api/ui/cast/pending/discard")
+    def ui_cast_pending_discard(body: dict) -> dict:
+        """从待定队列丢弃候选人（不影响已建角色）。
+
+        参数:
+            body: `{path, key}`。
+
+        返回:
+            `{ok, discarded, pending}`。
+        """
+        from ..writing.cast_sync import discard_pending
+
+        key = str(body.get("key") or "").strip()
+        if not key:
+            raise HTTPException(status_code=400, detail={"code": 2, "message": "缺少待定角色标识"})
+        try:
+            result = discard_pending(_store(body.get("path")), key)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"code": 2, "message": str(exc)})
+        return {"ok": True, **result}
+
+    @app.get("/api/ui/cast/status")
+    def ui_cast_status(path: str = Query(...), act: str = "", act_index: int = 0) -> dict:
+        """逐章返回角色识别状态（与补跑计划同一判定口径）。
+
+        参数:
+            path: 工程根目录。
+            act: 只看这一幕（可选）。
+            act_index: 幕序号兜底（可选）。
+
+        返回:
+            `{chapters, counts, job}`。
+        """
+        from ..writing.cast_capture import cast_status_overview
+
+        return cast_status_overview(
+            _store(path),
+            act_id=act or None,
+            act_index=act_index or None,
+        )
+
+    @app.post("/api/ui/cast/capture/start")
+    def ui_cast_capture_start(body: dict) -> dict:
+        """启动手动补跑：只做角色识别，不写正文。
+
+        参数:
+            body: `{path, chapter?, act?, act_index?}`。
+
+        返回:
+            `{job}`。
+        """
+        from ..writing.cast_capture import start_capture_job
+
+        store = _store(body.get("path"))
+        try:
+            job = start_capture_job(
+                store,
+                load_config(config_path),
+                chapter_id=str(body.get("chapter") or ""),
+                act_id=str(body.get("act") or ""),
+                act_index=int(body.get("act_index") or 0) or None,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"code": 2, "message": str(exc)})
+        return {"job": job}
+
+    @app.get("/api/ui/cast/capture/job")
+    def ui_cast_capture_job(path: str = Query(...)) -> dict:
+        """读取最近一次手动补跑任务（页面轮询进度与失败原因）。
+
+        参数:
+            path: 工程根目录。
+
+        返回:
+            `{job}`；没有任务时 job 为空对象。
+        """
+        from ..writing.cast_capture import latest_capture_job
+
+        return {"job": latest_capture_job(_store(path))}
+
+    @app.post("/api/ui/cast/capture/cancel")
+    def ui_cast_capture_cancel(body: dict) -> dict:
+        """停止手动补跑：当前章节识别结束后生效。
+
+        参数:
+            body: `{path, job_id?}`。
+
+        返回:
+            `{job}`。
+        """
+        from ..writing.cast_capture import cancel_capture_job
+
+        try:
+            job = cancel_capture_job(_store(body.get("path")), str(body.get("job_id") or ""))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"code": 2, "message": str(exc)})
+        return {"job": job}
+
     @app.get("/api/ui/cast/autofill")
     def ui_cast_autofill_preview(path: str = Query(...)) -> dict:
         """预览「按角色自动补齐」计划（只读，不落盘）。

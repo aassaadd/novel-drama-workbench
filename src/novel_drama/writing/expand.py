@@ -785,6 +785,9 @@ def _to_outline_act(act: dict, origin: dict, beats_per_chapter: int, chapter_wor
                     extra_characters=beat.get("extra_characters") or [],
                 )
             )
+        for key in ("cast_synced", "cast_synced_at", "cast_created", "cast_reused", "cast_extras", "cast_pending"):
+            if key in chapter:
+                outline_chapter[key] = chapter[key]
         built["chapters"].append(outline_chapter)
     return built
 
@@ -824,6 +827,11 @@ def _apply_expand_cast(
         chapter_index=chapter_pos,
         chapter_title=chapter.get("title") or "",
     )
+    # 标记写回章节，随大纲一起落库；正文生成据此判断不必再补跑
+    chapter["cast_synced"] = True
+    chapter["cast_created"] = list(report.get("created") or [])
+    chapter["cast_reused"] = list(report.get("reused") or [])
+    chapter["cast_extras"] = list(report.get("extras") or [])
     title = chapter.get("title") or f"第{chapter_pos}章"
     summary = f"第 {chapter_pos} 章《{title}》角色对齐：{summarize_cast(report)}"
     _progress(on_progress, {"type": "notice", "message": summary})

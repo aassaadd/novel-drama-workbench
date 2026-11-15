@@ -150,7 +150,7 @@ def _chapter_world_ids(store: ProjectStore, chapter: dict) -> list[str]:
     try:
         settings_store = SettingsStore(store.root)
         bible = settings_store.load_or_none() or {}
-        entry = settings_store.find_outline_chapter(bible, chapter.get("id"))
+        entry = settings_store.find_outline_chapter(bible, chapter.get("id"), index=int(chapter.get("index") or 0))
         bound = [str(value) for value in ((entry or {}).get("world_ids") or []) if value]
         if bound:
             return bound

@@ -7,6 +7,7 @@ import { esc, icon, toast, openDialog, closeDialog } from '../dom.js';
 import { getJSON, patchJSON, postJSON, fileUrl, streamJSON } from '../api.js';
 import { selectHTML, labelOf } from '../enums.js';
 import { openProgress } from '../progress.js';
+import { confirmLlm, llmErrorText } from '../llm.js';
 import { modeSwitchHTML, bindModeSwitch } from '../gen-mode.js';
 import { state, resetProject } from '../store.js';
 import { railbar, topbar, goChapter, goProjects } from '../shell.js';
@@ -93,6 +94,8 @@ let audio = null;
 let overrideCache = { character: '', data: null };
 /** 大纲生成时按章登记的新建角色：`[{index, title, items:[{id,name,created_at}]}]` */
 let createdChapters = [];
+/** 待定角色队列：第二次出现才建卡的候选人（含出现次数与归属线索） */
+let pendingCast = [];
 
 /** 更新顶栏保存态（参考：输入后显示「待保存」，落盘后「已自动保存」） */
 function setSaveState(kind, text) {
@@ -202,7 +205,53 @@ function listHTML() {
         </div>
       </div>
       <div class="chap-list">${body}</div>
+      ${pendingCastHTML()}
     </section>`;
+}
+
+/**
+ * 待定角色区：第二次出现才建卡的候选人。
+ * 空队列也给出明确说明，避免侧栏留一块空白。
+ * @returns {string} HTML
+ */
+function pendingCastHTML() {
+  const rows = pendingCast
+    .map(
+      (item) => `
+      <div class="summary-line" style="gap:6px;align-items:flex-start;padding:6px 4px">
+        <span style="min-width:0">
+          <b style="font-size:12px">${esc(item.name)}</b>
+          <span class="badge mute" style="margin-left:4px">${Number(item.occurrences || 0)} 次 · ${Number(
+            item.chapter_count || 0
+          )} 章</span>
+          <div class="hint" style="margin-top:2px">首次：第 ${Number(item.first_index || 0)} 章《${esc(
+            item.first_title || ''
+          )}》</div>
+          <div class="hint" style="margin-top:1px" title="${esc(item.clue || '暂无归属线索')}">线索：${esc(
+            item.clue || '暂无'
+          )}</div>
+        </span>
+        <span class="right" style="display:flex;gap:4px;flex-shrink:0">
+          <button class="btn sm" data-act="pending-promote" data-key="${esc(item.key)}"
+            title="立即建卡：沿用角色识别的建卡字段，不会改动已有角色">建卡</button>
+          <button class="btn sm" data-act="pending-discard" data-key="${esc(item.key)}"
+            title="只从待定队列移除，不影响已建角色">丢弃</button>
+        </span>
+      </div>`
+    )
+    .join('');
+  return `
+    <div class="ctx-group" style="margin-top:4px" title="角色识别遇到首次出现的新人物时先放到这里，等第二次出现自动建卡">
+      待定角色 <span class="n">${pendingCast.length}</span>
+      <span class="right hint">第二次出现才建卡</span>
+    </div>
+    <div style="max-height:190px;overflow-y:auto;padding:0 8px 8px">
+      ${
+        pendingCast.length
+          ? rows
+          : `<div class="hint" style="padding:6px 4px;line-height:1.6">当前没有待定角色。故事里首次出现的新人物会先放在这里，等第二次出现自动建卡；也可以直接建卡或丢弃。</div>`
+      }
+    </div>`;
 }
 
 /** 说话风格（只读展示，避免与档案字段重复编辑） */
@@ -669,15 +718,17 @@ function profileHTML() {
 
 /** 读取全部数据 */
 async function loadAll(path) {
-  const [info, chapters, charaPayload, castPayload, checkPayload, statsPayload, createdPayload] = await Promise.all([
-    getJSON('/api/project/info', { path }),
-    getJSON('/api/ui/chapters', { path }),
-    getJSON('/api/ui/characters', { path }),
-    getJSON('/api/ui/cast', { path }).catch(() => null),
-    getJSON('/api/ui/cast/check', { path }).catch(() => null),
-    getJSON('/api/ui/characters/stats', { path }).catch(() => null),
-    getJSON('/api/ui/characters/new-this-chapter', { path }).catch(() => null),
-  ]);
+  const [info, chapters, charaPayload, castPayload, checkPayload, statsPayload, createdPayload, pendingPayload] =
+    await Promise.all([
+      getJSON('/api/project/info', { path }),
+      getJSON('/api/ui/chapters', { path }),
+      getJSON('/api/ui/characters', { path }),
+      getJSON('/api/ui/cast', { path }).catch(() => null),
+      getJSON('/api/ui/cast/check', { path }).catch(() => null),
+      getJSON('/api/ui/characters/stats', { path }).catch(() => null),
+      getJSON('/api/ui/characters/new-this-chapter', { path }).catch(() => null),
+      getJSON('/api/ui/cast/pending', { path }).catch(() => null),
+    ]);
   state.info = info;
   state.chapters = chapters || [];
   if (!state.chapters.some((item) => item.id === state.chapterId)) {
@@ -688,6 +739,7 @@ async function loadAll(path) {
   check = checkPayload;
   stats = statsPayload?.characters || {};
   createdChapters = (createdPayload?.chapters || []).filter((row) => (row.items || []).length);
+  pendingCast = pendingPayload?.items || [];
   overrideCache = { character: '', data: null };
   if (!characters.some((item) => item.id === selectedId)) selectedId = characters[0]?.id || '';
 }
@@ -1042,6 +1094,66 @@ function openCreatedThisChapter() {
       closeDialog(false);
       repaint();
     });
+  });
+}
+
+/**
+ * 待定角色立即建卡：沿用角色识别的建卡字段，并在成功后切到新角色档案。
+ * @param {string} key 待定队列键
+ * @param {HTMLButtonElement} button 触发按钮（用于禁用与「正在…」文案）
+ */
+async function promotePending(key, button) {
+  const label = button.textContent;
+  button.disabled = true;
+  button.textContent = '建卡中…';
+  try {
+    const result = await postJSON('/api/ui/cast/pending/promote', { path: state.path, key });
+    if (result.character?.id) selectedId = result.character.id;
+    await reloadPreservingView();
+    toast(
+      result.created
+        ? `已建卡：${result.character?.name || ''}`
+        : `${result.character?.name || '该角色'} 已有角色卡，已从待定队列移除`,
+      'ok'
+    );
+  } catch (error) {
+    button.disabled = false;
+    button.textContent = label;
+    toast(error.message, 'bad', 4200);
+  }
+}
+
+/**
+ * 丢弃待定角色：二次确认后只从队列移除，不影响已建角色与正文。
+ * @param {string} key 待定队列键
+ */
+function discardPending(key) {
+  const item = pendingCast.find((row) => row.key === key);
+  const name = item?.name || '这个角色';
+  const mask = openDialog({
+    title: '丢弃待定角色',
+    body: `<div class="banner">${icon('warn', 13)} 丢弃后「${esc(
+      name
+    )}」不会建卡，也不会影响已有角色与已写正文。</div>
+      <div class="hint" style="margin-top:8px">如果之后再次识别到同名角色，会重新进入待定队列。</div>`,
+    foot: `<div class="right"><button class="btn" data-dlg-close>取消</button>
+      <button class="btn danger" data-discard-ok>丢弃</button></div>`,
+  });
+  const ok = mask.querySelector('[data-discard-ok]');
+  ok.addEventListener('click', async () => {
+    if (ok.disabled) return;
+    ok.disabled = true;
+    ok.textContent = '丢弃中…';
+    try {
+      await postJSON('/api/ui/cast/pending/discard', { path: state.path, key });
+      closeDialog();
+      await reloadPreservingView();
+      toast(`已丢弃：${name}`, 'ok');
+    } catch (error) {
+      ok.disabled = false;
+      ok.textContent = '丢弃';
+      toast(error.message, 'bad', 4200);
+    }
   });
 }
 
@@ -1470,13 +1582,26 @@ function openAiFill() {
  * @param {'fill'|'regen'} [mode] 生成方式：fill 只补缺失，regen 重新生成并覆盖
  */
 async function runDescriptionFill(item, mask, resultHost, mode = 'fill') {
+  const check = await confirmLlm({
+    action: 'characters.describe',
+    params: { path: state.path, character: item.id || '', regen: mode === 'regen' },
+  });
+  if (!check.ok) {
+    if (check.error) toast(llmErrorText(check), 'bad', 3600);
+    return;
+  }
   const regen = mode === 'regen';
+  const aborter = new AbortController();
   const panel = openProgress({
     title: regen ? `正在重新生成「${item.name}」的档案…` : `正在补全「${item.name}」的档案…`,
     hint: regen
       ? '重新生成音色描述、外貌描述与负向提示词，并覆盖已有内容'
       : '只补缺失的音色描述、外貌描述与负向提示词，已有内容不会被覆盖',
     stage: '正在分析缺失字段…',
+    onStop: async () => {
+      aborter.abort();
+      panel.note('正在停止：当前字段生成结束后中断，已写入的字段会保留');
+    },
   });
   panel.update({ percent: null });
   let settled = false;
@@ -1533,10 +1658,13 @@ async function runDescriptionFill(item, mask, resultHost, mode = 'fill') {
           settled = true;
           panel.fail({ message: data.message || '补全失败', retry: () => void runDescriptionFill(item, mask, resultHost, mode) });
         }
-      }
-    );
+      }, { signal: aborter.signal });
     if (!settled) panel.fail({ message: '连接已中断，没有收到补全结果', retry: () => void runDescriptionFill(item, mask, resultHost, mode) });
   } catch (error) {
+    if (aborter.signal.aborted) {
+      if (!settled) panel.finish({ message: '已停止补全：已写入的字段会保留' });
+      return;
+    }
     if (!settled) panel.fail({ message: `补全失败：${error.message}`, retry: () => void runDescriptionFill(item, mask, resultHost, mode) });
     if (resultHost) resultHost.innerHTML = `<div class="dlg-note bad">${esc(error.message)}</div>`;
   }
@@ -1668,11 +1796,24 @@ function openAiGenerate() {
  * @returns {Promise<Array<object>>} 角色预览行
  */
 async function runCharacterGenerate(count, brief, resultHost, mode = 'fill') {
+  const check = await confirmLlm({
+    action: 'characters.generate',
+    params: { path: state.path, count, mode },
+  });
+  if (!check.ok) {
+    if (check.error) toast(llmErrorText(check), 'bad', 3600);
+    return [];
+  }
   const regen = mode === 'regen';
+  const aborter = new AbortController();
   const panel = openProgress({
     title: regen ? `正在重新生成 ${count} 个角色名单…` : `正在生成缺失角色（目标 ${count} 个）…`,
     hint: regen ? brief || '忽略已有角色，重新生成完整名单' : brief || '跳过与已有角色同名的行，只生成缺失角色',
     stage: '已提交生成请求，等待模型返回…',
+    onStop: async () => {
+      aborter.abort();
+      panel.note('正在停止：当前批次结束后中断，已生成的行会保留');
+    },
   });
   panel.update({ percent: null });
   let settled = false;
@@ -1739,7 +1880,7 @@ async function runCharacterGenerate(count, brief, resultHost, mode = 'fill') {
           retry: () => void runCharacterGenerate(count, brief, resultHost, mode),
         });
       }
-    });
+    }, { signal: aborter.signal });
     if (!settled) {
       panel.fail({
         message: '连接已中断，没有收到角色生成结果',
@@ -1747,6 +1888,10 @@ async function runCharacterGenerate(count, brief, resultHost, mode = 'fill') {
       });
     }
   } catch (error) {
+    if (aborter.signal.aborted) {
+      if (!settled) panel.finish({ message: '已停止生成：已生成的角色行会保留，可重新勾选' });
+      return rows;
+    }
     if (!settled) {
       panel.fail({
         message: `角色生成失败：${error.message}`,
@@ -1888,6 +2033,8 @@ async function onRootClick(event) {
   if (act === 'delete-character') return deleteCharacter();
   if (act === 'merge-character') return mergeCharacter();
   if (act === 'new-this-chapter') return openCreatedThisChapter();
+  if (act === 'pending-promote') return void promotePending(button.dataset.key, button);
+  if (act === 'pending-discard') return discardPending(button.dataset.key);
   if (act === 'view-appearances') return viewAppearances();
   if (act === 'relation-add') return addRelationRow();
   if (act === 'relation-del') return deleteRelationRow(Number(el.dataset.index));

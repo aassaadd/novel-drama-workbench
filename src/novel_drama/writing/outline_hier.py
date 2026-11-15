@@ -1057,6 +1057,10 @@ def generate_hierarchical_outline(
             outline_chapter["character_arcs"] = [
                 dict(arc) for arc in (chapter.get("character_arcs") or []) if isinstance(arc, dict)
             ]
+            # 角色同步结果随章节一起写进设定库：后续据此判断「已识别，不再补跑」
+            for key in ("cast_synced", "cast_synced_at", "cast_created", "cast_reused", "cast_extras", "cast_pending"):
+                if key in chapter:
+                    outline_chapter[key] = chapter[key]
             built["chapters"].append(outline_chapter)
         built_acts.append(built)
 

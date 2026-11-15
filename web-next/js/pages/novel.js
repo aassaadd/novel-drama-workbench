@@ -8,6 +8,7 @@
  */
 import { esc, fmtClock, icon, toast, openDialog, closeDialog, reuseListHTML } from '../dom.js';
 import { getJSON, postJSON, streamJSON } from '../api.js';
+import { confirmLlm, fetchLlmPlan, llmErrorText } from '../llm.js';
 import { ENUMS, selectHTML } from '../enums.js';
 import { openProgress, watchProgress } from '../progress.js';
 import { modeSwitchHTML, bindModeSwitch } from '../gen-mode.js';
@@ -58,6 +59,10 @@ const cache = {
   /** 生成后的角色一致性检查结果 */
   consistency: null,
   consistencyChapter: '',
+  /** 逐章角色识别状态：`{章节ID: {state, running, last_error, ...}}` */
+  castStatus: {},
+  /** 最近一次手动补跑任务（只做角色识别，不写正文） */
+  castJob: null,
 };
 
 /** 弹窗里待采用的世界条目（勾选状态） */
@@ -90,17 +95,20 @@ const boot = {
 async function loadAll(path, keepCheck = false) {
   // 空工程允许设定库 / 世界条目 / 大纲尚未初始化：单项失败按空数据处理，
   // 不让整个小说视图中断（章节列表仍以真实返回为准）
-  const [setting, worlds, outline, chapters] = await Promise.all([
+  const [setting, worlds, outline, chapters, castStatus] = await Promise.all([
     getJSON('/api/ui/setting', { path }).catch(() => ({})),
     getJSON('/api/ui/worlds', { path }).catch(() => ({ worlds: [] })),
     getJSON('/api/ui/outline', { path }).catch(() => ({ acts: [] })),
     getJSON('/api/ui/chapters', { path }),
+    getJSON('/api/ui/cast/status', { path }).catch(() => null),
   ]);
   cache.path = path;
   cache.setting = setting || {};
   cache.worlds = worlds?.worlds || [];
   cache.outline = outline || { acts: [] };
   cache.chapters = Array.isArray(chapters) ? chapters : [];
+  cache.castStatus = Object.fromEntries(((castStatus?.chapters || []).map((row) => [row.id, row])));
+  cache.castJob = castStatus?.job || null;
   // 手动刷新成功后清掉启动阶段的失败态，避免旧错误块一直留在界面上
   boot.state.setting = 'ok';
   boot.state.worlds = 'ok';
@@ -239,6 +247,81 @@ function findOutlineAct(key) {
 /** 章节是否已落成正文文件 */
 function landedChapter(id) {
   return cache.chapters.find((item) => item.id === id) || null;
+}
+
+/**
+ * 取某章的角色识别状态（后端 cast_status_overview 的原样结果）。
+ * @param {string} id 章节 ID
+ * @returns {object|null} `{state, running, last_error, synced_at, ...}`
+ */
+function castStateOf(id) {
+  return cache.castStatus?.[id] || null;
+}
+
+/**
+ * 单章角色识别徽标：进行中 > 上次失败 > 未识别 / 无节拍 > 已识别。
+ * 状态口径全部来自后端，前端不自行推算。
+ * @param {string} id 章节 ID
+ * @returns {string} HTML
+ */
+function castBadgeHTML(id) {
+  const row = castStateOf(id);
+  if (!row) return '';
+  if (row.running) return '<span class="badge warn" title="正在补跑角色识别">识别中…</span>';
+  if (row.last_error) {
+    return `<span class="badge bad" title="上次补跑失败：${esc(row.last_error)}">识别失败</span>`;
+  }
+  if (row.state === 'missing') {
+    return '<span class="badge warn" title="本章还没有识别角色；可在正文工具栏点「补角色识别」">角色未识别</span>';
+  }
+  if (row.state === 'absent') {
+    return '<span class="badge mute" title="本章还没有节拍，暂时无法识别角色">无节拍</span>';
+  }
+  return `<span class="badge ok" title="角色已识别${row.synced_at ? ` · ${esc(row.synced_at)}` : ''}">角色已识别</span>`;
+}
+
+/**
+ * 单章角色识别状态的纯文本（幕详情清单等不便放徽标的位置）。
+ * @param {string} id 章节 ID
+ * @returns {string} 中文状态；未知时为空串
+ */
+function castStateText(id) {
+  const row = castStateOf(id);
+  if (!row) return '';
+  if (row.running) return '角色识别中';
+  if (row.last_error) return '角色识别失败';
+  if (row.state === 'missing') return '角色未识别';
+  if (row.state === 'absent') return '无节拍';
+  return '角色已识别';
+}
+
+/**
+ * 幕内角色识别汇总（用于幕标题与整幕补跑按钮）。
+ * @param {object} act 幕对象
+ * @returns {{rows: object[], missing: number, running: number}}
+ */
+function castActSummary(act) {
+  const rows = (act.chapters || []).map((chapter) => castStateOf(chapter.id)).filter(Boolean);
+  return {
+    rows,
+    missing: rows.filter((row) => row.state === 'missing').length,
+    running: rows.filter((row) => row.running).length,
+  };
+}
+
+/**
+ * 幕级角色识别徽标：进行中 / N 章待识别 / 已识别。
+ * @param {object} act 幕对象
+ * @returns {string} HTML
+ */
+function castActBadgeHTML(act) {
+  const { rows, missing, running } = castActSummary(act);
+  if (!rows.length) return '';
+  if (running) return '<span class="badge warn" title="本幕正在补跑角色识别">识别中…</span>';
+  if (missing) {
+    return `<span class="badge warn" title="本幕还有 ${missing} 章未识别角色；可点「补角色识别」按章补跑">${missing} 章待识别</span>`;
+  }
+  return '<span class="badge ok" title="本幕章节都已识别角色">角色已识别</span>';
 }
 
 /** 当前章已写正文字数（优先正文接口，其次章节列表缓存） */
@@ -705,6 +788,7 @@ function ctxHTML() {
           <button class="novel-act-title" data-act="novel-sel-act" data-key="${esc(actKey(act, actIndex))}"
             title="打开该幕：查看并修改幕标题与幕摘要">${esc(act.title || '未命名幕')}</button>
           ${originBadge(act.origin)}
+          ${castActBadgeHTML(act)}
           <button class="btn icon sm" data-act="novel-act-generate" data-id="${esc(act.id || '')}"
             data-index="${Number(act.index || actIndex + 1)}" data-pos="${actIndex + 1}"
             title="生成整幕正文：按章节顺序一次跑完，可选只补缺失或重新生成已有正文">${icon('spark', 12)}</button>
@@ -724,6 +808,7 @@ function ctxHTML() {
             )}</span>
             ${originBadge(chapter.origin)}
             ${landedChapter(chapter.id) ? '<span class="badge ok">已落章</span>' : ''}
+            ${castBadgeHTML(chapter.id)}
           </button>`
                 )
                 .join('')}</div>`
@@ -1071,7 +1156,7 @@ function actChapterRowsHTML(chapters) {
           )}</span>
           <span class="right hint">${(chapter.beats || []).length} 个节拍${
             landedChapter(chapter.id) ? ' · 已落章' : ''
-          }</span>
+          }${castStateText(chapter.id) ? ` · ${castStateText(chapter.id)}` : ''}</span>
         </div>`
     )
     .join('');
@@ -1090,6 +1175,7 @@ function actHTML() {
   const { act, index } = hit;
   const chapters = act.chapters || [];
   const rows = actChapterRowsHTML(chapters);
+  const castSummary = castActSummary(act);
   return `
     <div class="ed-head">
       <div style="min-width:0">
@@ -1098,6 +1184,15 @@ function actHTML() {
       </div>
       <div class="right">
         <button class="btn sm primary" data-act="novel-act-save">保存</button>
+        <button class="btn sm" data-act="novel-cast-capture" data-scope="act" data-id="${esc(act.id || '')}"
+          data-index="${index + 1}" ${castSummary.missing && !castSummary.running ? '' : 'disabled'}
+          title="${
+            castSummary.missing
+              ? `只做角色识别、不写正文；本幕还有 ${castSummary.missing} 章未识别，按章节顺序逐章补跑`
+              : castSummary.running
+                ? '本幕正在补跑角色识别'
+                : '本幕章节都已完成角色识别'
+          }">${icon('user', 12)} 补角色识别${castSummary.missing ? `（${castSummary.missing} 章）` : ''}</button>
         <button class="btn sm" data-act="novel-act-generate" data-id="${esc(act.id || '')}"
           data-index="${index + 1}" data-pos="${index + 1}"
           title="生成整幕正文：按章节顺序一次跑完，可选只补缺失或重新生成已有正文">${icon('spark', 12)} 生成本幕正文</button>
@@ -1852,6 +1947,14 @@ function addArcRow() {
 async function detectUpdates() {
   const hit = findOutlineChapter(ui.sel.id);
   if (!hit) return;
+  const check = await confirmLlm({
+    action: 'character.updates',
+    params: { path: cache.path, chapter: hit.chapter.id },
+  });
+  if (!check.ok) {
+    if (check.error) toast(llmErrorText(check), 'bad', 3600);
+    return;
+  }
   try {
     cache.updates = await postJSON('/api/ui/chapters/character-updates', {
       path: cache.path,
@@ -1900,6 +2003,14 @@ async function applyUpdates() {
 async function checkConsistency() {
   const hit = findOutlineChapter(ui.sel.id);
   if (!hit) return;
+  const check = await confirmLlm({
+    action: 'consistency',
+    params: { path: cache.path, chapter: hit.chapter.id },
+  });
+  if (!check.ok) {
+    if (check.error) toast(llmErrorText(check), 'bad', 3600);
+    return;
+  }
   try {
     cache.consistency = await postJSON('/api/ui/chapters/consistency', {
       path: cache.path,
@@ -1984,6 +2095,17 @@ function bodyCardHTML(chapter, landed) {
   const words = loading ? Number(landed.word_count || 0) : Number(cache.body?.word_count || 0);
   const hasBody = words > 0;
   const draft = cache.bodyChapter === chapter.id ? cache.draft : null;
+  const castRow = castStateOf(chapter.id);
+  const castMissing = castRow?.state === 'missing' && !castRow?.running;
+  const castTitle = !castRow
+    ? '本章还没有大纲条目，暂时无法补跑角色识别'
+    : castRow.running
+      ? '本章正在补跑角色识别'
+      : castRow.state === 'absent'
+        ? '本章还没有节拍，暂时无法识别角色'
+        : castRow.state === 'missing'
+          ? '只做角色识别、不写正文；按本章节拍补一次，约多 8 秒'
+          : '本章已完成角色识别，不需要补跑';
   return `
     <div class="card" id="novel-body-card">
       <div class="card-head">
@@ -1992,6 +2114,8 @@ function bodyCardHTML(chapter, landed) {
         <div class="right">
           <button class="btn sm" data-act="novel-body-versions">版本记录</button>
           <button class="btn sm" data-act="novel-body-save">保存正文</button>
+          <button class="btn sm" data-act="novel-cast-capture" data-scope="chapter" ${castMissing ? '' : 'disabled'}
+            title="${castTitle}">${icon('user', 12)} 补角色识别</button>
           <button class="btn sm" data-act="novel-body-generate">${icon('spark', 12)} ${hasBody ? '重新生成' : '生成正文'}</button>
           <button class="btn sm primary" data-act="novel-body-continue" ${hasBody ? '' : 'disabled'}>续写</button>
         </div>
@@ -2500,11 +2624,19 @@ function openWorldGenerate() {
         action: mask.querySelector('[data-wg-run]'),
         labels: { fill: '补缺失预览', regen: '重新生成预览' },
       });
-      mask.querySelector('[data-wg-run]').addEventListener('click', () => {
+      mask.querySelector('[data-wg-run]').addEventListener('click', async () => {
         const brief = mask.querySelector('#wg-brief').value.trim();
         const count = Number(mask.querySelector('#wg-count').value) || 1;
         if (!brief) return toast('先写一句方向', 'warn');
         const mode = modeOf();
+        const check = await confirmLlm({
+          action: 'world.generate',
+          params: { path: cache.path, count },
+        });
+        if (!check.ok) {
+          if (check.error) toast(llmErrorText(check), 'bad', 3600);
+          return;
+        }
         closeDialog();
         runWorldGenerate(brief, count, mode);
       });
@@ -2729,7 +2861,7 @@ function openOutlineGenerate() {
         action: mask.querySelector('[data-og-run]'),
         labels: { fill: '补缺失', regen: '重新生成大纲' },
       });
-      mask.querySelector('[data-og-run]').addEventListener('click', () => {
+      mask.querySelector('[data-og-run]').addEventListener('click', async () => {
         const body = {
           path: cache.path,
           acts: Number(mask.querySelector('#og-acts').value) || 3,
@@ -2741,6 +2873,22 @@ function openOutlineGenerate() {
         const brief = mask.querySelector('#og-brief').value.trim();
         if (brief) body.brief = brief;
         const mode = modeOf();
+        // 「只补缺失」且已有大纲时不会调用模型，不弹假提示
+        if (!(mode === 'fill' && outlineCounts().acts > 0)) {
+          const check = await confirmLlm({
+            action: 'outline.generate',
+            params: {
+              path: cache.path,
+              acts: body.acts,
+              chapters_per_act: body.chapters_per_act,
+              beats_per_chapter: body.beats_per_chapter,
+            },
+          });
+          if (!check.ok) {
+            if (check.error) toast(llmErrorText(check), 'bad', 3600);
+            return;
+          }
+        }
         closeDialog();
         runOutlineGenerate(body, mode);
       });
@@ -3010,6 +3158,20 @@ function openOutlineExpand() {
         }
         const brief = mask.querySelector('#oe-brief').value.trim();
         if (brief) body.brief = brief;
+        const check = await confirmLlm({
+          action: 'outline.expand',
+          params: {
+            path: cache.path,
+            new_acts: body.new_acts,
+            new_chapters: body.new_chapters || 0,
+            chapters_per_act: body.chapters_per_act,
+            beats_per_chapter: body.beats_per_chapter,
+          },
+        });
+        if (!check.ok) {
+          if (check.error) toast(llmErrorText(check), 'bad', 3600);
+          return;
+        }
         closeDialog();
         runOutlineExpand(body);
       });
@@ -3161,12 +3323,17 @@ function openSettingGenerate(section) {
         action: mask.querySelector('[data-sg-run]'),
         labels: { fill: '补缺失', regen: '重新生成' },
       });
-      mask.querySelector('[data-sg-run]').addEventListener('click', () => {
+      mask.querySelector('[data-sg-run]').addEventListener('click', async () => {
         const brief = mask.querySelector('#sg-brief').value.trim();
         const seedText = mask.querySelector('#sg-seed').value.trim();
         const seed = seedText ? Number(seedText) : null;
         if (seedText && !Number.isInteger(seed)) return toast('种子必须是整数', 'warn');
         const mode = modeOf();
+        const check = await confirmLlm({ action: 'setting.section', params: { path: cache.path } });
+        if (!check.ok) {
+          if (check.error) toast(llmErrorText(check), 'bad', 3600);
+          return;
+        }
         closeDialog();
         runSettingGenerate(section, label, brief, seed, mode);
       });
@@ -3699,6 +3866,184 @@ function resumeGenerationIfAny() {
 }
 
 /**
+ * 补角色识别（不进正文生成流程）：单章或整幕，只读节拍、只写角色表与待定队列。
+ * 开始前把调用次数与预估耗时写清，不静默触发。
+ * @param {{chapter?: string, act?: string, actIndex?: number}} scope 补跑范围
+ */
+async function openCastCaptureDialog(scope = {}) {
+  const chapterId = String(scope.chapter || '').trim();
+  const actId = String(scope.act || '').trim();
+  const actIndex = Number(scope.actIndex || 0);
+  if (!chapterId && !actId && !actIndex) return toast('请先选择要补跑的章节或幕', 'warn');
+  const params = { path: cache.path };
+  if (chapterId) params.chapter = chapterId;
+  else {
+    if (actId) params.act = actId;
+    if (actIndex) params.act_index = actIndex;
+  }
+  let plan = null;
+  try {
+    plan = await fetchLlmPlan({ action: 'cast.capture', ...params });
+  } catch (error) {
+    return toast(`读取补跑范围失败：${error.message}`, 'bad', 4200);
+  }
+  const count = Number(plan?.calls || 0);
+  if (!count) {
+    toast(chapterId ? '本章已完成角色识别，不需要补跑' : '本幕没有需要补跑角色识别的章节', 'info', 3200);
+    await refreshCastStatus();
+    return;
+  }
+  let rows = [];
+  try {
+    rows = (await getJSON('/api/ui/cast/capture-plan', params))?.chapters || [];
+  } catch {
+    rows = [];
+  }
+  const list =
+    rows
+      .slice(0, 8)
+      .map((row) => `第 ${Number(row.index || 0)} 章《${row.title || ''}》`)
+      .join('、') + (rows.length > 8 ? ` 等 ${rows.length} 章` : '');
+  const check = await confirmLlm({
+    action: 'cast.capture',
+    params,
+    plan,
+    title: chapterId ? `补角色识别 · 第 ${Number(rows[0]?.index || 0)} 章` : `补角色识别 · 第 ${actIndex || '?'} 幕`,
+    confirmLabel: '开始补跑',
+    extraHTML: list
+      ? `<div class="hint" style="line-height:1.6">待补章节：${esc(list)}</div>`
+      : '',
+  });
+  if (!check.ok) return;
+  await runCastCapture({ ...params, count });
+}
+
+/**
+ * 执行手动补跑：轮询任务进度，逐章展示识别结果，支持中途停止。
+ * @param {{path: string, chapter?: string, act?: string, act_index?: number, count?: number, seconds?: number}} body
+ */
+async function runCastCapture(body) {
+  const total = Number(body.count || 0);
+  const panel = openProgress({
+    title: `正在补角色识别 · ${body.chapter ? '本章' : '本幕'}`,
+    hint: `只做角色识别，不写正文；本次共 ${total} 章，可在当前章节结束后停止`,
+    stage: '正在启动补跑…',
+    onStop: async () => {
+      try {
+        const data = await postJSON('/api/ui/cast/capture/cancel', { path: body.path });
+        panel.note(`已请求停止：${data?.job?.note || '当前章节识别结束后生效'}`);
+      } catch (error) {
+        toast(`停止失败：${error.message}`, 'bad', 3600);
+      }
+    },
+  });
+  let job = null;
+  try {
+    job = (await postJSON('/api/ui/cast/capture/start', body))?.job || null;
+  } catch (error) {
+    panel.fail({ message: `补跑启动失败：${error.message}` });
+    return;
+  }
+  if (!job) {
+    panel.fail({ message: '补跑启动失败：没有返回任务信息' });
+    return;
+  }
+  const jobId = job.job_id;
+  let errors = 0;
+  /** 读一次任务进度；结束后汇总逐章结果 */
+  const tick = async () => {
+    let current = null;
+    try {
+      current = (await getJSON('/api/ui/cast/capture/job', { path: body.path }))?.job || null;
+      errors = 0;
+    } catch (error) {
+      errors += 1;
+      if (errors >= 4) {
+        panel.fail({ message: `读取补跑进度失败：${error.message}` });
+        return;
+      }
+      panel.update({ stage: `暂时读不到进度（${error.message}），正在重试…` });
+      window.setTimeout(tick, 1500);
+      return;
+    }
+    if (!current || current.job_id !== jobId) {
+      panel.fail({ message: '补跑任务已被新的任务替换，请回列表查看最新状态' });
+      return;
+    }
+    const items = current.items || [];
+    const done = Number(current.done || 0);
+    const failed = Number(current.failed || 0);
+    const skipped = Number(current.skipped || 0);
+    const totalNow = Number(current.total || total || 0);
+    if (current.status === 'running') {
+      const cur = current.current || {};
+      panel.update({
+        stage: cur.title
+          ? `第 ${Number(cur.position || 0)}/${totalNow} 章 · 第 ${Number(cur.index || 0)} 章《${cur.title}》`
+          : `已完成 ${done}/${totalNow} 章`,
+        percent: totalNow ? Math.round((done / totalNow) * 100) : null,
+      });
+      const last = [...items].reverse().find((item) => item.status === 'captured' || item.status === 'failed');
+      if (last) {
+        panel.note(
+          last.status === 'failed'
+            ? `第 ${Number(last.index || 0)} 章失败：${last.error || '未知原因'}`
+            : `第 ${Number(last.index || 0)} 章：${last.message || '已完成'}`
+        );
+      }
+      window.setTimeout(tick, 1500);
+      return;
+    }
+    await refreshCastStatus();
+    const detail = items
+      .map((item) => {
+        const head = `第 ${Number(item.index || 0)} 章《${item.title || ''}》`;
+        if (item.status === 'failed') return `${head}：失败 · ${item.error || '未知原因'}`;
+        if (item.status === 'skipped') return `${head}：${item.error || '已跳过'}`;
+        return `${head}：${item.message || '已完成'}`;
+      })
+      .join('；');
+    if (current.status === 'failed') {
+      panel.fail({ message: current.note || '补跑失败', detail });
+      toast('角色识别补跑失败，已在进度面板列出原因', 'bad', 4200);
+      return;
+    }
+    const label = { succeeded: '补跑完成', partial: '部分完成', canceled: '已停止' }[current.status] || '补跑结束';
+    panel.finish({
+      message: `${label}：完成 ${done}/${totalNow} 章${failed ? ` · 失败 ${failed}` : ''}${
+        skipped ? ` · 跳过 ${skipped}` : ''
+      }`,
+      detail,
+      actions: [
+        {
+          label: '看角色表',
+          primary: true,
+          onClick: () => {
+            window.location.hash = `#/p/${encodeURIComponent(cache.path)}/characters`;
+          },
+        },
+      ],
+    });
+    toast(`${label}：${current.note || ''}`, current.status === 'succeeded' ? 'ok' : 'warn', 3600);
+  };
+  void tick();
+}
+
+/**
+ * 只刷新角色识别状态并重画（补跑结束后用，不整页重新加载）。
+ */
+async function refreshCastStatus() {
+  try {
+    const data = await getJSON('/api/ui/cast/status', { path: cache.path });
+    cache.castStatus = Object.fromEntries(((data?.chapters || []).map((row) => [row.id, row])));
+    cache.castJob = data?.job || null;
+    paint();
+  } catch (error) {
+    // 状态刷新失败不打断主流程：下一次进入页面会重新读取
+  }
+}
+
+/**
  * 正文生成：确认参数后走 SSE 流，完成后刷新。
  * @param {boolean} hasBody 本章是否已有正文
  * @param {{mode?: string, beatsPerRound?: number, maxRounds?: number, multiTurn?: boolean, focusKey?: string}} [prefill]
@@ -3719,6 +4064,12 @@ async function openGenerateDialog(hasBody, prefill = {}) {
     binding = null;
   }
   const pov = povStatusOf(binding, hit.chapter);
+  let capturePlan = null;
+  try {
+    capturePlan = await getJSON('/api/ui/cast/capture-plan', { path: cache.path, chapter: hit.chapter.id });
+  } catch (error) {
+    capturePlan = null;
+  }
   openDialog({
     title: hasBody ? '重新生成本章正文' : 'AI 生成本章正文',
     body: `
@@ -3727,6 +4078,11 @@ async function openGenerateDialog(hasBody, prefill = {}) {
       <button type="button" class="pov-status-line ${pov.ok ? '' : 'warn'}" data-gen-pov
         title="点击设置本章视角（与其他生成入口共用同一弹窗）">
         <span data-pov-text>${esc(pov.text)}</span>${icon('edit', 12)}</button>
+      ${
+        capturePlan && capturePlan.count > 0
+          ? `<div class="banner" style="margin:8px 0">${icon('warn', 13)} 本章尚未识别角色，开始时会先补一次角色识别（约多 ${capturePlan.seconds} 秒）；每章只补一次，之后不再重复。</div>`
+          : ''
+      }
       <div class="hint" style="margin-bottom:8px">按本章节拍逐轮写作：写完一组节拍即推进，全部节拍写完就收尾；篇幅只作参考。</div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
         <div class="field"><label>每轮节拍数</label><input class="input" id="gen-beats" type="number" min="0" step="1" value="${beatsValue}" />
@@ -3790,6 +4146,21 @@ async function openGenerateDialog(hasBody, prefill = {}) {
           beats_per_round: Number(mask.querySelector('#gen-beats').value) || null,
           max_rounds: Number(mask.querySelector('#gen-rounds').value) || null,
         };
+        const check = await confirmLlm({
+          action: 'chapter.generate',
+          params: {
+            path: cache.path,
+            chapter: hit.chapter.id,
+            regen: body.regen,
+            multi_turn: body.multi_turn,
+            beats_per_round: body.beats_per_round || 0,
+            max_rounds: body.max_rounds || 0,
+          },
+        });
+        if (!check.ok) {
+          if (check.error) toast(llmErrorText(check), 'bad', 3600);
+          return;
+        }
         runBtn.disabled = true;
         runBtn.textContent = '正在检查视角…';
         try {
@@ -3868,18 +4239,27 @@ async function runGenerate(body, hadBody = false, options = {}) {
           : `${body.beats_per_round ? `每轮 ${Number(body.beats_per_round)} 个节拍` : '每轮节拍数自动分配'} · 最多 ${Number(
               body.max_rounds || 8
             )} 轮${body.regen ? ' · 覆盖现有正文' : ''}`;
+  const aborter = new AbortController();
   const panel = openProgress({
     title: panelTitle,
     hint: panelHint,
     stage: '已提交生成请求，等待模型返回…',
     stream: true,
+    onStop: async () => {
+      // 断开流后服务端会在下一个增量处中断，已完成轮次保留为断点
+      aborter.abort();
+      panel.note('正在停止：当前片段结束后中断，已完成的轮次会保留');
+    },
   });
   panel.update({ percent: null });
   if (options.resumeNote) panel.note(`自动续跑：${options.resumeNote}`);
   if (options.note) panel.note(options.note);
   let settled = false;
   try {
-    await streamJSON('/api/ui/chapter/generate/stream', { ...body, mode }, (event, data) => {
+    await streamJSON(
+      '/api/ui/chapter/generate/stream',
+      { ...body, mode },
+      (event, data) => {
       if (event === 'start') {
         panel.update({ stage: '模型正在写作…', percent: null });
       } else if (event === 'delta') {
@@ -3897,6 +4277,8 @@ async function runGenerate(body, hadBody = false, options = {}) {
         panel.append(data?.text || '');
       } else if (event === 'done') {
         settled = true;
+        // 正文生成前可能补跑过角色识别：完成后同步刷新章节状态
+        void refreshCastStatus();
         const result = data?.result || {};
         const words = Number(result.word_count || result.words || 0);
         const beats = `${Number(result.beats_done || 0)}/${Number(result.beats_total || 0)}`;
@@ -3933,7 +4315,21 @@ async function runGenerate(body, hadBody = false, options = {}) {
                   action.label ||
                   (action.id === 'compress' ? '按目标字数压缩' : action.id === 'supplement' ? '补写' : '重写'),
                 primary: action.id === 'compress' || action.id === 'supplement',
-                onClick: (close) => {
+                onClick: async (close) => {
+                  const llmAction =
+                    action.id === 'supplement'
+                      ? 'chapter.supplement'
+                      : action.id === 'compress'
+                        ? 'chapter.compress'
+                        : 'chapter.rewrite';
+                  const check = await confirmLlm({
+                    action: llmAction,
+                    params: { path: cache.path, chapter: body.chapter, mode: action.id },
+                  });
+                  if (!check.ok) {
+                    if (check.error) toast(llmErrorText(check), 'bad', 3600);
+                    return;
+                  }
                   close();
                   const actionBody =
                     action.id === 'supplement' ? { ...body, mode: action.id } : { ...body, regen: true, mode: action.id };
@@ -4006,11 +4402,15 @@ async function runGenerate(body, hadBody = false, options = {}) {
         }
         panel.fail({ message: data?.message || '生成失败', retry: () => runGenerate(body, hadBody, options) });
       }
-    });
+    }, { signal: aborter.signal });
     if (!settled) {
       panel.fail({ message: '连接已中断，没有收到生成结果', retry: () => runGenerate(body, hadBody, options) });
     }
   } catch (error) {
+    if (aborter.signal.aborted) {
+      panel.finish({ message: '已停止生成：已完成的轮次会保留，下次生成会自动从断点继续' });
+      return;
+    }
     if (!settled) panel.fail({ message: `生成失败：${error.message}`, retry: () => runGenerate(body, hadBody, options) });
   }
 }
@@ -4307,6 +4707,14 @@ async function openActGenerateDialog(act, actIndex, prefill = {}) {
   const hasBody = chapters.filter((chapter) => Number(landedChapter(chapter.id)?.word_count || 0) > 0);
   const modeKey = 'act.generate';
   const fallback = prefill.mode || (hasBody.length ? 'fill' : 'regen');
+  let capturePlan = null;
+  if (act.id) {
+    try {
+      capturePlan = await getJSON('/api/ui/cast/capture-plan', { path: cache.path, act: act.id });
+    } catch (error) {
+      capturePlan = null;
+    }
+  }
   openDialog({
     title: `生成整幕正文 · 第 ${actIndex} 幕《${act.title || '未命名幕'}》`,
     body: `
@@ -4314,6 +4722,11 @@ async function openActGenerateDialog(act, actIndex, prefill = {}) {
       <button type="button" class="pov-status-line" data-ag-pov
         title="点击设置本幕视角（与单章生成共用同一弹窗）">
         <span data-pov-text>本幕视角：正在检查各章视角…</span>${icon('edit', 12)}</button>
+      ${
+        capturePlan && capturePlan.count > 0
+          ? `<div class="banner" style="margin-top:8px">${icon('warn', 13)} 本幕有 ${capturePlan.count} 章尚未识别角色，开始后会逐章先补一次角色识别（每章约 ${capturePlan.seconds_per_chapter} 秒，合计约 ${capturePlan.seconds} 秒）；每章只补一次，之后不再重复。</div>`
+          : ''
+      }
       <div class="summary-line"><span>本幕章节</span><span class="right mono">${chapters.length} 章</span></div>
       <div class="summary-line"><span>已落成章节</span><span class="right mono">${landed.length} / ${chapters.length} 章</span></div>
       <div class="summary-line"><span>已有正文</span><span class="right mono">${hasBody.length} / ${chapters.length} 章</span></div>
@@ -4368,6 +4781,14 @@ async function openActGenerateDialog(act, actIndex, prefill = {}) {
       runBtn.addEventListener('click', async () => {
         if (runBtn.disabled) return;
         const mode = modeOf();
+        const check = await confirmLlm({
+          action: 'act.generate',
+          params: { path: cache.path, act: act.id || '', act_index: actIndex, regen: mode === 'regen' },
+        });
+        if (!check.ok) {
+          if (check.error) toast(llmErrorText(check), 'bad', 3600);
+          return;
+        }
         runBtn.disabled = true;
         runBtn.textContent = '正在检查视角…';
         try {
@@ -4540,6 +4961,8 @@ async function runActGenerate(act, actIndex, mode, options = {}) {
           });
         } else if (event === 'done') {
           settled = true;
+          // 整幕生成可能逐章补跑过角色识别：完成后同步刷新章节状态
+          void refreshCastStatus();
           const result = data?.result || {};
           const failedRows = (result.chapters || []).filter((row) => row.status === 'failed');
           const groups = groupActFailures(failedRows.length ? failedRows : failures);
@@ -4685,7 +5108,7 @@ function openContinueDialog(retry = false) {
         action: mask.querySelector('[data-ct-run]'),
         labels: { fill: '沿用现有草稿', regen: '重新生成续写' },
       });
-      mask.querySelector('[data-ct-run]').addEventListener('click', () => {
+      mask.querySelector('[data-ct-run]').addEventListener('click', async () => {
         const mode = modeOf();
         const body = {
           path: cache.path,
@@ -4695,6 +5118,17 @@ function openContinueDialog(retry = false) {
           // 重新生成时才作废旧草稿并重抽
           retry: mode === 'regen',
         };
+        // 「只补缺失」且已有草稿时不会调用模型，不弹假提示
+        if (mode === 'regen' || !hasDraft) {
+          const check = await confirmLlm({
+            action: 'chapter.continue',
+            params: { path: cache.path, chapter: hit.chapter.id },
+          });
+          if (!check.ok) {
+            if (check.error) toast(llmErrorText(check), 'bad', 3600);
+            return;
+          }
+        }
         closeDialog();
         runContinue(body, mode);
       });
@@ -4736,11 +5170,16 @@ async function runContinue(body, mode = 'regen') {
     });
     return;
   }
+  const aborter = new AbortController();
   const panel = openProgress({
     title: body.retry ? '正在重新生成续写草稿…' : '正在生成续写草稿…',
     hint: `本轮约 ${Number(body.words || 0)} 字${body.retry ? ' · 覆盖旧草稿' : ''}`,
     stage: '已提交续写请求，等待模型返回…',
     stream: true,
+    onStop: async () => {
+      aborter.abort();
+      panel.note('正在停止：当前片段结束后中断，已接收草稿会保留');
+    },
   });
   panel.update({ percent: null });
   let settled = false;
@@ -4774,9 +5213,13 @@ async function runContinue(body, mode = 'regen') {
         settled = true;
         panel.fail({ message: data?.message || '续写失败', retry: () => runContinue(body) });
       }
-    });
+    }, { signal: aborter.signal });
     if (!settled) panel.fail({ message: '连接已中断，没有收到续写结果', retry: () => runContinue(body) });
   } catch (error) {
+    if (aborter.signal.aborted) {
+      panel.finish({ message: '已停止续写：已接收草稿会保留，可稍后重新生成' });
+      return;
+    }
     if (!settled) panel.fail({ message: `续写失败：${error.message}`, retry: () => runContinue(body) });
   }
 }
@@ -5115,11 +5558,12 @@ const BOOT_REQUESTS = {
   setting: (path) => getJSON('/api/ui/setting', { path }),
   worlds: (path) => getJSON('/api/ui/worlds', { path }),
   outline: (path) => getJSON('/api/ui/outline', { path }),
+  castStatus: (path) => getJSON('/api/ui/cast/status', { path }),
 };
 
 /**
  * 把某个数据块的结果写入缓存。
- * @param {'info'|'chapters'|'setting'|'worlds'|'outline'} key 数据块
+ * @param {'info'|'chapters'|'setting'|'worlds'|'outline'|'castStatus'} key 数据块
  * @param {any} data 接口返回
  */
 function applyBootData(key, data) {
@@ -5130,6 +5574,9 @@ function applyBootData(key, data) {
     state.chapters = cache.chapters;
   } else if (key === 'setting') {
     cache.setting = data || {};
+  } else if (key === 'castStatus') {
+    cache.castStatus = Object.fromEntries(((data?.chapters || []).map((row) => [row.id, row])));
+    cache.castJob = data?.job || null;
   } else if (key === 'worlds') {
     cache.worlds = data?.worlds || [];
     // 首次载入或当前世界被外部删除时，落到第一套世界；正在新建世界时不抢占
@@ -5300,6 +5747,13 @@ async function onClick(event) {
     );
     if (!hit) return toast('找不到该幕，先刷新大纲', 'warn');
     return openActGenerateDialog(hit, index || position || 1);
+  }
+  if (act === 'novel-cast-capture') {
+    const scope =
+      el.dataset.scope === 'act'
+        ? { act: el.dataset.id || '', actIndex: Number(el.dataset.index) || 0 }
+        : { chapter: ui.sel.id };
+    return openCastCaptureDialog(scope);
   }
   if (act === 'novel-entry-new') return newEntry(el.dataset.category);
   if (act === 'novel-sel-act') {
