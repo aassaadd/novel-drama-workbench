@@ -559,7 +559,8 @@ def register_cast_routes(app, project_root: str | None = None, config_path: str 
             body: `{path, all?, force?}`。
 
         返回:
-            `{changed, applied}`。
+            `{changed, applied, warnings: [{name, message}]}`；warnings 是回落规则模板的原因，
+            页面据此提示哪些角色没有用上模型描述，不静默丢弃。
         """
         _require(body, "本接口需要 path（工程目录）", path="工程目录")
         path = body["path"]
@@ -574,4 +575,8 @@ def register_cast_routes(app, project_root: str | None = None, config_path: str 
                 all=bool(body.get("all")),
             )
         )
-        return {"changed": result["changed"], "applied": result["applied"]}
+        return {
+            "changed": result["changed"],
+            "applied": result["applied"],
+            "warnings": result.get("warnings") or [],
+        }

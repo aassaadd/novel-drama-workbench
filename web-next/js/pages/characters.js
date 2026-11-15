@@ -771,6 +771,9 @@ function profileHTML() {
         <button class="btn" data-act="autofill" title="按性别/年龄/同场不撞音为全剧角色一键编排音色">
           ${icon('mic', 13)} 自动推荐音色
         </button>
+        <button class="btn" data-act="cast-backfill" title="给缺失或仍是规则草稿的音色描述补生成；已有正式描述不覆盖">
+          ${icon('spark', 13)} 补齐音色描述
+        </button>
         <button class="btn" data-act="view-appearances" ${
           hasAppearance || (rowStats.planned_chapters || []).length ? '' : 'disabled'
         }
@@ -2238,6 +2241,70 @@ async function openAutofill() {
   });
 }
 
+/**
+ * 展示补齐音色描述时回落为规则模板的角色（告警不静默丢弃）。
+ * @param {Array<{name?: string, message?: string}>} warnings 后端返回的 warnings
+ */
+function showBackfillWarnings(warnings) {
+  openDialog({
+    title: `有 ${warnings.length} 个角色回落为规则模板`,
+    body: `<div class="dlg-note warn">这些角色没能用上模型生成的音色描述，已按档案规则给出草稿；
+      可在本页逐个角色点「AI 补全」重试，或检查本机模型连接。</div>
+      ${warnings
+        .map(
+          (row) => `<div class="summary-line" style="align-items:flex-start;gap:8px">
+            <span style="min-width:0"><b>${esc(row.name || '未命名角色')}</b>
+              <div class="hint" style="margin-top:2px">${esc(row.message || '未给出原因')}</div></span>
+          </div>`
+        )
+        .join('')}`,
+    foot: `<div class="right"><button class="btn" data-dlg-close>知道了</button></div>`,
+  });
+}
+
+/** 全剧补齐音色描述：只补缺失 / draft，回落告警随结果一起展示 */
+async function openCastBackfill() {
+  if (!state.path) return toast('先打开一个工程', 'warn');
+  const check = await confirmLlm({ action: 'cast.backfill', params: { path: state.path } });
+  if (!check.ok) {
+    if (check.error) toast(llmErrorText(check), 'bad', 3600);
+    return;
+  }
+  const panel = openProgress({
+    title: '正在补齐音色描述…',
+    hint: '只为缺失或仍是规则草稿的角色调用写作模型，已有正式描述不覆盖',
+    stage: '正在逐个角色生成音色描述…',
+  });
+  panel.update({ percent: null });
+  try {
+    const result = await postJSON('/api/ui/cast/backfill', {
+      path: state.path,
+      all: false,
+      force: false,
+    });
+    const changed = Number(result?.changed || 0);
+    const warnings = Array.isArray(result?.warnings) ? result.warnings : [];
+    panel.finish({
+      message: changed ? `已补齐 ${changed} 个角色的音色描述` : '没有需要补齐的音色描述',
+      detail: warnings.length
+        ? `其中 ${warnings.length} 个角色回落为规则模板，原因可逐条查看`
+        : '全部由模型生成',
+      actions: warnings.length
+        ? [{ label: '查看回落原因', primary: true, onClick: () => showBackfillWarnings(warnings) }]
+        : [],
+    });
+    if (warnings.length) showBackfillWarnings(warnings);
+    toast(
+      changed ? `已补齐 ${changed} 个角色的音色描述` : '没有需要补齐的音色描述',
+      warnings.length ? 'warn' : 'ok'
+    );
+    await loadAll(state.path);
+    repaint();
+  } catch (error) {
+    panel.fail({ message: `补齐音色描述失败：${error.message}`, retry: () => void openCastBackfill() });
+  }
+}
+
 /** 主区点击/输入绑定 */
 async function onRootClick(event) {
   // 监听绑在共享根节点上：离开角色页后不再处理，避免抢走其它页面的同名操作
@@ -2275,6 +2342,7 @@ async function onRootClick(event) {
   if (act === 'ai-generate') return openAiGenerate();
   if (act === 'ai-fill') return openAiFill();
   if (act === 'autofill') return void openAutofill();
+  if (act === 'cast-backfill') return void openCastBackfill();
   if (act === 'char-image') return openCharacterImage(button.dataset.kind || '');
   if (act === 'delete-character') return deleteCharacter();
   if (act === 'merge-character') return mergeCharacter();

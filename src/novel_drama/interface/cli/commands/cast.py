@@ -49,17 +49,25 @@ def _cmd_backfill(args, store, config: AppConfig) -> int:
         all=bool(getattr(args, "all", False)),
     )
     apply = result["applied"]
+    json_mode = bool(getattr(args, "json", False))
     for row in result["profiles"]:
-        if not apply and not getattr(args, "json", False):
+        if not apply and not json_mode:
             print(f"[dry-run] {row['name']}: {row['design_prompt']}")
-        if row["note"]:
+        # --json 时告警随 JSON 一起返回，不能混进 stdout 把 JSON 打坏
+        if row["note"] and not json_mode:
             print(f"[警告] {row['name']}：{row['note']}")
-    if not getattr(args, "json", False):
+    if not json_mode:
         for row in result["stock"]:
             print(f"[{'apply' if apply else 'dry-run'}] 龙套槽位: {row['name']} → {row['slot']}")
 
-    if getattr(args, "json", False):
-        print(json.dumps({"changed": result["changed"], "applied": apply}, ensure_ascii=False, indent=2))
+    if json_mode:
+        print(
+            json.dumps(
+                {"changed": result["changed"], "applied": apply, "warnings": result["warnings"]},
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
     else:
         print(("已写入" if apply else "[dry-run] 待写入") + f" {result['changed']} 个角色")
     return EXIT_OK

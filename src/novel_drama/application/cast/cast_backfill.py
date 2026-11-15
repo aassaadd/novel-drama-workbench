@@ -51,7 +51,8 @@ def backfill_cast(
         all: 已有非 draft 描述也重新生成。
 
     返回:
-        `{"changed": 变更数, "applied": 是否写盘, "profiles": 逐角色预览, "stock": 逐角色槽位}`。
+        `{"changed": 变更数, "applied": 是否写盘, "profiles": 逐角色预览, "stock": 逐角色槽位,
+        "warnings": 回落告警}`。
     """
     from ...tts.voice_design import build_profile
     from ..support.llm_calls import build_writing_adapter
@@ -62,6 +63,7 @@ def backfill_cast(
     changed = 0
     profile_rows: list[dict] = []
     stock_rows: list[dict] = []
+    warnings: list[dict] = []
 
     if want_profiles:
         adapter = build_writing_adapter(config, SettingsStore(store.root).load_or_none() or {})
@@ -81,7 +83,9 @@ def backfill_cast(
             }
             if built.get("note"):
                 # 回落原因写进来源，页面与后续 cast check 可据此解释 draft
-                source["note"] = str(built["note"])[:200]
+                note = str(built["note"])[:200]
+                source["note"] = note
+                warnings.append({"name": character.get("name"), "message": note})
             new_profile.update(
                 {
                     "schema": "voice_profile/1",
@@ -117,4 +121,10 @@ def backfill_cast(
 
     if apply and changed:
         store.save_characters(table)
-    return {"changed": changed, "applied": apply, "profiles": profile_rows, "stock": stock_rows}
+    return {
+        "changed": changed,
+        "applied": apply,
+        "profiles": profile_rows,
+        "stock": stock_rows,
+        "warnings": warnings,
+    }

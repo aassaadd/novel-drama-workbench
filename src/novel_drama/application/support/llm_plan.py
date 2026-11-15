@@ -316,6 +316,15 @@ _action(
     calls=lambda store, config, ctx: _describe_calls(store, ctx),
 )
 _action(
+    "cast.backfill",
+    title="补齐音色描述",
+    what="给缺失或仍是规则草稿的音色描述重新生成；已有正式描述不覆盖",
+    stages=("voice_profile",),
+    seconds=12,
+    cancelable=False,
+    calls=lambda store, config, ctx: _backfill_calls(store),
+)
+_action(
     "cast.capture",
     title="补角色识别",
     what="只做角色识别、不写正文：从本章节拍里识别角色并更新角色表与待定队列",
@@ -456,6 +465,24 @@ def _describe_calls(store: ProjectStore, ctx: dict) -> int:
     if ctx.get("regen"):
         return max(1, len(characters))
     return max(0, sum(1 for item in characters if _needs_description(item)))
+
+
+def _backfill_calls(store: ProjectStore, ctx: dict | None = None) -> int:
+    """全剧补齐音色描述的调用次数（缺失或仍为 draft 的角色数）。
+
+    参数:
+        store: 工程。
+        ctx: 预留的上下文参数（当前不用）。
+
+    返回:
+        需要调用写作模型补描述的角色数；都已就绪时为 0（前端不弹模型确认）。
+    """
+    count = 0
+    for character in store.load_characters().get("characters") or []:
+        profile = character.get("voice_profile") or {}
+        if not profile or profile.get("status") == "draft":
+            count += 1
+    return count
 
 
 def _capture_calls(store: ProjectStore, ctx: dict) -> int:
