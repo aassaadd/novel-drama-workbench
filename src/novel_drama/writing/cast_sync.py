@@ -16,13 +16,16 @@
 from __future__ import annotations
 
 import json
-import re
-import unicodedata
 
+from ..domain.cast.rules.naming import add_aliases, is_descriptor
+from ..domain.shared.text import normalize_name
 from ..models import entities
 from ..models.ids import now_iso
 from ..store import ProjectStore
 from .service import _clean_speech_style
+
+#: 姓名归一化：阶段 3 起由 domain 单点实现（NFKC → 去空白 → casefold）
+_norm = normalize_name
 
 #: 允许的角色定位（与 character.schema.json 对齐）
 ROLES = ("protagonist", "antagonist", "supporting", "minor")
@@ -33,48 +36,6 @@ GENDERS = ("male", "female", "other", "unknown")
 PENDING_VERSION = "cast_pending/1"
 #: 新建角色登记（界面「本章新建」）
 CREATED_VERSION = "cast_created/1"
-
-#: 叙述代称：一律不建卡
-DESCRIPTOR_WORDS = {
-    "他",
-    "她",
-    "它",
-    "他们",
-    "她们",
-    "它们",
-    "我",
-    "我们",
-    "你",
-    "你们",
-    "您",
-    "大家",
-    "众人",
-    "有人",
-    "某人",
-    "对方",
-    "旁人",
-    "那人",
-    "这人",
-    "此人",
-    "女人",
-    "男人",
-    "女孩",
-    "男孩",
-    "女子",
-    "男子",
-    "妇人",
-    "少女",
-    "少年",
-    "老人",
-    "老者",
-    "孩子",
-    "小孩",
-    "陌生人",
-    "声音",
-}
-
-#: 归一化用的空白
-_SPACE_RE = re.compile(r"\s+")
 
 
 def _clean_text(value, limit: int) -> str:
@@ -88,37 +49,6 @@ def _clean_text(value, limit: int) -> str:
         去空白后的字符串。
     """
     return str(value or "").strip()[:limit]
-
-
-def _norm(name: str) -> str:
-    """姓名归一化：全半角统一、去空白、英文小写，用于确定性匹配。
-
-    参数:
-        name: 姓名或别名。
-
-    返回:
-        归一化后的字符串（空串表示无效）。
-    """
-    text = unicodedata.normalize("NFKC", str(name or ""))
-    return _SPACE_RE.sub("", text).casefold()
-
-
-def is_descriptor(name: str) -> bool:
-    """判断是否是叙述代称（代词 / 「女人」「男人」「对方」这类泛称）。
-
-    参数:
-        name: 候选姓名。
-
-    返回:
-        True 表示不应建卡。
-    """
-    key = _norm(name)
-    if not key:
-        return True
-    if key in DESCRIPTOR_WORDS:
-        return True
-    # 「他」「她」「它」+ 们，或「一个男人」这类带量词的泛称
-    return bool(re.fullmatch(r"(他们|她们|它们|你|我|他|她|它)", key))
 
 
 def _registry_path(store: ProjectStore, name: str):
@@ -519,27 +449,6 @@ def _match_existing(row: dict, by_id: dict[str, dict], by_name: dict[str, dict])
     return None
 
 
-def _add_alias(character: dict, aliases: list[str]) -> None:
-    """把本章别名补进角色卡（跳过与正式名/已有别名重复的项）。
-
-    参数:
-        character: 角色 dict（就地修改）。
-        aliases: 候选别名。
-
-    返回:
-        无。
-    """
-    merged = list(character.get("aliases") or [])
-    known = {_norm(item) for item in [character.get("name"), *merged] if _norm(item)}
-    for alias in aliases:
-        norm = _norm(alias)
-        if norm and norm not in known:
-            merged.append(alias)
-            known.add(norm)
-    if merged:
-        character["aliases"] = merged
-
-
 def apply_chapter_cast(
     store: ProjectStore,
     chapter: dict,
@@ -606,7 +515,7 @@ def apply_chapter_cast(
             continue
         if existing is not None:
             character = existing
-            _add_alias(character, row.get("aliases") or [])
+            add_aliases(character, row.get("aliases") or [])
             if character.get("name") not in reused:
                 reused.append(character.get("name"))
             pending.pop(_norm(character.get("name")), None)
