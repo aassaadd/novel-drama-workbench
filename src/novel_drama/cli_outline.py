@@ -75,8 +75,9 @@ def cmd_outline_bind(args, config: AppConfig) -> int:
 
     raw_worlds = getattr(args, "worlds", None)
     raw_pov = getattr(args, "pov", None)
-    if raw_worlds is None and raw_pov is None:
-        _emit(args, "至少给 --worlds 或 --pov 之一", {"chapter": args.chapter, "message": "缺少绑定参数"})
+    raw_pov_mode = getattr(args, "pov_mode", None)
+    if raw_worlds is None and raw_pov is None and raw_pov_mode is None:
+        _emit(args, "至少给 --worlds / --pov / --pov-mode 之一", {"chapter": args.chapter, "message": "缺少绑定参数"})
         return 2
 
     if raw_worlds is not None:
@@ -101,10 +102,21 @@ def cmd_outline_bind(args, config: AppConfig) -> int:
         chapter["pov_character_id"] = pov
 
     bible = settings.save(bible)
+    # POV 以设定库为主源，同时写通章节副本，避免画本/大纲两处看到不同的值
+    from .writing.service import sync_chapter_pov
+
+    sync_result = sync_chapter_pov(
+        store,
+        args.chapter,
+        chapter.get("pov_character_id"),
+        pov_mode=(getattr(args, "pov_mode", None) or None),
+        update_mode=getattr(args, "pov_mode", None) is not None,
+    )
     payload = {
         "chapter": args.chapter,
         "world_ids": chapter.get("world_ids") or [],
         "pov_character_id": chapter.get("pov_character_id"),
+        "pov_mode": sync_result.get("pov_mode"),
         "settings_revision": bible.get("settings_revision"),
     }
     _emit(

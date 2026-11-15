@@ -4285,6 +4285,9 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
             ("appearance_negative_zh", "--appearance-negative-zh"),
             ("appearance_negative_en", "--appearance-negative-en"),
             ("situation", "--situation"),
+            ("knowledge", "--knowledge"),
+            ("relations", "--relations"),
+            ("speech_style", "--speech-style"),
             ("voice_profile", "--voice-profile"),
             ("stock", "--stock"),
         ):
@@ -4339,39 +4342,390 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
 
     @app.get("/api/ui/characters/stats")
     def ui_character_stats(path: str = Query(...)) -> dict:
-        """按角色汇总全书出场行数与首次登场章节（角色档案「查看出场」用）。
+        """按角色汇总全书出场情况（实际：场景 + 台词；计划：大纲节拍）。
 
         参数:
             path: 工程目录。
 
         返回:
-            `{characters: {角色ID: {lines, chapters: [{id, title, index, lines}]}}}`。
+            `{characters: {角色ID: {lines, scenes, chapters: [...], planned_chapters: [...]}}}`；
+            chapters 每项含 `{id, title, index, lines, scenes}`，planned_chapters 每项含
+            `{id, title, index, beats}`（该角色在本章被排进几个节拍）。
         """
         store = _store(path)
+        from ..models import entities
+
         stats: dict[str, dict] = {}
+
+        def row_of(character_id: str) -> dict:
+            """取或创建角色统计行。"""
+            return stats.setdefault(
+                character_id,
+                {"lines": 0, "scenes": 0, "chapters": [], "planned_chapters": []},
+            )
+
         for chapter in store.list_chapters():
             chapter_id = chapter.get("id")
             if not chapter_id:
                 continue
             data = store.load_chapter(chapter_id)
+            chapter_lines: dict[str, int] = {}
+            chapter_scenes: dict[str, int] = {}
             for scene in data.get("scenes") or []:
+                for cid in scene.get("character_ids") or []:
+                    key = str(cid or "").strip()
+                    if key:
+                        chapter_scenes[key] = chapter_scenes.get(key, 0) + 1
                 for line in scene.get("lines") or []:
-                    speaker = line.get("speaker_id")
-                    if not speaker:
-                        continue
-                    row = stats.setdefault(speaker, {"lines": 0, "chapters": []})
-                    row["lines"] += 1
-                    bucket = row["chapters"][-1] if row["chapters"] else None
-                    if not bucket or bucket["id"] != chapter_id:
-                        bucket = {
+                    speaker = str(line.get("speaker_id") or "").strip()
+                    if speaker:
+                        chapter_lines[speaker] = chapter_lines.get(speaker, 0) + 1
+            for character_id in set(chapter_lines) | set(chapter_scenes):
+                if character_id in (entities.NARRATOR_ID, entities.UNKNOWN_SPEAKER_ID):
+                    continue
+                row = row_of(character_id)
+                lines = chapter_lines.get(character_id, 0)
+                scenes = chapter_scenes.get(character_id, 0)
+                row["lines"] += lines
+                row["scenes"] += scenes
+                row["chapters"].append(
+                    {
+                        "id": chapter_id,
+                        "title": chapter.get("title") or "",
+                        "index": chapter.get("index") or 0,
+                        "lines": lines,
+                        "scenes": scenes,
+                    }
+                )
+        # 计划出场：只读设定库节拍，不落盘
+        from ..store.settings_store import SettingsStore
+
+        bible = SettingsStore(store.root).ensure()
+        title_by_id = {item.get("id"): item.get("title") for item in store.list_chapters()}
+        for act in (bible.get("outline") or {}).get("acts") or []:
+            for chapter in act.get("chapters") or []:
+                chapter_id = chapter.get("id")
+                if not chapter_id:
+                    continue
+                counts: dict[str, int] = {}
+                for beat in chapter.get("beats") or []:
+                    for cid in beat.get("character_ids") or []:
+                        key = str(cid or "").strip()
+                        if key:
+                            counts[key] = counts.get(key, 0) + 1
+                for character_id, beats in counts.items():
+                    row_of(character_id)["planned_chapters"].append(
+                        {
                             "id": chapter_id,
-                            "title": chapter.get("title") or "",
+                            "title": title_by_id.get(chapter_id) or chapter.get("title") or "",
                             "index": chapter.get("index") or 0,
-                            "lines": 0,
+                            "beats": beats,
                         }
-                        row["chapters"].append(bucket)
-                    bucket["lines"] += 1
+                    )
+        for row in stats.values():
+            row["chapters"].sort(key=lambda item: int(item.get("index") or 0))
+            row["planned_chapters"].sort(key=lambda item: int(item.get("index") or 0))
         return {"characters": stats}
+
+    @app.get("/api/ui/characters/graph")
+    def ui_character_graph(path: str = Query(...)) -> dict:
+        """角色关系图数据：结构化 relations + 旧关系备注，统一解析成姓名。
+
+        参数:
+            path: 工程目录。
+
+        返回:
+            `{nodes: [{id,name,role,pov?}], edges: [{source,target,label,sentiment,note,kind}]}`。
+        """
+        store = _store(path)
+        characters = [
+            item for item in store.load_characters()["characters"] if item.get("role") != "narrator"
+        ]
+        by_id = {str(item.get("id")): item for item in characters if item.get("id")}
+        name_by_id = {cid: str(item.get("name") or "") for cid, item in by_id.items()}
+        nodes = [
+            {"id": cid, "name": item.get("name") or "", "role": item.get("role") or "minor"}
+            for cid, item in by_id.items()
+        ]
+        edges: list[dict] = []
+        seen: set[tuple] = set()
+        for cid, item in by_id.items():
+            state = item.get("state") or {}
+            for relation in state.get("relations") or []:
+                target = str(relation.get("target_id") or "").strip()
+                if not target or target not in by_id:
+                    continue
+                key = (cid, target, str(relation.get("label") or ""))
+                if key in seen:
+                    continue
+                seen.add(key)
+                edges.append(
+                    {
+                        "source": cid,
+                        "source_name": name_by_id.get(cid, ""),
+                        "target": target,
+                        "target_name": name_by_id.get(target, ""),
+                        "label": str(relation.get("label") or ""),
+                        "sentiment": relation.get("sentiment"),
+                        "note": str(relation.get("note") or ""),
+                        "kind": "relation",
+                    }
+                )
+            for key_name, note in (state.get("relationship_notes") or {}).items():
+                target = str(key_name)
+                if target not in by_id:
+                    continue
+                key = (cid, target, "note")
+                if key in seen:
+                    continue
+                seen.add(key)
+                edges.append(
+                    {
+                        "source": cid,
+                        "source_name": name_by_id.get(cid, ""),
+                        "target": target,
+                        "target_name": name_by_id.get(target, ""),
+                        "label": "关系备注",
+                        "sentiment": None,
+                        "note": str(note or ""),
+                        "kind": "note",
+                    }
+                )
+        return {"nodes": nodes, "edges": edges}
+
+    @app.get("/api/ui/characters/arcs")
+    def ui_character_arcs(path: str = Query(...), character: str = Query("")) -> dict:
+        """角色弧线：按章节列出该角色在大纲里的 from → to 变化。
+
+        参数:
+            path: 工程目录。
+            character: 角色 ID；为空时返回全部角色的弧线。
+
+        返回:
+            `{arcs: [{chapter_id, index, title, character_id, name, from_state, to_state, note}]}`。
+        """
+        store = _store(path)
+        from ..store.settings_store import SettingsStore
+
+        bible = SettingsStore(store.root).ensure()
+        name_by_id = {
+            str(item.get("id")): item.get("name")
+            for item in store.load_characters()["characters"]
+            if item.get("id")
+        }
+        rows: list[dict] = []
+        for act in (bible.get("outline") or {}).get("acts") or []:
+            for chapter in act.get("chapters") or []:
+                for arc in chapter.get("character_arcs") or []:
+                    cid = str(arc.get("character_id") or "").strip()
+                    if not cid or (character and cid != character):
+                        continue
+                    rows.append(
+                        {
+                            "chapter_id": chapter.get("id"),
+                            "index": chapter.get("index"),
+                            "title": chapter.get("title"),
+                            "character_id": cid,
+                            "name": name_by_id.get(cid) or "已删除角色",
+                            "from_state": arc.get("from_state") or "",
+                            "to_state": arc.get("to_state") or "",
+                            "note": arc.get("note") or "",
+                        }
+                    )
+        rows.sort(key=lambda item: int(item.get("index") or 0))
+        return {"arcs": rows}
+
+    @app.get("/api/ui/chapters/character-updates")
+    def ui_character_updates_get(path: str = Query(...), chapter: str = Query(...)) -> dict:
+        """读取本章角色状态回流提案（只读，不自动改角色卡）。
+
+        参数:
+            path: 工程目录。
+            chapter: 章节 ID。
+
+        返回:
+            `{chapter_id, exists, applied, updates: [{character_id, situation, knowledge_add, relations}]}`。
+        """
+        from ..writing.character_updates import load_character_updates
+
+        return load_character_updates(_store(path), chapter)
+
+    @app.post("/api/ui/chapters/character-updates")
+    def ui_character_updates_create(body: dict) -> dict:
+        """根据本章正文生成角色状态更新提案（不写回）。
+
+        参数:
+            body: `{path, chapter}`。
+
+        返回:
+            提案记录。
+
+        异常:
+            HTTPException 400: 正文为空或生成失败。
+        """
+        from ..writing.character_updates import propose_character_updates
+
+        store = _store(body.get("path"))
+        chapter = str(body.get("chapter") or "")
+        if not chapter:
+            raise HTTPException(status_code=400, detail={"code": 2, "message": "缺少 chapter 参数"})
+        try:
+            return propose_character_updates(store, load_config(config_path), chapter)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"code": 2, "message": str(exc)}) from exc
+
+    @app.post("/api/ui/chapters/character-updates/apply")
+    def ui_character_updates_apply(body: dict) -> dict:
+        """按作者确认的选择写回角色状态（只改被确认的字段）。
+
+        参数:
+            body: `{path, chapter, selections?: [{character_id, situation?, knowledge_add?, relations?}]}`；
+            selections 缺省表示全部确认。
+
+        返回:
+            `{chapter_id, applied, skipped}`。
+
+        异常:
+            HTTPException 400: 没有可应用的提案。
+        """
+        from ..writing.character_updates import apply_character_updates
+
+        store = _store(body.get("path"))
+        chapter = str(body.get("chapter") or "")
+        if not chapter:
+            raise HTTPException(status_code=400, detail={"code": 2, "message": "缺少 chapter 参数"})
+        try:
+            return apply_character_updates(store, chapter, body.get("selections"))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"code": 2, "message": str(exc)}) from exc
+
+    @app.get("/api/ui/chapters/consistency")
+    def ui_consistency_get(path: str = Query(...), chapter: str = Query(...)) -> dict:
+        """读取本章最近一次角色一致性检查结果。
+
+        参数:
+            path: 工程目录。
+            chapter: 章节 ID。
+
+        返回:
+            `{chapter_id, exists, issues, counts}`。
+        """
+        from ..writing.consistency import load_consistency
+
+        return load_consistency(_store(path), chapter)
+
+    @app.post("/api/ui/chapters/consistency")
+    def ui_consistency_check(body: dict) -> dict:
+        """执行本章角色一致性检查（只产出问题清单）。
+
+        参数:
+            body: `{path, chapter}`。
+
+        返回:
+            `{chapter_id, issues, counts}`。
+
+        异常:
+            HTTPException 400: 正文为空或生成失败。
+        """
+        from ..writing.consistency import check_chapter_consistency
+
+        store = _store(body.get("path"))
+        chapter = str(body.get("chapter") or "")
+        if not chapter:
+            raise HTTPException(status_code=400, detail={"code": 2, "message": "缺少 chapter 参数"})
+        try:
+            return check_chapter_consistency(store, load_config(config_path), chapter)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"code": 2, "message": str(exc)}) from exc
+
+    @app.post("/api/ui/chapters/capture-character")
+    def ui_capture_character(body: dict) -> dict:
+        """捕获未建卡/计划外角色：建最小角色卡并补进指定节拍。
+
+        参数:
+            body: `{path, chapter, beat?, character_id?, name?, sample?, role?}`。
+
+        返回:
+            `{character, binding}`。
+
+        异常:
+            HTTPException 400: 缺少参数或节拍不存在。
+        """
+        from ..models import entities as model_entities
+        from ..writing.service import bind_beat_characters, chapter_binding
+
+        store = _store(body.get("path"))
+        chapter_id = str(body.get("chapter") or "")
+        if not chapter_id:
+            raise HTTPException(status_code=400, detail={"code": 2, "message": "缺少 chapter 参数"})
+        chapter = store.load_chapter(chapter_id)
+        table = store.load_characters()
+        cast = [item for item in table["characters"] if item.get("role") != "narrator"]
+        character_id = str(body.get("character_id") or "").strip()
+        character = next((item for item in cast if item.get("id") == character_id), None) if character_id else None
+        name = str(body.get("name") or "").strip()
+        if character is None:
+            if not name:
+                raise HTTPException(status_code=400, detail={"code": 2, "message": "缺少 name：无法建卡"})
+            character = next((item for item in cast if item.get("name") == name), None)
+            if character is None:
+                role = str(body.get("role") or "minor")
+                if role not in ("protagonist", "antagonist", "supporting", "minor"):
+                    role = "minor"
+                character = model_entities.new_character(name, role=role)
+                sample = str(body.get("sample") or "").strip()[:200]
+                character["state"] = {
+                    "situation": f"首次出现在第 {chapter.get('index') or '?'} 章" + (f"：{sample}" if sample else ""),
+                    "knowledge": None,
+                    "relations": None,
+                    "as_of_chapter_id": chapter_id,
+                }
+                table["characters"].append(character)
+                store.save_characters(table)
+        beat_id = str(body.get("beat") or "").strip()
+        if beat_id:
+            current = next(
+                (
+                    [str(cid) for cid in (beat.get("character_ids") or [])]
+                    for beats in [
+                        (chapter_entry or {}).get("beats") or []
+                        for chapter_entry in _outline_chapters(store)
+                    ]
+                    for beat in beats
+                    if beat.get("id") == beat_id
+                ),
+                [],
+            )
+            if character["id"] not in current:
+                current.append(character["id"])
+            try:
+                binding = bind_beat_characters(store, chapter_id, beat_id, current)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail={"code": 2, "message": str(exc)}) from exc
+        else:
+            binding = chapter_binding(store, chapter_id)
+        return {"character": character, "binding": binding}
+
+    def _outline_chapters(store) -> list[dict]:
+        """读取设定库里的全部大纲章节（捕获角色时查找节拍用）。
+
+        参数:
+            store: 工程。
+
+        返回:
+            大纲章节列表；没有设定库时返回空列表。
+        """
+        from ..store.settings_store import SettingsStore
+
+        settings = SettingsStore(store.root)
+        if not settings.exists():
+            return []
+        bible = settings.ensure()
+        return [
+            chapter
+            for act in (bible.get("outline") or {}).get("acts") or []
+            for chapter in act.get("chapters") or []
+        ]
 
     # ---------------- 音色库（内置参考音色 / 录音上传 / 绑定角色）----------------
 
@@ -5206,7 +5560,144 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
             argv += ["--worlds", str(world_ids)]
         if body.get("pov_character_id") is not None:
             argv += ["--pov", str(body["pov_character_id"])]
+        if body.get("pov_mode") is not None:
+            argv += ["--pov-mode", str(body["pov_mode"])]
         return _respond_business(_cli(*argv))
+
+    @app.post("/api/ui/outline/pov")
+    def ui_outline_pov(body: dict) -> dict:
+        """设置本章视角人物或显式切换全知视角（写通设定库与章节副本）。
+
+        参数:
+            body: `{path, chapter, pov_character_id?: string|null, pov_mode?: string|null}`；
+                pov_mode=third_omniscient 时可不绑定具体角色。
+
+        返回:
+            最新 `chapter_binding`。
+
+        异常:
+            HTTPException 400: 角色不存在或视角写法非法。
+        """
+        from ..writing.service import chapter_binding, sync_chapter_pov
+
+        store = _store(body.get("path"))
+        chapter_id = str(body.get("chapter") or "")
+        if not chapter_id:
+            raise HTTPException(status_code=400, detail={"code": 2, "message": "缺少 chapter 参数"})
+        pov_id = body.get("pov_character_id")
+        pov_mode = body.get("pov_mode")
+        if pov_mode not in (None, "", "first", "second", "third_limited", "third_omniscient"):
+            raise HTTPException(status_code=400, detail={"code": 2, "message": f"视角写法非法：{pov_mode}"})
+        pov_id = str(pov_id).strip() if pov_id else ""
+        try:
+            sync_chapter_pov(
+                store,
+                chapter_id,
+                pov_id or None,
+                pov_mode=pov_mode or None,
+                update_mode=True,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"code": 2, "message": str(exc)}) from exc
+        return chapter_binding(store, chapter_id)
+
+    @app.get("/api/ui/chapters/binding")
+    def ui_chapter_binding(path: str = Query(...), chapter: str = Query(...)) -> dict:
+        """本章角色绑定与对账（视角人物、节拍出场、计划 vs 实际）。
+
+        参数:
+            path: 工程目录。
+            chapter: 章节 ID。
+
+        返回:
+            `chapter_binding` 的完整结果；页面据此显示绑定条与生成阻断提示。
+        """
+        from ..writing.service import chapter_binding
+
+        return chapter_binding(_store(path), chapter)
+
+    @app.post("/api/ui/outline/beat/characters")
+    def ui_outline_beat_characters(body: dict) -> dict:
+        """设置某个节拍的出场角色（只改大纲计划选角）。
+
+        参数:
+            body: `{path, chapter, beat, character_ids: ["chr_..."]}`。
+
+        返回:
+            最新 `chapter_binding`。
+
+        异常:
+            HTTPException 400: 缺少参数或角色 ID 非法。
+        """
+        from ..writing.service import bind_beat_characters
+
+        path = body.get("path")
+        store = _store(path)
+        chapter = body.get("chapter")
+        beat = body.get("beat")
+        if not chapter or not beat:
+            raise HTTPException(status_code=400, detail={"code": 2, "message": "缺少 chapter 或 beat 参数"})
+        character_ids = body.get("character_ids")
+        if character_ids is None:
+            character_ids = []
+        if not isinstance(character_ids, list):
+            raise HTTPException(status_code=400, detail={"code": 2, "message": "character_ids 必须是数组"})
+        try:
+            return bind_beat_characters(store, str(chapter), str(beat), [str(item) for item in character_ids])
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"code": 2, "message": str(exc)}) from exc
+
+    @app.post("/api/ui/outline/arcs")
+    def ui_outline_arcs(body: dict) -> dict:
+        """设置本章角色弧线（角色在本章从什么状态走到什么状态）。
+
+        参数:
+            body: `{path, chapter, arcs: [{character_id, from_state?, to_state?, note?}]}`。
+
+        返回:
+            `{chapter, arcs}`。
+
+        异常:
+            HTTPException 400: 章节/角色不存在或字段非法。
+        """
+        path = body.get("path")
+        store = _store(path)
+        chapter_id = str(body.get("chapter") or "")
+        arcs = body.get("arcs")
+        if not chapter_id or not isinstance(arcs, list):
+            raise HTTPException(status_code=400, detail={"code": 2, "message": "缺少 chapter 或 arcs 参数"})
+        from ..store.settings_store import SettingsStore
+
+        settings = SettingsStore(store.root)
+        bible = settings.ensure()
+        entry = settings.find_outline_chapter(bible, chapter_id)
+        if entry is None:
+            raise HTTPException(status_code=404, detail={"code": 4, "message": f"本章还没有大纲条目：{chapter_id}"})
+        cast_ids = {
+            str(item.get("id"))
+            for item in store.load_characters()["characters"]
+            if item.get("id") and item.get("role") != "narrator"
+        }
+        clean: list[dict] = []
+        for arc in arcs:
+            if not isinstance(arc, dict):
+                continue
+            character_id = str(arc.get("character_id") or "").strip()
+            if not character_id:
+                continue
+            if character_id not in cast_ids:
+                raise HTTPException(status_code=400, detail={"code": 2, "message": f"角色不存在：{character_id}"})
+            clean.append(
+                {
+                    "character_id": character_id,
+                    "from_state": str(arc.get("from_state") or "").strip()[:500],
+                    "to_state": str(arc.get("to_state") or "").strip()[:500],
+                    "note": str(arc.get("note") or "").strip()[:500],
+                }
+            )
+        entry["character_arcs"] = clean
+        settings.save(bible)
+        return {"chapter": chapter_id, "arcs": clean}
 
     # ---------------- 世界条目（多世界 / 封面图）----------------
 

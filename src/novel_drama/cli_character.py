@@ -221,6 +221,8 @@ def cmd_character_update(args, config: AppConfig) -> int:
     target = next((item for item in table["characters"] if item.get("id") == args.id), None)
     if target is None:
         raise PreconditionError(f"角色不存在: {args.id}")
+    # 关系键统一为角色 ID：姓名只用于展示，写入前先映射成 ID
+    id_by_name = {str(item.get("name") or ""): str(item.get("id") or "") for item in table["characters"]}
 
     changed: list[str] = []
     if getattr(args, "name", None) is not None:
@@ -295,12 +297,71 @@ def cmd_character_update(args, config: AppConfig) -> int:
             target.pop("stock", None)
         changed.append("stock")
 
+    if getattr(args, "speech_style", None) is not None:
+        raw = str(args.speech_style or "").strip()
+        if raw:
+            try:
+                style = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"speech_style 不是合法 JSON: {exc}") from exc
+            if not isinstance(style, dict):
+                raise ValueError("speech_style 必须是 JSON 对象")
+            target["speech_style"] = {
+                "tempo": str(style.get("tempo") or "").strip()[:40] or None,
+                "pitch": str(style.get("pitch") or "").strip()[:40] or None,
+                "accent": str(style.get("accent") or "").strip()[:40] or None,
+                "catchphrases": [
+                    str(item).strip()[:60] for item in (style.get("catchphrases") or []) if str(item).strip()
+                ],
+            }
+        else:
+            target["speech_style"] = {"tempo": None, "pitch": None, "accent": None, "catchphrases": []}
+        changed.append("speech_style")
+
     state = target.get("state") or {}
     state_changed = False
     if getattr(args, "situation", None) is not None:
         state["situation"] = args.situation.strip() or None
         state_changed = True
         changed.append("situation")
+    if getattr(args, "knowledge", None) is not None:
+        raw = str(args.knowledge or "").strip()
+        if raw.startswith("["):
+            try:
+                items = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"knowledge 不是合法 JSON: {exc}") from exc
+        else:
+            items = _split_items(raw)
+        state["knowledge"] = [str(item).strip()[:200] for item in items if str(item).strip()] or None
+        state_changed = True
+        changed.append("knowledge")
+    if getattr(args, "relations", None) is not None:
+        raw = str(args.relations or "").strip()
+        rows = json.loads(raw) if raw else []
+        if not isinstance(rows, list):
+            raise ValueError("relations 必须是 JSON 数组")
+        clean_rows: list[dict] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            target_id = str(row.get("target_id") or "").strip()
+            if not target_id:
+                continue
+            if target_id not in id_by_name.values():
+                raise ValueError(f"关系目标角色不存在：{target_id}")
+            clean_rows.append(
+                {
+                    "target_id": target_id,
+                    "label": str(row.get("label") or "").strip()[:40],
+                    "sentiment": row.get("sentiment") if row.get("sentiment") in ("ally", "enemy", "family", "romance", "neutral") else None,
+                    "since_chapter_id": str(row.get("since_chapter_id") or "").strip() or None,
+                    "note": str(row.get("note") or "").strip()[:500],
+                }
+            )
+        state["relations"] = clean_rows or None
+        state_changed = True
+        changed.append("relations")
     for item in getattr(args, "relationship", None) or []:
         if "=" not in item:
             raise ValueError(f"--relationship 需要 `目标ID=备注` 格式: {item}")
@@ -308,6 +369,10 @@ def cmd_character_update(args, config: AppConfig) -> int:
         key = key.strip()
         if not key:
             raise ValueError("--relationship 的目标角色 ID 不能为空")
+        # 允许命令行传姓名，落盘前统一换成角色 ID
+        key = id_by_name.get(key, key)
+        if key not in id_by_name.values():
+            raise ValueError(f"关系目标角色不存在：{key}；请使用角色 ID（人物页可复制）")
         notes = state.get("relationship_notes") or {}
         notes[key] = note.strip()[:500]
         state["relationship_notes"] = notes
@@ -317,12 +382,19 @@ def cmd_character_update(args, config: AppConfig) -> int:
         key = str(item or "").strip()
         if not key:
             continue
+        key = id_by_name.get(key, key)
         notes = state.get("relationship_notes") or {}
         if key in notes:
             del notes[key]
             state["relationship_notes"] = notes
             state_changed = True
             changed.append(f"relationship-remove:{key}")
+        # 结构化关系同步删除，避免关系图残留悬空边
+        relations = state.get("relations") or []
+        kept = [row for row in relations if str(row.get("target_id") or "") != key]
+        if len(kept) != len(relations):
+            state["relations"] = kept or None
+            state_changed = True
     if state_changed:
         target["state"] = state
 
@@ -338,17 +410,21 @@ def cmd_character_update(args, config: AppConfig) -> int:
 
 
 def character_refs(store, character_id: str) -> dict:
-    """汇总某个角色被哪些章节/台词行引用（删除前保护与页面提示用）。
+    """汇总某个角色被哪些章节/台词行/大纲/关系引用（删除前保护与页面提示用）。
+
+    四类引用都算数：台词说话人、场景出场标签、大纲 POV 与节拍选角、其它角色的关系目标。
 
     参数:
         store: 工程读写入口。
         character_id: 角色 ID。
 
     返回:
-        `{total, chapters: [{id, index, title, lines: [{line_id, text}]}]}`，只含有引用的章节。
+        `{total, lines_total, chapters: [{id, index, title, lines, scenes, pov, beats}],
+        relations: [{id, name, note}], settings_available}`。
     """
     chapters: list[dict] = []
     total = 0
+    lines_total = 0
     for meta in store.list_chapters():
         chapter = store.load_chapter(meta["id"])
         rows = [
@@ -357,18 +433,86 @@ def character_refs(store, character_id: str) -> dict:
             for line in scene.get("lines") or []
             if line.get("speaker_id") == character_id
         ]
-        if not rows:
+        scenes = sum(
+            1
+            for scene in chapter.get("scenes") or []
+            if character_id in (scene.get("character_ids") or [])
+        )
+        if not rows and not scenes:
             continue
-        total += len(rows)
+        total += len(rows) + (1 if scenes else 0)
+        lines_total += len(rows)
         chapters.append(
             {
                 "id": meta["id"],
                 "index": meta.get("index"),
                 "title": meta.get("title"),
                 "lines": rows[:50],
+                "scenes": scenes,
+                "pov": False,
+                "beats": 0,
             }
         )
-    return {"total": total, "chapters": chapters}
+    settings_available = False
+    try:
+        from ..store.settings_store import SettingsStore
+
+        settings = SettingsStore(store.root)
+        if settings.exists():
+            settings_available = True
+            bible = settings.ensure()
+            by_chapter = {item.get("id"): item for item in chapters}
+            for act in (bible.get("outline") or {}).get("acts") or []:
+                for outline_chapter in act.get("chapters") or []:
+                    chapter_id = outline_chapter.get("id")
+                    if not chapter_id:
+                        continue
+                    pov = outline_chapter.get("pov_character_id") == character_id
+                    beats = sum(
+                        1
+                        for beat in outline_chapter.get("beats") or []
+                        if character_id in (beat.get("character_ids") or [])
+                    )
+                    if not pov and not beats:
+                        continue
+                    row = by_chapter.get(chapter_id)
+                    if row is None:
+                        row = {
+                            "id": chapter_id,
+                            "index": outline_chapter.get("index"),
+                            "title": outline_chapter.get("title"),
+                            "lines": [],
+                            "scenes": 0,
+                            "pov": False,
+                            "beats": 0,
+                        }
+                        chapters.append(row)
+                        by_chapter[chapter_id] = row
+                    row["pov"] = bool(row.get("pov") or pov)
+                    row["beats"] = int(row.get("beats") or 0) + beats
+                    total += (1 if pov else 0) + beats
+    except Exception:  # 设定库损坏不应阻断删除保护之外的正常查询
+        settings_available = False
+    relations: list[dict] = []
+    table = store.load_characters()
+    for item in table.get("characters") or []:
+        if item.get("id") == character_id:
+            continue
+        notes = (item.get("state") or {}).get("relationship_notes") or {}
+        relations_rows = (item.get("state") or {}).get("relations") or []
+        note = notes.get(character_id)
+        has_relation = any(str(row.get("target_id") or "") == character_id for row in relations_rows)
+        if note or has_relation:
+            relations.append({"id": item.get("id"), "name": item.get("name"), "note": note or ""})
+    total += len(relations)
+    chapters.sort(key=lambda item: int(item.get("index") or 0))
+    return {
+        "total": total,
+        "lines_total": lines_total,
+        "chapters": chapters,
+        "relations": relations,
+        "settings_available": settings_available,
+    }
 
 
 def cmd_character_remove(args, config: AppConfig) -> int:
@@ -394,9 +538,16 @@ def cmd_character_remove(args, config: AppConfig) -> int:
     refs = character_refs(store, args.id)
     if refs["total"]:
         chapters = "、".join(str(item.get("title") or item.get("id")) for item in refs["chapters"][:6])
+        parts = []
+        if refs.get("lines_total"):
+            parts.append(f"{refs['lines_total']} 行台词")
+        if refs.get("chapters"):
+            parts.append(f"{len(refs['chapters'])} 章出场/大纲引用")
+        if refs.get("relations"):
+            parts.append(f"{len(refs['relations'])} 个角色的关系指向")
         raise ValueError(
-            f"角色仍被 {refs['total']} 行台词引用（{len(refs['chapters'])} 章：{chapters}），"
-            "请先把这些行的说话人改派给其它角色，再删除"
+            f"角色仍被引用（{'，'.join(parts) or '未知引用'}；章节：{chapters}），"
+            "请先改派台词、调整大纲选角/视角，并清理其它角色的关系后再删除"
         )
     table["characters"] = [item for item in table["characters"] if item.get("id") != args.id]
     store.save_characters(table)

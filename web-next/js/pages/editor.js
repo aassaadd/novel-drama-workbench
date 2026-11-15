@@ -29,7 +29,7 @@ import {
 } from '../shell.js';
 import {
   VIEW_META,
-  MORE_VIEWS,
+  normalizeView,
   viewMainHTML,
   viewPanelHTML,
   mountView,
@@ -105,6 +105,7 @@ function focusLine(lineId) {
   state.lineSearch = '';
   state.expandedLine = lineId;
   repaintPage();
+  syncViewToURL('script');
   const node = document.querySelector(`[data-line-id="${CSS.escape(lineId)}"]`);
   if (!node) return;
   node.scrollIntoView({ block: 'center' });
@@ -608,10 +609,59 @@ async function playTimelineItem(asset, startMs) {
   }
 }
 
-/** 整页 HTML */
+/**
+ * 画本顶部角色绑定条：显示并修改本章视角、出场角色，双向跳转角色档案与大纲。
+ * @param {object|null} chapter 当前章节
+ * @returns {string} HTML
+ */
+function editorBindingHTML(chapter) {
+  const binding = state.binding;
+  if (!binding || !chapter) return '';
+  const cast = state.characters.filter((item) => item.role !== 'narrator' && item.id !== 'chr_narrator');
+  const povId = binding.pov?.id || '';
+  const omni = binding.pov_mode === 'third_omniscient';
+  const blocking = binding.blocking || [];
+  const rows = (binding.characters || []).filter((item) => item.planned || item.is_pov || item.lines || item.scenes);
+  const charLink = (id) =>
+    `#/p/${encodeURIComponent(state.path)}/characters?character=${encodeURIComponent(id)}`;
+  const chips = rows
+    .map(
+      (item) => `<a class="badge ${item.is_pov ? 'ok' : 'mute'}" href="${charLink(item.id)}"
+        title="${item.planned ? `计划 ${item.planned_beats} 个节拍` : '计划外'} · 台词 ${item.lines} 行 / 场景 ${item.scenes} 场"
+        >${esc(item.name)}${item.is_pov ? '（视角）' : ''}</a>`
+    )
+    .join(' ');
+  return `<div class="ed-binding" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:6px 12px;
+      border-bottom:1px solid var(--line);background:var(--bg-1)">
+      <span class="hint">本章视角</span>
+      <select class="select" id="ed-pov" style="width:150px;height:26px" title="视角人物会写进提示词并同步章节副本">
+        ${cast
+          .map(
+            (item) =>
+              `<option value="${esc(item.id)}" ${item.id === povId ? 'selected' : ''}>${esc(item.name)}</option>`
+          )
+          .join('')}
+        <option value="__omniscient__" ${omni ? 'selected' : ''}>全知视角</option>
+      </select>
+      <span class="hint">出场</span>
+      <span style="display:flex;gap:4px;flex-wrap:wrap">${chips || '<span class="hint">本章还没有绑定角色</span>'}</span>
+      <span class="right" style="display:flex;gap:8px;margin-left:auto">
+        ${
+          blocking.length
+            ? `<span class="badge bad" title="${esc(blocking.map((item) => item.message).join('；'))}">绑定未完成</span>`
+            : ''
+        }
+        <a class="btn sm" href="#/p/${encodeURIComponent(state.path)}/novel?chapter=${encodeURIComponent(
+          chapter.id
+        )}">编辑大纲</a>
+        <a class="btn sm" href="#/p/${encodeURIComponent(state.path)}/characters">角色档案</a>
+      </span>
+    </div>`;
+}
+
 function pageHTML() {
-  // 旧版本可能把「审听与对轨」当作主视图；现在它已拆成独立对轨页 + 右栏页签
-  if (state.view === 'review') state.view = 'script';
+  // 视图键只允许四个一级视图：旧状态或手改 URL 的非法值统一回落画本编辑
+  state.view = normalizeView(state.view);
   const chapter = currentChapter();
   const c = counts();
   const index = state.chapters.findIndex((item) => item.id === state.chapterId);
@@ -625,20 +675,27 @@ function pageHTML() {
                ${icon('cloud', 15)}<em>${state.saveState === 'saving' ? '保存中…' : '已自动保存'}</em>
              </span>
              <span class="tb-sep"></span>
-             ${VIEW_META.map(
-               (view) => `<button class="btn icon view-tab ${state.view === view.key ? 'on' : ''}"
-                 data-act="set-view" data-view="${view.key}" title="${view.title}">${icon(view.icon)}</button>`
-             ).join('')}
-             <button class="btn icon view-tab ${state.view === 'align' || (state.view === 'script' && state.panelTab === 'audit') ? 'on' : ''}"
-               data-act="more-views" title="审听与对轨视图">${icon('more')}</button>`,
-      crumbs: `<button class="btn icon sm" data-act="prev-chapter" ${prev ? '' : 'disabled'} title="上一章">${icon('prev')}</button>
-               <button class="chapter-picker" data-act="chapter-picker" title="切换章节">
-                 <span class="cp-title">${esc(state.info?.work?.title || '工程')}</span>
-                 <span class="sep">/</span>
-                 <span class="cp-cur">${esc(chapter?.title || '未选择章节')}</span>
-                 <span class="cp-caret">⌄</span>
-               </button>
-               <button class="btn icon sm" data-act="next-chapter" ${next ? '' : 'disabled'} title="下一章">${icon('next')}</button>`,
+             <div class="view-switch" role="group" aria-label="制作视图">
+               ${VIEW_META.map((view) => {
+                 const on = state.view === view.key;
+                 return `<button class="btn view-tab ${on ? 'on' : ''}"
+                   data-act="set-view" data-view="${view.key}" title="${view.title}"
+                   aria-label="${view.title}" aria-pressed="${on ? 'true' : 'false'}">
+                   ${icon(view.icon)}<em>${view.label}</em></button>`;
+               }).join('')}
+             </div>`,
+      // 章节切换不在视图组里：用分隔线与上一组断开，避免看起来像第五个视图
+      crumbs: `<span class="tb-sep"></span>
+               <div class="chapter-switch" role="group" aria-label="章节切换">
+                 <button class="btn icon sm" data-act="prev-chapter" ${prev ? '' : 'disabled'} title="上一章">${icon('prev')}</button>
+                 <button class="chapter-picker" data-act="chapter-picker" title="切换章节">
+                   <span class="cp-title">${esc(state.info?.work?.title || '工程')}</span>
+                   <span class="sep">/</span>
+                   <span class="cp-cur">${esc(chapter?.title || '未选择章节')}</span>
+                   <span class="cp-caret">⌄</span>
+                 </button>
+                 <button class="btn icon sm" data-act="next-chapter" ${next ? '' : 'disabled'} title="下一章">${icon('next')}</button>
+               </div>`,
       right: `<button class="btn icon" id="tb-undo" data-act="undo" ${history.undo.length ? '' : 'disabled'} title="撤销（⌘Z）">${icon('undo')}</button>
         <button class="btn icon" id="tb-redo" data-act="redo" ${history.redo.length ? '' : 'disabled'} title="重做（⇧⌘Z）">${icon('redo')}</button>
         <button class="btn icon" data-act="open-settings" title="工程设置：作品信息与制作要求">${icon('gear')}</button>`,
@@ -673,6 +730,7 @@ function pageHTML() {
             <button class="btn sm primary" data-act="batch-plan">${icon('mic', 13)} 生成配音</button>
           </div>
         </div>
+        ${editorBindingHTML(chapter)}
         <div id="filter-bar">${filterBarHTML()}</div>
         <div class="ed-body" id="ed-body">
           ${
@@ -713,27 +771,41 @@ function pageHTML() {
 }
 
 /**
+ * 把当前视图写进地址栏，保证刷新不丢、可直接分享。
+ * 用 replaceState 而非改 location.hash：不触发 hashchange，也就不会整页重新加载数据。
+ * 画本编辑是默认视图，URL 保持旧格式（不带参数）。
+ * @param {string} view 视图键
+ */
+function syncViewToURL(view) {
+  if (!state.path || !state.chapterId) return;
+  const base = `#/p/${encodeURIComponent(state.path)}/c/${encodeURIComponent(state.chapterId)}`;
+  const next = view === 'script' ? base : `${base}?view=${encodeURIComponent(view)}`;
+  if (location.hash === next) return;
+  try {
+    // 模块内的 history 是撤销栈，这里必须显式走 window.history
+    window.history.replaceState(window.history.state, '', next);
+  } catch (error) {
+    // 地址栏不可写只影响分享链接，不影响当前视图
+  }
+}
+
+/**
  * 切换工作室视图：'script' / 'record' / 'post' / 'align'。
- * 'audit' 不是独立视图，等价于回到画本编辑并打开右栏「智能审听」页签。
+ * 内容审听不是视图，只走画本编辑右栏页签。
  * @param {string} key 视图键
  */
 function switchView(key) {
-  const view = key === 'audit' ? 'script' : key;
+  const view = normalizeView(key);
   stopAuditPlayback();
   state.view = view;
-  if (key === 'audit') state.panelTab = 'audit';
   repaintPage();
   const studio = document.getElementById('studio');
-  // 参考的录音视图与智能审听默认展开右栏
-  if (view === 'record' || key === 'audit') {
-    if (studio) {
-      studio.classList.add('right-open');
-      if (window.innerWidth < 1680) studio.classList.add('ctx-hidden');
-    }
+  // 参考的录音视图默认展开右栏
+  if (view === 'record' && studio) {
+    studio.classList.add('right-open');
+    if (window.innerWidth < 1680) studio.classList.add('ctx-hidden');
   }
-  if (key === 'audit' || (view === 'script' && state.panelTab === 'audit')) {
-    ensureAuditData().then(() => paintAuditPanel());
-  }
+  syncViewToURL(view);
 }
 
 /**
@@ -934,7 +1006,13 @@ async function loadData(path, chapterId) {
   ]);
   state.info = info;
   state.chapters = chapters || [];
-  state.characters = (characters?.characters || []).map((item) => ({ id: item.id, name: item.name }));
+  state.characters = (characters?.characters || []).map((item) => ({
+    id: item.id,
+    name: item.name,
+    role: item.role,
+    speech_style: item.speech_style || {},
+    voice_binding: item.voice_binding || null,
+  }));
   if (!state.characters.some((item) => item.id === 'chr_narrator')) {
     state.characters.unshift({ id: 'chr_narrator', name: '旁白' });
   }
@@ -948,14 +1026,16 @@ async function loadData(path, chapterId) {
 /** 读取章节台词与批量任务状态 */
 async function loadChapterState() {
   if (!state.path || !state.chapterId) return;
-  const [payload, task] = await Promise.all([
+  const [payload, task, binding] = await Promise.all([
     getJSON('/api/ui/lines', { path: state.path, chapter: state.chapterId }),
     getJSON('/api/ui/tts/batch-all/progress', { path: state.path }).catch(() => null),
+    getJSON('/api/ui/chapters/binding', { path: state.path, chapter: state.chapterId }).catch(() => null),
   ]);
   state.lines = payload?.lines || [];
   state.counts = payload?.counts || {};
   state.consistency = payload?.consistency || null;
   state.task = task;
+  state.binding = binding;
   state.selected = new Set();
   state.expandedLine = '';
   state.saveState = 'saved';
@@ -2388,14 +2468,6 @@ async function onRootClick(event) {
   const lineId = rowEl?.dataset.lineId || blockEl?.dataset.block || '';
 
   if (act === 'back') return goProjects();
-  if (act === 'more-views') {
-    openMenu(
-      button,
-      MORE_VIEWS.map((item) => ({ key: item.key, label: item.title })),
-      (key) => switchView(key)
-    );
-    return;
-  }
   if (act === 'panel-tab') {
     const tab = button.dataset.tab === 'audit' ? 'audit' : 'tasks';
     if (tab === state.panelTab) return;
@@ -2581,7 +2653,34 @@ async function onRootClick(event) {
   }
 }
 
+/**
+ * 画本顶部切换本章视角：写通设定库与章节副本，然后刷新绑定条。
+ * @param {string} value 角色 ID 或 `__omniscient__`
+ */
+async function saveEditorPov(value) {
+  if (!state.path || !state.chapterId) return;
+  const body = { path: state.path, chapter: state.chapterId };
+  if (value === '__omniscient__') {
+    body.pov_character_id = null;
+    body.pov_mode = 'third_omniscient';
+  } else {
+    body.pov_character_id = value || null;
+    body.pov_mode = null;
+  }
+  try {
+    state.binding = await postJSON('/api/ui/outline/pov', body);
+    repaintPage();
+    toast('本章视角已保存', 'ok');
+  } catch (error) {
+    toast(`保存视角失败：${error.message}`, 'bad', 3600);
+  }
+}
+
 function onRootChange(event) {
+  if (event.target.id === 'ed-pov') {
+    saveEditorPov(event.target.value);
+    return;
+  }
   const speakerSelect = event.target.closest('.spk-select');
   if (speakerSelect) {
     saveSpeaker(speakerSelect.dataset.speakerFor, speakerSelect.value);
@@ -2863,7 +2962,7 @@ function scriptPreviewHTML(preview, markupPath) {
       <b>标注预览（还没有写入本集）</b>
       <div style="margin-top:4px;font-size:11.5px;color:var(--text-3)">
         不写入：点「丢弃预览」或关闭弹窗，本集已有标注保持原样；
-        写入：点「写入本集标注文件（采纳）」会把下面的内容保存到本集，并同步到本集场景与台词。
+        写入：点「写入本集标注文件（采纳）」会用下面的内容覆盖本集标注，并同步到本集场景与台词。
       </div>
     </div>
     <div class="summary-line" style="margin-top:8px">
@@ -2902,7 +3001,7 @@ function scriptPreviewHTML(preview, markupPath) {
     <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px">
       <button class="btn" data-sa="discard">丢弃预览</button>
       <button class="btn primary" data-sa="adopt" ${canAdopt ? '' : 'disabled'}
-        title="${canAdopt ? '把预览写入本集标注文件，并同步到本集场景与台词' : '还有失败批次，补齐后才能写入'}">
+        title="${canAdopt ? '用预览覆盖本集标注文件，并同步到本集场景与台词' : '还有失败批次，补齐后才能写入'}">
         写入本集标注文件（采纳）
       </button>
     </div>`;
@@ -3096,10 +3195,12 @@ function bind(root) {
 }
 
 /** 进入编辑页入口 */
-export async function renderEditor(root, { path, chapterId, lineId = '', act = '' }) {
+export async function renderEditor(root, { path, chapterId, lineId = '', act = '', studioView = '' }) {
   stopPolling();
   pageRoot = root;
   if (state.path !== path) resetProject(path);
+  // 视图来自 URL（分享链接 / 刷新）；没有参数时沿用会话内的选择
+  if (studioView) state.view = normalizeView(studioView);
   bind(root);
   root.innerHTML = `
     ${topbar({
@@ -3131,11 +3232,22 @@ export async function renderEditor(root, { path, chapterId, lineId = '', act = '
         state.view = 'script';
         state.expandedLine = lineId;
         repaintPage();
+        syncViewToURL('script');
       },
     });
     root.innerHTML = pageHTML();
     mountView(root);
     startPolling();
+    // 直链进入非画本视图时，与手动切换保持同一套布局（录音默认展开右栏）
+    if (state.view === 'record') {
+      const studio = document.getElementById('studio');
+      if (studio) {
+        studio.classList.add('right-open');
+        if (window.innerWidth < 1680) studio.classList.add('ctx-hidden');
+      }
+    }
+    // 切章等导航会把 URL 还原成带章节的地址，这里补回当前视图，保证 URL 与界面一致
+    syncViewToURL(state.view);
     // 顶部「重新切分本章」：完成后重新读本章数据并整页重画，提示条自动消失
     onResplit(async () => {
       await loadChapterState();

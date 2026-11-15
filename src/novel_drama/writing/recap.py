@@ -22,8 +22,8 @@ RECAP_TAIL_CHARS = 9000
 CHAPTER_SUMMARY_LIMIT = 4000
 #: 全书摘要落盘长度上限
 BOOK_SUMMARY_LIMIT = 8000
-#: 摘要调用的输出预算
-RECAP_MAX_TOKENS = 1600
+#: 摘要调用的输出预算：章节摘要 + 全书摘要两段较长，1600 在真实模型上容易被截断
+RECAP_MAX_TOKENS = 2600
 
 
 def _chapter_excerpt(content: str) -> str:

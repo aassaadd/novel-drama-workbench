@@ -47,10 +47,23 @@ const cache = {
   plan: null,
   /** 预检对应的章节 ID */
   planChapter: '',
+  /** 本章角色绑定与对账（POV / 节拍出场 / 计划 vs 实际） */
+  binding: null,
+  bindingChapter: '',
+  /** 角色表（绑定下拉与节拍选角共用） */
+  cast: [],
+  /** 生成后的角色状态回流提案 */
+  updates: null,
+  updatesChapter: '',
+  /** 生成后的角色一致性检查结果 */
+  consistency: null,
+  consistencyChapter: '',
 };
 
 /** 弹窗里待采用的世界条目（勾选状态） */
 let previewPicked = new Set();
+/** 深链待选中的章节（`#/p/.../novel?chapter=chp_x`），数据到达后一次性消费 */
+let pendingChapter = '';
 /** 根节点点击监听只绑一次（main.js 复用同一个根节点） */
 let bound = false;
 
@@ -1070,8 +1083,11 @@ function chapterHTML() {
           ${beats || '<div class="hint">这一章还没有节拍</div>'}
         </div>
       </div>
+      ${bindingCardHTML(chapter)}
       ${linkCardHTML(chapter, landed)}
       ${bodyCardHTML(chapter, landed)}
+      ${updatesCardHTML(chapter)}
+      ${consistencyCardHTML(chapter)}
     </div>`;
 }
 
@@ -1293,6 +1309,644 @@ function openBatchDialog() {
 }
 
 /** 章节正文卡：未落章先引导落地；已落章提供保存 / 重新生成 / 续写 */
+/**
+ * 角色下拉选项（POV / 节拍选角 / 弧线共用）。
+ * @param {Array<object>} cast 非旁白角色
+ * @param {string} selected 当前选中 ID
+ * @param {{empty?: string}} [options] empty 非空时插入一个空选项（文案即该值）
+ * @returns {string} option HTML
+ */
+function castOptions(cast, selected, options = {}) {
+  const rows = [];
+  if (options.empty) rows.push(`<option value="">${esc(options.empty)}</option>`);
+  cast.forEach((item) => {
+    rows.push(
+      `<option value="${esc(item.id)}" ${item.id === selected ? 'selected' : ''}>${esc(
+        item.name || item.id
+      )}${item.role === 'protagonist' ? '（主角）' : ''}</option>`
+    );
+  });
+  return rows.join('');
+}
+
+/**
+ * 角色绑定卡：视角人物、节拍出场角色、计划 vs 实际对账、角色弧线。
+ * POV 缺失时在这里显式提示，不会静默套默认值。
+ * @param {object} chapter 大纲章
+ * @returns {string} HTML
+ */
+function bindingCardHTML(chapter) {
+  const binding = cache.bindingChapter === chapter.id ? cache.binding : null;
+  const cast = (cache.cast || []).filter((item) => item.role !== 'narrator');
+  const povId = binding?.pov?.id || '';
+  const omni = binding?.pov_mode === 'third_omniscient';
+  const blocking = binding?.blocking || [];
+  const warnings = binding?.warnings || [];
+  const beats = chapter.beats || [];
+  const rows = binding?.beats || [];
+  const castById = Object.fromEntries(cast.map((item) => [item.id, item.name]));
+  const actual = Object.fromEntries((binding?.characters || []).map((item) => [item.id, item]));
+  const beatHTML = beats
+    .map((beat, index) => {
+      const row = rows[index] || {};
+      const names = (row.characters || [])
+        .map(
+          (item) =>
+            `<a class="badge mute" href="#/p/${esc(safePath())}/characters?character=${encodeURIComponent(
+              item.id
+            )}" title="打开角色档案">${esc(item.name)}</a>`
+        )
+        .join(' ');
+      return `<div class="arc-row" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <span class="mono" style="min-width:52px">节拍 ${index + 1}</span>
+        <span style="flex:1;min-width:160px">${esc(beat.summary || '')}</span>
+        <span>出场：${names || '<span class="hint">未指定</span>'}</span>
+        <button class="btn sm" data-act="novel-beat-cast" data-index="${index}">选择角色</button>
+      </div>`;
+    })
+    .join('');
+  const auditRows = (binding?.characters || [])
+    .filter((item) => item.planned || item.is_pov || item.lines || item.scenes)
+    .map(
+      (item) => `<div class="summary-line" style="display:flex;gap:12px">
+        <a class="badge mute" href="#/p/${esc(safePath())}/characters?character=${encodeURIComponent(
+          item.id
+        )}">${esc(item.name)}</a>
+        <span>计划 ${item.planned ? `${Number(item.planned_beats)} 个节拍` : '未安排'}</span>
+        <span class="right">实际 台词 ${Number(item.lines)} · 场景 ${Number(item.scenes)}</span>
+      </div>`
+    )
+    .join('');
+  const arcs = chapter.character_arcs || [];
+  const arcHTML = arcs.length
+    ? arcs
+        .map(
+          (arc, index) => `<div class="arc-row" data-arc="${index}"
+            style="display:grid;grid-template-columns:150px 1fr 1fr 1fr auto;gap:6px;align-items:center">
+            <select class="select" data-arc-char="${index}">${castOptions(cast, arc.character_id, {
+              empty: '选择角色',
+            })}</select>
+            <input class="input" data-arc-from="${index}" placeholder="从什么状态" value="${esc(
+              arc.from_state || ''
+            )}" />
+            <input class="input" data-arc-to="${index}" placeholder="到本章结束时" value="${esc(
+              arc.to_state || ''
+            )}" />
+            <input class="input" data-arc-note="${index}" placeholder="说明（可选）" value="${esc(
+              arc.note || ''
+            )}" />
+            <button class="btn icon sm" data-act="novel-arc-del" data-index="${index}" title="删除这条弧线">${icon(
+              'trash',
+              12
+            )}</button>
+          </div>`
+        )
+        .join('')
+    : '<div class="hint">还没有角色弧线：给主要角色写清「本章从什么状态走到什么状态」，生成时会注入提示词。</div>';
+  return `
+    <div class="card" id="novel-binding-card">
+      <div class="card-head">
+        <span class="ct">角色绑定</span>
+        ${povId ? `<span class="badge ok">视角：${esc(castById[povId] || '已删除角色')}</span>` : ''}
+        ${omni ? '<span class="badge mute">全知视角</span>' : ''}
+        <div class="right">
+          <a class="btn sm" href="#/p/${esc(safePath())}/characters">角色档案</a>
+        </div>
+      </div>
+      <div class="card-body" style="display:grid;gap:10px">
+        ${
+          blocking.length
+            ? `<div class="banner warn">${icon('warn', 13)} ${blocking
+                .map((item) => esc(item.message))
+                .join('；')}</div>`
+            : ''
+        }
+        <div class="field"><label>本章视角人物</label>
+          <select class="select" id="novel-pov-select" data-act="novel-pov">
+            ${castOptions(cast, povId, { empty: '未指定（生成前必须选择）' })}
+            <option value="__omniscient__" ${omni ? 'selected' : ''}>全知视角（不绑定单一角色）</option>
+          </select>
+          <div class="hint">视角人物会写进提示词，并同步到章节副本；全知视角是显式选择，不会自动套用。</div>
+        </div>
+        <div class="field"><label>节拍出场角色（计划）</label>
+          <div style="display:grid;gap:6px">${beatHTML || '<div class="hint">本章还没有节拍</div>'}</div>
+        </div>
+        <div class="field"><label>角色弧线</label>
+          <div id="novel-arc-rows" style="display:grid;gap:6px">${arcHTML}</div>
+          <div class="right" style="display:flex;gap:6px;margin-top:6px">
+            <button class="btn sm" data-act="novel-arc-add">添加角色</button>
+            <button class="btn sm primary" data-act="novel-arc-save">保存弧线</button>
+          </div>
+        </div>
+        <div class="field"><label>计划 vs 实际</label>
+          ${auditRows || '<div class="hint">还没有正文出场数据：生成并切分后这里会列出对账。</div>'}
+          ${
+            warnings.length
+              ? `<div class="hint" style="color:var(--warn);margin-top:6px">${warnings
+                  .map((item) => esc(item.message))
+                  .join('；')}</div>`
+              : ''
+          }
+          ${(binding?.audit?.unknown_speakers || [])
+            .map(
+              (item) => `<div class="summary-line"><span>未建卡说话人：${esc(
+                item.speaker_id
+              )}（${Number(item.lines)} 行）</span>
+                <button class="btn sm right" data-act="novel-capture" data-name="${esc(
+                  item.speaker_id === 'chr_unknown' ? '' : item.speaker_id
+                )}" data-sample="${esc(item.sample || '')}">建卡并补进本章</button></div>`
+            )
+            .join('')}
+          ${
+            actual && Object.keys(actual).length
+              ? ''
+              : '<div class="hint">本章尚未切分台词，实际出场统计会在保存正文后出现。</div>'
+          }
+        </div>
+      </div>
+    </div>`;
+}
+
+/**
+ * 生成后角色状态回流卡：先提案、逐条勾选、确认后才写回角色卡。
+ * @param {object} chapter 大纲章
+ * @returns {string} HTML
+ */
+function updatesCardHTML(chapter) {
+  const record = cache.updatesChapter === chapter.id ? cache.updates : null;
+  const castById = Object.fromEntries((cache.cast || []).map((item) => [item.id, item.name]));
+  const updates = record?.updates || [];
+  return `
+    <div class="card" id="novel-updates-card">
+      <div class="card-head">
+        <span class="ct">角色状态回流</span>
+        ${record?.applied ? '<span class="badge ok">已写入</span>' : ''}
+        <div class="right">
+          <button class="btn sm" data-act="novel-updates-detect">根据正文检测</button>
+        </div>
+      </div>
+      <div class="card-body" style="display:grid;gap:8px">
+        ${
+          updates.length
+            ? updates
+                .map(
+                  (item, index) => `<div class="arc-row" data-update="${index}">
+                    <label class="checkline"><input type="checkbox" data-update-pick="${index}" checked />
+                      <b>${esc(castById[item.character_id] || item.character_id)}</b></label>
+                    ${item.situation ? `<div class="hint">处境：${esc(item.situation)}</div>` : ''}
+                    ${
+                      (item.knowledge_add || []).length
+                        ? `<div class="hint">已知：${esc((item.knowledge_add || []).join('；'))}</div>`
+                        : ''
+                    }
+                    ${
+                      (item.relations || []).length
+                        ? `<div class="hint">关系：${esc(
+                            (item.relations || [])
+                              .map(
+                                (rel) =>
+                                  `${castById[rel.target_id] || rel.target_id}${rel.label ? `（${rel.label}）` : ''}${
+                                    rel.note ? `：${rel.note}` : ''
+                                  }`
+                              )
+                              .join('；')
+                          )}</div>`
+                        : ''
+                    }
+                  </div>`
+                )
+                .join('') +
+              `<div class="right"><button class="btn sm primary" data-act="novel-updates-apply">确认写入角色卡</button></div>`
+            : '<div class="hint">正文生成后可检测「本章结束后角色处境/已知信息/关系的变化」；检测结果先预览，确认后才写回角色卡。</div>'
+        }
+      </div>
+    </div>`;
+}
+
+/**
+ * 生成后角色一致性检查卡：只列问题，不改正文与角色卡。
+ * @param {object} chapter 大纲章
+ * @returns {string} HTML
+ */
+function consistencyCardHTML(chapter) {
+  const record = cache.consistencyChapter === chapter.id ? cache.consistency : null;
+  const issues = record?.issues || [];
+  const levelLabel = { high: '高', medium: '中', low: '低' };
+  const kindLabel = {
+    speech: '口吻',
+    knowledge: '已知信息',
+    relation: '关系',
+    unplanned: '计划外',
+    pov: '视角',
+    other: '其它',
+  };
+  return `
+    <div class="card" id="novel-consistency-card">
+      <div class="card-head">
+        <span class="ct">角色一致性检查</span>
+        ${record?.exists ? `<span class="badge ${issues.length ? 'warn' : 'ok'}">${issues.length} 个问题</span>` : ''}
+        <div class="right">
+          <button class="btn sm" data-act="novel-consistency-check">检查本章</button>
+        </div>
+      </div>
+      <div class="card-body" style="display:grid;gap:6px">
+        ${
+          issues.length
+            ? issues
+                .map(
+                  (item) => `<div class="summary-line">
+                    <span class="badge ${item.level === 'high' ? 'bad' : item.level === 'medium' ? 'warn' : 'mute'}">${
+                      levelLabel[item.level] || '中'
+                    } · ${kindLabel[item.kind] || '其它'}</span>
+                    <span style="flex:1;margin-left:8px">${esc(item.message)}</span>
+                    ${
+                      item.character_id
+                        ? `<a class="btn sm" href="#/p/${esc(safePath())}/characters?character=${encodeURIComponent(
+                            item.character_id
+                          )}">看角色</a>`
+                        : ''
+                    }
+                  </div>${item.evidence ? `<div class="hint">证据：${esc(item.evidence)}</div>` : ''}`
+                )
+                .join('')
+            : record?.exists
+              ? '<div class="hint" style="color:var(--ok)">没有发现角色一致性问题。</div>'
+              : '<div class="hint">检查会对照角色卡看口吻偏离、说出未知信息、关系矛盾与计划外出场；结果只展示，不改正文。</div>'
+        }
+      </div>
+    </div>`;
+}
+
+/**
+ * 读取本章角色绑定、角色表、回流提案与一致性结果。
+ * @param {string} chapterId 章节 ID
+ * @param {boolean} [force] 忽略缓存强制刷新
+ */
+async function loadBinding(chapterId, force = false) {
+  if (!force && cache.bindingChapter === chapterId && cache.binding) return;
+  try {
+    const [binding, castResp, updates, consistency] = await Promise.all([
+      getJSON('/api/ui/chapters/binding', { path: cache.path, chapter: chapterId }),
+      getJSON('/api/ui/characters', { path: cache.path }).catch(() => ({ characters: [] })),
+      getJSON('/api/ui/chapters/character-updates', { path: cache.path, chapter: chapterId }).catch(() => null),
+      getJSON('/api/ui/chapters/consistency', { path: cache.path, chapter: chapterId }).catch(() => null),
+    ]);
+    if (ui.sel.kind !== 'chapter' || ui.sel.id !== chapterId) return;
+    cache.binding = binding;
+    cache.bindingChapter = chapterId;
+    cache.cast = (castResp?.characters || []).filter((item) => item.role !== 'narrator');
+    cache.updates = updates;
+    cache.updatesChapter = chapterId;
+    cache.consistency = consistency;
+    cache.consistencyChapter = chapterId;
+    refreshBindingCards();
+  } catch (error) {
+    toast(`读取角色绑定失败：${error.message}`, 'bad', 3600);
+  }
+}
+
+/** 只重画三张角色卡，保留标题 / 节拍正在编辑的内容 */
+function refreshBindingCards() {
+  const hit = findOutlineChapter(ui.sel.id);
+  if (!hit) return;
+  const pairs = [
+    ['novel-binding-card', bindingCardHTML],
+    ['novel-updates-card', updatesCardHTML],
+    ['novel-consistency-card', consistencyCardHTML],
+  ];
+  pairs.forEach(([id, builder]) => {
+    const node = document.getElementById(id);
+    if (node) node.outerHTML = builder(hit.chapter);
+  });
+}
+
+/**
+ * 保存本章视角人物（或显式全知）。
+ * @param {string} value 角色 ID 或 `__omniscient__`
+ */
+async function savePov(value) {
+  const chapter = findOutlineChapter(ui.sel.id);
+  if (!chapter) return;
+  const body = { path: cache.path, chapter: chapter.chapter.id };
+  if (value === '__omniscient__') {
+    body.pov_character_id = null;
+    body.pov_mode = 'third_omniscient';
+  } else {
+    body.pov_character_id = value || null;
+    body.pov_mode = null;
+  }
+  try {
+    cache.binding = await postJSON('/api/ui/outline/pov', body);
+    cache.bindingChapter = chapter.chapter.id;
+    refreshBindingCards();
+    toast(value === '__omniscient__' ? '已切换为全知视角' : '视角人物已保存', 'ok');
+  } catch (error) {
+    toast(`保存视角失败：${error.message}`, 'bad', 3600);
+  }
+}
+
+/**
+ * 生成前的绑定闸门：POV 缺失时弹窗给两个出口，不允许静默套默认值。
+ * @param {string} chapterId 章节 ID
+ * @returns {Promise<boolean>} true 表示可以继续生成
+ */
+async function ensureBinding(chapterId) {
+  try {
+    const binding = await getJSON('/api/ui/chapters/binding', { path: cache.path, chapter: chapterId });
+    cache.binding = binding;
+    cache.bindingChapter = chapterId;
+    if (!(binding.blocking || []).some((item) => item.code === 'BINDING_POV_MISSING')) return true;
+    cache.cast = cache.cast.length
+      ? cache.cast
+      : ((await getJSON('/api/ui/characters', { path: cache.path }))?.characters || []).filter(
+          (item) => item.role !== 'narrator'
+        );
+    // 生成参数弹窗先关掉，避免两层弹窗叠在一起；设定后让作者重新点生成
+    closeDialog();
+    openPovDialog(chapterId);
+    return false;
+  } catch (error) {
+    toast(`生成前检查角色绑定失败：${error.message}`, 'bad', 3600);
+    return false;
+  }
+}
+
+/**
+ * POV 缺失弹窗：指定某一角色，或显式使用全知视角。
+ * @param {string} chapterId 章节 ID
+ */
+function openPovDialog(chapterId) {
+  const cast = (cache.cast || []).filter((item) => item.role !== 'narrator');
+  openDialog({
+    title: '本章还没有视角人物',
+    body: `
+      <div class="banner warn" style="margin-bottom:8px">${icon(
+        'warn',
+        13
+      )} 生成正文必须明确视角：要么指定一个视角人物，要么显式使用全知视角。系统不会自动套默认值。</div>
+      <div class="field"><label>指定视角人物</label>
+        <select class="select" id="pov-gate-select">${castOptions(cast, '', { empty: '请选择角色' })}</select>
+        <div class="hint">该角色会写进提示词，只写他能感知到的内容。</div>
+      </div>
+      <div class="hint">如果本章确实要写多人内心，可显式选择全知视角；这是有意的叙事选择。</div>`,
+    foot: `<div class="right">
+      <button class="btn" data-dlg-close>取消</button>
+      <button class="btn" data-pov-omniscient>使用全知视角</button>
+      <button class="btn primary" data-pov-confirm>指定并继续</button>
+    </div>`,
+    onMount: (mask) => {
+      mask.querySelector('[data-pov-omniscient]').addEventListener('click', async () => {
+        await postJSON('/api/ui/outline/pov', {
+          path: cache.path,
+          chapter: chapterId,
+          pov_character_id: null,
+          pov_mode: 'third_omniscient',
+        });
+        closeDialog();
+        cache.bindingChapter = '';
+        toast('已设为全知视角，请再次点击生成', 'ok');
+      });
+      mask.querySelector('[data-pov-confirm]').addEventListener('click', async () => {
+        const value = mask.querySelector('#pov-gate-select').value;
+        if (!value) return toast('请先选择一个角色，或改用全知视角', 'warn');
+        await postJSON('/api/ui/outline/pov', {
+          path: cache.path,
+          chapter: chapterId,
+          pov_character_id: value,
+          pov_mode: null,
+        });
+        closeDialog();
+        cache.bindingChapter = '';
+        toast('视角人物已保存，请再次点击生成', 'ok');
+      });
+    },
+  });
+}
+
+/**
+ * 节拍选角弹窗：勾选该节拍的出场角色，保存到大纲计划。
+ * @param {number} index 节拍下标
+ */
+function openBeatCastDialog(index) {
+  const hit = findOutlineChapter(ui.sel.id);
+  if (!hit) return;
+  const beat = (hit.chapter.beats || [])[index];
+  if (!beat) return;
+  const cast = (cache.cast || []).filter((item) => item.role !== 'narrator');
+  const selected = new Set(beat.character_ids || []);
+  openDialog({
+    title: `节拍 ${index + 1} 的出场角色`,
+    body: `
+      <div class="hint" style="margin-bottom:8px">${esc(beat.summary || '')}</div>
+      <div style="display:grid;gap:4px;max-height:46vh;overflow:auto">
+        ${cast
+          .map(
+            (item) => `<label class="checkline"><input type="checkbox" data-cast-pick="${esc(item.id)}" ${
+              selected.has(item.id) ? 'checked' : ''
+            } /> ${esc(item.name)}<span class="hint" style="margin-left:6px">${esc(item.role || '')}</span></label>`
+          )
+          .join('') || '<div class="hint">还没有角色：请先去角色页生成人物。</div>'}
+      </div>
+      <div class="hint" style="margin-top:6px">这里只改大纲计划选角；正文实际出场由切分结果派生，不会伪造。</div>`,
+    foot: `<div class="right"><button class="btn" data-dlg-close>取消</button>
+      <button class="btn primary" data-cast-save>保存</button></div>`,
+    onMount: (mask) => {
+      mask.querySelector('[data-cast-save]').addEventListener('click', async () => {
+        const ids = [...mask.querySelectorAll('[data-cast-pick]:checked')].map((node) => node.dataset.castPick);
+        try {
+          cache.binding = await postJSON('/api/ui/outline/beat/characters', {
+            path: cache.path,
+            chapter: hit.chapter.id,
+            beat: beat.id,
+            character_ids: ids,
+          });
+          cache.bindingChapter = hit.chapter.id;
+          closeDialog();
+          // 大纲缓存同步，避免刷新前展开的列表还是旧值
+          beat.character_ids = ids;
+          paint();
+          refreshBindingCards();
+          toast('节拍出场角色已保存', 'ok');
+        } catch (error) {
+          toast(`保存失败：${error.message}`, 'bad', 3600);
+        }
+      });
+    },
+  });
+}
+
+/** 收集并保存本章角色弧线 */
+async function saveArcs() {
+  const hit = findOutlineChapter(ui.sel.id);
+  if (!hit) return;
+  const rows = [...document.querySelectorAll('#novel-arc-rows [data-arc]')];
+  const arcs = rows
+    .map((row) => {
+      const index = row.dataset.arc;
+      return {
+        character_id: row.querySelector(`[data-arc-char="${index}"]`)?.value || '',
+        from_state: row.querySelector(`[data-arc-from="${index}"]`)?.value || '',
+        to_state: row.querySelector(`[data-arc-to="${index}"]`)?.value || '',
+        note: row.querySelector(`[data-arc-note="${index}"]`)?.value || '',
+      };
+    })
+    .filter((item) => item.character_id);
+  try {
+    const result = await postJSON('/api/ui/outline/arcs', {
+      path: cache.path,
+      chapter: hit.chapter.id,
+      arcs,
+    });
+    hit.chapter.character_arcs = result.arcs || [];
+    paint();
+    refreshBindingCards();
+    toast('角色弧线已保存', 'ok');
+  } catch (error) {
+    toast(`保存弧线失败：${error.message}`, 'bad', 3600);
+  }
+}
+
+/** 给弧线区追加一行空白编辑（不落盘，保存后才写入） */
+function addArcRow() {
+  const wrap = document.getElementById('novel-arc-rows');
+  const hit = findOutlineChapter(ui.sel.id);
+  if (!wrap || !hit) return;
+  const index = wrap.querySelectorAll('[data-arc]').length;
+  const cast = (cache.cast || []).filter((item) => item.role !== 'narrator');
+  const html = `<div class="arc-row" data-arc="${index}"
+    style="display:grid;grid-template-columns:150px 1fr 1fr 1fr auto;gap:6px;align-items:center">
+    <select class="select" data-arc-char="${index}">${castOptions(cast, '', { empty: '选择角色' })}</select>
+    <input class="input" data-arc-from="${index}" placeholder="从什么状态" />
+    <input class="input" data-arc-to="${index}" placeholder="到本章结束时" />
+    <input class="input" data-arc-note="${index}" placeholder="说明（可选）" />
+    <button class="btn icon sm" data-act="novel-arc-del" data-index="${index}" title="删除">${icon('trash', 12)}</button>
+  </div>`;
+  const hint = wrap.querySelector('.hint');
+  if (hint) hint.remove();
+  wrap.insertAdjacentHTML('beforeend', html);
+}
+
+/** 检测本章角色状态回流（只生成提案，不写角色卡） */
+async function detectUpdates() {
+  const hit = findOutlineChapter(ui.sel.id);
+  if (!hit) return;
+  try {
+    cache.updates = await postJSON('/api/ui/chapters/character-updates', {
+      path: cache.path,
+      chapter: hit.chapter.id,
+    });
+    cache.updatesChapter = hit.chapter.id;
+    refreshBindingCards();
+    const count = (cache.updates?.updates || []).length;
+    toast(count ? `检测到 ${count} 个角色状态变化，请逐条确认` : '没有检测到需要回流的角色变化', count ? 'ok' : 'warn');
+  } catch (error) {
+    toast(`检测失败：${error.message}`, 'bad', 3600);
+  }
+}
+
+/** 按勾选确认写入角色状态（不勾选即不写） */
+async function applyUpdates() {
+  const hit = findOutlineChapter(ui.sel.id);
+  if (!hit) return;
+  const picks = [...document.querySelectorAll('[data-update-pick]')];
+  const selections = picks
+    .filter((node) => node.checked)
+    .map((node) => {
+      const index = Number(node.dataset.updatePick);
+      const update = (cache.updates?.updates || [])[index];
+      return update ? { character_id: update.character_id } : null;
+    })
+    .filter(Boolean);
+  if (!selections.length) return toast('没有勾选任何角色，角色卡未改动', 'warn');
+  try {
+    const result = await postJSON('/api/ui/chapters/character-updates/apply', {
+      path: cache.path,
+      chapter: hit.chapter.id,
+      selections,
+    });
+    cache.updates = { ...(cache.updates || {}), applied: true };
+    refreshBindingCards();
+    toast(`已写入 ${(result.applied || []).length} 个角色的状态`, 'ok');
+    cache.cast = (await getJSON('/api/ui/characters', { path: cache.path })).characters || cache.cast;
+    refreshBindingCards();
+  } catch (error) {
+    toast(`写入失败：${error.message}`, 'bad', 3600);
+  }
+}
+
+/** 执行本章角色一致性检查（只出问题清单） */
+async function checkConsistency() {
+  const hit = findOutlineChapter(ui.sel.id);
+  if (!hit) return;
+  try {
+    cache.consistency = await postJSON('/api/ui/chapters/consistency', {
+      path: cache.path,
+      chapter: hit.chapter.id,
+    });
+    cache.consistencyChapter = hit.chapter.id;
+    refreshBindingCards();
+    const total = Number(cache.consistency?.counts?.total || 0);
+    toast(total ? `发现 ${total} 个角色一致性问题` : '没有发现角色一致性问题', total ? 'warn' : 'ok');
+  } catch (error) {
+    toast(`检查失败：${error.message}`, 'bad', 3600);
+  }
+}
+
+/**
+ * 未建卡角色捕获：先让作者确认/填写姓名，再建最小角色卡并补进本章节拍。
+ * @param {string} sample 该说话人的一句台词，作为建卡上下文
+ */
+function openCaptureDialog(sample) {
+  const hit = findOutlineChapter(ui.sel.id);
+  if (!hit) return;
+  const beats = hit.chapter.beats || [];
+  openDialog({
+    title: '捕获未建卡角色',
+    body: `<div class="dlg-note">这段正文里的说话人还不在角色库。填一个姓名会建最小角色卡，并补进本章节拍；人设可稍后在角色页补全。</div>
+      <div class="field"><label>角色姓名</label>
+        <input class="input" id="capture-name" placeholder="从台词或上下文里判断的名字" /></div>
+      <div class="field"><label>补进的节拍</label>
+        <select class="select" id="capture-beat">${beats
+          .map(
+            (beat, index) =>
+              `<option value="${esc(beat.id)}">节拍 ${index + 1} · ${esc((beat.summary || '').slice(0, 40))}</option>`
+          )
+          .join('')}</select></div>
+      <div class="field"><label>台词样例（只读）</label>
+        <input class="input" value="${esc(sample || '（没有可用的台词样例）')}" disabled /></div>
+      <div class="hint">系统不会自动给未知说话人编姓名；姓名必须由作者确认。</div>`,
+    foot: `<div class="right"><button class="btn" data-dlg-close>取消</button>
+      <button class="btn primary" data-capture-save>建卡并补进本章</button></div>`,
+    onMount: (mask) => {
+      mask.querySelector('[data-capture-save]').addEventListener('click', async () => {
+        const name = mask.querySelector('#capture-name').value.trim();
+        if (!name) return toast('请填写角色姓名', 'warn');
+        const beatId = mask.querySelector('#capture-beat').value;
+        try {
+          const result = await postJSON('/api/ui/chapters/capture-character', {
+            path: cache.path,
+            chapter: hit.chapter.id,
+            beat: beatId,
+            name,
+            sample,
+          });
+          cache.binding = result.binding;
+          cache.bindingChapter = hit.chapter.id;
+          cache.cast = (await getJSON('/api/ui/characters', { path: cache.path })).characters || cache.cast;
+          const beat = beats.find((item) => item.id === beatId);
+          if (beat) beat.character_ids = [...(beat.character_ids || []), result.character.id];
+          closeDialog();
+          paint();
+          refreshBindingCards();
+          toast(`已为「${name}」建卡并补进本章计划，请到角色页补充人设`, 'ok');
+        } catch (error) {
+          toast(`建卡失败：${error.message}`, 'bad', 3600);
+        }
+      });
+    },
+  });
+}
+
 function bodyCardHTML(chapter, landed) {
   if (!landed) {
     return `
@@ -2776,7 +3430,7 @@ function openGenerateDialog(hasBody) {
         action: mask.querySelector('[data-gen-run]'),
         labels: { fill: '生成缺失正文', regen: '重新生成并覆盖' },
       });
-      mask.querySelector('[data-gen-run]').addEventListener('click', () => {
+      mask.querySelector('[data-gen-run]').addEventListener('click', async () => {
         const mode = modeOf();
         const body = {
           path: cache.path,
@@ -2786,6 +3440,9 @@ function openGenerateDialog(hasBody) {
           beats_per_round: Number(mask.querySelector('#gen-beats').value) || null,
           max_rounds: Number(mask.querySelector('#gen-rounds').value) || null,
         };
+        // 生成前必须确认角色绑定：缺 POV 时弹窗要求指定角色或显式全知
+        const ready = await ensureBinding(hit.chapter.id);
+        if (!ready) return;
         closeDialog();
         runGenerate(body, hasBody);
       });
@@ -2868,6 +3525,15 @@ async function runGenerate(body, hadBody = false) {
         panel.fail({ message: '已停止生成', detail: '任务已在任务队列中取消，已接收的内容不会写入正文。' });
       } else if (event === 'error') {
         settled = true;
+        if (data?.code === 'BINDING_POV_MISSING') {
+          // 后端兜底阻断：同样给出两个出口，不静默重试
+          panel.fail({
+            message: data?.message || '本章还没有指定视角人物',
+            detail: '请先选择视角人物或显式使用全知视角，再重新生成。',
+          });
+          openPovDialog(body.chapter);
+          return;
+        }
         panel.fail({ message: data?.message || '生成失败', retry: () => runGenerate(body) });
       }
     });
@@ -3443,6 +4109,8 @@ function paint() {
   if (list) list.scrollTop = listScroll;
   const crumbs = document.getElementById('novel-crumb');
   if (crumbs) crumbs.innerHTML = crumbHTML();
+  // 章节角色绑定与对账：按章懒加载，避免整页刷新
+  if (ui.sel.kind === 'chapter' && ui.sel.id) loadBinding(ui.sel.id);
 }
 
 /**
@@ -3455,6 +4123,12 @@ function paint() {
 export async function renderNovel(root, target) {
   const path = target.path;
   state.path = path;
+  // 深链：数据已缓存时立即选中，否则等大纲到达后消费
+  pendingChapter = String(target.chapter || '');
+  if (pendingChapter && boot.state.outline === 'ok') {
+    if (findOutlineChapter(pendingChapter)) ui.sel = { kind: 'chapter', id: pendingChapter };
+    pendingChapter = '';
+  }
   if (cache.path !== path) {
     cache.path = path;
     cache.setting = null;
@@ -3542,6 +4216,16 @@ function applyBootData(key, data) {
     }
   } else if (key === 'outline') {
     cache.outline = data || { acts: [] };
+    // 深链 `?chapter=` 只能在大纲到达后解析；找到就选中该章
+    if (pendingChapter) {
+      const hit = findOutlineChapter(pendingChapter);
+      if (hit) {
+        ui.sel = { kind: 'chapter', id: pendingChapter };
+        ui.draftWorld = false;
+        ui.draftEntry = false;
+      }
+      pendingChapter = '';
+    }
   }
 }
 
@@ -3602,6 +4286,12 @@ function startBoot(path) {
 /** 变更事件：世界选择器切换 / 节拍转折开关 */
 function onChange(event) {
   if (!document.getElementById('novel-main')) return;
+  // 视角人物下拉：立即写通到设定库与章节副本
+  const pov = event.target.closest('#novel-pov-select');
+  if (pov) {
+    savePov(pov.value);
+    return;
+  }
   // 节拍转折开关：只切卡片高亮态，落盘交给「保存」
   const turn = event.target.closest('[data-beat-turn]');
   if (turn) {
@@ -3718,6 +4408,17 @@ async function onClick(event) {
   if (act === 'novel-draft-apply') return applyDraft(ui.sel.id);
   if (act === 'novel-draft-regen') return openContinueDialog(true);
   if (act === 'novel-tts-batch') return openBatchDialog();
+  if (act === 'novel-beat-cast') return openBeatCastDialog(Number(el.dataset.index));
+  if (act === 'novel-arc-add') return addArcRow();
+  if (act === 'novel-arc-save') return saveArcs();
+  if (act === 'novel-arc-del') {
+    el.closest('[data-arc]')?.remove();
+    return;
+  }
+  if (act === 'novel-updates-detect') return detectUpdates();
+  if (act === 'novel-updates-apply') return applyUpdates();
+  if (act === 'novel-consistency-check') return checkConsistency();
+  if (act === 'novel-capture') return openCaptureDialog(el.dataset.sample || '');
   if (act === 'novel-jump-chapter') {
     const chapter = landedChapter(el.dataset.id);
     if (chapter) return goChapter(cache.path, chapter.id);

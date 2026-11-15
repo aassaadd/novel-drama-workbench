@@ -9,18 +9,26 @@ import { getJSON, postJSON, fileUrl } from '../api.js';
 import { state, audioOf, toneFor } from '../store.js';
 import { STATE_LABEL, stateClass } from '../shell.js';
 
-/** 顶栏三个主视图：顺序与参考一致 */
+/**
+ * 顶栏四个一级视图：画本 / 录音 / 后期 / 对轨。
+ * `label` 是顶栏按钮上的文字，`title` 用于 title 与 aria-label。
+ * 图标刻意避开左侧导航：画本不用 chapter（目录），后期不用 audio（音色）。
+ */
 export const VIEW_META = [
-  { key: 'script', title: '画本编辑视图', icon: 'chapter' },
-  { key: 'record', title: '录音视图', icon: 'mic' },
-  { key: 'post', title: '后期制作视图', icon: 'audio' },
+  { key: 'script', label: '画本', title: '画本编辑视图', icon: 'pen' },
+  { key: 'record', label: '录音', title: '录音视图', icon: 'mic' },
+  { key: 'post', label: '后期', title: '后期制作视图', icon: 'wave' },
+  { key: 'align', label: '对轨', title: '智能对轨视图', icon: 'align' },
 ];
 
-/** 「更多视图」下拉：智能对轨是独立上传页，内容审听进画本编辑右栏页签 */
-export const MORE_VIEWS = [
-  { key: 'align', title: '智能对轨', icon: 'arrow' },
-  { key: 'audit', title: '内容审听', icon: 'list' },
-];
+/**
+ * 视图键正常化：URL、旧状态里出现的非法值统一回落到画本编辑。
+ * @param {string} view 视图键
+ * @returns {'script'|'record'|'post'|'align'} 合法视图键
+ */
+export function normalizeView(view) {
+  return VIEW_META.some((item) => item.key === view) ? view : 'script';
+}
 
 /** 页面注入的刷新回调（切章、生成完成后由 editor.js 提供） */
 const hooks = { refresh: async () => {}, openInScript: () => {} };
@@ -1029,17 +1037,30 @@ function recordPanelHTML() {
   const task = state.task || {};
   const ratio = c.total ? Math.round((c.ready / c.total) * 100) : 0;
   const tab = ui.record.panelTab || 'tasks';
-  const characterRows = state.characters
+  // 「本章角色」只列实际出场的角色（有台词或场景），不再拿全量角色冒充
+  const speakerIds = new Set(
+    (state.lines || []).map((row) => row.speaker_id).filter((id) => id && id !== 'chr_narrator')
+  );
+  const chapterCharacters = state.characters.filter((item) => speakerIds.has(item.id));
+  const plannedIds = new Set(
+    ((state.binding?.characters || []) || []).filter((item) => item.planned).map((item) => item.id)
+  );
+  const characterRows = chapterCharacters
     .map((item) => {
       const bound = item.voice_binding || {};
       const voiceName = bound.voice_name || bound.voice_id || '未绑定音色';
       const lines = state.lines.filter((row) => row.speaker_id === item.id).length;
-      return `<div class="fail-row">
+      const isPov = state.binding?.pov?.id === item.id;
+      return `<a class="fail-row" href="#/p/${encodeURIComponent(state.path)}/characters?character=${encodeURIComponent(
+        item.id
+      )}" title="打开角色档案：${esc(item.name)}" style="text-decoration:none">
         <span class="t" title="${esc(item.name)} · ${esc(voiceName)}">
-          <b style="color:var(--text)">${esc(item.name)}</b>
-          <span style="display:block;color:var(--text-4);font-size:11px">${esc(voiceName)} · ${lines} 行</span>
+          <b style="color:var(--text)">${esc(item.name)}${isPov ? '（视角）' : ''}</b>
+          <span style="display:block;color:var(--text-4);font-size:11px">${esc(voiceName)} · ${lines} 行${
+            plannedIds.has(item.id) ? ' · 计划内' : ' · 计划外'
+          }</span>
         </span>
-      </div>`;
+      </a>`;
     })
     .join('');
   return `
@@ -1061,8 +1082,8 @@ function recordPanelHTML() {
       ${
         tab === 'characters'
           ? `<div class="sr-sec">
-               <h4>全部配音角色（${state.characters.length}）</h4>
-               ${characterRows || '<div class="hint">本章还没有识别到角色。</div>'}
+               <h4>本章出场角色（${chapterCharacters.length}）</h4>
+               ${characterRows || '<div class="hint">本章还没有切分出角色台词。</div>'}
                <a class="btn" style="margin-top:9px" href="#/p/${encodeURIComponent(state.path)}/voices">${icon(
                  'audio',
                  13

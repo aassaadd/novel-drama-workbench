@@ -202,6 +202,8 @@ def _adapter_error_payload(exc: AdapterError) -> dict:
         data["retryable"] = True
     if detail.get("resume"):
         data["resume"] = True
+    if detail.get("code"):
+        data["code"] = detail["code"]
     return data
 
 

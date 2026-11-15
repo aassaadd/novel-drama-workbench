@@ -1,0 +1,159 @@
+{
+  "schema_version": 1,
+  "characters": [
+    {
+      "id": "chr_narrator",
+      "name": "旁白",
+      "aliases": [],
+      "role": "narrator",
+      "gender": "unknown",
+      "age_range": null,
+      "personality": [],
+      "background": "",
+      "speech_style": {
+        "tempo": null,
+        "pitch": null,
+        "accent": null,
+        "catchphrases": []
+      },
+      "voice_binding": null,
+      "appearance_prompt": "",
+      "negative_prompt": "",
+      "portrait_asset": null,
+      "created_at": "2026-11-15T00:00:00Z",
+      "updated_at": "2026-11-15T00:00:00Z"
+    },
+    {
+      "id": "chr_linjiujin",
+      "name": "林九斤",
+      "aliases": ["九斤"],
+      "role": "protagonist",
+      "gender": "female",
+      "age_range": "38 岁上下",
+      "personality": ["直率", "护短", "嘴硬", "动手快"],
+      "background": "书名点明 38 岁悍妇。常年操持菜市场与厨房，习惯用擀面杖、铁棍解决问题；与周也是夫妻。进入诡异副本后靠蛮力与生活经验破局。",
+      "speech_style": {
+        "tempo": "快",
+        "pitch": "偏低",
+        "accent": null,
+        "catchphrases": ["说人话", "这要是厨房，该把抽油烟机开了"]
+      },
+      "voice_binding": null,
+      "appearance_prompt": "",
+      "negative_prompt": "",
+      "portrait_asset": null,
+      "created_at": "2026-11-15T00:00:00Z",
+      "updated_at": "2026-11-15T00:00:00Z"
+    },
+    {
+      "id": "chr_zhouye",
+      "name": "周也",
+      "aliases": [],
+      "role": "protagonist",
+      "gender": "male",
+      "age_range": "30 多岁",
+      "personality": ["冷静", "理性", "爱拆解规则", "说话像写代码"],
+      "background": "林九斤的丈夫，程序员。习惯把诡异现象拆成流程、条件与分支，口头禅式地用‘意味着’层层推导；戴眼镜，进副本后仍保持分析习惯。",
+      "speech_style": {
+        "tempo": "中",
+        "pitch": "中",
+        "accent": null,
+        "catchphrases": ["这个 bug 不对", "意味着"]
+      },
+      "voice_binding": null,
+      "appearance_prompt": "",
+      "negative_prompt": "",
+      "portrait_asset": null,
+      "created_at": "2026-11-15T00:00:00Z",
+      "updated_at": "2026-11-15T00:00:00Z"
+    },
+    {
+      "id": "chr_sumei01",
+      "name": "苏梅",
+      "aliases": ["苏姐"],
+      "role": "supporting",
+      "gender": "female",
+      "age_range": "40 岁上下",
+      "personality": ["老练", "务实", "算计清楚", "善于分工"],
+      "background": "前外企供应链管理，进过十一个副本的老手。暗红旗袍外搭黑色西装外套，头发盘髻，南方口音，手持铜钥匙。第 8 章出场，主张用‘值’与祭品规则换命。",
+      "speech_style": {
+        "tempo": "稳",
+        "pitch": "中",
+        "accent": "南方口音",
+        "catchphrases": ["供应链管理", "值"]
+      },
+      "voice_binding": null,
+      "appearance_prompt": "",
+      "negative_prompt": "",
+      "portrait_asset": null,
+      "created_at": "2026-11-15T00:00:00Z",
+      "updated_at": "2026-11-15T00:00:00Z"
+    },
+    {
+      "id": "chr_chenmo",
+      "name": "陈默",
+      "aliases": [],
+      "role": "supporting",
+      "gender": "male",
+      "age_range": "20 出头",
+      "personality": ["胆小", "谨慎", "观察细", "记路强"],
+      "background": "戴眼镜的年轻大学生，第二次进副本。体力差但记路与观察细致，说话声音细、常结巴，习惯称苏梅为‘苏姐’。注意：第 10 章另有一个未具名的‘大学生’龙套，不是陈默。",
+      "speech_style": {
+        "tempo": "慢",
+        "pitch": "偏高",
+        "accent": null,
+        "catchphrases": ["苏姐"]
+      },
+      "voice_binding": null,
+      "appearance_prompt": "",
+      "negative_prompt": "",
+      "portrait_asset": null,
+      "created_at": "2026-11-15T00:00:00Z",
+      "updated_at": "2026-11-15T00:00:00Z"
+    },
+    {
+      "id": "chr_zhinainai",
+      "name": "纸奶奶",
+      "aliases": ["老板娘"],
+      "role": "antagonist",
+      "gender": "female",
+      "age_range": "老年",
+      "personality": ["冷淡", "按规矩办事", "不解释"],
+      "background": "纸扎世界的店主，纸人。花布旗袍印牡丹，脸是画的，眼睛是两个黑洞，嘴唇不动而声音直接传出，声音干涩像纸摩擦。自称‘这里的主人’，被九斤称为纸奶奶。",
+      "speech_style": {
+        "tempo": "慢",
+        "pitch": "低",
+        "accent": null,
+        "catchphrases": ["活到纸火燃尽"]
+      },
+      "voice_binding": null,
+      "appearance_prompt": "",
+      "negative_prompt": "",
+      "portrait_asset": null,
+      "created_at": "2026-11-15T00:00:00Z",
+      "updated_at": "2026-11-15T00:00:00Z"
+    },
+    {
+      "id": "chr_nuowang",
+      "name": "傩王",
+      "aliases": [],
+      "role": "antagonist",
+      "gender": "unknown",
+      "age_range": null,
+      "personality": ["非人", "居高临下", "把生死当戏"],
+      "background": "傩面副本的主宰，巨大傩面从青铜鼎灰烬中升起，无身体、无眼睛，声音从四面八方的面具与地底传出。说话简短、古腔，视祭品挣扎为戏。",
+      "speech_style": {
+        "tempo": "慢",
+        "pitch": "低",
+        "accent": null,
+        "catchphrases": ["开脸", "换脸"]
+      },
+      "voice_binding": null,
+      "appearance_prompt": "",
+      "negative_prompt": "",
+      "portrait_asset": null,
+      "created_at": "2026-11-15T00:00:00Z",
+      "updated_at": "2026-11-15T00:00:00Z"
+    }
+  ]
+}

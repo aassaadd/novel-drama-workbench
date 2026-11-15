@@ -71,6 +71,26 @@
         "summary": { "type": "string", "maxLength": 2000 },
         "beats": { "type": "array", "items": { "$ref": "#/$defs/beat" } },
         "pov_character_id": { "type": ["string", "null"], "pattern": "^chr_[0-9A-Za-z]{6,32}$" },
+        "pov_mode": {
+          "type": ["string", "null"],
+          "enum": ["first", "second", "third_limited", "third_omniscient", null],
+          "description": "本章视角覆盖；null 表示跟随全书写法。第三称全知时可不绑定视角人物"
+        },
+        "character_arcs": {
+          "type": "array",
+          "description": "本章的角色弧线目标：角色在本章从什么状态走到什么状态",
+          "items": {
+            "type": "object",
+            "required": ["character_id"],
+            "additionalProperties": false,
+            "properties": {
+              "character_id": { "type": "string", "pattern": "^chr_[0-9A-Za-z]{6,32}$" },
+              "from_state": { "type": "string", "maxLength": 500 },
+              "to_state": { "type": "string", "maxLength": 500 },
+              "note": { "type": "string", "maxLength": 500 }
+            }
+          }
+        },
         "world_ids": {
           "type": "array",
           "items": { "type": "string", "pattern": "^wld_[0-9A-Za-z]{6,32}$" },

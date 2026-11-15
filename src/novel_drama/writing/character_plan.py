@@ -24,6 +24,7 @@ from ..store.world_store import WorldStore
 from .service import (
     _CHARACTER_DESC_RULES,
     _clean_character_row,
+    _clean_speech_style,
     _generate_json,
     _progress,
     _project_context,
@@ -523,7 +524,7 @@ def fill_character_descriptions(
             continue
         if keys and character.get("id") not in keys and character.get("name") not in keys:
             continue
-        if overwrite or missing_description_fields(character):
+        if overwrite or missing_description_fields(character) or not character.get("speech_style"):
             wanted.append(character)
             steps.append({"character": character, "name": name, "skip": "", "overwrite": overwrite})
         else:
@@ -557,8 +558,10 @@ def fill_character_descriptions(
             })
             continue
         missing = missing_description_fields(character)
+        if not character.get("speech_style"):
+            missing.append("speech_style")
         # 重新生成模式下要覆盖全部描述字段；只补缺失模式只处理空缺项
-        targets = list(DESCRIPTION_FIELDS) if overwrite else missing
+        targets = list(DESCRIPTION_FIELDS) + ["speech_style"] if overwrite else missing
         profile = {
             key: value
             for key, value in character.items()
@@ -619,6 +622,12 @@ def fill_character_descriptions(
                 raw = rows[0] if isinstance(rows, list) and rows and isinstance(rows[0], dict) else payload
             changed = 0
             for field in targets:
+                if field == "speech_style":
+                    style = _clean_speech_style((raw or {}).get("speech_style"))
+                    if style:
+                        character["speech_style"] = style
+                        changed += 1
+                    continue
                 value = str((raw or {}).get(field) or "").strip()
                 if value:
                     character[field] = value[: _DESC_LIMITS[field]]

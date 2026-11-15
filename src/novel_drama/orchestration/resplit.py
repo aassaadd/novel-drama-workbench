@@ -66,13 +66,41 @@ def classify_lines(existing: list[dict], drafts: list[dict]) -> tuple[list[tuple
     return matched, manual
 
 
-def merge_manual_lines(existing: list[dict], drafts: list[dict], scene_id: str) -> list[dict]:
+def _is_folded_row(row: dict, folded_texts: set[str] | None) -> bool:
+    """判断旧行是否属于「已折回旁白的强调引语」。
+
+    只处理同时满足以下条件的行，避免误删人工成果：
+    - 文本与规则识别出的强调引语完全一致；
+    - 说话人仍为空 / `chr_unknown`（人工改过说话人的行不动）；
+    - 没有已生成的配音（保护已有音频引用）。
+
+    参数:
+        row: 旧台词行。
+        folded_texts: 本次切分折回旁白的引语文本集合。
+
+    返回:
+        可以丢弃并折回旁白时返回 True。
+    """
+    if not folded_texts:
+        return False
+    if _clean(row.get("text")) not in folded_texts:
+        return False
+    speaker = row.get("speaker_id")
+    if speaker and speaker != entities.UNKNOWN_SPEAKER_ID:
+        return False
+    return not line_has_audio(row)
+
+
+def merge_manual_lines(
+    existing: list[dict], drafts: list[dict], scene_id: str, folded_texts: set[str] | None = None
+) -> list[dict]:
     """按「保留人工修改」重切：同文本旧行复用，剩余旧行插回原位。
 
     参数:
         existing: 场景已有台词行。
         drafts: 规则切分草案。
         scene_id: 目标场景 ID（旧行可能来自另一个场景，需要改写归属）。
+        folded_texts: 规则折回旁白的强调引语文本；命中的未知旧行不再单独插回。
 
     返回:
         合并后的台词行列表，index 已重排为 0..N-1。
@@ -94,16 +122,42 @@ def merge_manual_lines(existing: list[dict], drafts: list[dict], scene_id: str) 
                 speaker_id=draft["speaker_id"],
                 confidence=draft.get("confidence"),
             )
+        elif not picked.get("speaker_id") or picked.get("speaker_id") == entities.UNKNOWN_SPEAKER_ID:
+            # 旧行说话人为空/未知时才补规则结果；人工改过的已知说话人原样保留
+            if draft.get("speaker_id") and draft["speaker_id"] != entities.UNKNOWN_SPEAKER_ID:
+                picked["speaker_id"] = draft["speaker_id"]
+                picked["confidence"] = draft.get("confidence")
         picked["scene_id"] = scene_id
         merged.append(picked)
-    # 规则结果里没有的旧行（人工改写 / 人工新增）按原位置插回，避免静默丢失
+    # 规则结果里没有的旧行（人工改写 / 人工新增）按原位置插回，避免静默丢失；
+    # 只有「已折回旁白 + 未知说话人 + 无配音」的强调引语行才丢弃
     for row in remaining:
+        if _is_folded_row(row, folded_texts):
+            continue
         row["scene_id"] = scene_id
         position = max(0, min(int(row.get("index") or 0), len(merged)))
         merged.insert(position, row)
     for index, row in enumerate(merged):
         row["index"] = index
     return merged
+
+
+def _split_and_classify(existing: list[dict], source_text: str, characters: list[dict]):
+    """切分并分类，同时剔除会折回旁白的强调引语旧行。
+
+    参数:
+        existing: 场景已有台词行。
+        source_text: 场景正文。
+        characters: 角色表。
+
+    返回:
+        (drafts, matched, manual, folded_count)。
+    """
+    folded: set[str] = set()
+    drafts = split_lines(source_text or "", characters, folded_sink=folded)
+    kept = [row for row in existing if not _is_folded_row(row, folded)]
+    matched, manual = classify_lines(kept, drafts)
+    return drafts, matched, manual, len(existing) - len(kept)
 
 
 def _script_info(store, chapter: dict) -> dict:
@@ -166,23 +220,28 @@ def analyze_scene_split(store, chapter: dict, characters: list[dict], max_chars:
     total_lines = sum(len(_scene_lines(scene)) for scene in old_scenes)
     total_audio = sum(1 for scene in old_scenes for line in _scene_lines(scene) if line_has_audio(line))
     total_manual = 0
+    total_folded = 0
     for scene in old_scenes:
-        _, manual = classify_lines(_scene_lines(scene), split_lines(scene.get("source_text") or "", characters))
+        _drafts, _matched, manual, folded = _split_and_classify(
+            _scene_lines(scene), scene.get("source_text") or "", characters
+        )
         total_manual += len(manual)
+        total_folded += folded
 
     reuse_lines = sum(len(_scene_lines(scene)) for scene, _ in reused) if keep_lines else 0
     reuse_audio = (
         sum(1 for scene, _ in reused for line in _scene_lines(scene) if line_has_audio(line)) if keep_lines else 0
     )
 
-    lost_lines = lost_audio = lost_manual = 0
+    lost_lines = lost_audio = lost_manual = lost_folded = 0
     samples: list[dict] = []
     for scene in lost:
         lines = _scene_lines(scene)
-        _, manual = classify_lines(lines, split_lines(scene.get("source_text") or "", characters))
+        _drafts, _matched, manual, folded = _split_and_classify(lines, scene.get("source_text") or "", characters)
         lost_lines += len(lines)
         lost_audio += sum(1 for line in lines if line_has_audio(line))
         lost_manual += len(manual)
+        lost_folded += folded
         for line, reason in manual:
             if len(samples) < _MAX_SAMPLES:
                 samples.append(_sample(int(scene.get("index") or 0), line, reason))
@@ -222,6 +281,7 @@ def analyze_scene_split(store, chapter: dict, characters: list[dict], max_chars:
             else f"全部按规则重切：{len(old_scenes)} 个场景全部重建，{total_lines} 行台词全部丢失。"
         ),
         f"丢失台词中人工/标注改动 {lost_manual} 行，已有配音 {lost_audio} 条。",
+        f"另有 {total_folded} 行强调引语会折回旁白（不单独成行，不计入人工改动）。",
         ("本章已有导演标注：是（" + str(script["shots"]) + " 个镜头），场景重切后必须重新生成标注。") if script["exists"] else "本章暂无导演标注。",
         "场景重切后需要重新切分台词；已有音频/图片/视频文件不会删除，但会失去引用，需要重新生成。",
     ]
@@ -245,9 +305,11 @@ def analyze_scene_split(store, chapter: dict, characters: list[dict], max_chars:
             "scenes": len(lost),
             "lines": lost_lines,
             "manual": lost_manual,
+            "folded": lost_folded,
             "audio": lost_audio,
             "samples": samples,
         },
+        "folded": {"lines": total_folded},
         "created": created,
         "need_audio": lost_lines,
         "script": script,
@@ -270,15 +332,17 @@ def analyze_line_split(store, chapter: dict, characters: list[dict], scene_ids: 
         dict：结构化计数 + `text`（中文影响清单）。
     """
     scenes = [scene for scene in chapter.get("scenes") or [] if not scene_ids or scene.get("id") in scene_ids]
-    existing_total = draft_total = manual_total = audio_total = new_lines = kept_audio = 0
+    existing_total = draft_total = manual_total = audio_total = new_lines = kept_audio = folded_total = 0
     samples: list[dict] = []
     for scene in scenes:
         existing = _scene_lines(scene)
-        drafts = split_lines(scene.get("source_text") or "", characters)
-        matched, manual = classify_lines(existing, drafts)
+        drafts, matched, manual, folded = _split_and_classify(
+            existing, scene.get("source_text") or "", characters
+        )
         existing_total += len(existing)
         draft_total += len(drafts)
         manual_total += len(manual)
+        folded_total += folded
         audio_total += sum(1 for line in existing if line_has_audio(line))
         new_lines += len(drafts) - len(matched)
         kept_audio += sum(1 for line, _ in matched if line_has_audio(line))
@@ -301,6 +365,7 @@ def analyze_line_split(store, chapter: dict, characters: list[dict], scene_ids: 
         ),
         ("本章已有导演标注：是（" + str(script["shots"]) + " 个镜头），台词重切后锚点会变化，需要重新生成标注。") if script["exists"] else "本章暂无导演标注。",
         "台词重切不影响场景划分；已有音频文件不会删除，但被替换的行会失去引用并需要重新生成。",
+        f"另有 {folded_total} 行强调引语会折回旁白（不单独成行，不计入人工改动）。",
     ]
     if samples:
         text.append("点名的改动行：")
@@ -318,6 +383,7 @@ def analyze_line_split(store, chapter: dict, characters: list[dict], scene_ids: 
         },
         "planned": {"lines": draft_total},
         "reuse": {"lines": existing_total if keep_manual else 0, "audio": kept_audio if keep_manual else 0},
+        "folded": {"lines": folded_total},
         "lost": {
             "lines": max(0, existing_total - draft_total) if not keep_manual else 0,
             "manual": 0 if keep_manual else manual_total,

@@ -162,10 +162,16 @@ def _characters_payload(characters: list[dict]) -> list[dict]:
         characters: 完整角色表。
 
     返回:
-        [{id, name, role, aliases}]。
+        [{id, name, role, aliases, speech_style}]。
     """
     return [
-        {"id": item["id"], "name": item.get("name"), "role": item.get("role"), "aliases": item.get("aliases") or []}
+        {
+            "id": item["id"],
+            "name": item.get("name"),
+            "role": item.get("role"),
+            "aliases": item.get("aliases") or [],
+            "speech_style": item.get("speech_style") or {},
+        }
         for item in characters
         if item.get("role") != "narrator"
     ]
@@ -640,6 +646,9 @@ def apply_outline(store: ProjectStore, dry_run: bool = False) -> dict:
                 continue
             chapter = entities.new_chapter(work_id, int(entry.get("index") or 1), entry.get("title") or "未命名", outline=outline_text)
             chapter["id"] = entry["id"]
+            # POV 以设定库为主源，章节文件只是副本：落地时一并写通
+            chapter["pov_character_id"] = entry.get("pov_character_id")
+            chapter["pov_mode"] = entry.get("pov_mode")
             store.save_chapter(chapter)
             created.append(chapter["id"])
             existing_ids.add(chapter["id"])
@@ -647,7 +656,18 @@ def apply_outline(store: ProjectStore, dry_run: bool = False) -> dict:
             # 列表接口只返回轻量元信息，写回前必须读完整章节，否则会丢掉 work_id 等必填字段
             chapter = store.load_chapter(entry["id"])
             changed = False
-            for key, value in (("title", entry.get("title")), ("outline", outline_text)):
+            for key, value in (
+                ("title", entry.get("title")),
+                ("outline", outline_text),
+                ("pov_character_id", entry.get("pov_character_id")),
+                ("pov_mode", entry.get("pov_mode")),
+            ):
+                if key in ("pov_character_id", "pov_mode"):
+                    # POV 副本允许为空（全知视角），不能因为空值跳过写通
+                    if chapter.get(key) != value:
+                        chapter[key] = value
+                        changed = True
+                    continue
                 if value and chapter.get(key) != value:
                     chapter[key] = value
                     changed = True
@@ -716,12 +736,23 @@ def build_chapter_context(store: ProjectStore, config: AppConfig, chapter: dict)
             world_context = _worlds_digest(all_worlds, [str(all_worlds[0].get("id") or "")])
 
     character_payload = _characters_payload(characters)
+    # POV 以设定库为唯一主源；章节文件里的 pov_character_id 只是副本（保存时写通）
+    pov_character_id = (entry or {}).get("pov_character_id") or chapter.get("pov_character_id")
+    if pov_character_id == entities.NARRATOR_ID:
+        pov_character_id = None
+    # 章节视角覆盖优先于全书；显式全知时不要求绑定具体角色
+    pov_mode = (entry or {}).get("pov_mode") or chapter.get("pov_mode") or None
+    name_by_id = {item.get("id"): item.get("name") for item in characters if item.get("id")}
+    planned_counts: dict[str, int] = {}
+    for beat in beats:
+        for cid in beat.get("character_ids") or []:
+            if cid:
+                planned_counts[str(cid)] = planned_counts.get(str(cid), 0) + 1
     speaker_ids: list[str] | None = None
     if entry:
-        # 角色上下文只取本章 POV 与节拍涉及的角色；找不到时保留全量角色
-        focus = {cid for cid in [entry.get("pov_character_id")] if cid}
-        for beat in beats:
-            focus.update(cid for cid in (beat.get("character_ids") or []) if cid)
+        # 角色上下文取本章 POV 与节拍涉及的角色；找不到时保留全量角色
+        focus = {cid for cid in [pov_character_id] if cid}
+        focus.update(planned_counts)
         focus.discard(entities.NARRATOR_ID)
         focused = [item for item in character_payload if item["id"] in focus]
         if focused:
@@ -759,16 +790,41 @@ def build_chapter_context(store: ProjectStore, config: AppConfig, chapter: dict)
     # 全书（或前半部）滚动摘要：与最近章摘要一起注入，长书不会退化成只看最近几章
     book_digest = str(store.load_rolling_summary().get("book_summary") or "")
 
+    style = bible.get("style") or {}
+    pov_name = None
+    if pov_character_id:
+        pov_name = name_by_id.get(pov_character_id) or "已删除角色"
+    beat_payload = [
+        {
+            "id": beat.get("id"),
+            "index": position,
+            "summary": beat.get("summary"),
+            "character_ids": list(beat.get("character_ids") or []),
+            "character_names": [
+                name_by_id.get(str(cid)) or "已删除角色"
+                for cid in (beat.get("character_ids") or [])
+                if str(cid).strip()
+            ],
+            "turning_point": bool(beat.get("turning_point")),
+            "target_words": int(beat.get("target_words") or 0),
+        }
+        for position, beat in enumerate(beats, start=1)
+    ]
     metadata = {
         "title": chapter.get("title"),
         "summary": (entry or {}).get("summary") or chapter.get("outline"),
         "beats": beats,
+        "beat_characters": beat_payload,
         "characters": character_payload,
+        "character_names": name_by_id,
+        "planned_counts": planned_counts,
         "world": world_context,
         "world_ids": world_ids,
-        "pov_character_id": (entry or {}).get("pov_character_id") or chapter.get("pov_character_id"),
-        "pov": (bible.get("style") or {}).get("pov"),
-        "tone": (bible.get("style") or {}).get("tone"),
+        "pov_character_id": pov_character_id,
+        "pov_name": pov_name,
+        "pov_mode": pov_mode,
+        "pov": style.get("pov"),
+        "tone": style.get("tone"),
         "target_words": chapter_words,
     }
     return {
@@ -782,9 +838,12 @@ def build_chapter_context(store: ProjectStore, config: AppConfig, chapter: dict)
         "world_context": world_context,
         "character_payload": character_payload,
         "speaker_ids": speaker_ids,
+        "pov_character_id": pov_character_id,
+        "pov_mode": pov_mode,
+        "planned_counts": planned_counts,
         "previous_chapters": previous_chapters,
         "book_digest": book_digest,
-        "style": bible.get("style") or {},
+        "style": style,
         "adapter": adapter,
         "metadata": metadata,
     }
@@ -902,11 +961,29 @@ def generate_chapter(
     use_multi = (enabled if multi_turn is None else bool(multi_turn)) and len(groups) > 1
 
     summary_text = (entry or {}).get("summary") or chapter.get("outline") or ""
-    pov_label = POV_LABELS.get((style.get("pov") or "").strip(), style.get("pov") or "第三人称有限视角")
+    pov_value = (context.get("pov_mode") or (style.get("pov") or "").strip() or "third_limited").strip()
+    pov_label = POV_LABELS.get(pov_value, pov_value)
+    pov_id = context.get("pov_character_id")
+    name_by_id = {item.get("id"): item.get("name") for item in context["characters"] if item.get("id")}
+    # POV 缺失时不允许静默套用默认值：页面必须先让作者指定视角人物或显式选择全知视角
+    if not pov_id and pov_value != "third_omniscient":
+        raise AdapterError(
+            ErrorCode.INVALID_INPUT,
+            "本章还没有指定视角人物：请先选择本章视角人物，或显式切换为全知视角后再生成",
+            detail={"code": "BINDING_POV_MISSING", "chapter": chapter_id},
+        )
+    if pov_value == "third_omniscient":
+        pov_line = f"视角：全知视角（{pov_label}，不绑定单一角色）"
+    else:
+        pov_line = (
+            f"视角人物：{name_by_id.get(pov_id) or '已删除角色'}（{pov_label}，"
+            "只写该人物能感知到的内容，其他人物的内心活动不得越过视角）"
+        )
     tone_label = style.get("tone") or "沿用既有基调"
     instruction_lines = [
         f"写《{chapter.get('title')}》本章正文，篇幅参考约 {chapter_words} 字。",
         f"本章摘要：{summary_text or '按设定推进主线'}",
+        pov_line,
         "按以下节拍顺序推进：",
     ]
     for order, beat in enumerate(beats, start=1):
@@ -915,11 +992,13 @@ def generate_chapter(
         except (TypeError, ValueError):
             target = 0
         turning = "是" if beat.get("turning_point") else "否"
-        instruction_lines.append(f"{order}. {beat.get('summary')}（目标 {target} 字，转折点：{turning}）")
-    instruction_lines.append(f"视角：{pov_label}；基调：{tone_label}。")
+        names = [name_by_id.get(str(cid)) or "已删除角色" for cid in (beat.get("character_ids") or []) if str(cid).strip()]
+        present = "、".join(names) if names else "未指定"
+        instruction_lines.append(f"{order}. {beat.get('summary')}（目标 {target} 字，转折点：{turning}，出场：{present}）")
+    instruction_lines.append(f"基调：{tone_label}。")
     instruction_lines.append(
         "人物必须按角色卡的性格、背景、说话方式和关系行动，像真人在这个世界里做选择；"
-        "不同角色用各自口吻说话，不要为了推进剧情强行改变立场。"
+        "每个角色的语速、用词、口头禅与称呼习惯都要体现出来，不同角色的对白必须能分辨出是谁在说。"
     )
     instruction_lines.append(
         "输出格式：只输出正文，不要写章节标题或小标题，不要解释。"
@@ -954,6 +1033,9 @@ def generate_chapter(
         current_content=chapter.get("content") or "",
         budget_tokens=int(config.get("writing.context_budget_tokens") or 32768),
         book_digest=context["book_digest"],
+        pov_character_id=context.get("pov_character_id"),
+        planned_counts=context.get("planned_counts"),
+        pov_mode=context.get("pov_mode"),
     )
     req = assembler.build("chapter", instruction, context["speaker_ids"])
     # metadata 保持原有字段不变：离线适配器依赖它，且产物需要确定性一致
@@ -966,7 +1048,7 @@ def generate_chapter(
         if work_id:
             req.prompt_cache_key = f"{work_id}:{chapter_id}"
         outcome = _generate_chapter_rounds(
-            context["adapter"], req, groups, total_beats, chapter_words, rounds_cap, on_delta=on_delta
+            context["adapter"], req, groups, total_beats, chapter_words, rounds_cap, on_delta=on_delta, name_by_id=name_by_id
         )
         content = outcome["content"].strip()
         provider = outcome["provider"]
@@ -1143,7 +1225,13 @@ def _group_words(group: list[dict], total_beats: int, chapter_words: int) -> int
     return max(100, round(chapter_words * len(group) / total_beats))
 
 
-def _beats_round_instruction(groups: list[list[dict]], index: int, total_beats: int, chapter_words: int) -> str:
+def _beats_round_instruction(
+    groups: list[list[dict]],
+    index: int,
+    total_beats: int,
+    chapter_words: int,
+    name_by_id: dict | None = None,
+) -> str:
     """构造第 index 轮（0 起）的续写指令。
 
     参数:
@@ -1151,20 +1239,31 @@ def _beats_round_instruction(groups: list[list[dict]], index: int, total_beats: 
         index: 当前轮下标（0 起；首轮不走本函数）。
         total_beats: 本章节拍总数。
         chapter_words: 全章参考字数。
+        name_by_id: 角色 ID → 姓名；用于写明本轮每个节拍的出场角色。
 
     返回:
-        一句话续写指令，写明本轮节拍范围与篇幅参考。
+        一句话续写指令，写明本轮节拍范围、出场角色与篇幅参考。
     """
     start = sum(len(group) for group in groups[:index])
     group = groups[index]
     end = start + len(group)
-    beat_lines = "；".join(
-        f"第 {start + offset + 1} 个：{beat.get('summary') or ''}" for offset, beat in enumerate(group)
-    )
+    names = name_by_id or {}
+
+    def beat_line(offset: int, beat: dict) -> str:
+        """渲染单条节拍：摘要 + 出场角色姓名（不输出内部 ID）。"""
+        present = [
+            names.get(str(cid)) or "已删除角色"
+            for cid in (beat.get("character_ids") or [])
+            if str(cid).strip()
+        ]
+        return f"第 {start + offset + 1} 个：{beat.get('summary') or ''}（出场：{'、'.join(present) if present else '未指定'}）"
+
+    beat_lines = "；".join(beat_line(offset, beat) for offset, beat in enumerate(group))
     next_note = f"不要写第 {end + 1} 个及之后的节拍。" if end < total_beats else "本章节拍到此结束。"
     return (
         f"继续写第 {start + 1}–{end} 个节拍（全章共 {total_beats} 个），紧接上文，不要重复已写内容。"
-        f"本轮节拍：{beat_lines}。写完停在第 {end} 个节拍边界，{next_note}"
+        f"本轮节拍：{beat_lines}。只让这些出场角色行动，未出场的角色不得突然出现；"
+        f"写完停在第 {end} 个节拍边界，{next_note}"
         f"本轮参考约 {_group_words(group, total_beats, chapter_words)} 字，只作篇幅参考。只输出新增正文。"
     )
 
@@ -1248,6 +1347,7 @@ def _generate_chapter_rounds(
     chapter_words: int,
     max_rounds: int,
     on_delta=None,
+    name_by_id: dict | None = None,
 ) -> dict:
     """按节拍分组串行写作，写完整组即推进节拍指针。
 
@@ -1264,6 +1364,7 @@ def _generate_chapter_rounds(
         chapter_words: 全章参考字数。
         max_rounds: 最大轮数（保险上限）。
         on_delta: 流式增量回调；传入时每轮改为流式生成。
+        name_by_id: 角色 ID → 姓名，用于本轮指令写明出场角色。
 
     返回:
         {"content", "rounds", "beats_done", "stop_reason", "provider"}。
@@ -1285,7 +1386,7 @@ def _generate_chapter_rounds(
                 messages=list(req.messages)
                 + [
                     Message("assistant", content),
-                    Message("user", _beats_round_instruction(groups, index, total_beats, chapter_words)),
+                    Message("user", _beats_round_instruction(groups, index, total_beats, chapter_words, name_by_id)),
                 ],
             )
         result = _generate_validated(adapter, request, on_delta, f"第 {index + 1} 轮正文")
@@ -1914,6 +2015,20 @@ _CHARACTER_TOOL_SCHEMA = {
             "description": "3-5 个性格短标签，每个不超过 20 字",
         },
         "background": {"type": "string", "description": "人物背景，500 字以内"},
+        "speech_style": {
+            "type": "object",
+            "description": "写作时直接注入提示词的口吻约束：语速、音高、口音/用词习惯、口头禅",
+            "properties": {
+                "tempo": {"type": "string", "description": "语速，如「偏慢，常停顿」"},
+                "pitch": {"type": "string", "description": "音高/音色，如「低沉沙哑」"},
+                "accent": {"type": "string", "description": "口音或用词习惯，如「带江南口音，爱用反问」"},
+                "catchphrases": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "1-3 句标志性口头禅，写作时可直接复用",
+                },
+            },
+        },
         "appearance_prompt": {"type": "string", "description": "外貌提示词，用于配图（可与 appearance_desc_en 一致）"},
         "negative_prompt": {"type": "string", "description": "配图负向提示词（可与 appearance_negative_en 一致）"},
         "voice_description_zh": {
@@ -1970,7 +2085,10 @@ _CHARACTER_DESC_RULES = (
     "5) appearance_negative_zh：中文负向说明，用名词短语列出出图应排除的元素（如眼镜、胡须、伤疤），"
     "不要写成否定句堆砌；\n"
     "6) appearance_negative_en：英文 negative prompt，逗号分隔的排除项（如 glasses, beard, scar），"
-    "不要写 not/no 句式。"
+    "不要写 not/no 句式；\n"
+    "7) speech_style：写作时直接进提示词的口吻约束，必须给 tempo（语速）、pitch（音高/音色）、"
+    "accent（口音或用词习惯）、catchphrases（1-3 句口头禅）；四个人物之间的语速、用词和口头禅要能明显区分，"
+    "不能千篇一律。"
 )
 
 #: 龙套条目 schema：在人物 schema 上要求 stock
@@ -2157,7 +2275,23 @@ _BEAT_ITEM_SCHEMA = _OUTLINE_TOOL_SCHEMA["properties"]["acts"]["items"]["propert
 #: 三级分层生成：阶段三某章的节拍（一次补齐）
 _HIER_BEATS_TOOL_SCHEMA = {
     "type": "object",
-    "properties": {"beats": {"type": "array", "description": "本章全部节拍，按顺序排列", "items": _BEAT_ITEM_SCHEMA}},
+    "properties": {
+        "beats": {"type": "array", "description": "本章全部节拍，按顺序排列", "items": _BEAT_ITEM_SCHEMA},
+        "character_arcs": {
+            "type": "array",
+            "description": "本章主要角色弧线：角色在本章从什么状态走到什么状态（可选，最多 3 条）",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "character_id": {"type": "string", "description": "角色 ID，必须来自给定角色表"},
+                    "from_state": {"type": "string", "description": "本章开始时的状态"},
+                    "to_state": {"type": "string", "description": "本章结束时的状态"},
+                    "note": {"type": "string", "description": "变化原因（可选）"},
+                },
+                "required": ["character_id", "to_state"],
+            },
+        },
+    },
     "required": ["beats"],
 }
 
@@ -3091,6 +3225,28 @@ def generate_characters(
     }
 
 
+def _clean_speech_style(value) -> dict | None:
+    """清洗人物说话方式（写作时直接注入提示词）。
+
+    参数:
+        value: 模型返回的 speech_style 对象，或旧数据。
+
+    返回:
+        `{tempo,pitch,accent,catchphrases}`；四项全空时返回 None。
+    """
+    if not isinstance(value, dict):
+        return None
+    clean = {
+        "tempo": _check_text(value.get("tempo"), 40, "说话方式的语速"),
+        "pitch": _check_text(value.get("pitch"), 40, "说话方式的音高"),
+        "accent": _check_text(value.get("accent"), 40, "说话方式的口音"),
+        "catchphrases": _clean_str_list(value.get("catchphrases"), 60, "说话方式的口头禅")[:3],
+    }
+    if not any([clean["tempo"], clean["pitch"], clean["accent"], clean["catchphrases"]]):
+        return None
+    return clean
+
+
 def _clean_character_row(row, index: int) -> dict:
     """清洗单个 LLM 人物条目（重名由调用方判断）。
 
@@ -3119,6 +3275,7 @@ def _clean_character_row(row, index: int) -> dict:
         "age_range": _check_text(row.get("age_range"), 40, f"人物 {name} 的年龄区间") or None,
         "personality": _clean_str_list(row.get("personality"), 120, f"人物 {name} 的性格"),
         "background": _check_text(row.get("background"), 2000, f"人物 {name} 的背景"),
+        "speech_style": _clean_speech_style(row.get("speech_style")),
         "appearance_prompt": _check_text(row.get("appearance_prompt"), 2000, f"人物 {name} 的外貌提示词"),
         "negative_prompt": _check_text(row.get("negative_prompt"), 1000, f"人物 {name} 的负向提示词"),
         "voice_description_zh": _check_text(row.get("voice_description_zh"), 1000, f"人物 {name} 的中文音色描述"),
@@ -3348,6 +3505,7 @@ def _clean_character_entry(row: dict) -> dict:
         "age_range": _check_text(row.get("age_range"), 40, f"人物 {name} 的年龄区间") or None,
         "personality": _clean_str_list(row.get("personality"), 120, f"人物 {name} 的性格"),
         "background": _check_text(row.get("background"), 2000, f"人物 {name} 的背景"),
+        "speech_style": _clean_speech_style(row.get("speech_style")),
         "appearance_prompt": _check_text(row.get("appearance_prompt"), 2000, f"人物 {name} 的外貌提示词"),
         "negative_prompt": _check_text(row.get("negative_prompt"), 1000, f"人物 {name} 的负向提示词"),
         "voice_description_zh": _check_text(row.get("voice_description_zh"), 1000, f"人物 {name} 的中文音色描述"),
@@ -3706,61 +3864,360 @@ def bind_outline_characters(store: ProjectStore, bible: dict) -> dict:
     return bind_outline_context(bible, worlds, store.load_characters()["characters"])
 
 
-def validate_chapter_binding(store: ProjectStore, chapter_id: str) -> dict:
-    """校验章节是否已绑定可用的世界与角色。
+def _effective_pov_mode(entry: dict | None, chapter: dict, style: dict) -> str:
+    """计算本章实际生效的视角写法。
+
+    优先级：设定库章节的 pov_mode → 章节副本 pov_mode → 全书 style.pov → 第三人称有限。
+
+    参数:
+        entry: 设定库大纲章节；没有绑定时为 None。
+        chapter: 章节文件。
+        style: 设定库 style。
+
+    返回:
+        视角枚举值（first/second/third_limited/third_omniscient）。
+    """
+    for value in ((entry or {}).get("pov_mode"), chapter.get("pov_mode"), style.get("pov")):
+        text = str(value or "").strip()
+        if text:
+            return text
+    return "third_limited"
+
+
+def sync_chapter_pov(
+    store: ProjectStore,
+    chapter_id: str,
+    pov_character_id: str | None,
+    pov_mode: str | None = None,
+    update_mode: bool = False,
+) -> dict:
+    """把本章 POV 同步写进设定库与章节文件（消灭两份死数据）。
+
+    设定库是主源，章节文件只作为副本保存；两处同时写入，页面与生成读取的结果一致。
+
+    参数:
+        store: 工程。
+        chapter_id: 章节 ID。
+        pov_character_id: 视角人物 ID；None 表示不绑定（全知视角常用）。
+        pov_mode: 视角写法覆盖；None 表示跟随全书。
+        update_mode: 是否改写 pov_mode（False 时只改人物，不动视角写法）。
+
+    返回:
+        {"chapter": 章节ID, "pov_character_id", "pov_mode", "settings_revision"}。
+
+    异常:
+        ValueError: 角色不存在，或视角写法非法。
+    """
+    allowed_modes = {"first", "second", "third_limited", "third_omniscient", None, ""}
+    if pov_mode not in allowed_modes:
+        raise ValueError(f"视角写法非法：{pov_mode}（可选 first/second/third_limited/third_omniscient）")
+    settings = SettingsStore(store.root)
+    bible = settings.ensure()
+    entry = settings.find_outline_chapter(bible, chapter_id)
+    cast_ids = {
+        str(item.get("id"))
+        for item in store.load_characters()["characters"]
+        if item.get("id") and item.get("role") != "narrator"
+    }
+    if pov_character_id and pov_character_id not in cast_ids:
+        raise ValueError(f"角色不存在：{pov_character_id}；请先在人物页生成人物")
+    if entry is not None:
+        entry["pov_character_id"] = pov_character_id or None
+        if update_mode:
+            entry["pov_mode"] = pov_mode or None
+        bible = settings.save(bible)
+    chapter = None
+    try:
+        chapter = store.load_chapter(chapter_id)
+    except FileNotFoundError:
+        chapter = None
+    if chapter is not None:
+        chapter["pov_character_id"] = pov_character_id or None
+        if update_mode:
+            chapter["pov_mode"] = pov_mode or None
+        store.save_chapter(chapter)
+    return {
+        "chapter": chapter_id,
+        "pov_character_id": pov_character_id or None,
+        "pov_mode": (entry or {}).get("pov_mode") if entry is not None else (chapter or {}).get("pov_mode"),
+        "settings_revision": bible.get("settings_revision"),
+    }
+
+
+def bind_beat_characters(store: ProjectStore, chapter_id: str, beat_id: str, character_ids: list[str]) -> dict:
+    """把某个节拍的出场角色写入设定库（页面「节拍选角」）。
+
+    只改设定库里的计划选角，不触碰正文与章节文件；返回最新绑定供页面立即刷新。
+
+    参数:
+        store: 工程。
+        chapter_id: 章节 ID。
+        beat_id: 节拍 ID。
+        character_ids: 角色 ID 列表（去重，按传入顺序）。
+
+    返回:
+        `chapter_binding` 的返回值。
+
+    异常:
+        ValueError: 大纲章节/节拍不存在，或角色 ID 非法。
+    """
+    settings = SettingsStore(store.root)
+    bible = settings.ensure()
+    entry = settings.find_outline_chapter(bible, chapter_id)
+    if entry is None:
+        raise ValueError(f"本章还没有大纲条目：{chapter_id}；请先生成或落地大纲")
+    cast_ids = {
+        str(item.get("id"))
+        for item in store.load_characters()["characters"]
+        if item.get("id") and item.get("role") != "narrator" and item.get("id") != entities.NARRATOR_ID
+    }
+    beat = next((item for item in (entry.get("beats") or []) if item.get("id") == beat_id), None)
+    if beat is None:
+        raise ValueError(f"节拍不存在：{beat_id}")
+    clean: list[str] = []
+    for raw in character_ids or []:
+        value = str(raw or "").strip()
+        if not value:
+            continue
+        if value not in cast_ids:
+            raise ValueError(f"角色不存在或不可出场：{value}")
+        if value not in clean:
+            clean.append(value)
+    beat["character_ids"] = clean
+    settings.save(bible)
+    return chapter_binding(store, chapter_id)
+
+
+def chapter_binding(store: ProjectStore, chapter_id: str) -> dict:
+    """汇总本章的角色绑定、实际出场与对账结果（只读派生，不落盘）。
+
+    实际出场从 `scenes[].character_ids` 与 `lines[].speaker_id` 现算；计划出场只读大纲节拍。
 
     参数:
         store: 工程。
         chapter_id: 章节 ID。
 
     返回:
-        {"chapter_id", "source", "world_ids", "pov_character_id", "character_ids"}。
+        {
+          chapter_id, pov: {id,name}|null, pov_mode, blocking: [...], warnings: [...],
+          beats: [...], characters: [...],
+          audit: {planned_not_used, unplanned_appeared, pov_not_in_prose, missing_refs, unknown_speakers}
+        }。
+    """
+    settings = SettingsStore(store.root)
+    bible = settings.ensure()
+    entry = settings.find_outline_chapter(bible, chapter_id)
+    try:
+        chapter = store.load_chapter(chapter_id)
+    except FileNotFoundError:
+        # 大纲章还没落地：绑定信息仍要能看，实际出场视为空
+        chapter = {"pov_character_id": None, "scenes": []}
+    style = bible.get("style") or {}
+    characters = [
+        item
+        for item in store.load_characters()["characters"]
+        if item.get("id") and item.get("role") != "narrator"
+    ]
+    cast_by_id = {str(item["id"]): item for item in characters}
+    pov_id = (entry or {}).get("pov_character_id") or chapter.get("pov_character_id")
+    if pov_id == entities.NARRATOR_ID:
+        pov_id = None
+    pov_mode = _effective_pov_mode(entry, chapter, style)
+    beats = (entry or {}).get("beats") or []
+    planned_counts: dict[str, int] = {}
+    beat_rows: list[dict] = []
+    for position, beat in enumerate(beats, start=1):
+        ids = [str(cid) for cid in (beat.get("character_ids") or []) if str(cid).strip()]
+        for cid in ids:
+            planned_counts[cid] = planned_counts.get(cid, 0) + 1
+        beat_rows.append(
+            {
+                "beat_id": beat.get("id"),
+                "index": position,
+                "summary": beat.get("summary") or "",
+                "character_ids": ids,
+                "characters": [
+                    {
+                        "id": cid,
+                        "name": (cast_by_id.get(cid) or {}).get("name") or "已删除角色",
+                        "role": (cast_by_id.get(cid) or {}).get("role"),
+                    }
+                    for cid in ids
+                ],
+            }
+        )
+    # 实际出场：场景标签 + 台词说话人
+    lines_by_char: dict[str, int] = {}
+    scenes_by_char: dict[str, int] = {}
+    unknown: dict[str, dict] = {}
+    for scene in chapter.get("scenes") or []:
+        for cid in scene.get("character_ids") or []:
+            key = str(cid or "").strip()
+            if key and key not in (entities.NARRATOR_ID, entities.UNKNOWN_SPEAKER_ID):
+                scenes_by_char[key] = scenes_by_char.get(key, 0) + 1
+        for line in scene.get("lines") or []:
+            key = str(line.get("speaker_id") or "").strip()
+            if not key or key == entities.NARRATOR_ID:
+                continue
+            lines_by_char[key] = lines_by_char.get(key, 0) + 1
+            if key == entities.UNKNOWN_SPEAKER_ID or key not in cast_by_id:
+                row = unknown.setdefault(key, {"speaker_id": key, "lines": 0, "sample": ""})
+                row["lines"] += 1
+                if not row["sample"]:
+                    row["sample"] = str(line.get("text") or "")[:60]
+    actual_ids = {cid for cid, count in lines_by_char.items() if count} | {
+        cid for cid, count in scenes_by_char.items() if count
+    }
+    actual_ids = {cid for cid in actual_ids if cid not in (entities.UNKNOWN_SPEAKER_ID,)}
+    rows: list[dict] = []
+    for cid in sorted(set(cast_by_id) | set(planned_counts) | actual_ids | ({pov_id} if pov_id else set())):
+        if cid in (entities.NARRATOR_ID, entities.UNKNOWN_SPEAKER_ID):
+            continue
+        item = cast_by_id.get(cid) or {}
+        rows.append(
+            {
+                "id": cid,
+                "name": item.get("name") or "已删除角色",
+                "role": item.get("role") or "minor",
+                "planned": cid in planned_counts,
+                "planned_beats": planned_counts.get(cid, 0),
+                "lines": lines_by_char.get(cid, 0),
+                "scenes": scenes_by_char.get(cid, 0),
+                "is_pov": cid == pov_id,
+            }
+        )
+    missing_refs: list[dict] = []
+    for cid in planned_counts:
+        if cid not in cast_by_id:
+            missing_refs.append({"kind": "beat", "id": cid})
+    if pov_id and pov_id not in cast_by_id:
+        missing_refs.append({"kind": "pov", "id": pov_id})
+    blocking: list[dict] = []
+    warnings: list[dict] = []
+    if pov_mode != "third_omniscient" and not pov_id:
+        blocking.append(
+            {
+                "code": "BINDING_POV_MISSING",
+                "message": "本章还没有指定视角人物：请选择本章视角人物，或显式切换为全知视角",
+            }
+        )
+    if not planned_counts and not pov_id:
+        blocking.append(
+            {
+                "code": "BINDING_CHARACTER_MISSING",
+                "message": "本章还没有绑定任何角色：请先在大纲里给节拍选择出场角色",
+            }
+        )
+    empty_beats = [row["index"] for row in beat_rows if not row["character_ids"]]
+    if empty_beats:
+        warnings.append(
+            {
+                "code": "BINDING_BEAT_EMPTY",
+                "message": "以下节拍还没有指定出场角色：第 " + "、".join(str(i) for i in empty_beats) + " 个",
+            }
+        )
+    planned_not_used = [
+        {"id": row["id"], "name": row["name"]}
+        for row in rows
+        if row["planned"] and row["lines"] == 0 and row["scenes"] == 0
+    ]
+    if planned_not_used:
+        warnings.append(
+            {
+                "code": "PLAN_UNUSED_CHARACTER",
+                "message": "计划出场但正文里没有出现：" + "、".join(item["name"] for item in planned_not_used),
+            }
+        )
+    unplanned = [
+        {"id": row["id"], "name": row["name"]}
+        for row in rows
+        if not row["planned"] and (row["lines"] or row["scenes"]) and row["id"] in cast_by_id
+    ]
+    if unplanned:
+        warnings.append(
+            {
+                "code": "PLAN_UNPLANNED_CHARACTER",
+                "message": "正文里出现了计划外角色：" + "、".join(item["name"] for item in unplanned),
+            }
+        )
+    pov_row = next((row for row in rows if row["id"] == pov_id), None) if pov_id else None
+    pov_not_in_prose = bool(pov_id and pov_row and pov_row["lines"] == 0 and pov_row["scenes"] == 0)
+    if pov_not_in_prose:
+        warnings.append(
+            {"code": "POV_NOT_IN_PROSE", "message": f"视角人物「{pov_row['name']}」没有在正文场景或台词里出现"}
+        )
+    if unknown:
+        warnings.append(
+            {
+                "code": "UNKNOWN_SPEAKER",
+                "message": f"有 {sum(item['lines'] for item in unknown.values())} 行台词无法对应到角色卡",
+            }
+        )
+    pov_name = (cast_by_id.get(pov_id) or {}).get("name") if pov_id else None
+    return {
+        "chapter_id": chapter_id,
+        "pov": {"id": pov_id, "name": pov_name or ("已删除角色" if pov_id else None)} if pov_id else None,
+        "pov_mode": pov_mode,
+        "blocking": blocking,
+        "warnings": warnings,
+        "beats": beat_rows,
+        "characters": rows,
+        "audit": {
+            "planned_not_used": planned_not_used,
+            "unplanned_appeared": unplanned,
+            "pov_not_in_prose": pov_not_in_prose,
+            "missing_refs": missing_refs,
+            "unknown_speakers": list(unknown.values()),
+        },
+    }
+
+
+def validate_chapter_binding(store: ProjectStore, chapter_id: str) -> dict:
+    """校验章节是否已绑定可用的世界、视角人物与角色。
+
+    POV 缺失时阻断生成（除非本章显式设为全知视角）；不再静默套用默认主角。
+
+    参数:
+        store: 工程。
+        chapter_id: 章节 ID。
+
+    返回:
+        {"chapter_id", "source", "world_ids", "pov_character_id", "pov_mode", "character_ids"}。
 
     异常:
-        ValueError: 绑定的世界条目不存在，或缺少非旁白角色，提示文案带操作指引。
+        ValueError: 绑定的世界条目不存在、缺少视角人物或缺少非旁白角色。
     """
-    settings_store = SettingsStore(store.root)
-    bible = settings_store.ensure()
+    binding = chapter_binding(store, chapter_id)
     characters = [
         item
         for item in store.load_characters()["characters"]
         if item.get("id") and item.get("role") != "narrator" and item.get("id") != entities.NARRATOR_ID
     ]
     cast_ids = {item["id"] for item in characters}
+    settings_store = SettingsStore(store.root)
+    bible = settings_store.ensure()
     entry = settings_store.find_outline_chapter(bible, chapter_id)
-
-    if entry:
-        # 世界是可选项：未绑定时回退设定库摘要继续生成；一旦绑定，引用的条目必须存在
-        world_ids = list(entry.get("world_ids") or [])
-        if world_ids:
-            world_store = WorldStore(store.root)
-            known = {item.get("id") for item in (world_store.list_worlds() if world_store.exists() else [])}
-            missing = [world_id for world_id in world_ids if world_id not in known]
-            if missing:
-                raise ValueError(f"本章绑定的世界条目不存在：{'、'.join(missing)}；请先在世界页生成并绑定世界")
-        beat_ids = {cid for beat in (entry.get("beats") or []) for cid in (beat.get("character_ids") or [])}
-        linked = {cid for cid in {entry.get("pov_character_id"), *beat_ids} if cid and cid != entities.NARRATOR_ID}
-        valid = linked & cast_ids
-        if not valid:
-            raise ValueError("本章还没有绑定角色：请先在人物页生成主要人物并在大纲页绑定")
-        return {
-            "chapter_id": chapter_id,
-            "source": "outline",
-            "world_ids": world_ids,
-            "pov_character_id": entry.get("pov_character_id"),
-            "character_ids": sorted(valid),
-        }
-
-    if not cast_ids:
-        raise ValueError("本章还没有角色：请先在人物页生成主要人物并在大纲页绑定")
-    chapter = store.load_chapter(chapter_id)
-    pov = chapter.get("pov_character_id")
+    world_ids = list((entry or {}).get("world_ids") or [])
+    if world_ids:
+        world_store = WorldStore(store.root)
+        known = {item.get("id") for item in (world_store.list_worlds() if world_store.exists() else [])}
+        missing = [world_id for world_id in world_ids if world_id not in known]
+        if missing:
+            raise ValueError(f"本章绑定的世界条目不存在：{'、'.join(missing)}；请先在世界页生成并绑定世界")
+    blocking = binding.get("blocking") or []
+    if blocking:
+        raise ValueError(blocking[0]["message"])
+    linked = {row["id"] for row in binding["characters"] if row["planned"] or row["is_pov"]}
+    valid = linked & cast_ids
+    if not valid:
+        raise ValueError("本章还没有绑定角色：请先在人物页生成主要人物并在大纲页绑定")
     return {
         "chapter_id": chapter_id,
-        "source": "bible",
-        "world_ids": [],
-        "pov_character_id": pov if pov in cast_ids else None,
-        "character_ids": sorted(cast_ids),
+        "source": "outline" if entry else "bible",
+        "world_ids": world_ids,
+        "pov_character_id": binding.get("pov", {}).get("id") if binding.get("pov") else None,
+        "pov_mode": binding.get("pov_mode"),
+        "character_ids": sorted(valid),
     }
 
 

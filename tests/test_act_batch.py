@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from novel_drama.config import load_config
+from novel_drama.models import entities
 from novel_drama.store import ProjectStore
 from novel_drama.store.settings_store import SettingsStore
 from novel_drama.writing.act_batch import ActBatchCanceled, generate_act_chapters
@@ -34,6 +35,20 @@ class ActBatchTest(unittest.TestCase):
         self.config = load_config(str(self._runtime_config()))
         generate_outline(self.store, self.config, acts=1, chapters_per_act=2, beats_per_chapter=2, chapter_words=300)
         apply_outline(self.store)
+        # 新版写作要求必须绑定视角人物与出场角色：这里显式造两个角色并写入大纲
+        table = self.store.load_characters()
+        lead = entities.new_character("沈砚", role="protagonist")
+        lead["speech_style"] = {"tempo": "偏慢", "pitch": "低沉", "accent": "北方口音", "catchphrases": ["先别急"]}
+        peer = entities.new_character("林见夏", role="supporting")
+        table["characters"].extend([lead, peer])
+        self.store.save_characters(table)
+        settings = SettingsStore(self.tmp.name)
+        bible = settings.load()
+        for chapter in (bible.get("outline") or {}).get("acts")[0].get("chapters") or []:
+            chapter["pov_character_id"] = lead["id"]
+            for beat in chapter.get("beats") or []:
+                beat["character_ids"] = [lead["id"], peer["id"]]
+        settings.save(bible)
         bible = SettingsStore(self.tmp.name).load()
         self.act = (bible.get("outline") or {}).get("acts")[0]
         self.chapters = self.act.get("chapters") or []

@@ -1128,6 +1128,12 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--chapter", required=True)
     q.add_argument("--worlds", help="世界 ID，逗号分隔；传空串表示清空")
     q.add_argument("--pov", help="POV 角色 ID；传空串表示清空")
+    q.add_argument(
+        "--pov-mode",
+        dest="pov_mode",
+        choices=["first", "second", "third_limited", "third_omniscient"],
+        help="本章视角覆盖；不传则跟随全书写法，传 third_omniscient 可显式使用全知视角",
+    )
     q.set_defaults(func=cmd_outline_bind)
     q = p_sub.add_parser("continue", help="在已有大纲之后追加新章（默认预览，--apply 才写设定库）")
     q.add_argument("--chapters", type=int, help="本次追加章数（默认取配置或 3）；与 --acts 同时给出时以本参数为准")
@@ -1208,6 +1214,9 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--appearance-negative-zh", dest="appearance_negative_zh", help="中文负向说明（空串表示清空）")
     q.add_argument("--appearance-negative-en", dest="appearance_negative_en", help="英文负向提示词（空串表示清空）")
     q.add_argument("--situation", help="当前处境")
+    q.add_argument("--knowledge", help="已知信息，逗号分隔或 JSON 数组（空串表示清空）")
+    q.add_argument("--relations", help="结构化关系 JSON 数组：[{target_id,label,sentiment,note}]")
+    q.add_argument("--speech-style", dest="speech_style", help="说话方式 JSON：{tempo,pitch,accent,catchphrases}")
     q.add_argument("--voice-profile", dest="voice_profile", help="音色描述 JSON（空串表示清空）")
     q.add_argument("--stock", help="龙套槽位 JSON（空串表示清空）")
     q.add_argument("--relationship", action="append", help="`目标ID=备注`，可重复")

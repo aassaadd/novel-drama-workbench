@@ -7,7 +7,7 @@
 产出原则：
 - 只使用 `metadata.characters` 里已有的角色，不新造人物；
 - 同 seed + 同输入 → 完全相同的输出（可回归、可 diff）；
-- 正文对白用中文引号并让说话人名字出现在引号前 30 字内，保证 `split_lines` 能识别。
+- 正文对白用中文引号，并在引号前后给出说话人或明确 cue，保证 `split_lines` 能识别。
 """
 
 from __future__ import annotations
@@ -158,6 +158,10 @@ class OfflineWritingAdapter:
             text = self._summarize(meta)
         elif task == "recap":
             text = self._recap(meta)
+        elif task == "character_updates":
+            text = self._character_updates(meta)
+        elif task == "consistency":
+            text = self._consistency(meta)
         elif task == "script":
             text = self._script(meta)
         elif task == "image_prompt":
@@ -172,7 +176,7 @@ class OfflineWritingAdapter:
             text = self._freeform(req)
         else:
             raise ValueError(
-                f"离线写作不支持的 task={task!r}（可选 outline/chapter/summarize/recap/script/image_prompt/setting/character/polish/freeform）"
+                f"离线写作不支持的 task={task!r}（可选 outline/chapter/summarize/recap/character_updates/consistency/script/image_prompt/setting/character/polish/freeform）"
             )
         return TextGenResult(
             text=text,
@@ -372,6 +376,18 @@ class OfflineWritingAdapter:
                         "title": title,
                         "summary": f"{names[chapter_no % len(names)]}面对新的线索，冲突升级到不可回避的地步。",
                         "beats": beats,
+                        "character_arcs": (
+                            [
+                                {
+                                    "character_id": char_ids[chapter_no % len(char_ids)],
+                                    "from_state": "维持现状",
+                                    "to_state": "被迫做出选择",
+                                    "note": "离线规则：跟随章号推进",
+                                }
+                            ]
+                            if char_ids
+                            else []
+                        ),
                     }
                 )
             acts.append(
@@ -401,6 +417,14 @@ class OfflineWritingAdapter:
         beats = meta.get("beats") or [{"summary": meta.get("summary") or "推进主线", "target_words": 1000}]
         characters = [item for item in (meta.get("characters") or []) if item.get("name")]
         names = [item["name"] for item in characters] or ["主人公"]
+        # 要求生成侧必须把节拍选角与视角人物带进元信息；离线实现同样只用这些数据，不做额外兜底
+        beat_rows = meta.get("beat_characters") or []
+        speech_by_name = {
+            str(item.get("name")): item.get("speech_style") or {}
+            for item in characters
+            if item.get("name")
+        }
+        pov_name = str(meta.get("pov_name") or "").strip()
         target_total = max(200, int(meta.get("target_words") or 1200))
         per_beat = max(120, target_total // max(1, len(beats)))
         rng = self._rng(meta, "chapter")
@@ -408,13 +432,27 @@ class OfflineWritingAdapter:
 
         for beat_index, beat in enumerate(beats):
             summary = (beat.get("summary") or "").strip() or "事情继续向前推进"
-            lead = names[beat_index % len(names)]
-            other = names[(beat_index + 1) % len(names)] if len(names) > 1 else lead
+            row = beat_rows[beat_index] if beat_index < len(beat_rows) else {}
+            present = [str(name) for name in (row.get("character_names") or []) if str(name).strip()]
+            present = present or names
+            lead = present[0]
+            if beat_index == 0 and pov_name:
+                # 视角人物决定开场视角：首段必须是视角人物在感知
+                lead = pov_name
+            other = present[1] if len(present) > 1 else present[0]
             # 叙述段：把节拍摘要展开成两句可读叙述
             paragraphs.append(f"{lead}停在门口，先看了一眼屋里的人。{summary}。")
             paragraphs.append(rng.choice(NARRATION_POOL))
             # 对白段：说话人名字必须出现在引号前 30 字内，供规则切分识别
             line_text = self._dialogue_line(summary, beat_index, rng)
+            catchphrases = [
+                str(item).strip()
+                for item in (speech_by_name.get(other) or {}).get("catchphrases") or []
+                if str(item).strip()
+            ]
+            if catchphrases:
+                # 口头禅直接进入对白，便于验证「说话方式」确实影响了输出
+                line_text = f"{catchphrases[beat_index % len(catchphrases)]}……{line_text}"
             paragraphs.append(f"{other}把手里的东西放下，看着他：“{line_text}”")
             paragraphs.append(f"{lead}没有马上接话。{rng.choice(NARRATION_POOL)}")
             # 补足该节拍目标字数
@@ -515,6 +553,97 @@ class OfflineWritingAdapter:
             ensure_ascii=False,
             indent=2,
         )
+
+    def _character_updates(self, meta: dict) -> str:
+        """离线生成角色状态回流提案（确定性）。
+
+        参数:
+            meta: {characters, content, summary, chapter_id}。
+
+        返回:
+            JSON 字符串（`{"updates": [...]}`）。
+        """
+        content = str(meta.get("content") or "")
+        summary = str(meta.get("summary") or "").strip()
+        chapter_id = str(meta.get("chapter_id") or "")
+        characters = [item for item in (meta.get("characters") or []) if item.get("character_id")]
+        present = [item for item in characters if str(item.get("name") or "") in content]
+        targets = present[:2] or characters[:1]
+        updates = []
+        for item in targets:
+            updates.append(
+                {
+                    "character_id": item.get("character_id"),
+                    "situation": f"第 {chapter_id} 章结束后：{(summary or content)[:120]}",
+                    "knowledge_add": [summary[:160]] if summary else [],
+                    "relations": [],
+                    "arc_note": "离线规则：按本章摘要推进",
+                }
+            )
+        if len(targets) >= 2:
+            updates[0]["relations"] = [
+                {
+                    "target_id": targets[1].get("character_id"),
+                    "label": "同章交集",
+                    "sentiment": "neutral",
+                    "note": "离线规则：本章共同出场",
+                }
+            ]
+        return json.dumps({"updates": updates}, ensure_ascii=False, indent=2)
+
+    def _consistency(self, meta: dict) -> str:
+        """离线做角色一致性检查（确定性，覆盖口吻/计划/视角）。
+
+        参数:
+            meta: {characters, content, pov_name, chapter_id}。
+
+        返回:
+            JSON 字符串（`{"issues": [...]}`）。
+        """
+        content = str(meta.get("content") or "")
+        characters = [item for item in (meta.get("characters") or []) if item.get("character_id")]
+        issues = []
+        for item in characters:
+            name = str(item.get("name") or "")
+            if name and name not in content:
+                issues.append(
+                    {
+                        "character_id": item.get("character_id"),
+                        "kind": "unplanned",
+                        "level": "medium",
+                        "message": f"「{name}」在本章正文里没有出现",
+                        "evidence": "",
+                    }
+                )
+        phrases = [
+            str(phrase)
+            for item in characters
+            for phrase in ((item.get("speech_style") or {}).get("catchphrases") or [])
+            if str(phrase).strip()
+        ]
+        if phrases and not any(phrase in content for phrase in phrases):
+            first = characters[0] if characters else {}
+            issues.append(
+                {
+                    "character_id": first.get("character_id"),
+                    "kind": "speech",
+                    "level": "medium",
+                    "message": "正文没有体现任何角色的口头禅，口吻可能趋于一致",
+                    "evidence": "",
+                }
+            )
+        pov_name = str(meta.get("pov_name") or "").strip()
+        if pov_name and pov_name not in content:
+            issues.append(
+                {
+                    "character_id": None,
+                    "kind": "pov",
+                    "level": "high",
+                    "message": f"视角人物「{pov_name}」没有在正文里出现",
+                    "evidence": "",
+                }
+            )
+        return json.dumps({"issues": issues}, ensure_ascii=False, indent=2)
 
     def _recap(self, meta: dict) -> str:
         """生成本章摘要与滚动全书摘要（离线确定性实现）。
@@ -912,6 +1041,12 @@ class OfflineWritingAdapter:
             ),
             "appearance_negative_zh": "眼镜, 胡须, 浓妆, 伤疤, 水印, 文字, 多余手指",
             "appearance_negative_en": "glasses, beard, mustache, heavy makeup, scar, watermark, text, extra fingers",
+            "speech_style": {
+                "tempo": "中等偏慢" if role in ("protagonist", "antagonist") else "偏快",
+                "pitch": f"{gender_word_zh}声中低音区",
+                "accent": "北方口音" if gender == "male" else "南方口音",
+                "catchphrases": ["这事没那么简单", "先别急"] if role == "protagonist" else ["我早说过", "随你"],
+            },
         }
 
     def _character(self, meta: dict) -> str:

@@ -1066,6 +1066,9 @@ def unresolved_speaker_lines(store, chapter_ids: list[str] | None = None) -> lis
             for line_no, line in enumerate(lines, start=1):
                 if not (line.get("text") or "").strip():
                     continue
+                # 旁白不属于配音的说话人归属范围；即使 speaker 脏成 chr_unknown 也不计入未知台词
+                if (line.get("kind") or "dialogue") == "narration":
+                    continue
                 speaker = line.get("speaker_id")
                 if speaker and speaker != UNKNOWN_SPEAKER_ID and speaker in characters:
                     continue

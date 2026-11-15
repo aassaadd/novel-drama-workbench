@@ -163,11 +163,24 @@ svg { display: block; }
 .save-state.ok { color: var(--ok); }
 .save-state em { font-style: normal; }
 .tb-sep { width: 1px; height: 18px; flex: 0 0 1px; background: var(--line-2); margin: 0 4px; }
-/* 四个视图切换：同一套控件，当前视图高亮 */
-.view-tab { color: var(--text-3); }
+/* 四个一级视图：图标 + 文字标签，同一时刻只有一个选中 */
+.view-switch { display: flex; align-items: center; gap: 2px; flex: 0 0 auto; }
+.view-tab {
+  position: relative; display: inline-flex; align-items: center; gap: 6px;
+  height: 28px; padding: 0 10px; font-size: 12px; white-space: nowrap; color: var(--text-3);
+}
+.view-tab em { font-style: normal; }
 .view-tab:hover:not(:disabled) { color: var(--text); }
 .view-tab.on { background: var(--accent-weak); color: var(--accent-hi); box-shadow: inset 0 0 0 1px var(--accent-line); }
+/* 选中态除底色外再给字重与底部强调条，不只靠颜色区分 */
+.view-tab.on em { font-weight: 600; }
+.view-tab.on::after {
+  content: ""; position: absolute; left: 8px; right: 8px; bottom: -6px;
+  height: 2px; border-radius: 2px; background: var(--accent);
+}
 .view-tab:disabled { opacity: 0.35; }
+/* 章节切换：与视图组用分隔线断开，避免看起来像第五个视图 */
+.chapter-switch { display: flex; align-items: center; gap: 6px; min-width: 0; }
 /* 作品名 / 章节名 下拉触发区 */
 .chapter-picker { display: inline-flex; align-items: center; gap: 6px; height: 28px; max-width: 440px;
   padding: 0 9px; border: 1px solid transparent; border-radius: 7px; background: transparent;
@@ -176,6 +189,16 @@ svg { display: block; }
 .chapter-picker .cp-title { color: var(--text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 180px; }
 .chapter-picker .cp-cur { color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .chapter-picker .cp-caret { color: var(--text-4); font-size: 10px; }
+/* 窄屏：先收起作品名与保存态文案，保证四个视图的文字标签始终可见 */
+@media (max-width: 1180px) {
+  .chapter-picker .cp-title, .chapter-picker .sep { display: none; }
+  .chapter-picker { max-width: 240px; }
+  .save-state em { display: none; }
+}
+@media (max-width: 1024px) {
+  .save-state { display: none; }
+  .chapter-picker { max-width: 170px; }
+}
 /* 章节切换浮层 */
 .chap-pop { position: fixed; z-index: 90; width: 360px; background: var(--bg-2);
   border: 1px solid var(--line-2); border-radius: 10px; box-shadow: 0 18px 44px rgba(0, 0, 0, 0.5);

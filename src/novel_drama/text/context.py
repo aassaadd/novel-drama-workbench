@@ -4,8 +4,9 @@
     故事圣经 → 世界设定 → 角色卡 → 全书前情摘要 → 最近章摘要 → 本章大纲与节拍 → 前文摘录 → 任务指令。
 预算不足时按以下顺序裁剪：
     前文摘录 → 最近章摘要（先删最旧）→ 全书前情摘要 → 世界细节（先地点/术语，再硬规则/势力）
-    → 角色卡细节（先删背景，再删性格/说话方式）。
-故事圣经与本次任务指令永不被裁剪；角色设定只从 characters.json 取。
+    → 角色卡细节（先删已知信息，再删背景，再删性格/说话方式；POV 卡最后删）。
+故事圣经与本次任务指令永不被裁剪；角色设定只从 characters.json 取；
+关系键统一解析成姓名，任何 `chr_` 内部 ID 都不会进入提示词。
 """
 
 from __future__ import annotations
@@ -67,6 +68,9 @@ class ContextAssembler:
         excerpt_chars: int = EXCERPT_CHARS,
         story_digest: str = "",
         book_digest: str = "",
+        pov_character_id: str | None = None,
+        planned_counts: dict | None = None,
+        pov_mode: str | None = None,
     ):
         """绑定上下文素材。
 
@@ -83,6 +87,9 @@ class ContextAssembler:
             excerpt_chars: 每段前文摘录最多保留的字数（续写时调大，默认沿用 800）。
             story_digest: 全剧梗概文本（续写专用，与故事圣经一样固定保留，不参与裁剪）。
             book_digest: 全书滚动摘要文本（生成正文时注入，预算不足时可整段裁剪）。
+            pov_character_id: 本章视角人物 ID；由设定库/章节绑定传入，用于渲染「视角人物」。
+            planned_counts: 计划出场次数 `{角色ID: 节拍数}`；用于角色卡排序，不影响裁剪。
+            pov_mode: 本章视角覆盖（first/second/third_limited/third_omniscient）；None 时跟随全书。
         """
         self.work = work or {}
         self.bible = bible or {}
@@ -96,6 +103,16 @@ class ContextAssembler:
         self.excerpt_chars = max(1, int(excerpt_chars or EXCERPT_CHARS))
         self.story_digest = story_digest or ""
         self.book_digest = book_digest or ""
+        self.pov_character_id = _text(pov_character_id) or None
+        self.planned_counts = {str(key): int(value or 0) for key, value in (planned_counts or {}).items()}
+        self.pov_mode = _text(pov_mode) or None
+        #: 角色 ID → 姓名：提示词里只出现姓名，绝不出现 chr_ 内部 ID
+        self._name_by_id = {
+            _text(item.get("id")): _text(item.get("name"))
+            for item in self.characters
+            if _text(item.get("id")) and _text(item.get("name"))
+        }
+        self._name_by_id[NARRATOR_ID] = "旁白"
         #: 本次装配产生的告警（已被重置为最新一次 build 的结果）
         self.warnings: list[str] = []
 
@@ -196,14 +213,55 @@ class ContextAssembler:
             sections.append({"kind": kind, "text": line})
         return sections
 
+    def _display_name(self, key: str) -> str:
+        """把关系键解析成展示名。
+
+        规则：先按角色 ID 查姓名；再按姓名原样保留（兼容旧数据）；解析失败显示「已删除角色」。
+
+        参数:
+            key: 关系备注键（角色 ID 或姓名）。
+
+        返回:
+            可直接写进提示词的姓名。
+        """
+        value = _text(key)
+        if not value:
+            return "已删除角色"
+        if value in self._name_by_id:
+            return self._name_by_id[value]
+        # 已经是姓名（不是 chi_ 这类内部 ID）时原样展示
+        if not value.startswith(("chr_", "chp_", "bea_")):
+            return value
+        return "已删除角色"
+
+    def _scrub_ids(self, text: str) -> str:
+        """把文本里残留的内部角色 ID 替换成可读名称。
+
+        参数:
+            text: 待输出的提示词文本。
+
+        返回:
+            不含 `chr_` 的文本；`chr_narrator` 显示为旁白，无法解析的显示「已删除角色」。
+        """
+        import re
+
+        def replace(match: re.Match) -> str:
+            """单次替换：已知 ID 取姓名，未知 ID 用占位名。"""
+            return self._display_name(match.group(0))
+
+        return re.sub(r"chr_[0-9A-Za-z]{6,32}", replace, text or "")
+
     def _character_models(self, speaker_ids: list[str] | None = None) -> list[dict]:
         """筛选并整理角色卡模型。
+
+        角色卡只保留「文字写作能用上」的字段：性格、背景、当前处境、说话方式
+        （语速/音高/口音/口头禅）、已知信息与关系备注；关系键一律解析成姓名。
 
         参数:
             speaker_ids: 只取这些角色；为 None 时取全部非旁白角色。
 
         返回:
-            角色卡 dict 列表，附带 show_background/show_persona 两个裁剪开关。
+            角色卡 dict 列表，附带裁剪开关与排序信息（POV 优先，其次计划出场次数）。
         """
         allowed = {str(item) for item in speaker_ids} if speaker_ids is not None else None
         models: list[dict] = []
@@ -214,12 +272,46 @@ class ContextAssembler:
             if allowed is not None and character_id not in allowed:
                 continue
             speech = character.get("speech_style") or {}
-            speech_text = "，".join(
-                part for part in (_text(speech.get("tempo")), _text(speech.get("pitch"))) if part
-            )
-            notes = (character.get("state") or {}).get("relationship_notes") or {}
+            tempo = _text(speech.get("tempo"))
+            pitch = _text(speech.get("pitch"))
+            accent = _text(speech.get("accent"))
+            catchphrases = [str(item) for item in (speech.get("catchphrases") or []) if _text(item)]
+            speech_parts: list[str] = []
+            if tempo:
+                speech_parts.append(f"语速{tempo}")
+            if pitch:
+                speech_parts.append(f"音高{pitch}")
+            if accent:
+                speech_parts.append(accent)
+            if catchphrases:
+                speech_parts.append("口头禅「" + "」「".join(catchphrases) + "」")
+            state = character.get("state") or {}
+            notes = state.get("relationship_notes") or {}
+            relationships: list[dict] = []
+            seen_names: set[str] = set()
+            # 结构化关系优先：目标统一是角色 ID，展示时解析成姓名
+            for row in state.get("relations") or []:
+                if not isinstance(row, dict):
+                    continue
+                target = _text(row.get("target_id"))
+                if not target:
+                    continue
+                name = self._display_name(target)
+                if name in seen_names:
+                    continue
+                seen_names.add(name)
+                parts = [_text(row.get("label")), _text(row.get("note"))]
+                relationships.append({"name": name, "note": "：".join(part for part in parts if part)})
+            # 旧关系备注补位：键可能是姓名（历史数据）或角色 ID
+            for key, value in notes.items():
+                name = self._display_name(str(key))
+                if name in seen_names:
+                    continue
+                seen_names.add(name)
+                relationships.append({"name": name, "note": _text(value)})
             models.append(
                 {
+                    "id": character_id,
                     "name": _text(character.get("name")),
                     "role": _text(character.get("role")),
                     "gender": _text(character.get("gender")),
@@ -227,12 +319,19 @@ class ContextAssembler:
                     "aliases": [str(item) for item in (character.get("aliases") or []) if _text(item)],
                     "personality": [str(item) for item in (character.get("personality") or []) if _text(item)],
                     "background": _text(character.get("background")),
-                    "speech": speech_text,
-                    "relationships": {str(key): _text(value) for key, value in notes.items() if _text(value)},
+                    "speech": "；".join(speech_parts),
+                    "situation": _text(state.get("situation")),
+                    "knowledge": [str(item) for item in (state.get("knowledge") or []) if _text(item)],
+                    "relationships": relationships,
+                    "is_pov": bool(self.pov_character_id and character_id == self.pov_character_id),
+                    "planned": int(self.planned_counts.get(character_id) or 0),
                     "show_background": True,
                     "show_persona": True,
+                    "show_knowledge": True,
                 }
             )
+        # POV 放在最前，其余按计划出场次数降序；同次数保持原顺序，便于稳定回归
+        models.sort(key=lambda card: (0 if card["is_pov"] else 1, -card["planned"]))
         return models
 
     def _render_cards(self, models: list[dict]) -> str:
@@ -254,17 +353,29 @@ class ContextAssembler:
             if card.get("age_range"):
                 traits.append(card["age_range"])
             head = f"- {card['name']}（{'，'.join(trait for trait in traits if trait)}）"
+            if card.get("is_pov"):
+                head += "【本章视角人物】"
             if card["aliases"]:
                 head += "，别名：" + "、".join(card["aliases"])
             lines = [head]
             if card["show_persona"] and card["personality"]:
                 lines.append("  性格：" + "、".join(card["personality"]))
-            if card["show_background"] and card["background"]:
-                lines.append("  背景：" + card["background"])
+            if card["situation"]:
+                lines.append("  当前处境：" + card["situation"])
             if card["show_persona"] and card["speech"]:
                 lines.append("  说话方式：" + card["speech"])
+            if card["show_knowledge"] and card["knowledge"]:
+                lines.append("  已知信息：" + "；".join(card["knowledge"]))
+            if card["show_background"] and card["background"]:
+                lines.append("  背景：" + card["background"])
             if card["relationships"]:
-                lines.append("  关系备注：" + "；".join(f"{key}：{value}" for key, value in card["relationships"].items()))
+                lines.append(
+                    "  关系："
+                    + "；".join(
+                        f"{item['name']}——{item['note']}" if item["note"] else item["name"]
+                        for item in card["relationships"]
+                    )
+                )
             cards.append("\n".join(lines))
         return "\n".join(cards)
 
@@ -326,13 +437,24 @@ class ContextAssembler:
     def chapter_outline(self) -> str:
         """渲染本章大纲与节拍（不参与裁剪）。
 
+        必须包含三件事，否则模型无法按本章的叙事安排写作：
+        视角人物（POV）、每个节拍的出场角色、角色弧线的本章目标。
+
         返回:
-            大纲文本，包含章节标题、摘要与逐条节拍（目标字数/转折点）。
+            大纲文本，包含章节标题、摘要、视角人物、逐条节拍与角色弧线。
         """
         index = self.outline_chapter.get("index") or self.chapter.get("index")
         title = _text(self.outline_chapter.get("title")) or _text(self.chapter.get("title")) or "未命名"
         label = f"第 {index} 章《{title}》" if index else f"《{title}》"
+        style = self.bible.get("style") or {}
+        pov_value = self.pov_mode or _text(style.get("pov")) or "third_limited"
+        pov_label = POV_LABELS.get(pov_value, pov_value)
         lines = ["【本章大纲与节拍】", f"章节：{label}"]
+        if pov_value == "third_omniscient":
+            lines.append(f"视角人物：全知视角（不绑定单一角色；{pov_label}）")
+        else:
+            pov_name = self._display_name(self.pov_character_id) if self.pov_character_id else "未指定"
+            lines.append(f"视角人物：{pov_name}（{pov_label}）")
         summary = (
             _text(self.outline_chapter.get("summary"))
             or _text(self.chapter.get("synopsis"))
@@ -353,10 +475,31 @@ class ContextAssembler:
                     tags.append(f"目标 {target} 字")
                 if beat.get("turning_point"):
                     tags.append("转折点")
+                present = [
+                    self._display_name(str(cid))
+                    for cid in (beat.get("character_ids") or [])
+                    if str(cid).strip()
+                ]
+                tags.append("出场：" + ("、".join(present) if present else "未指定"))
                 suffix = f"（{'，'.join(tags)}）" if tags else ""
                 lines.append(f"{order}. {_text(beat.get('summary'))}{suffix}")
         elif _text(self.chapter.get("outline")):
             lines.append("大纲：" + _text(self.chapter.get("outline")))
+        arcs = self.outline_chapter.get("character_arcs") or []
+        if arcs:
+            lines.append("角色弧线（本章目标状态）：")
+            for arc in arcs:
+                character_id = str(arc.get("character_id") or "").strip()
+                if not character_id:
+                    continue
+                name = self._display_name(character_id)
+                start = _text(arc.get("from_state"))
+                end = _text(arc.get("to_state"))
+                note = _text(arc.get("note"))
+                text = f"{name}：" + (f"{start} → " if start else "") + (end or "有变化")
+                if note:
+                    text += f"（{note}）"
+                lines.append(text)
         return "\n".join(lines)
 
     # ---------- 装配 ----------
@@ -449,8 +592,10 @@ class ContextAssembler:
             system_parts.append(
                 "写作准则：\n"
                 "- 人物言行必须符合其性格、背景、说话方式与关系备注，不得为推进剧情改变人设；\n"
+                "- 不同角色要用各自的口吻说话（语速、用词、口头禅、称呼习惯不同），读者能只看对白分辨是谁；\n"
                 "- 人物只知道自己在故事中经历或被告知的信息，不能凭空说出未知事实；\n"
                 "- 让人物按自身目标与处境做出选择来推动剧情，而不是由作者安排；\n"
+                "- 视角限制：只写视角人物能感知到的内容，其他人物的内心活动不得越过视角；\n"
                 "- 世界规则与势力格局不可违背，人物行动须发生在设定允许的范围内。\n"
                 "输出边界：只输出小说叙事正文，直接以场景、动作或对白开头；"
                 "禁止复述任务要求，禁止列出写作准则、人物设定或节拍清单，"
@@ -473,7 +618,8 @@ class ContextAssembler:
             if excerpt_text:
                 user_parts.append("前文摘录：\n" + excerpt_text)
             user_parts.append("任务指令：\n" + instruction)
-            return system, "\n\n".join(part for part in user_parts if part)
+            # 最后一层兜底：任何 chr_ 内部 ID 都不允许进入提示词
+            return self._scrub_ids(system), self._scrub_ids("\n\n".join(part for part in user_parts if part))
 
         system, user = compose()
         # 中文按 1 字 ≈ 1 token 粗算，system 与 user 合计计入预算
@@ -509,17 +655,29 @@ class ContextAssembler:
                         changed = True
                         break
 
-            # 5. 角色卡细节：先删背景，再删性格/说话方式
+            # 5. 角色卡细节：先删已知信息，再删背景，再删性格/说话方式；POV 卡最后删
             if not changed and cards:
-                target = next((card for card in cards if card["show_background"]), None)
+                # 5.1 已知信息：优先删非 POV 角色
+                target = next((card for card in cards if card["show_knowledge"] and not card["is_pov"]), None)
+                if target is None:
+                    target = next((card for card in cards if card["show_knowledge"]), None)
                 if target is not None:
-                    target["show_background"] = False
+                    target["show_knowledge"] = False
                     changed = True
                 else:
-                    target = next((card for card in cards if card["show_persona"]), None)
+                    target = next((card for card in cards if card["show_background"] and not card["is_pov"]), None)
+                    if target is None:
+                        target = next((card for card in cards if card["show_background"]), None)
                     if target is not None:
-                        target["show_persona"] = False
+                        target["show_background"] = False
                         changed = True
+                    else:
+                        target = next((card for card in cards if card["show_persona"] and not card["is_pov"]), None)
+                        if target is None:
+                            target = next((card for card in cards if card["show_persona"]), None)
+                        if target is not None:
+                            target["show_persona"] = False
+                            changed = True
 
             if not changed:
                 break

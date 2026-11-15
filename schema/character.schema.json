@@ -90,6 +90,25 @@
               "additionalProperties": { "type": "string", "maxLength": 500 }
             },
             "knowledge": { "type": ["array", "null"], "items": { "type": "string", "maxLength": 200 } },
+            "relations": {
+              "type": ["array", "null"],
+              "description": "P2：结构化关系（目标角色 ID），用于关系图与提示词注入；relationship_notes 保留为文字备注",
+              "items": {
+                "type": "object",
+                "required": ["target_id"],
+                "additionalProperties": false,
+                "properties": {
+                  "target_id": { "type": "string", "pattern": "^chr_[0-9A-Za-z]{6,32}$" },
+                  "label": { "type": "string", "maxLength": 40 },
+                  "sentiment": {
+                    "type": ["string", "null"],
+                    "enum": ["ally", "enemy", "family", "romance", "neutral", null]
+                  },
+                  "since_chapter_id": { "type": ["string", "null"], "pattern": "^chp_[0-9A-Za-z]{6,32}$" },
+                  "note": { "type": "string", "maxLength": 500 }
+                }
+              }
+            },
             "as_of_chapter_id": { "type": ["string", "null"], "pattern": "^chp_[0-9A-Za-z]{6,32}$" }
           }
         },

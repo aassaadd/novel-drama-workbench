@@ -15,6 +15,11 @@
     "synopsis": { "type": ["string", "null"], "maxLength": 4000, "description": "滚动摘要，供后续章节上下文使用" },
     "content": { "type": ["string", "null"], "maxLength": 200000 },
     "pov_character_id": { "type": ["string", "null"], "pattern": "^chr_[0-9A-Za-z]{6,32}$" },
+    "pov_mode": {
+      "type": ["string", "null"],
+      "enum": ["first", "second", "third_limited", "third_omniscient", null],
+      "description": "章节视角副本，与设定库写通；null 表示跟随全书写法"
+    },
     "voice_overrides": {
       "type": "object",
       "description": "R18：章节级音色覆盖，仅允许旁白或龙套；键为角色 ID，必须写 reason",

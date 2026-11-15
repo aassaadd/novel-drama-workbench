@@ -387,6 +387,131 @@ function renderOverrideRows(host, characterId, data) {
   });
 }
 
+const RELATION_SENTIMENTS = [
+  ['', '未标注'],
+  ['ally', '盟友'],
+  ['enemy', '敌对'],
+  ['family', '亲属'],
+  ['romance', '情感'],
+  ['neutral', '一般'],
+];
+
+/** 姓名 → 角色 ID（旧关系备注可能以姓名为键，展示时统一解析成 ID） */
+function idByName() {
+  const map = {};
+  characters.forEach((item) => {
+    if (item.name) map[item.name] = item.id;
+  });
+  return map;
+}
+
+/**
+ * 整理当前角色的关系行：结构化 relations 优先，旧 relationship_notes 补位。
+ * @param {object} item 角色
+ * @returns {Array<{target_id,label,sentiment,note}>}
+ */
+function relationRows(item) {
+  const byName = idByName();
+  const rows = [];
+  const seen = new Set();
+  ((item.state || {}).relations || []).forEach((row) => {
+    const target = String(row.target_id || '');
+    if (!target) return;
+    rows.push({
+      target_id: target,
+      label: row.label || '',
+      sentiment: row.sentiment || '',
+      note: row.note || '',
+    });
+    seen.add(target);
+  });
+  Object.entries((item.state || {}).relationship_notes || {}).forEach(([key, note]) => {
+    const target = key.startsWith('chr_') ? key : byName[key] || '';
+    if (!target || seen.has(target) || !String(note || '').trim()) return;
+    rows.push({ target_id: target, label: '', sentiment: '', note: String(note) });
+    seen.add(target);
+  });
+  return rows;
+}
+
+/**
+ * 关系编辑卡：目标角色只能从角色库选择，落盘为角色 ID。
+ * @param {object} item 角色
+ * @returns {string} HTML
+ */
+function relationsCardHTML(item) {
+  const cast = characters.filter((row) => row.role !== 'narrator' && row.id !== item.id);
+  const rows = relationRows(item);
+  const nameOf = (id) => characters.find((row) => row.id === id)?.name || id;
+  const body = rows
+    .map(
+      (row, index) => `<div class="arc-row" data-rel="${index}"
+        style="display:grid;grid-template-columns:150px 110px 110px 1fr auto;gap:6px;align-items:center">
+        <select class="select" data-rel-target="${index}">
+          ${cast
+            .map(
+              (option) =>
+                `<option value="${esc(option.id)}" ${option.id === row.target_id ? 'selected' : ''}>${esc(
+                  option.name
+                )}</option>`
+            )
+            .join('')}
+        </select>
+        <input class="input" data-rel-label="${index}" placeholder="关系名" value="${esc(row.label || '')}" />
+        <select class="select" data-rel-sentiment="${index}">${RELATION_SENTIMENTS.map(
+          ([value, label]) =>
+            `<option value="${value}" ${value === row.sentiment ? 'selected' : ''}>${label}</option>`
+        ).join('')}</select>
+        <input class="input" data-rel-note="${index}" placeholder="备注（会进提示词）" value="${esc(
+          row.note || ''
+        )}" />
+        <button class="btn icon sm" data-act="relation-del" data-index="${index}" title="删除这段关系">${icon(
+          'trash',
+          12
+        )}</button>
+      </div>`
+    )
+    .join('');
+  return `
+    <div class="card" style="margin:0 18px 18px" id="chara-relations">
+      <div class="card-head"><span class="ct">角色关系</span>
+        <div class="right">
+          <button class="btn sm" data-act="relation-add">添加关系</button>
+          <button class="btn sm" data-act="relation-graph">关系图</button>
+          <button class="btn sm" data-act="view-arcs">角色弧线</button>
+        </div>
+      </div>
+      <div class="card-body" style="display:grid;gap:8px">
+        <div id="chara-rel-rows" style="display:grid;gap:6px">
+          ${
+            body ||
+            '<div class="hint">还没有关系：关系目标只能从角色库选择，保存的是角色 ID；姓名只用于展示。</div>'
+          }
+        </div>
+        <div class="hint">关系会随角色卡进入生成提示词。目标角色：${esc(
+          rows.map((row) => nameOf(row.target_id)).join('、') || '—'
+        )}</div>
+      </div>
+    </div>`;
+}
+
+/** 读取关系编辑区，返回结构化 relations（用于 PATCH） */
+function collectRelations() {
+  return [...document.querySelectorAll('#chara-rel-rows [data-rel]')]
+    .map((row) => {
+      const index = row.dataset.rel;
+      const target = row.querySelector(`[data-rel-target="${index}"]`)?.value || '';
+      if (!target) return null;
+      return {
+        target_id: target,
+        label: row.querySelector(`[data-rel-label="${index}"]`)?.value.trim() || '',
+        sentiment: row.querySelector(`[data-rel-sentiment="${index}"]`)?.value || null,
+        note: row.querySelector(`[data-rel-note="${index}"]`)?.value.trim() || '',
+      };
+    })
+    .filter(Boolean);
+}
+
 /** 主区档案表单 */
 function profileHTML() {
   const item = current();
@@ -400,11 +525,16 @@ function profileHTML() {
   }
   const locked = item.role === 'narrator';
   const lockHint = locked ? '旁白是固定角色，不可改名或改定位' : '';
-  const rowStats = stats[item.id] || { lines: 0, chapters: [] };
+  const rowStats = stats[item.id] || { lines: 0, scenes: 0, chapters: [], planned_chapters: [] };
   const firstChapter = rowStats.chapters[0];
-  const appearanceLine = rowStats.lines
-    ? `出场 ${rowStats.lines} 行${firstChapter ? ` · 首次登场第 ${firstChapter.index} 章` : ''}`
-    : '还没有出场记录';
+  const hasAppearance = Boolean(rowStats.lines || rowStats.scenes);
+  const appearanceLine = hasAppearance
+    ? `${Number(rowStats.lines || 0)} 行台词 · ${Number(rowStats.scenes || 0)} 个场景${
+        firstChapter ? ` · 首次登场第 ${firstChapter.index} 章` : ''
+      }`
+    : (rowStats.planned_chapters || []).length
+      ? `还没有正文出场 · 已排进 ${rowStats.planned_chapters.length} 章大纲`
+      : '还没有出场记录';
   return `
     <div class="page-head">
       <div class="ph">
@@ -419,9 +549,11 @@ function profileHTML() {
         <button class="btn" data-act="autofill" title="按性别/年龄/同场不撞音为全剧角色一键编排音色">
           ${icon('mic', 13)} 自动推荐音色
         </button>
-        <button class="btn" data-act="view-appearances" ${rowStats.lines ? '' : 'disabled'}
-          title="${rowStats.lines ? '查看这个角色在每章的出场行数' : '这个角色还没有出现在任何台词里'}">
-          查看出场${rowStats.lines ? `（${rowStats.lines}）` : ''}
+        <button class="btn" data-act="view-appearances" ${
+          hasAppearance || (rowStats.planned_chapters || []).length ? '' : 'disabled'
+        }
+          title="查看实际出场（台词/场景）与大纲计划出场，可双向跳转">
+          查看出场${hasAppearance ? `（${Number(rowStats.lines || 0)} 行）` : ''}
         </button>
         ${
           locked
@@ -478,9 +610,34 @@ function profileHTML() {
               title="性格关键词，多个用逗号分隔" /></div>
           <div class="field" style="grid-column:1/-1"><label>背景（自由填写）</label>
             <textarea class="textarea" data-free="1" id="ch-background" rows="3" title="角色的来历、动机与关系背景">${esc(item.background || '')}</textarea></div>
-          <div class="field" style="grid-column:1/-1"><label>说话风格（只读）</label>
+          <div class="field" style="grid-column:1/-1"><label>当前处境（写作时注入「当前处境」）</label>
+            <textarea class="textarea" data-free="1" id="ch-situation" rows="2"
+              title="角色在最新一章结束时的处境；生成正文时会作为角色卡的一部分进入提示词">${esc(
+                (item.state || {}).situation || ''
+              )}</textarea></div>
+          <div class="field" style="grid-column:1/-1"><label>已知信息（逗号分隔，自由填写）</label>
+            <input class="input" data-free="1" id="ch-knowledge" value="${esc(
+              ((item.state || {}).knowledge || []).join('，')
+            )}" title="角色当前知道的关键事实；生成时会限制角色不能说出未知信息" /></div>
+          <div class="field"><label>语速</label>
+            <input class="input" data-free="1" id="ch-speech-tempo" value="${esc(
+              (item.speech_style || {}).tempo || ''
+            )}" placeholder="如：偏慢，常停顿" title="直接写进提示词的口吻约束" /></div>
+          <div class="field"><label>音高 / 音色</label>
+            <input class="input" data-free="1" id="ch-speech-pitch" value="${esc(
+              (item.speech_style || {}).pitch || ''
+            )}" placeholder="如：低沉沙哑" title="直接写进提示词的口吻约束" /></div>
+          <div class="field"><label>口音 / 用词习惯</label>
+            <input class="input" data-free="1" id="ch-speech-accent" value="${esc(
+              (item.speech_style || {}).accent || ''
+            )}" placeholder="如：带江南口音，爱用反问" title="直接写进提示词的口语习惯" /></div>
+          <div class="field"><label>口头禅（逗号分隔）</label>
+            <input class="input" data-free="1" id="ch-speech-catch" value="${esc(
+              ((item.speech_style || {}).catchphrases || []).join('，')
+            )}" placeholder="如：这事没那么简单，先别急" title="写作时会要求角色复用这些口头禅" /></div>
+          <div class="field" style="grid-column:1/-1"><label>说话风格（音色侧，只读）</label>
             <div class="input" style="display:flex;align-items:center;color:var(--text-3)"
-              title="说话风格由音色与行内参数决定，这里只读展示">${esc(speechLine(item))}</div></div>
+              title="音色与行内参数推导出的听感；写作侧用上面的「说话方式」字段">${esc(speechLine(item))}</div></div>
           <div class="field" style="grid-column:1/-1"><label>外貌提示词（自由填写）</label>
             <textarea class="textarea" data-free="1" id="ch-appearance" rows="3"
               title="用于角色立绘与配图的形象描述">${esc(item.appearance_prompt || '')}</textarea></div>
@@ -491,6 +648,7 @@ function profileHTML() {
         <div class="hint">音色绑定在下方或「音色」视图完成；档案改动自动保存并写回 characters.json。</div>
       </div>
     </div>
+    ${relationsCardHTML(item)}
     ${imageCardHTML(item)}
     ${voiceBindingHTML(item)}
     ${chapterOverrideCardHTML()}`;
@@ -555,6 +713,15 @@ function collectForm(item) {
     age_range: document.getElementById('ch-age')?.value.trim() || null,
     personality: split(document.getElementById('ch-personality')?.value).join('，'),
     background: document.getElementById('ch-background')?.value || '',
+    situation: document.getElementById('ch-situation')?.value || '',
+    knowledge: split(document.getElementById('ch-knowledge')?.value).join('，'),
+    speech_style: JSON.stringify({
+      tempo: document.getElementById('ch-speech-tempo')?.value.trim() || '',
+      pitch: document.getElementById('ch-speech-pitch')?.value.trim() || '',
+      accent: document.getElementById('ch-speech-accent')?.value.trim() || '',
+      catchphrases: split(document.getElementById('ch-speech-catch')?.value),
+    }),
+    relations: JSON.stringify(collectRelations()),
     appearance_prompt: document.getElementById('ch-appearance')?.value || '',
     negative_prompt: document.getElementById('ch-negative')?.value || '',
   };
@@ -632,8 +799,10 @@ async function deleteCharacter() {
     title: '删除角色',
     wide: blocked,
     body: blocked
-      ? `<div class="dlg-note bad">「${esc(item.name)}」仍被 ${refs.total} 行台词引用，暂不能删除。
-          先把这些行的说话人改派给其它角色（画本里可直接在说话人下拉里切换）。</div>
+      ? `<div class="dlg-note bad">「${esc(item.name)}」仍被引用（${Number(
+          refs.lines_total || 0
+        )} 行台词 · ${(refs.chapters || []).length} 章出场/大纲 · ${(refs.relations || []).length} 个关系指向），暂不能删除。
+          请先改派台词、调整大纲的视角/节拍选角，并清理其它角色的关系。</div>
          <div class="impact">
            ${samples
              .map(
@@ -667,25 +836,54 @@ async function deleteCharacter() {
   });
 }
 
-/** 查看出场：按章列出该角色的台词行数，点击跳到对应章节 */
+/**
+ * 出场弹窗：实际出场（台词/场景）与计划出场（大纲节拍）并列，双向可跳。
+ * 实际出场跳画本，计划出场跳小说页对应章节大纲。
+ */
 function viewAppearances() {
   const item = current();
   if (!item) return;
-  const row = stats[item.id];
-  if (!row?.lines) return toast('这个角色还没有出场记录', 'info');
-  const rows = row.chapters
+  const row = stats[item.id] || { lines: 0, scenes: 0, chapters: [], planned_chapters: [] };
+  const planned = row.planned_chapters || [];
+  if (!row.lines && !row.scenes && !planned.length) {
+    return toast('这个角色既没有出场记录，也没有被排进任何章节', 'info');
+  }
+  const novelHref = (chapterId) =>
+    `#/p/${encodeURIComponent(state.path)}/novel?chapter=${encodeURIComponent(chapterId)}`;
+  const actualRows = (row.chapters || [])
     .map(
       (chapter) => `<button class="btn" style="height:auto;padding:9px 11px;justify-content:space-between"
-        data-jump="${esc(chapter.id)}" title="跳到第 ${chapter.index} 章">
+        data-jump="${esc(chapter.id)}" title="跳到第 ${chapter.index} 章画本">
         <span style="min-width:0">第 ${chapter.index} 章 · ${esc(chapter.title || '未命名章节')}</span>
-        <span class="badge mute">${chapter.lines} 行</span>
+        <span class="badge mute">${Number(chapter.lines || 0)} 行 · ${Number(chapter.scenes || 0)} 场</span>
       </button>`
     )
     .join('');
+  const plannedRows = planned
+    .map(
+      (chapter) => `<a class="btn" style="height:auto;padding:9px 11px;justify-content:space-between;text-decoration:none"
+        href="${novelHref(chapter.id)}" title="跳到第 ${chapter.index} 章大纲">
+        <span style="min-width:0">第 ${chapter.index} 章 · ${esc(chapter.title || '未命名章节')}</span>
+        <span class="badge">计划 ${Number(chapter.beats || 0)} 个节拍</span>
+      </a>`
+    )
+    .join('');
   const mask = openDialog({
-    title: `${item.name} 的出场`,
-    body: `<div class="dlg-note">共 ${row.lines} 行，分布在 ${row.chapters.length} 章。点击章节跳到画本。</div>
-      <div style="display:flex;flex-direction:column;gap:6px;max-height:340px;overflow:auto">${rows}</div>`,
+    title: `${item.name} 的出场与计划`,
+    body: `<div class="dlg-note">实际：${Number(row.lines || 0)} 行台词、${Number(
+      row.scenes || 0
+    )} 个场景；计划：${planned.length} 章。点实际出场跳画本，点计划跳大纲。</div>
+      <div style="display:grid;gap:4px;margin-bottom:10px">
+        <div class="hint">实际出场</div>
+        ${
+          actualRows ||
+          '<div class="hint">还没有切分台词或场景标注；保存正文后这里会出现。</div>'
+        }
+      </div>
+      <div style="display:grid;gap:4px">
+        <div class="hint">计划出场（大纲节拍）</div>
+        ${plannedRows || '<div class="hint">大纲里还没有给这个角色安排节拍。</div>'}
+      </div>`,
     foot: `<div class="right"><button class="btn" data-dlg-close>关闭</button></div>`,
   });
   mask.querySelectorAll('[data-jump]').forEach((button) => {
@@ -694,6 +892,144 @@ function viewAppearances() {
       goChapter(state.path, button.dataset.jump);
     });
   });
+}
+
+/** 关系编辑区追加一行（默认选第一个目标角色，保存由自动保存负责） */
+function addRelationRow() {
+  const item = current();
+  const wrap = document.getElementById('chara-rel-rows');
+  if (!item || !wrap) return;
+  const cast = characters.filter((row) => row.role !== 'narrator' && row.id !== item.id);
+  if (!cast.length) return toast('还没有其它角色可建立关系', 'warn');
+  const index = wrap.querySelectorAll('[data-rel]').length;
+  const hint = wrap.querySelector('.hint');
+  if (hint) hint.remove();
+  wrap.insertAdjacentHTML(
+    'beforeend',
+    `<div class="arc-row" data-rel="${index}"
+      style="display:grid;grid-template-columns:150px 110px 110px 1fr auto;gap:6px;align-items:center">
+      <select class="select" data-rel-target="${index}">${cast
+        .map((row) => `<option value="${esc(row.id)}">${esc(row.name)}</option>`)
+        .join('')}</select>
+      <input class="input" data-rel-label="${index}" placeholder="关系名" />
+      <select class="select" data-rel-sentiment="${index}">${RELATION_SENTIMENTS.map(
+        ([value, label]) => `<option value="${value}">${label}</option>`
+      ).join('')}</select>
+      <input class="input" data-rel-note="${index}" placeholder="备注（会进提示词）" />
+      <button class="btn icon sm" data-act="relation-del" data-index="${index}" title="删除这段关系">${icon(
+        'trash',
+        12
+      )}</button>
+    </div>`
+  );
+  scheduleSave();
+}
+
+/** 删除关系行：只从表单移除，自动保存后写回 */
+function deleteRelationRow(index) {
+  document.querySelector(`#chara-rel-rows [data-rel="${index}"]`)?.remove();
+  scheduleSave();
+}
+
+/** 角色弧线弹窗：按章节列出该角色的 from → to，点击跳对应章节大纲 */
+async function openCharacterArcs() {
+  const item = current();
+  if (!item) return;
+  try {
+    const data = await getJSON('/api/ui/characters/arcs', { path: state.path, character: item.id });
+    const rows = data?.arcs || [];
+    const html = rows
+      .map(
+        (row) => `<a class="btn" style="height:auto;padding:9px 11px;text-decoration:none;display:block"
+          href="#/p/${encodeURIComponent(state.path)}/novel?chapter=${encodeURIComponent(row.chapter_id)}"
+          title="跳到第 ${row.index} 章大纲">
+          <div><b>第 ${row.index} 章</b> · ${esc(row.title || '未命名章节')}</div>
+          <div class="hint">${esc(row.from_state || '（未填写起点）')} → ${esc(
+            row.to_state || '（未填写终点）'
+          )}${row.note ? `；${esc(row.note)}` : ''}</div>
+        </a>`
+      )
+      .join('');
+    openDialog({
+      title: `${item.name} 的角色弧线`,
+      body: `<div class="dlg-note">只在有角色弧线的大纲章节里出现；点击跳到大纲对应章节编辑。</div>
+        <div style="display:grid;gap:6px;max-height:420px;overflow:auto">${
+          html || '<div class="hint">还没有为该角色写过弧线：到小说页章节详情「角色绑定 → 角色弧线」添加。</div>'
+        }</div>`,
+      foot: `<div class="right"><button class="btn" data-dlg-close>关闭</button></div>`,
+    });
+  } catch (error) {
+    toast(`读取角色弧线失败：${error.message}`, 'bad', 3600);
+  }
+}
+
+/** 关系图弹窗：圆形布局画节点与边，点击节点切换角色 */
+async function openRelationGraph() {
+  try {
+    const data = await getJSON('/api/ui/characters/graph', { path: state.path });
+    const nodes = data?.nodes || [];
+    const edges = data?.edges || [];
+    if (!nodes.length) return toast('角色库还是空的', 'info');
+    const width = 760;
+    const height = 520;
+    const cx = width / 2;
+    const cy = height / 2;
+    const radius = Math.min(width, height) / 2 - 70;
+    const pos = {};
+    nodes.forEach((node, index) => {
+      const angle = (Math.PI * 2 * index) / nodes.length - Math.PI / 2;
+      pos[node.id] = {
+        x: cx + radius * Math.cos(angle),
+        y: cy + radius * Math.sin(angle),
+      };
+    });
+    const edgeHTML = edges
+      .map((edge) => {
+        const from = pos[edge.source];
+        const to = pos[edge.target];
+        if (!from || !to) return '';
+        const mx = (from.x + to.x) / 2;
+        const my = (from.y + to.y) / 2;
+        const label = edge.label || (edge.kind === 'note' ? '备注' : '');
+        return `<line x1="${from.x}" y1="${from.y}" x2="${to.x}" y2="${to.y}"
+            stroke="${edge.sentiment === 'enemy' ? 'var(--bad)' : 'var(--line)'}"
+            stroke-width="${edge.sentiment ? 1.6 : 1}" stroke-dasharray="${edge.kind === 'note' ? '4 3' : ''}" />
+          ${label ? `<text x="${mx}" y="${my - 4}" font-size="10" fill="var(--text-4)" text-anchor="middle">${esc(label)}</text>` : ''}`;
+      })
+      .join('');
+    const nodeHTML = nodes
+      .map((node) => {
+        const point = pos[node.id];
+        return `<g data-graph-node="${esc(node.id)}" style="cursor:pointer">
+          <circle cx="${point.x}" cy="${point.y}" r="24"
+            fill="${node.id === selectedId ? 'var(--accent)' : 'var(--bg-2)'}"
+            stroke="var(--line)" />
+          <text x="${point.x}" y="${point.y + 4}" font-size="11" text-anchor="middle"
+            fill="${node.id === selectedId ? '#fff' : 'var(--text-2)'}">${esc((node.name || '').slice(0, 4))}</text>
+          <text x="${point.x}" y="${point.y + 42}" font-size="10" text-anchor="middle"
+            fill="var(--text-4)">${esc(node.name || '')}</text>
+        </g>`;
+      })
+      .join('');
+    const mask = openDialog({
+      title: '角色关系图',
+      wide: true,
+      body: `<div class="dlg-note">实线为结构化关系，虚线为旧关系备注；点击节点切换角色。关系目标统一为角色 ID。</div>
+        <svg viewBox="0 0 ${width} ${height}" style="width:100%;height:auto;background:var(--bg-1);border-radius:8px">
+          ${edgeHTML}${nodeHTML}
+        </svg>`,
+      foot: `<div class="right"><button class="btn" data-dlg-close>关闭</button></div>`,
+    });
+    mask.querySelectorAll('[data-graph-node]').forEach((node) => {
+      node.addEventListener('click', () => {
+        selectedId = node.dataset.graphNode;
+        closeDialog();
+        repaint();
+      });
+    });
+  } catch (error) {
+    toast(`读取关系图失败：${error.message}`, 'bad', 3600);
+  }
 }
 
 /** 形象图类型（顺序即展示顺序） */
@@ -1342,6 +1678,10 @@ async function onRootClick(event) {
   if (act === 'char-image') return openCharacterImage(button.dataset.kind || '');
   if (act === 'delete-character') return deleteCharacter();
   if (act === 'view-appearances') return viewAppearances();
+  if (act === 'relation-add') return addRelationRow();
+  if (act === 'relation-del') return deleteRelationRow(Number(el.dataset.index));
+  if (act === 'relation-graph') return openRelationGraph();
+  if (act === 'view-arcs') return openCharacterArcs();
   if (act === 'go-voices') {
     if (!state.path) return goProjects();
     location.hash = `#/p/${encodeURIComponent(state.path)}/voices`;

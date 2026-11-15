@@ -575,6 +575,9 @@ def continue_chapter(
         budget_tokens=budget,
         excerpt_chars=recent_chars,
         story_digest=digest,
+        pov_character_id=context.get("pov_character_id"),
+        planned_counts=context.get("planned_counts"),
+        pov_mode=context.get("pov_mode"),
     )
     req = assembler.build("chapter", instruction_text, context["speaker_ids"])
     req.metadata = context["metadata"]

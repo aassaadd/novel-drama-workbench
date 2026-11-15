@@ -46,10 +46,13 @@ function parseRoute() {
         chapterId: decodePath(parts[3]),
         lineId: query.get('line') || '',
         act: query.get('act') || '',
+        // 工作室一级视图（画本 / 录音 / 后期 / 对轨），与页面名 view 区分
+        studioView: query.get('view') || '',
       };
     }
     if (parts[2] === 'characters') return { view: 'characters', path, character: query.get('character') || '' };
-    if (parts[2] === 'novel') return { view: 'novel', path };
+    if (parts[2] === 'novel')
+      return { view: 'novel', path, chapter: query.get('chapter') || '' };
     if (parts[2] === 'voices') return { view: 'voices', path };
     if (parts[2] === 'media') return { view: 'media', path };
     if (parts[2] === 'tasks') return { view: 'tasks', path };

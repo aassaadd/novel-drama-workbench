@@ -112,14 +112,15 @@ def split_scene_lines(
             continue
         if scene.get("lines") and not force:
             raise ValueError(f"场景 {scene.get('id')} 已有台词行，若确认覆盖请加 --force")
-        drafts = split_lines(scene.get("source_text") or "", characters)
+        folded: set[str] = set()
+        drafts = split_lines(scene.get("source_text") or "", characters, folded_sink=folded)
         if dry_run:
             scene_count += 1
             total_lines += len(drafts)
             unknown += sum(1 for item in drafts if item["speaker_id"] == entities.UNKNOWN_SPEAKER_ID)
             continue
         if keep_manual and scene.get("lines"):
-            lines = merge_manual_lines(scene["lines"], drafts, scene["id"])
+            lines = merge_manual_lines(scene["lines"], drafts, scene["id"], folded_texts=folded)
         else:
             lines = [
                 entities.new_line(scene["id"], index, item["text"], kind=item["kind"], speaker_id=item["speaker_id"], confidence=item["confidence"])

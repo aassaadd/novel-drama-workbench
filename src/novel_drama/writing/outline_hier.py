@@ -393,6 +393,44 @@ def _normalize_chapters(payload: dict, expected: int) -> list[dict]:
     return rows
 
 
+def _normalize_character_arcs(payload: dict, cast_ids: set[str]) -> list[dict]:
+    """清洗阶段三返回的本章角色弧线。
+
+    参数:
+        payload: `emit_beats` 的返回值。
+        cast_ids: 允许引用的角色 ID 集合。
+
+    返回:
+        最多 3 条弧线；角色不存在或状态为空时丢弃。
+    """
+    raw = payload.get("character_arcs") if isinstance(payload, dict) else None
+    if not isinstance(raw, list):
+        return []
+    rows: list[dict] = []
+    seen: set[str] = set()
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        character_id = str(item.get("character_id") or "").strip()
+        if not character_id or character_id not in cast_ids or character_id in seen:
+            continue
+        seen.add(character_id)
+        to_state = _text(item.get("to_state"), 500)
+        if not to_state:
+            continue
+        rows.append(
+            {
+                "character_id": character_id,
+                "from_state": _text(item.get("from_state"), 500),
+                "to_state": to_state,
+                "note": _text(item.get("note"), 500),
+            }
+        )
+        if len(rows) >= 3:
+            break
+    return rows
+
+
 def _normalize_beats(payload: dict, expected: int, chapter_words: int, beats_per_chapter: int) -> list[dict]:
     """清洗阶段三某一章的节拍列表。
 
@@ -884,6 +922,9 @@ def generate_hierarchical_outline(
                         },
                     )
                 chapter["beats"] = beats
+                chapter["character_arcs"] = _normalize_character_arcs(
+                    payload, {str(item.get("id")) for item in char_rows if item.get("id")}
+                )
                 chapter["status"] = "done"
                 chapter["error"] = None
                 beats_done += len(beats)
@@ -926,6 +967,9 @@ def generate_hierarchical_outline(
                         target_words=int(beat.get("target_words") or chapter_words // max(1, beats_per_chapter)),
                     )
                 )
+            outline_chapter["character_arcs"] = [
+                dict(arc) for arc in (chapter.get("character_arcs") or []) if isinstance(arc, dict)
+            ]
             built["chapters"].append(outline_chapter)
         built_acts.append(built)
 
