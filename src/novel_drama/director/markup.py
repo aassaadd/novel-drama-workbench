@@ -403,23 +403,6 @@ def _flush_info_counts(info_counts: dict[tuple[str, str], int], warnings: list[s
             warnings.append(f"{INFO_PREFIX}{where}有 {count} 行{reason}，已标为 chr_unknown 待校对")
 
 
-def _tts_from_line(line: dict | None) -> dict:
-    """从章节台词行复制配音状态（保持 schema 允许的字段）。"""
-    if not line:
-        return {"status": "pending"}
-    tts = line.get("tts") or {}
-    state = {
-        "status": tts.get("status") or "pending",
-        "asset_id": tts.get("asset_id"),
-        "duration_ms": tts.get("duration_ms"),
-        "synthesized_revision": tts.get("synthesized_revision"),
-    }
-    for key in ("provider_id", "model_version", "voice_id", "variant_id", "routing", "chunks", "error", "updated_at"):
-        if tts.get(key) is not None:
-            state[key] = tts[key]
-    return state
-
-
 def _template_ids(settings: dict) -> dict:
     """解析图像/视频工作流模板 ID。
 
@@ -834,7 +817,6 @@ def parse_markup(
                 "text": text,
                 "emotion": emotion,
                 "anchor": anchor,
-                "tts": _tts_from_line(matched),
                 "revision": int((matched or {}).get("revision") or 1),
             }
         )

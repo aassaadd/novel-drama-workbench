@@ -8,6 +8,7 @@ import re
 import sys
 from pathlib import Path
 
+from ...domain.production.line_fields import PRODUCTION_LINE_FIELDS
 from ...domain.story.rules.chapter_rules import should_archive_version, version_id_of
 from ...models import entities
 from ...models.enum_check import (
@@ -422,10 +423,17 @@ class ProjectStore:
     # ---------- 导演脚本 ----------
 
     def load_script(self, chapter_id: str) -> dict:
-        """读取导演脚本（缺失时报错）。
+        """读取导演脚本（缺失时报错）；顺带剔除已迁走的行级生产态。
+
+        台本行只存内容层字段，`tts` / `confidence` 归章节场景投影（见
+        `domain/production/line_fields.py`）。旧版本写下的台本里可能残留这些字段，
+        读取时直接丢弃，避免再被读进内存、写回磁盘或被 schema 拒收。
 
         参数:
             chapter_id: 章节 ID。
+
+        返回:
+            导演脚本 dict（镜头行已剔除生产态字段）。
 
         异常:
             FileNotFoundError: 脚本不存在。
@@ -433,7 +441,12 @@ class ProjectStore:
         path = self.script_path(chapter_id)
         if not path.exists():
             raise FileNotFoundError(f"导演脚本不存在: {path}（先执行 ndw script parse）")
-        return self._read_json(path)
+        script = self._read_json(path)
+        for shot in script.get("shots") or []:
+            for line in shot.get("lines") or []:
+                for field in PRODUCTION_LINE_FIELDS:
+                    line.pop(field, None)
+        return script
 
     def save_script(self, script: dict) -> None:
         """保存导演脚本（先校验枚举与 schema，再原子写入）。

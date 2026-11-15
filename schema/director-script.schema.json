@@ -172,7 +172,8 @@
     },
     "line": {
       "type": "object",
-      "required": ["id", "index", "kind", "speaker_id", "text", "emotion", "anchor", "tts", "revision"],
+      "description": "台本行只存内容层字段；tts 等生产态归章节场景（见 domain/production/line_fields.py）",
+      "required": ["id", "index", "kind", "speaker_id", "text", "emotion", "anchor", "revision"],
       "additionalProperties": false,
       "properties": {
         "id": { "type": "string", "pattern": "^lin_[0-9A-Za-z]{6,32}$" },
@@ -207,7 +208,7 @@
         "pause_after_ms": { "type": "integer", "minimum": 0, "maximum": 10000 },
         "delivery_note": { "type": ["string", "null"], "maxLength": 500 },
         "anchor": { "$ref": "#/$defs/anchor" },
-        "tts": { "$ref": "#/$defs/tts_state" },
+        "inferred": { "type": "boolean", "description": "是否由模型切分/标注得出（内容层字段，与场景行同名）" },
         "revision": { "type": "integer", "minimum": 1 }
       }
     },

@@ -17,28 +17,8 @@ import hashlib
 import os
 
 from ...adapters.persistence import ProjectStore
+from ...domain.production.line_fields import CONTENT_LINE_FIELDS, SCENE_DESCRIPTIVE_FIELDS
 from ...models import entities
-
-#: 台本行承接的内容层字段（生产态 `tts`、`anchor` 与 `confidence` 不在此列）
-CONTENT_LINE_FIELDS = (
-    "index",
-    "kind",
-    "speaker_id",
-    "text",
-    "emotion",
-    "emotion_intensity",
-    "speed",
-    "pause_before_ms",
-    "pause_after_ms",
-    "delivery_note",
-    "paralinguistic",
-    "target_duration_ms",
-    "voice",
-    "inferred",
-)
-
-#: 场景描述字段：按镜头覆盖，其余场景字段（id/summary/source_text/status/媒体）沿用旧场景
-SCENE_DESCRIPTIVE_FIELDS = ("location", "time_of_day", "mood", "goal")
 
 #: 空章节内容的占位哈希输入（保证 `content_hash` 始终是合法 sha256）
 _EMPTY_TIME = "1970-01-01T00:00:00Z"

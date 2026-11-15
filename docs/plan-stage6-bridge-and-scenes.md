@@ -271,3 +271,21 @@
 - `chapter_override_rows(store, chapter)`、`check_cast(store, chapters)`、`unresolved_speaker_lines(store, chapters)` 不再回读章节；单章/全剧的取舍由调用方传列表决定。
 - `set_chapter_override` / `clear_chapter_overrides` 仍只写 `voice_overrides`，返回值由「展示行」改为「写后的章节」，路由再 `chapter_view` 派生视图取行——写点行为不变，读点已统一。
 - 双模式（A=scenes / B=script）比对：`check_cast` 全剧、单章 `cast check`、`chapter_override_rows`（全部 25 章）、`unresolved_speaker_lines` 全部逐字节一致；ndw_annotate_check 与 turn_ui_check 两份副本同样一致。`pytest` 253 passed / 10 skipped，分层 233 文件 0 违规。
+
+批次 D 验证：同一工程起两个端口（scenes / script），比对 12 条只读接口（章节列表、章节详情 ×2、对位检查、媒体、章节覆盖表、`cast/check` 单章/全剧、角色统计、全局搜索、新角色、工程概览）：状态码与响应体逐字节一致（最大 172790 字节）。`pytest` 253 passed / 10 skipped，分层 233 文件 0 违规。
+
+批次 E 验证：`chapter show`（219141 字节）、`chapter list`、`chapter_detail`、`chapter_binding`、`chapter_references`、`script.suggest` 预估在 scenes / script 两源下逐字节一致。`pytest` 253 passed / 10 skipped，分层 233 文件 0 违规。
+
+#### 9.3 步骤 2 进度（2026-11-16）
+
+| 变更 | 说明 |
+| --- | --- |
+| `domain/production/line_fields.py` | 字段分层唯一清单：`CONTENT_LINE_FIELDS` / `PRODUCTION_LINE_FIELDS` / `SCENE_IDENTITY_FIELDS` / `SCENE_DESCRIPTIVE_FIELDS` / `SCENE_MEDIA_FIELDS`；`lines_source` 改为引用这里，不再自带字段表 |
+| `schema/director-script.schema.json` | 台本行移除 `tts`（required 与 properties），补 `inferred`（内容层字段，旧引导台本本来就会带）；`line.schema.json` 保持场景行含 `tts` |
+| `director/markup.py` | 删除 `_tts_from_line`，解析出的镜头行不再复制 `tts`，`script parse` 产物首次全部符合新 schema |
+| `ProjectStore.load_script` | 读取时剔除行级 `tts` / `confidence`（旧台本残留），保证「不再读、不再写回」，也避免旧文件被 schema 拒收 |
+
+验证：
+- 三套语料逐章 `script_from_scenes` → 过 `director-script.schema.json` → `scenes_from_script` 与落盘场景逐字段相等（含 tt1 6 场景 / 256 行章节）。
+- `parse_markup` 解析结果行字段为 `anchor/emotion/id/index/kind/revision/speaker_id/text`，无 `tts`，schema 校验通过。
+- 步骤 1～3 读点全部复跑：`line list`、`tts plan`、`timeline build --dry-run`、image/video dry-run、`cast check`、`chapter show`、`chapter_binding`、`chapter_references`、`script.suggest` 预估在 scenes / script 两源下仍逐字节一致；`pytest` 253 passed / 10 skipped，分层 234 文件 0 违规。
