@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import time
 import uuid
@@ -33,6 +34,9 @@ from ..config import (
 from ..media import comfy_media, comfy_models
 from ..tts import model_store
 from ..writing.budgets import context_status
+
+#: 本模块日志：配置键等排查信息只写日志，不回显到界面
+logger = logging.getLogger(__name__)
 
 #: 后台下载任务表：`job_id -> {status, group, key, started_at, finished_at, result, logs}`
 _JOBS: dict[str, dict] = {}
@@ -1066,9 +1070,10 @@ def register_models_routes(app, config_path: str | None = None) -> None:
         removals: list[str] = []
         for dotted, value in values.items():
             if dotted not in GENERATION_FIELDS:
+                logger.warning("拒绝修改不支持的正文生成设置项：%s", dotted)
                 raise HTTPException(
                     status_code=400,
-                    detail={"code": 2, "message": f"不支持修改 {dotted}：正文生成只允许每轮节拍数与最大轮数"},
+                    detail={"code": 2, "message": "该设置项不支持在此修改，正文生成只允许调整每轮节拍数与最大轮数"},
                 )
             label, low, high, _default, field = GENERATION_FIELDS[dotted]
             if value is None or (isinstance(value, str) and not value.strip()):

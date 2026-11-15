@@ -3469,15 +3469,14 @@ const POV_MODE_LABELS = {
 let generationDefaultsCache = null;
 
 /**
- * 默认值来源的中文说明：设置页 / 配置文件 / 代码内置默认。
+ * 默认值来源的中文说明：只给用户看得懂的说法，配置键放进悬浮提示。
  * @param {'page'|'file'|'builtin'} source 来源标记
- * @param {string} key 配置键（file 来源时展示）
  * @returns {string} 说明文本
  */
-function defaultSourceLabel(source, key) {
-  if (source === 'page') return '来自设置页';
-  if (source === 'file') return `来自配置文件 ${key}`;
-  return '内置默认（设置页未改过）';
+function defaultSourceLabel(source) {
+  if (source === 'page') return '在设置页改过';
+  if (source === 'file') return '使用默认配置';
+  return '出厂默认';
 }
 
 /**
@@ -3537,26 +3536,24 @@ async function loadGenerationDefaults() {
  * @returns {string} HTML
  */
 function generationDefaultsHTML(defaults, clickable = true) {
-  const badge = '<span class="badge">默认值</span>';
   const head = defaults.fallback
-    ? '<div class="hint" style="margin-top:10px"><b>系统默认参数</b>：读取设置失败，下列为内置默认值。</div>'
-    : `<div class="hint" style="margin-top:10px"><b>系统默认参数</b>：未手填时按下列值生效，来源已标注${
-        clickable ? '；点带下划线的行可去设置页调整' : ''
+    ? '<div class="hint" style="margin-top:10px"><b>系统默认参数</b>：读取设置失败，下列为出厂默认值。</div>'
+    : `<div class="hint" style="margin-top:10px"><b>系统默认参数</b>：未手填时按下列值生效${
+        clickable ? '；点带虚线下划线的行可去设置页调整' : ''
       }。</div>`;
-  const row = (key, section, label, value, source, sourceKey) =>
-    clickable
-      ? `<button type="button" class="summary-line gen-default-line" data-goto-setting="${key}"
-           data-goto-section="${section}" title="到设置页调整「${label}」并立即生效">
-           <span>${label}</span><span class="right">${value} ${badge} · ${defaultSourceLabel(source, sourceKey)}</span>
-         </button>`
-      : `<div class="summary-line"><span>${label}</span><span class="right">${value} ${badge} · ${defaultSourceLabel(
-          source,
-          sourceKey
-        )}</span></div>`;
   return `
     ${head}
-    ${row('temperature', 'conn', '温度', defaults.temperature, defaults.temperatureSource, 'omlx.temperature')}
-    ${row(
+    ${generationDefaultRowHTML(
+      clickable,
+      'temperature',
+      'conn',
+      '温度',
+      String(defaults.temperature),
+      defaults.temperatureSource,
+      'omlx.temperature'
+    )}
+    ${generationDefaultRowHTML(
+      clickable,
       'thinking',
       'conn',
       '思考开关',
@@ -3595,27 +3592,23 @@ function povStatusOf(binding, chapter) {
 }
 
 /**
- * 从生成弹窗跳到设置页前，暂存已填参数与焦点项；返回小说页后据此恢复弹窗。
- * @param {object} prefill 已填参数（含 focusKey）
- * @param {boolean} hasBody 本章是否已有正文
- * @param {string} chapterId 章节 ID
+ * 从生成弹窗跳到设置页前，暂存恢复信息；返回小说页后据此恢复对应弹窗。
+ * 单章与整幕共用一个键，kind 区分恢复目标。
+ * @param {object} resume `{kind, path, chapter?, actId?, actIndex?, hasBody?, prefill?, focusKey}`
  */
-function saveGenerationResume(prefill, hasBody, chapterId) {
+function saveGenerationResume(resume) {
   try {
-    sessionStorage.setItem(
-      'ndw.genResume',
-      JSON.stringify({ path: cache.path, chapter: chapterId, hasBody, prefill, at: Date.now() })
-    );
+    sessionStorage.setItem('ndw.genResume', JSON.stringify({ ...resume, at: Date.now() }));
   } catch (error) {
     // 隐私模式或容量不足：只影响自动回填，不阻断跳转
   }
 }
 
 /**
- * 返回小说页后恢复生成弹窗：默认值与来源重新读取，已填参数原样带回。
- * 只消费一次；超过 10 分钟或工程不匹配则丢弃，避免误弹。
+ * 取出并清空待恢复信息；解析失败按无处理。
+ * @returns {object|null} 恢复信息
  */
-function resumeGenerationIfAny() {
+function readGenerationResume() {
   let resume = null;
   try {
     resume = JSON.parse(sessionStorage.getItem('ndw.genResume') || 'null');
@@ -3627,14 +3620,82 @@ function resumeGenerationIfAny() {
   } catch (error) {
     // 忽略：清理失败不影响本次恢复
   }
+  return resume;
+}
+
+/**
+ * 绑定默认参数行的设置跳转（单章/整幕共用，事件委托，行重绘也不会丢）。
+ * @param {HTMLElement} mask 弹窗根节点
+ * @param {(focusKey: string) => object} buildResume 返回除 focusKey/at 外的恢复信息
+ */
+function bindSettingJump(mask, buildResume) {
+  mask.addEventListener('click', (event) => {
+    const row = event.target.closest('[data-goto-setting]');
+    if (!row || !mask.contains(row) || row.disabled) return;
+    event.preventDefault();
+    const focusKey = row.dataset.gotoSetting;
+    saveGenerationResume({ ...buildResume(focusKey), focusKey });
+    closeDialog();
+    location.hash = `#/settings?section=${row.dataset.gotoSection || 'gen'}&focus=${encodeURIComponent(focusKey)}`;
+  });
+}
+
+/**
+ * 从设置页返回后，把焦点放回刚才点击的默认参数行。
+ * @param {HTMLElement} mask 弹窗根节点
+ * @param {string} focusKey 设置项键
+ */
+function restoreSettingFocus(mask, focusKey) {
+  if (!focusKey) return;
+  const row = mask.querySelector(`[data-goto-setting="${focusKey}"]`);
+  if (!row) return;
+  row.focus({ preventScroll: true });
+  row.classList.add('set-focus');
+  window.setTimeout(() => row.classList.remove('set-focus'), 1800);
+}
+
+/**
+ * 在已加载的大纲里找幕：优先按 ID，老数据没有 ID 时按去重后的位置。
+ * @param {string} actId 幕 ID
+ * @param {number} actIndex 1 基幕序号
+ * @returns {{act: object, index: number}|null} 幕与 0 基位置
+ */
+function findResumeAct(actId, actIndex) {
+  const acts = cache.outline?.acts || [];
+  let index = actId ? acts.findIndex((item) => item.id && item.id === actId) : -1;
+  if (index < 0) index = Number(actIndex || 0) - 1;
+  if (index < 0 || index >= acts.length) return null;
+  return { act: acts[index], index };
+}
+
+/**
+ * 返回小说页后恢复弹窗：默认值与来源重新读取，已选幕/章节与已填参数原样带回。
+ * 只消费一次；超过 10 分钟或工程不匹配则丢弃，避免误弹。
+ */
+function resumeGenerationIfAny() {
+  const resume = readGenerationResume();
   if (!resume || resume.path !== cache.path) return;
   if (!resume.at || Date.now() - Number(resume.at) > 10 * 60 * 1000) return;
+  generationDefaultsCache = null;
+  if (resume.kind === 'act') {
+    const hit = findResumeAct(resume.actId, resume.actIndex);
+    if (!hit) return;
+    ui.sel = { kind: 'act', id: actKey(hit.act, hit.index) };
+    paint();
+    window.setTimeout(
+      () => openActGenerateDialog(hit.act, hit.index + 1, { ...(resume.prefill || {}), focusKey: resume.focusKey }),
+      0
+    );
+    return;
+  }
   const hit = findOutlineChapter(resume.chapter);
   if (!hit) return;
   ui.sel = { kind: 'chapter', id: resume.chapter };
-  generationDefaultsCache = null;
   paint();
-  window.setTimeout(() => openGenerateDialog(Boolean(resume.hasBody), resume.prefill || {}), 0);
+  window.setTimeout(
+    () => openGenerateDialog(Boolean(resume.hasBody), { ...(resume.prefill || {}), focusKey: resume.focusKey }),
+    0
+  );
 }
 
 /**
@@ -3670,21 +3731,19 @@ async function openGenerateDialog(hasBody, prefill = {}) {
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
         <div class="field"><label>每轮节拍数</label><input class="input" id="gen-beats" type="number" min="0" step="1" value="${beatsValue}" />
           <button type="button" class="hint gen-default-link" data-goto-setting="beats_per_round"
-            data-goto-section="gen" title="到设置页调整「每轮节拍数」并立即生效">默认值 ${defaults.beatsPerRound} · 0 = 自动分配 · ${defaultSourceLabel(
-            defaults.beatsSource,
-            'writing.multi_turn.beats_per_round'
+            data-goto-section="gen" title="到设置页调整「每轮节拍数」并立即生效（配置项 writing.multi_turn.beats_per_round）">默认值 ${defaults.beatsPerRound} · 0 = 自动分配 · ${defaultSourceLabel(
+            defaults.beatsSource
           )}</button></div>
         <div class="field"><label>最大轮数（保险）</label><input class="input" id="gen-rounds" type="number" min="1" max="20" value="${roundsValue}" />
           <button type="button" class="hint gen-default-link" data-goto-setting="max_rounds"
-            data-goto-section="gen" title="到设置页调整「最大轮数」并立即生效">默认值 ${defaults.maxRounds} · ${defaultSourceLabel(
-            defaults.maxRoundsSource,
-            'writing.multi_turn.max_rounds'
+            data-goto-section="gen" title="到设置页调整「最大轮数」并立即生效（配置项 writing.multi_turn.max_rounds）">默认值 ${defaults.maxRounds} · ${defaultSourceLabel(
+            defaults.maxRoundsSource
           )}</button></div>
       </div>
       <label class="hint" style="display:flex;gap:6px;align-items:center;margin-top:4px">
         <input type="checkbox" id="gen-multi" ${multiValue ? 'checked' : ''} /> 按节拍分轮（更稳，耗时更长）
         <span class="badge">默认值 ${defaults.multiTurn ? '开启' : '关闭'}</span>
-        <span>${defaultSourceLabel(defaults.multiTurnSource, 'writing.multi_turn.enabled')}</span>
+        <span title="配置项 writing.multi_turn.enabled">${defaultSourceLabel(defaults.multiTurnSource)}</span>
       </label>
       ${generationDefaultsHTML(defaults)}`,
     foot: `<div class="right"><button class="btn" data-dlg-close>取消</button>
@@ -3706,35 +3765,20 @@ async function openGenerateDialog(hasBody, prefill = {}) {
         };
         openPovSetupDialog([hit.chapter], () => openGenerateDialog(hasBody, prefill), { actionLabel: '保存' });
       });
-      // 默认参数行可点：暂存已填参数后跳到设置页对应项；返回时自动恢复弹窗与焦点
-      mask.querySelectorAll('[data-goto-setting]').forEach((row) => {
-        row.addEventListener('click', () => {
-          saveGenerationResume(
-            {
-              mode: modeOf(),
-              beatsPerRound: Number(mask.querySelector('#gen-beats').value) || 0,
-              maxRounds: Number(mask.querySelector('#gen-rounds').value) || null,
-              multiTurn: mask.querySelector('#gen-multi').checked,
-              focusKey: row.dataset.gotoSetting,
-            },
-            hasBody,
-            hit.chapter.id
-          );
-          closeDialog();
-          location.hash = `#/settings?section=${row.dataset.gotoSection || 'gen'}&focus=${encodeURIComponent(
-            row.dataset.gotoSetting
-          )}`;
-        });
-      });
-      // 从设置页返回时把焦点放回刚才点击的默认参数行
-      if (prefill.focusKey) {
-        const row = mask.querySelector(`[data-goto-setting="${prefill.focusKey}"]`);
-        if (row) {
-          row.focus({ preventScroll: true });
-          row.classList.add('set-focus');
-          window.setTimeout(() => row.classList.remove('set-focus'), 1800);
-        }
-      }
+      // 默认参数行可点：与整幕共用同一套跳转；返回时按 kind 恢复本章弹窗与焦点
+      bindSettingJump(mask, () => ({
+        kind: 'chapter',
+        path: cache.path,
+        chapter: hit.chapter.id,
+        hasBody,
+        prefill: {
+          mode: modeOf(),
+          beatsPerRound: Number(mask.querySelector('#gen-beats').value) || 0,
+          maxRounds: Number(mask.querySelector('#gen-rounds').value) || null,
+          multiTurn: mask.querySelector('#gen-multi').checked,
+        },
+      }));
+      restoreSettingFocus(mask, prefill.focusKey);
       runBtn.addEventListener('click', async () => {
         if (runBtn.disabled) return;
         const mode = modeOf();
@@ -4153,20 +4197,53 @@ async function openPovSetupDialog(chapters, onDone, options = {}) {
 }
 
 /**
- * 整幕生成没有逐章参数输入，轮次相关默认值必须只读展示并标注来源。
- * @param {object} defaults loadGenerationDefaults 的返回
+ * 单个默认参数行：clickable=true 时是按钮，点击跳到设置页对应项；
+ * 单章与整幕弹窗共用，避免两处行为不一致。
+ * @param {boolean} clickable 是否可点
+ * @param {string} key 设置项键（beats_per_round / max_rounds / temperature / thinking）
+ * @param {string} section 设置页分区（gen / conn）
+ * @param {string} label 中文名
+ * @param {string} value 展示值
+ * @param {string} source 来源标记
+ * @param {string} sourceKey 配置键（file 来源时展示）
  * @returns {string} HTML
  */
-function generationRoundsHTML(defaults) {
-  const badge = '<span class="badge">默认值</span>';
+function generationDefaultRowHTML(clickable, key, section, label, value, source, sourceKey) {
+  const content = `<span>${label}</span><span class="right">${value} <span class="badge">默认值</span> · ${defaultSourceLabel(
+    source
+  )}</span>`;
+  if (!clickable) return `<div class="summary-line">${content}</div>`;
+  const keyHint = sourceKey ? `（配置项 ${sourceKey}）` : '';
+  return `<button type="button" class="summary-line gen-default-line" data-goto-setting="${key}"
+    data-goto-section="${section}" title="到设置页调整「${label}」并立即生效${keyHint}">${content}</button>`;
+}
+
+/**
+ * 每轮节拍数 / 最大轮数两行（整幕弹窗用）；clickable 与单章保持一致
+ * @param {object} defaults loadGenerationDefaults 的返回
+ * @param {boolean} [clickable=true] 是否可点跳转
+ * @returns {string} HTML
+ */
+function generationRoundsHTML(defaults, clickable = true) {
   return `
-    <div class="summary-line"><span>每轮节拍数</span><span class="right">${
-      defaults.beatsPerRound ? `${defaults.beatsPerRound} 个` : '自动分配'
-    } ${badge} · ${defaultSourceLabel(defaults.beatsSource, 'writing.multi_turn.beats_per_round')}</span></div>
-    <div class="summary-line"><span>最大轮数（保险）</span><span class="right">${defaults.maxRounds} ${badge} · ${defaultSourceLabel(
-    defaults.maxRoundsSource,
-    'writing.multi_turn.max_rounds'
-  )}</span></div>`;
+    ${generationDefaultRowHTML(
+      clickable,
+      'beats_per_round',
+      'gen',
+      '每轮节拍数',
+      defaults.beatsPerRound ? `${defaults.beatsPerRound} 个` : '自动分配',
+      defaults.beatsSource,
+      'writing.multi_turn.beats_per_round'
+    )}
+    ${generationDefaultRowHTML(
+      clickable,
+      'max_rounds',
+      'gen',
+      '最大轮数（保险）',
+      String(defaults.maxRounds),
+      defaults.maxRoundsSource,
+      'writing.multi_turn.max_rounds'
+    )}`;
 }
 
 /**
@@ -4188,16 +4265,17 @@ function actPovStatusOf(missing, total) {
  * 启动前先做视角预检，缺失时集中设置，不再逐章各报一遍。
  * @param {object} act 幕对象
  * @param {number} actIndex 幕序号（从 1 开始）
+ * @param {{mode?: 'fill'|'regen', focusKey?: string}} [prefill] 从设置页/视角弹窗返回时还原模式与焦点
  * @returns {Promise<void>} 无
  */
-async function openActGenerateDialog(act, actIndex) {
+async function openActGenerateDialog(act, actIndex, prefill = {}) {
   const chapters = act.chapters || [];
   if (!chapters.length) return toast('这一幕还没有章节，先补齐大纲', 'warn');
   const defaults = await loadGenerationDefaults();
   const landed = chapters.filter((chapter) => landedChapter(chapter.id));
   const hasBody = chapters.filter((chapter) => Number(landedChapter(chapter.id)?.word_count || 0) > 0);
   const modeKey = 'act.generate';
-  const fallback = hasBody.length ? 'fill' : 'regen';
+  const fallback = prefill.mode || (hasBody.length ? 'fill' : 'regen');
   openDialog({
     title: `生成整幕正文 · 第 ${actIndex} 幕《${act.title || '未命名幕'}》`,
     body: `
@@ -4216,9 +4294,9 @@ async function openActGenerateDialog(act, actIndex) {
           : ''
       }
       <div class="hint" style="margin-top:8px">按章节顺序逐章生成，复用单章链路（按节拍推进、滚动摘要、版本历史）；单章失败不中断整幕；「只补缺失」会跳过已有正文并计入结果。启动前会先检查本幕视角设置。</div>
-      <div class="hint" style="margin-top:10px"><b>整幕生成使用的默认参数</b>：本弹窗没有逐章输入框，下列值直接生效，来源已标注。</div>
+      <div class="hint" style="margin-top:10px"><b>整幕生成使用的默认参数</b>：本弹窗没有逐章输入框，下列值直接生效；点带虚线下划线的行可去设置页调整。</div>
       ${generationRoundsHTML(defaults)}
-      ${generationDefaultsHTML(defaults, false)}`,
+      ${generationDefaultsHTML(defaults)}`,
     foot: `<div class="right"><button class="btn" data-dlg-close>取消</button>
       <button class="btn primary" data-ag-run>${icon('spark', 12)} 开始生成整幕</button></div>`,
     onMount: (mask) => {
@@ -4241,9 +4319,20 @@ async function openActGenerateDialog(act, actIndex) {
           if (povText) povText.textContent = '本幕视角：检查失败，点击打开设置';
           povLine?.classList.add('warn');
         });
-      // 状态行可点击：打开共用视角弹窗；保存后重新打开本弹窗（原参数弹窗已被替换）
+      // 默认参数行可点：与单章共用同一套跳转；返回时恢复本幕弹窗与已选模式
+      bindSettingJump(mask, () => ({
+        kind: 'act',
+        path: cache.path,
+        actId: act.id || '',
+        actIndex,
+        prefill: { mode: modeOf() },
+      }));
+      restoreSettingFocus(mask, prefill.focusKey);
+      // 状态行可点击：打开共用视角弹窗；保存后重新打开本弹窗并保留已选模式
       povLine?.addEventListener('click', () => {
-        openPovSetupDialog(chapters, () => openActGenerateDialog(act, actIndex), { actionLabel: '保存' });
+        openPovSetupDialog(chapters, () => openActGenerateDialog(act, actIndex, { mode: modeOf() }), {
+          actionLabel: '保存',
+        });
       });
       runBtn.addEventListener('click', async () => {
         if (runBtn.disabled) return;

@@ -211,7 +211,10 @@ def test_generation_settings_reject_budget_and_bad_values(
         json={"values": {"omlx.max_tokens": 16384}},
     )
     assert budget.status_code == 400
-    assert "不支持修改" in budget.json()["detail"]["message"]
+    message = budget.json()["detail"]["message"]
+    assert "不支持在此修改" in message
+    # 界面提示不回显配置键，键名只写日志
+    assert "omlx." not in message
 
     for value in (0, 21, 2.5, "abc"):
         response = client.post(

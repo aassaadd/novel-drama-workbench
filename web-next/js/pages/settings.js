@@ -718,15 +718,23 @@ function connectionHTML() {
 }
 
 /**
- * 配置来源的中文说明：设置页 / 配置文件 / 内置默认（与生成弹窗口径一致）。
+ * 配置来源的用户说法，不显示配置键；键名通过悬浮提示给出。
  * @param {'page'|'file'|'builtin'} source 来源标记
- * @param {string} key 配置键（file 来源时展示）
  * @returns {string} 说明文本
  */
-function sourceLabel(source, key) {
-  if (source === 'page') return '来自设置页';
-  if (source === 'file') return `来自配置文件 ${key}`;
-  return '内置默认（设置页未改过）';
+function sourceLabel(source) {
+  if (source === 'page') return '在设置页改过';
+  if (source === 'file') return '使用默认配置';
+  return '出厂默认';
+}
+
+/**
+ * 配置键的悬浮提示（仅用于排查，不占正文位置）。
+ * @param {string} key 配置键
+ * @returns {string} title 文本
+ */
+function sourceTitle(key) {
+  return key ? `配置项：${key}` : '';
 }
 
 /** 正文生成可改项：字段名 → 覆盖层点分键 */
@@ -741,8 +749,8 @@ function generationFormHTML() {
     <div class="card" style="margin-top:14px">
       <div class="card-head"><span class="ct">正文生成默认参数（全局）</span>
         <div class="right">
-          <button class="btn sm" data-act="gen-reset" title="删除页面覆盖项，回落到配置文件或内置默认">恢复默认</button>
-          <button class="btn sm primary" data-act="gen-save" title="写入本机覆盖层，立即生效">保存</button>
+          <button class="btn sm" data-act="gen-reset" title="恢复到默认值，不改动手动填写的其他设置">恢复默认</button>
+          <button class="btn sm primary" data-act="gen-save" title="保存到本机设置，立即生效">保存</button>
         </div>
       </div>
       <div class="card-body">
@@ -776,18 +784,16 @@ function generationFormBodyHTML() {
         <input class="input" id="gen-beats-input" data-setting-key="beats_per_round" type="number"
           min="1" max="${beatsMax}" step="1" value="${auto ? '' : beats}" placeholder="例如 2"
           ${auto ? 'disabled' : ''} title="固定每轮写几个节拍；勾选自动分配时不可填" />
-        <div class="hint" id="gen-beats-hint">当前生效 ${auto ? '自动分配' : `${beats} 拍/轮`} · 默认值 自动分配 · ${sourceLabel(
-          sources.beats_per_round,
-          GENERATION_KEYS.beats_per_round
-        )}</div>
+        <div class="hint" id="gen-beats-hint" title="${sourceTitle(GENERATION_KEYS.beats_per_round)}">当前生效 ${
+          auto ? '自动分配' : `${beats} 拍/轮`
+        } · 默认值 自动分配 · ${sourceLabel(sources.beats_per_round)}</div>
       </div>
       <div class="field"><label>最大轮数（保险）</label>
         <input class="input" id="gen-rounds-input" data-setting-key="max_rounds" type="number"
           min="1" max="${roundsMax}" step="1" value="${rounds}"
           title="防止跑飞的保险：达到该轮数仍未写完就停止" />
-        <div class="hint" id="gen-rounds-hint">当前生效 ${rounds} · 默认值 ${defaults.max_rounds ?? 8} · ${sourceLabel(
-          sources.max_rounds,
-          GENERATION_KEYS.max_rounds
+        <div class="hint" id="gen-rounds-hint" title="${sourceTitle(GENERATION_KEYS.max_rounds)}">当前生效 ${rounds} · 默认值 ${defaults.max_rounds ?? 8} · ${sourceLabel(
+          sources.max_rounds
         )}</div>
       </div>
     </div>`;
@@ -843,7 +849,7 @@ async function saveGeneration(button) {
   try {
     generation = await postJSON('/api/ui/config/generation', { values });
     applyGenerationForm();
-    setConnResult('gen-form-result', true, `已保存到 ${generation.saved_to || '覆盖层'}，立即生效`);
+    setConnResult('gen-form-result', true, '已保存，立即生效');
     toast('正文生成参数已保存，立即生效', 'ok', 2400);
   } catch (error) {
     setConnResult('gen-form-result', false, error.message || '保存失败');
