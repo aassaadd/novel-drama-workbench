@@ -15,6 +15,11 @@ from novel_drama import __version__
 from novel_drama.application.story.queries import (
     settings_view,
 )
+from novel_drama.application.story.work_meta import (
+    init_project,
+    update_work,
+    work_view,
+)
 from novel_drama.composition import (
     WORKSPACE_INDEX,
     OmlxWritingAdapter,
@@ -24,11 +29,7 @@ from novel_drama.composition import (
 )
 from novel_drama.infrastructure.config import DEFAULT_UI_CONFIG_PATH, load_config
 from novel_drama.interface.http import use_cases
-from novel_drama.interface.http.cli_bridge import fail_body
-from novel_drama.interface.http.deps import run_cli, store_for
-from novel_drama.interface.http.routers.common import (
-    _respond,
-)
+from novel_drama.interface.http.deps import store_for
 from novel_drama.interface.http.routers.models_helpers import resolve_llm_settings
 from novel_drama.models.ids import now_iso
 
@@ -504,17 +505,6 @@ def register_config_routes(app, project_root: str | None = None, config_path: st
         无。
     """
     _store = store_for(project_root)
-
-    def _cli(*argv: str):
-        """按 `serve --config` 的同一份配置执行 CLI。
-
-        参数:
-            argv: 不含 `--config` 的参数串。
-
-        返回:
-            `actions.CliResult`。
-        """
-        return run_cli(config_path, *argv)
 
     @app.get("/api/health")
     def health() -> dict:
@@ -1022,17 +1012,18 @@ def register_config_routes(app, project_root: str | None = None, config_path: st
     @app.post("/api/ui/project/init")
     def ui_project_init(body: dict) -> dict:
         """新建工程（`init`），返回可直接用于后续请求的绝对路径。"""
-        argv = ["--json", "init", body["dir"], "--title", body["title"]]
-        if body.get("author"):
-            argv += ["--author", body["author"]]
-        for genre in body.get("genres") or []:
-            if genre:
-                argv += ["--genre", genre]
-        result = _cli(*argv)
-        if result.code != 0:
-            raise HTTPException(status_code=result.status, detail=fail_body(result))
-        payload = result.payload if isinstance(result.payload, dict) else {}
-        payload["root"] = str(ProjectStore(body["dir"]).root)
+        root = body["dir"]
+        genres = [str(item) for item in (body.get("genres") or []) if item]
+        payload = use_cases.call(
+            lambda: init_project(
+                root,
+                str(body["title"]),
+                author=str(body.get("author") or ""),
+                genre=genres,
+            )
+        )
+        payload = dict(payload) if isinstance(payload, dict) else {}
+        payload["root"] = str(ProjectStore(root).root)
         return payload
 
     @app.post("/api/ui/project/pick-dir")
@@ -1087,10 +1078,8 @@ def register_config_routes(app, project_root: str | None = None, config_path: st
     @app.get("/api/ui/project/work")
     def ui_project_work(path: str = Query(...)) -> dict:
         """作品元信息（书名 / 作者 / 类型），供创作向导回填。"""
-        _store(path)
-        payload = _respond(_cli("--project", path, "--json", "project", "info"))
-        work = (payload or {}).get("work") or {}
-        return {"title": work.get("title") or "", "author": work.get("author") or "", "genres": work.get("genre") or []}
+        store = _store(path)
+        return use_cases.call(lambda: work_view(store))
 
     @app.post("/api/ui/project/work")
     def ui_project_work_set(body: dict) -> dict:
@@ -1103,22 +1092,25 @@ def register_config_routes(app, project_root: str | None = None, config_path: st
             HTTPException 400: 没有任何要修改的字段，或 genres 不是数组。
         """
         path = body.get("path")
-        _store(path)
-        argv = ["--project", path, "--json", "project", "set"]
-        if body.get("title") is not None:
-            argv += ["--title", str(body["title"])]
-        if body.get("author") is not None:
-            argv += ["--author", str(body["author"])]
+        store = _store(path)
+        title = body.get("title")
+        author = body.get("author")
         genres = body.get("genres")
+        if genres is not None and not isinstance(genres, list):
+            raise HTTPException(status_code=400, detail={"code": 2, "message": "genres 必须是数组"})
+        # 空白标签等于没给：全部过滤后仍无字段时按「没有要修改的字段」处理；
+        # 空数组是明确的「清空类型标签」，不能当成没给。
+        clean_genres = None
         if genres is not None:
-            if not isinstance(genres, list):
-                raise HTTPException(status_code=400, detail={"code": 2, "message": "genres 必须是数组"})
-            if genres:
-                for genre in genres:
-                    if str(genre).strip():
-                        argv += ["--genre", str(genre).strip()]
-            else:
-                argv.append("--clear-genres")
-        if len(argv) == 5:
+            clean_genres = [str(item).strip() for item in genres if str(item).strip()]
+        genre_change = genres is not None and (not genres or bool(clean_genres))
+        if title is None and author is None and not genre_change:
             raise HTTPException(status_code=400, detail={"code": 2, "message": "没有要修改的字段"})
-        return _respond(_cli(*argv))
+        return use_cases.call(
+            lambda: update_work(
+                store,
+                title=None if title is None else str(title),
+                author=None if author is None else str(author),
+                genres=clean_genres if genre_change else None,
+            )
+        )
