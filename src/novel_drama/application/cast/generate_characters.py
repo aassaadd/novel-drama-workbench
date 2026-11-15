@@ -191,3 +191,26 @@ def generate_characters(
         "narrator_profile": narrator_profile,
         "batches": batches,
     }
+
+
+def preview_characters(
+    store: ProjectStore,
+    config: AppConfig,
+    count: int | None = None,
+    brief: str | None = None,
+) -> dict:
+    """只生成人物设定、不写盘（页面「生成角色」预览与 CLI `--dry-run` 共用）。
+
+    参数:
+        store: 工程。
+        config: 本机配置。
+        count: 期望人物总数。
+        brief: 用户补充要求。
+
+    返回:
+        `generate_characters` 的结果并追加 `applied=False`。
+
+    异常:
+        ValueError: 模型输出不是合法 JSON 或重名。
+    """
+    return {**generate_characters(store, config, count=count, brief=brief), "applied": False}

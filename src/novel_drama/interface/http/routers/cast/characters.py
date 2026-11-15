@@ -10,16 +10,15 @@ from novel_drama.application.cast.character_crud import (
     UPDATE_FIELDS,
     append_characters,
     character_refs,
+    character_sheet,
     remove_character,
     update_character,
 )
+from novel_drama.application.cast.generate_characters import preview_characters
 from novel_drama.application.cast.queries import character_list
+from novel_drama.infrastructure.config import load_config
 from novel_drama.interface.http import use_cases
-from novel_drama.interface.http.deps import run_cli, store_for
-from novel_drama.interface.http.routers.common import (
-    _respond,
-    _respond_business,
-)
+from novel_drama.interface.http.deps import store_for
 
 
 def register_cast_characters_routes(app, project_root: str | None = None, config_path: str | None = None) -> None:
@@ -34,17 +33,6 @@ def register_cast_characters_routes(app, project_root: str | None = None, config
         无。
     """
     _store = store_for(project_root)
-
-    def _cli(*argv: str):
-        """按 `serve --config` 的同一份配置执行 CLI。
-
-        参数:
-            argv: 不含 `--config` 的参数串。
-
-        返回:
-            `actions.CliResult`。
-        """
-        return run_cli(config_path, *argv)
 
     @app.get("/api/ui/characters")
     def ui_characters(path: str = Query(...)) -> dict:
@@ -104,13 +92,16 @@ def register_cast_characters_routes(app, project_root: str | None = None, config
             `{characters: [...], applied: false}`，由前端回填后用户确认再 POST 追加。
         """
         path = body.get("path")
-        _store(path)
-        argv = ["--project", path, "--json", "character", "generate", "--dry-run"]
-        if body.get("brief"):
-            argv += ["--brief", str(body["brief"])]
-        if body.get("count") is not None:
-            argv += ["--count", str(body["count"])]
-        return _respond(_cli(*argv))
+        store = _store(path)
+        count = int(body["count"]) if body.get("count") is not None else None
+        return use_cases.call(
+            lambda: preview_characters(
+                store,
+                load_config(config_path),
+                count=count,
+                brief=str(body["brief"]) if body.get("brief") else None,
+            )
+        )
 
     @app.post("/api/ui/characters/image")
     def ui_characters_image(body: dict) -> dict:
@@ -126,17 +117,23 @@ def register_cast_characters_routes(app, project_root: str | None = None, config
             HTTPException 400: 缺少 id 或 kind 非法。
         """
         path = body.get("path")
-        _store(path)
+        store = _store(path)
         character_id = body.get("id") or body.get("character")
         if not character_id:
             raise HTTPException(status_code=400, detail={"code": 2, "message": "缺少 id 参数"})
         kind = str(body.get("kind") or "").strip()
         if kind not in ("fullbody", "closeup", "turnaround"):
             raise HTTPException(status_code=400, detail={"code": 2, "message": "kind 必须是 fullbody / closeup / turnaround"})
-        argv = ["--project", path, "--json", "character", "image", "--id", str(character_id), "--kind", kind]
-        if body.get("force"):
-            argv.append("--force")
-        return _respond_business(_cli(*argv))
+        return use_cases.call(
+            lambda: character_sheet(
+                store,
+                load_config(config_path),
+                str(character_id),
+                kind,
+                force=bool(body.get("force")),
+            ),
+            business=True,
+        )
 
     @app.patch("/api/ui/characters")
     def ui_characters_update(body: dict) -> dict:

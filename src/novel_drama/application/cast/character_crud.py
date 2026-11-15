@@ -9,6 +9,7 @@ import json
 
 from ...adapters.persistence import ProjectStore
 from ...adapters.persistence.settings_store import SettingsStore
+from ...composition import render_character_sheet
 from ...domain.shared.errors import PreconditionError
 from ...models import entities
 from ...models.enums import AgeRange, SpeechPitch, SpeechTempo, choices_text
@@ -814,3 +815,27 @@ def remove_character(store: ProjectStore, character_id: str, *, force: bool = Fa
         "references": refs["total"],
         "cleaned": cleaned,
     }
+
+
+def character_sheet(
+    store: ProjectStore, config, character_id: str, kind: str, force: bool = False
+) -> dict:
+    """生成角色特写 / 三视图并写回 image_assets。
+
+    参数:
+        store: 工程。
+        config: 本机配置。
+        character_id: 角色 ID。
+        kind: `fullbody` / `closeup` / `turnaround`。
+        force: 已存在时也重新生成。
+
+    返回:
+        `render_character_sheet` 的结构化结果（含 `created` 与 `image_asset`）。
+
+    异常:
+        PreconditionError: 角色不存在。
+    """
+    table = store.load_characters()
+    if not any(item.get("id") == character_id for item in table["characters"]):
+        raise PreconditionError(f"角色不存在: {character_id}")
+    return render_character_sheet(store, config, character_id, kind, force=force)

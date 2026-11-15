@@ -9,7 +9,7 @@ import json
 import sys
 from pathlib import Path
 
-from novel_drama.application.script.annotate import suggest_script
+from novel_drama.application.script.suggest_apply import suggest_and_apply
 from novel_drama.application.story.apply_outline import apply_outline
 from novel_drama.application.story.edit_chapter import (
     edit_chapter,
@@ -19,7 +19,6 @@ from novel_drama.application.story.generate_chapter import generate_chapter_chec
 from novel_drama.application.story.generate_outline import generate_outline
 from novel_drama.application.story.queries import outline_view
 from novel_drama.application.story.summarize_chapter import summarize_chapter
-from novel_drama.composition import validate
 from novel_drama.infrastructure.config import AppConfig
 
 from ..common import (
@@ -364,21 +363,20 @@ def cmd_script_suggest(args, config: AppConfig) -> int:
         退出码。
     """
     store = _resolve_store(args, config)
-    result = suggest_script(
+    outcome = suggest_and_apply(
         store,
         config,
         args.chapter,
-        dry_run=args.dry_run,
-        scenes_per_round=getattr(args, "scenes_per_round", None),
+        apply=bool(args.apply),
+        dry_run=bool(args.dry_run),
         resume=bool(getattr(args, "resume", False)),
+        scenes_per_round=getattr(args, "scenes_per_round", None),
+        out_path=getattr(args, "out", None),
     )
-    markup = result["markup"]
+    result = outcome["result"]
+    payload = outcome["payload"]
+    out_path = outcome["markup_path"]
     chapter_id = args.chapter
-
-    out_path = Path(args.out) if getattr(args, "out", None) else store.root / "scripts" / f"{chapter_id}.markup.txt"
-    if not args.dry_run:
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_path.write_text(markup + "\n", encoding="utf-8")
 
     from novel_drama.director.markup import INFO_PREFIX
 
@@ -404,24 +402,14 @@ def cmd_script_suggest(args, config: AppConfig) -> int:
     if args.apply and not args.dry_run:
         if failures:
             lines.append("（有失败批次，本次未同步到章节）")
-            payload = {key: value for key, value in result.items() if key != "markup"} | {"markup_path": str(out_path)}
         else:
-            script = result["script"]
-            validate(script, "director-script.schema.json")
-            store.save_script(script)
-            from .voice import _apply_script_to_chapter
-
-            chapter = store.load_chapter(chapter_id)
-            summary = _apply_script_to_chapter(store, chapter, script)
+            summary = payload["apply"]
             lines.append(
                 f"已同步到章节：新建场景 {summary['scenes_created']}，新增台词 {summary['lines_added']}，"
                 f"更新台词 {summary['lines_updated']}，音效 {summary['sfx_added']}，画面 {summary['images_added']}，视频位 {summary['videos_added']}"
             )
-            payload = {**{key: value for key, value in result.items() if key != "markup"}, "apply": summary, "markup_path": str(out_path)}
-    else:
-        payload = {key: value for key, value in result.items() if key != "markup"} | {"markup_path": str(out_path)}
-        if args.dry_run:
-            lines.append("（dry-run，未写盘）")
+    elif args.dry_run:
+        lines.append("（dry-run，未写盘）")
     _emit(args, "\n".join(lines), payload)
     return EXIT_OK
 

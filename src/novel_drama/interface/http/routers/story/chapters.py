@@ -4,15 +4,14 @@ from __future__ import annotations
 
 from fastapi import HTTPException, Query
 
+from novel_drama.application.production.line_query import chapter_lines
 from novel_drama.application.story.queries import (
     chapter_list,
 )
 from novel_drama.composition import QueueStore
 from novel_drama.infrastructure.config import load_config
-from novel_drama.interface.http.deps import run_cli, store_for
-from novel_drama.interface.http.routers.common import (
-    _respond,
-)
+from novel_drama.interface.http import use_cases
+from novel_drama.interface.http.deps import store_for
 
 
 def register_story_chapters_routes(app, project_root: str | None = None, config_path: str | None = None) -> None:
@@ -27,17 +26,6 @@ def register_story_chapters_routes(app, project_root: str | None = None, config_
         无。
     """
     _store = store_for(project_root)
-
-    def _cli(*argv: str):
-        """按 `serve --config` 的同一份配置执行 CLI。
-
-        参数:
-            argv: 不含 `--config` 的参数串。
-
-        返回:
-            `actions.CliResult`。
-        """
-        return run_cli(config_path, *argv)
 
     def _outline_chapters(store) -> list[dict]:
         """读取设定库里的全部大纲章节（捕获角色时查找节拍用）。
@@ -117,7 +105,9 @@ def register_story_chapters_routes(app, project_root: str | None = None, config_
             `{chapter, title, counts, items: [{line_id, scene_id, scene_title, index, speaker, text, state}]}`。
         """
         store = _store(path)
-        payload = _respond(_cli("--project", path, "--json", "line", "list", "--chapter", chapter)) or {}
+        payload = use_cases.call(
+            lambda: chapter_lines(store, chapter, load_config(config_path))
+        )
         data = store.load_chapter(chapter)
         scene_titles = {
             str(scene.get("id")): str(scene.get("title") or f"场景 {int(scene.get('index') or 0) + 1}")

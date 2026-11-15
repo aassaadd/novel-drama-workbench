@@ -12,12 +12,15 @@ from pathlib import Path
 from novel_drama.application.cast.character_crud import (
     UPDATE_FIELDS,
     append_characters,
+    character_sheet,
     remove_character,
     update_character,
 )
-from novel_drama.application.cast.generate_characters import generate_characters
+from novel_drama.application.cast.generate_characters import (
+    generate_characters,
+    preview_characters,
+)
 from novel_drama.application.cast.queries import character_list
-from novel_drama.composition import render_character_sheet
 from novel_drama.infrastructure.config import AppConfig
 from novel_drama.interface.cli.common import EXIT_OK
 from novel_drama.models import entities
@@ -111,15 +114,22 @@ def cmd_character_generate(args, config: AppConfig) -> int:
         进程退出码。
     """
     store = _resolve_store(args, config)
+    if getattr(args, "dry_run", False):
+        # 预览不落盘：与页面「生成角色」走同一个用例
+        result = preview_characters(
+            store,
+            config,
+            count=getattr(args, "count", None),
+            brief=getattr(args, "brief", None),
+        )
+        _emit(args, f"[dry-run] 已生成 {len(result['characters'])} 个人物", result)
+        return 0
     result = generate_characters(
         store,
         config,
         count=getattr(args, "count", None),
         brief=getattr(args, "brief", None),
     )
-    if getattr(args, "dry_run", False):
-        _emit(args, f"[dry-run] 已生成 {len(result['characters'])} 个人物", {**result, "applied": False})
-        return 0
     rows = list(result["characters"]) + list(result.get("stock_characters") or [])
     applied = append_characters(store, rows)
     narrator_profile = result.get("narrator_profile") or {}
@@ -223,10 +233,9 @@ def cmd_character_image(args, config: AppConfig) -> int:
         PreconditionError: 角色不存在。
     """
     store = _resolve_store(args, config)
-    table = store.load_characters()
-    if not any(item.get("id") == args.id for item in table["characters"]):
-        raise PreconditionError(f"角色不存在: {args.id}")
-    result = render_character_sheet(store, config, args.id, args.kind, force=bool(getattr(args, "force", False)))
+    result = character_sheet(
+        store, config, args.id, args.kind, force=bool(getattr(args, "force", False))
+    )
     state = "已生成" if result.get("created") else "已存在，复用"
     _emit(args, f"角色设定图{state}: {result.get('image_asset')}", result)
     return 0

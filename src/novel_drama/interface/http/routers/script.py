@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from fastapi import Query
 
-from novel_drama.interface.http.deps import run_cli, store_for
-from novel_drama.interface.http.routers.common import (
-    _require,
-    _respond,
-)
+from novel_drama.application.script.suggest_apply import suggest_and_apply
+from novel_drama.infrastructure.config import load_config
+from novel_drama.interface.http import use_cases
+from novel_drama.interface.http.deps import store_for
+from novel_drama.interface.http.routers.common import _require
 
 
 def register_script_routes(app, project_root: str | None = None, config_path: str | None = None) -> None:
@@ -23,17 +23,6 @@ def register_script_routes(app, project_root: str | None = None, config_path: st
         无。
     """
     _store = store_for(project_root)
-
-    def _cli(*argv: str):
-        """按 `serve --config` 的同一份配置执行 CLI。
-
-        参数:
-            argv: 不含 `--config` 的参数串。
-
-        返回:
-            `actions.CliResult`。
-        """
-        return run_cli(config_path, *argv)
 
     @app.get("/api/ui/script")
     def ui_script(path: str = Query(...), chapter: str = Query(...)) -> dict:
@@ -82,11 +71,15 @@ def register_script_routes(app, project_root: str | None = None, config_path: st
             path="工程目录",
             chapter="章节 ID",
         )
-        argv = ["--project", body["path"], "--json", "script", "suggest", "--chapter", body["chapter"]]
-        if body.get("apply"):
-            argv.append("--apply")
-        if body.get("dry_run"):
-            argv.append("--dry-run")
-        if body.get("resume"):
-            argv.append("--resume")
-        return _respond(_cli(*argv))
+        store = _store(body["path"])
+        outcome = use_cases.call(
+            lambda: suggest_and_apply(
+                store,
+                load_config(config_path),
+                body["chapter"],
+                apply=bool(body.get("apply")),
+                dry_run=bool(body.get("dry_run")),
+                resume=bool(body.get("resume")),
+            )
+        )
+        return outcome["payload"]
