@@ -132,3 +132,119 @@
 1. 删除 `interface/http/cli_bridge.py` 与 `deps.run_cli`、`routers/common._respond*`。
 2. `scripts/check_layering.py` 增加规则：`interface/**` 禁止 `subprocess` 调用 `novel_drama.cli`。
 3. 再进 `chapter.scenes` 四步（读入口 → Line 值对象 → 单一写点 → 删字段）。
+
+## 三、阶段 6-3 实施方案（`chapter.scenes` → `Script.shots`，待确认，未动代码）
+
+> 调查结论（2026-11-16）：三套语料 **都没有 scripts/**（tt1：25 章 / 0 台本；turn_ui_check：0 章 / 0 台本；ndw_annotate_check：1 章 / 0 台本）。
+> 因此「script 唯一承接」不能假设台本已存在，第一步必须能从 `chapter.scenes` 无损引导出台本。
+
+### 1. 新读入口
+
+新增 `application/production/lines_source.py`（application 层，只依赖 store / schema / domain）：
+
+| 函数 | 作用 | 是否写盘 |
+| --- | --- | --- |
+| `read_scenes(store, chapter)` | 统一读入口：返回「场景 + 行」的完整视图 | 否 |
+| `read_line(store, chapter, line_id)` | 单行定位，返回 `(scene, line, shot)` | 否 |
+| `script_from_scenes(chapter)` | 旧工程引导：场景 → shots（行 ID 原样保留） | 否 |
+| `scenes_from_script(chapter, script)` | 派生：shots → scenes（保留生产态与媒体） | 否 |
+| `ensure_script(store, chapter)` | 首次写入前把引导结果落盘（幂等） | 是 |
+| `save_lines(store, chapter, script)` | **唯一写点**：保存台本 → 派生 scenes → 保存章节 | 是 |
+
+开关 `NDW_LINES_SOURCE=scenes|script`（默认值随步骤推进）：
+- 步骤 1 默认 `scenes`：`read_scenes` 直接返回 `chapter.scenes`，全链路 0 差异；
+- 步骤 3 默认 `script`：无台本时 `script_from_scenes` 内存引导，读到与原来一致的数据。
+
+步骤 1 要切换的读点（按输出链优先，分批提交、每批 0 差异）：
+`line_query.py` → `tts_plan.py`/`tts/batch.plan_batch` → `application/production/timeline.py` 及其调用的 `adapters/media/*` → `voice_cast.py`/`blockers.py` → `annotate.py`/`resplit.py` 的影响分析 → HTTP 读模型（`/api/ui/lines`、章节台词表、stream）。共 102 个读取点，分批迁完后 `chapter.scenes` 才允许删字段。
+
+### 2. Line 值对象（dict + 共享字段集，不引入 ORM/类层次）
+
+现状问题：`script.shots[].lines` 与 `chapter.scenes[].lines` 各存一份完整行，且台本行 schema **强制**包含 `tts`（`markup.parse_markup` 还会从场景行复制 `tts`），生产态因此双份。
+
+定为两层字段（`domain/production/line_fields.py` 作为唯一清单，schema 两边共用）：
+
+| 层 | 字段 | 归属 |
+| --- | --- | --- |
+| 内容 | `id/index/kind/speaker_id/text/emotion/emotion_intensity/speed/pause_before_ms/pause_after_ms/delivery_note/paralinguistic/target_duration_ms/voice/anchor/inferred` | **Script**（唯一可写源） |
+| 生产 | `tts{status,asset_id,duration_ms,error,…}` | **scenes 投影**（派生时按行 ID 保留） |
+| 场景 | `id/chapter_id/index/title/location/time_of_day/mood/goal/summary/source_text/character_ids/bgm/status/revision` | 由 shot 映射；shot 未覆盖的（`source_text`/`summary`/`status`）按 index 从旧场景保留 |
+| 媒体 | `sfx_events/key_images/video_segments` | **scenes**（按条目 ID 保留，不迁进台本） |
+
+`line.schema.json` 与 `director-script.schema.json#/$defs/line` 改为同一份 `$ref` + 各自附加字段；台本行移除 `tts`（步骤 2 起不再写、不再读）。
+
+### 3. scenes 如何派生
+
+`scenes_from_script(chapter, script)`（纯函数，幂等）：
+
+1. 镜头按 `index` 排序，`scene.index = shot.index - 1`（与现有 `apply_script` 一致；镜头内行序号 0 基）。
+2. 场景身份按 index 对齐旧场景：`scene.id/chapter_id/source_text/summary/status/revision` 沿用；新镜头用 `new_scene()` 默认值。镜头重排视为「重新标注」，不按 index 硬搬场景生产态。
+3. 场景描述字段：`title=scene_label`、`location/time_of_day/mood/goal` 取 shot，`bgm` 取 shot.bgm。
+4. 行：`shot.lines` 按 index 重建；内容字段全部取台本；`tts` 从旧场景同 `line_id` 的行复制（新行默认 pending）；`character_ids` 按现有规则重算。
+5. 媒体：`sfx_events/key_images/video_segments` 按条目 ID 从旧场景保留（与 `materialize_media` 同口径），台本不再引用也不删除，避免丢已生成资产。
+6. 变更语义：内容字段无变化时 **不 bump `scene.revision` / 不重写章节**，保证「同一命令跑两次第二次 0 文件变化」。
+7. 不变量：`scenes_from_script(script_from_scenes(chapter.scenes))` 与 `chapter.scenes` 逐字段相等（忽略顺序与不可派生字段）。步骤 1 先用三套语料全量校验这条不变量，再进步骤 2。
+
+### 4. 写点归属（目标：所有内容写点只写台本）
+
+| # | 写点 | 现在 | 目标 |
+| --- | --- | --- | --- |
+| 1 | `orchestration/pipeline.split_chapter_scenes` | 写 `chapter.scenes` | 产出镜头草案 + 复用旧行 → `save_lines` |
+| 2 | `orchestration/pipeline.split_scene_lines` | 写 `scene.lines` | 同上（只改台词） |
+| 3 | `orchestration/resplit.py`（分析/落地） | 经 1/2 间接写 scenes | 同上；重切后旧标注/媒体如何处理见「待确认 1」 |
+| 4 | `application/script/apply_script.py` | script→scenes 增量双写 | 校验台本 → `save_lines` 整章派生 |
+| 5 | `director/markup.parse_markup` | shot 行复制 `tts` | 台本行只存内容字段 |
+| 6 | `application/production/line_edit.py`（改/合并/切分/批量切分/替换） | 写 scenes | 写台本 → `save_lines` |
+| 7 | `tts/line_state.revert_line`（参数撤回） | 写 scenes | 写台本内容字段 → `save_lines` |
+| 8 | `tts/batch.py`、`line_state` 状态写、`routers/align.py`、`adapters/media/runner.py` | 写行 `tts` / 媒体 | **保持写 scenes 投影**；派生按行 ID/条目 ID 保留，不改这些写点 |
+| 9 | `orchestration/produce.py`（标注阶段）、`suggest_apply.py`、`stream.py`、CLI `voice.py` | 各自 `save_script` | 统一走 `save_lines` |
+
+### 5. 旧工程迁移时机（不做 `ndw migrate`）
+
+- **读**：永不写盘。无台本 → `script_from_scenes` 内存引导，输出与现状一致。
+- **第一次内容写**（重切、行编辑、标注落地）：`ensure_script` 把引导结果写成 `scripts/<chapter>.json`，再执行本次改动并派生 scenes；两个文件都按「内容变了才写」落盘。
+- **步骤 4 前**：`serve`/打开工程时跑一次幂等 `ensure_scripts(project)`（只补缺失台本，不覆盖已有），保证删字段后无章可读；可用 `NDW_SCENES_UPGRADE=off` 关闭。tt1 首开会产生 25 个台本文件，属一次性升级写。
+- **顺序保证**：先升级、后删字段；缺台本的章节在步骤 4 前用一条只读自检拦住（报「先打开一次工程完成升级」），不静默回退。
+
+### 6. 四步提交与验证
+
+| 步骤 | 提交内容 | 默认源 | 验收 |
+| --- | --- | --- | --- |
+| 1 | `lines_source.py` + 读点分批迁移 + 开关 | scenes | 三套语料 `line list/diff`、`tts plan`、`timelines/`、`exports/` 与基线逐字节一致；步骤 1 末校验派生不变量 |
+| 2 | Line 字段分层 + 台本行去 `tts` + `scenes_from_script` 单派生 | scenes | 同上；`NDW_LINES_SOURCE=script` 下再比一遍全等 |
+| 3 | 写点改 `save_lines`，行编辑只写台本 | script | 写命令连跑两次第二次 0 文件变化；`timelines/`、`exports/` 全等；行编辑页面走查 |
+| 4 | 停写 `chapter.scenes`，schema/实体删字段 | script | `ensure_scripts` 覆盖 100% 后删；三套语料重建工程可跑全链路；页面 0 warn 0 error |
+
+每步：`pytest` + `scripts/check_layering.py`；比对只归一化 `built_at` 与导出包时间戳，其余逐字节。回滚：步骤 1–3 开关切回 `scenes`；每步单提交可 revert；步骤 4 前 `scenes` 写路径一直保留。
+
+### 7. 需要确认（动第一刀前）
+
+1. **重切后的旧标注**：现在重切只提示「需重新标注」但保留台本；改台本唯一承接后，重切必须重写台本。建议：按新切分结果重建 shots，行 ID 尽量复用，锚定在已消失行上的 sfx/画面/动画保留资产但不再渲染（计入告警）；人工改写行的保留规则沿用 `keep_manual`。这会改变「重切后台本仍在」的现状，是否接受？
+2. **生产态归属**：`tts` 留在 scenes 投影、按行 ID 保留，台本行不再存 `tts`；媒体（sfx/图片/视频）继续归 scenes。是否确认？
+3. **迁移时机**：按「读不写、首次内容写落盘、步骤 4 前打开工程幂等补台本」执行，还是要求每次写命令都先整工程补台本？
+4. **场景对齐键**：按 index 对齐（与现有 apply/materialize 一致）；镜头重排按重新标注处理。是否确认不引入 `scene.shot_id`？
+5. **字段删除**：步骤 4 是否直接删 `chapter.schema.json` 的 `scenes`（不留只读版本周期）？
+
+### 8. 已确认口径（2026-11-16，按此执行）
+
+1. **重切**：接受行为变化——按新切分重建 shots，行 ID 尽量复用；锚在已消失行上的媒体保留资产但不参与渲染，并计入**告警明细**（要能在页面上看到具体是哪几条，不能只写日志）；人工行沿用 `keep_manual`。
+2. **生产态**：`tts` 留 scenes 投影、按行 ID 保留；媒体（sfx / 图片 / 视频）继续归 scenes。
+3. **迁移时机**：读不写；首次内容写时落盘；步骤 4 前打开工程幂等补台本。补台本是写盘动作，**页面和命令行都必须给出可见提示**（补了几个工程/几个章节），不得静默。
+4. **场景对齐**：按 index 对齐，不引入 `scene.shot_id`；镜头重排按重新标注处理。
+5. **删字段**：步骤 4 直接删 `chapter.schema.json` 的 `scenes`，不留只读周期；删之前先确认章节版本归档可回滚，删完做真机走查。
+6. **步骤 1 闸门**：先在三套语料（tt1 / turn_ui_check / ndw_annotate_check）全量校验 `scenes_from_script(script_from_scenes(scenes)) == scenes`，通过后才继续迁读点。
+
+### 9. 步骤 1 进度（2026-11-16）
+
+已新增 `application/production/lines_source.py`（只读，不接写路径）：
+
+| 函数 | 行为 |
+| --- | --- |
+| `script_from_scenes(chapter)` | 旧工程内存引导台本；行 ID 原样保留，镜头/脚本 ID 与锚点按章节 ID + 序号确定性生成，重复调用结果一致 |
+| `scenes_from_script(chapter, script)` | 深拷贝旧场景后只覆盖内容层字段；`tts` / `confidence` / 媒体 / `summary` / `source_text` / `status` / `character_ids` 原样保留；内容无变化不 bump `revision` |
+| `read_scenes(store, chapter)` | 统一读入口；`NDW_LINES_SOURCE=scenes`（默认）直读落盘场景，`script` 时读台本（缺失则内存引导）后派生 |
+| `read_line(store, chapter, line_id)` | 单行定位，返回 `(scene, line)` |
+
+闸门结果：tt1（25 章，1 章有场景 / 6 场景 / 256 行）、turn_ui_check（0 章）、ndw_annotate_check（1 章 / 2 场景 / 6 行）全部 round-trip 逐字段相等，`script_from_scenes` 二次调用完全一致；另用合成数据覆盖空标题场景、`tts ready/failed`、行锚点、`confidence`、`paralinguistic`、`voice`、`bgm`、音效/关键图产物，同样全等。`pytest` 253 passed / 10 skipped，分层检查 233 文件 0 违规。
+
+说明：引导出的台本行刻意不带 `tts`（生产态归场景投影），当前 `director-script.schema.json` 仍强制该字段，落盘要等步骤 2 改 schema；步骤 1 不写盘，故无影响。
