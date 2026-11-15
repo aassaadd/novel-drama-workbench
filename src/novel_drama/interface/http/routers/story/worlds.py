@@ -4,16 +4,18 @@ from __future__ import annotations
 
 from fastapi import HTTPException, Query
 
+from novel_drama.adapters.media.art import render_world_cover
+from novel_drama.adapters.persistence import WorldStore
 from novel_drama.application.cast.queries import character_list
 from novel_drama.application.story.queries import (
     world_list,
 )
+from novel_drama.application.story.settings_generate import generate_worlds
 from novel_drama.application.story.world_crud import remove_world, upsert_worlds
+from novel_drama.domain.shared.errors import PreconditionError
+from novel_drama.infrastructure.config import load_config
 from novel_drama.interface.http import use_cases
-from novel_drama.interface.http.deps import run_cli, store_for
-from novel_drama.interface.http.routers.common import (
-    _respond_business,
-)
+from novel_drama.interface.http.deps import store_for
 
 
 def register_story_worlds_routes(app, project_root: str | None = None, config_path: str | None = None) -> None:
@@ -28,17 +30,6 @@ def register_story_worlds_routes(app, project_root: str | None = None, config_pa
         无。
     """
     _store = store_for(project_root)
-
-    def _cli(*argv: str):
-        """按 `serve --config` 的同一份配置执行 CLI。
-
-        参数:
-            argv: 不含 `--config` 的参数串。
-
-        返回:
-            `actions.CliResult`。
-        """
-        return run_cli(config_path, *argv)
 
     @app.get("/api/ui/worlds")
     def ui_worlds(path: str = Query(...)) -> dict:
@@ -106,14 +97,26 @@ def register_story_worlds_routes(app, project_root: str | None = None, config_pa
         返回:
             `{worlds, count, saved: false}`。
         """
-        path = body.get("path")
-        _store(path)
-        argv = ["--project", path, "--json", "world", "generate", "--dry-run"]
-        if body.get("brief"):
-            argv += ["--brief", str(body["brief"])]
-        if body.get("count") is not None:
-            argv += ["--count", str(body["count"])]
-        return _respond_business(_cli(*argv))
+        store = _store(body.get("path"))
+        count = body.get("count")
+        if count is not None and str(count).strip() != "":
+            try:
+                count = int(count)
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400, detail={"code": 2, "message": "count 必须是整数"})
+        else:
+            count = None
+        result = use_cases.call(
+            lambda: generate_worlds(
+                store,
+                load_config(config_path),
+                count=count,
+                brief=str(body["brief"]) if body.get("brief") else None,
+            ),
+            business=True,
+        )
+        generated = result["worlds"]
+        return {"worlds": generated, "count": len(generated), "saved": False}
 
     @app.post("/api/ui/worlds/image")
     def ui_worlds_image(body: dict) -> dict:
@@ -125,12 +128,18 @@ def register_story_worlds_routes(app, project_root: str | None = None, config_pa
         异常:
             HTTPException 400: 缺少 id。
         """
-        path = body.get("path")
-        _store(path)
+        store = _store(body.get("path"))
         world_id = body.get("id")
         if not world_id:
             raise HTTPException(status_code=400, detail={"code": 2, "message": "缺少 id 参数"})
-        argv = ["--project", path, "--json", "world", "image", "--id", str(world_id)]
-        if body.get("force"):
-            argv.append("--force")
-        return _respond_business(_cli(*argv))
+        force = bool(body.get("force"))
+
+        def _render() -> dict:
+            """确认世界存在后生成封面（已存在且未强制时直接复用）。"""
+            worlds = WorldStore(store.root)
+            worlds.ensure()
+            if worlds.get(str(world_id)) is None:
+                raise PreconditionError(f"世界条目不存在: {world_id}")
+            return render_world_cover(store, load_config(config_path), str(world_id), force=force)
+
+        return use_cases.call(_render, business=True)

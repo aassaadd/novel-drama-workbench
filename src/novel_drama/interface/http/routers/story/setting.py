@@ -4,16 +4,23 @@ from __future__ import annotations
 
 from fastapi import HTTPException
 
+from novel_drama.adapters.persistence import SettingsStore
 from novel_drama.application.production.job_tracker import (
     UiJob,
 )
-from novel_drama.application.story.settings_edit import apply_section, set_scalars
-from novel_drama.interface.http import use_cases
-from novel_drama.interface.http.deps import run_cli, store_for
-from novel_drama.interface.http.routers.common import (
-    _respond,
-    _respond_business,
+from novel_drama.application.story.settings_edit import (
+    apply_section,
+    read_field_value,
+    set_scalars,
 )
+from novel_drama.application.story.settings_generate import (
+    generate_section,
+    generate_settings,
+    polish_field,
+)
+from novel_drama.infrastructure.config import load_config
+from novel_drama.interface.http import use_cases
+from novel_drama.interface.http.deps import store_for
 
 SECTION_LABEL = {
     "premise": "故事内核",
@@ -48,17 +55,6 @@ def register_story_setting_routes(app, project_root: str | None = None, config_p
     """
     _store = store_for(project_root)
 
-    def _cli(*argv: str):
-        """按 `serve --config` 的同一份配置执行 CLI。
-
-        参数:
-            argv: 不含 `--config` 的参数串。
-
-        返回:
-            `actions.CliResult`。
-        """
-        return run_cli(config_path, *argv)
-
     @app.post("/api/ui/setting/set")
     def ui_setting_set(body: dict) -> dict:
         """修改设定库标量字段（应用层用例 `set_scalars`，与 `setting set` 同源）。"""
@@ -89,44 +85,57 @@ def register_story_setting_routes(app, project_root: str | None = None, config_p
                     status_code=400,
                     detail={"code": 2, "message": "section 必须是 premise / style / character（世界观请用世界模块）"},
                 )
-            argv = ["--project", path, "--json", "setting", "generate", "--section", section, "--dry-run"]
-            if body.get("brief"):
-                argv += ["--brief", str(body["brief"])]
-            if body.get("target_id"):
-                argv += ["--target-id", str(body["target_id"])]
-            # overwrite=false 表示「只补缺失」：保留已有字段，只生成空缺
-            if body.get("overwrite") is False:
-                argv.append("--keep-existing")
+            seed = None
             # 显式固定种子才传；缺省不固定，保证同一设定重复生成结果不同
             if body.get("seed") is not None and str(body.get("seed")).strip() != "":
                 try:
-                    argv += ["--seed", str(int(body["seed"]))]
+                    seed = int(body["seed"])
                 except (TypeError, ValueError):
                     raise HTTPException(status_code=400, detail={"code": 2, "message": "seed 必须是整数"})
+            overwrite = body.get("overwrite") is not False
             job = UiJob(store, "setting", {"label": SECTION_LABEL.get(section, section)}, f"生成{SECTION_LABEL.get(section, section)}")
             job.start("已提交生成请求")
             try:
-                payload = _respond_business(_cli(*argv))
+                result = use_cases.call(
+                    lambda: generate_section(
+                        store,
+                        load_config(config_path),
+                        section,
+                        brief=str(body["brief"]) if body.get("brief") else None,
+                        target_id=str(body["target_id"]) if body.get("target_id") else None,
+                        seed=seed,
+                        overwrite=overwrite,
+                    ),
+                    business=True,
+                )
             except Exception as exc:  # noqa: BLE001 - 失败原因写进任务队列后再抛出
                 job.fail(str(getattr(exc, "detail", exc)))
                 raise
             job.finish("生成完成")
-            return payload
+            return {
+                "section": result["section"],
+                "fields": result["fields"] or {},
+                "skipped": result.get("skipped") or [],
+                "overwrite": overwrite,
+            }
         step = str(body.get("step") or "").strip()
         if step not in ("premise", "style"):
             raise HTTPException(status_code=400, detail={"code": 2, "message": "step 必须是 premise / style（世界观请用世界模块）"})
-        argv = ["--project", path, "--json", "setting", "generate", "--step", step, "--dry-run"]
-        if body.get("overwrite"):
-            argv.append("--overwrite")
+        overwrite_step = bool(body.get("overwrite"))
         job = UiJob(store, "setting", {"label": SECTION_LABEL.get(step, step)}, f"生成{SECTION_LABEL.get(step, step)}")
         job.start("已提交生成请求")
         try:
-            payload = _respond(_cli(*argv))
+            result = use_cases.call(
+                lambda: generate_settings(
+                    store, load_config(config_path), step, overwrite=overwrite_step
+                )
+            )
         except Exception as exc:  # noqa: BLE001
             job.fail(str(getattr(exc, "detail", exc)))
             raise
         job.finish("生成完成")
-        return payload
+        revision = (SettingsStore(store.root).load_or_none() or {}).get("settings_revision")
+        return {**result, "applied": False, "settings_revision": revision}
 
     @app.post("/api/ui/setting/apply")
     def ui_setting_apply(body: dict) -> dict:
@@ -161,15 +170,24 @@ def register_story_setting_routes(app, project_root: str | None = None, config_p
             HTTPException 400: field 缺失或不受支持。
         """
         path = body.get("path")
-        _store(path)
+        store = _store(path)
         field = str(body.get("field") or "").strip()
         if not field:
             raise HTTPException(status_code=400, detail={"code": 2, "message": "缺少 field 参数"})
-        argv = ["--project", path, "--json", "setting", "polish", "--field", field]
-        if body.get("text") is not None:
-            argv += ["--text", str(body["text"])]
-        if body.get("context"):
-            argv += ["--context", str(body["context"])]
-        if body.get("character"):
-            argv += ["--character", str(body["character"])]
-        return _respond(_cli(*argv))
+        character_id = str(body["character"]) if body.get("character") else None
+
+        def _polish() -> dict:
+            """读取待润色文本（未传时取当前值）并调用润色用例。"""
+            source = body.get("text")
+            if source is None:
+                settings = SettingsStore(store.root)
+                source = read_field_value(store, settings.ensure(), field, character_id)
+            return polish_field(
+                store,
+                load_config(config_path),
+                field,
+                str(source),
+                context=str(body["context"]) if body.get("context") else None,
+            )
+
+        return {**use_cases.call(_polish), "applied": False}
