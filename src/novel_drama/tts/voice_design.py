@@ -24,6 +24,7 @@ from pathlib import Path
 from ..adapters.base import Message, TextGenRequest
 from ..config import AppConfig, resolve_temperature
 from ..models import entities
+from ..models.enums import AgeRange, SpeechPitch, SpeechTempo
 
 WORKER_PATH = Path(__file__).resolve().parent / "providers" / "voxcpm2_design_worker.py"
 
@@ -148,15 +149,16 @@ def _publish(batch_id: str, event: dict) -> None:
 def _character_brief(character: dict) -> str:
     """把人物档案压成给 LLM 的简报（只取与音色相关的字段）。"""
     style = character.get("speech_style") or {}
+    age_raw = character.get("age_range")
     parts = [
         f"姓名：{character.get('name') or '未命名'}",
         f"角色定位：{character.get('role') or 'unknown'}",
         f"性别：{character.get('gender') or 'unknown'}",
-        f"年龄：{character.get('age_range') or '未标注'}",
+        f"年龄：{AgeRange.label_of(age_raw) or age_raw or '未标注'}",
         f"性格：{'、'.join(character.get('personality') or []) or '未标注'}",
         f"背景：{(character.get('background') or '')[:600] or '未标注'}",
-        f"语速：{style.get('tempo') or '未标注'}",
-        f"音区：{style.get('pitch') or '未标注'}",
+        f"语速：{SpeechTempo.label_of(style.get('tempo')) or '未标注'}",
+        f"音区：{SpeechPitch.label_of(style.get('pitch')) or '未标注'}",
         f"口音：{style.get('accent') or '未标注'}",
     ]
     return "\n".join(parts)
@@ -166,16 +168,15 @@ def _rule_profile(character: dict) -> dict:
     """LLM 不可用时的规则模板（保证功能可用）。"""
     gender = character.get("gender") if character.get("gender") in {"male", "female", "other"} else "unknown"
     style = character.get("speech_style") or {}
-    pitch_raw = (style.get("pitch") or "").strip()
-    pitch = "low" if any(word in pitch_raw for word in ("低", "沉")) else "high" if any(word in pitch_raw for word in ("高", "尖")) else "mid"
-    tempo_raw = (style.get("tempo") or "").strip()
-    pace = "slow" if any(word in tempo_raw for word in ("慢", "缓")) else "fast" if any(word in tempo_raw for word in ("快", "急")) else "medium"
+    pitch = SpeechPitch.normalize(style.get("pitch")) or SpeechPitch.MEDIUM.value
+    pace = SpeechTempo.normalize(style.get("tempo")) or SpeechTempo.MEDIUM.value
     gender_en = {"male": "male", "female": "female"}.get(gender, "neutral")
     age = character.get("age_range") or "30s"
     accent = (style.get("accent") or "").strip() or "standard Mandarin"
     prompt = f"A {pitch}-pitched {gender_en} voice in {age}, clear natural timbre, {pace} pace, {accent}, restrained and believable."
     return {
-        "voice_summary": f"{age}{'男' if gender == 'male' else '女' if gender == 'female' else ''}声，{pitch_raw or '中音区'}，{tempo_raw or '中速'}",
+        "voice_summary": f"{age}{'男' if gender == 'male' else '女' if gender == 'female' else ''}声，"
+        f"{SpeechPitch.label_of(pitch) or '中等'}，{SpeechTempo.label_of(pace) or '中速'}",
         "gender": gender,
         "age_range": age,
         "pitch": pitch,

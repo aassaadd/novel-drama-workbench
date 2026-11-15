@@ -20,6 +20,7 @@ from ..cancel import GenerationCanceled
 from ..config import AppConfig, resolve_temperature
 from ..director.markup import parse_markup
 from ..models import entities
+from ..models.enums import AgeRange, SpeechPitch, SpeechTempo
 from ..models.ids import new_id, now_iso
 from ..oplog import set_llm_abort_reason, set_llm_call_reason
 from ..store import ProjectStore
@@ -3129,7 +3130,11 @@ _CHARACTER_TOOL_SCHEMA = {
             "description": "protagonist=主角，antagonist=反派，supporting=配角，minor=龙套",
         },
         "gender": {"type": "string", "enum": list(GENDER_OPTIONS)},
-        "age_range": {"type": "string", "description": "年龄区间，如「18-24」，40 字以内"},
+        "age_range": {
+            "type": "string",
+            "enum": list(AgeRange.values()),
+            "description": "年龄段分档，只能从枚举里选：10-14 儿童 / 18-25 青年 / 26-39 成年 / 40-54 中年 / 55-70 老年",
+        },
         "personality": {
             "type": "array",
             "items": {"type": "string"},
@@ -3140,8 +3145,16 @@ _CHARACTER_TOOL_SCHEMA = {
             "type": "object",
             "description": "写作时直接注入提示词的口吻约束：语速、音高、口音/用词习惯、口头禅",
             "properties": {
-                "tempo": {"type": "string", "description": "语速，如「偏慢，常停顿」"},
-                "pitch": {"type": "string", "description": "音高/音色，如「低沉沙哑」"},
+                "tempo": {
+                    "type": "string",
+                    "enum": list(SpeechTempo.values()),
+                    "description": "语速档位：slow=慢，medium=中速，fast=快（只选枚举，不要写「偏慢，常停顿」这类长句）",
+                },
+                "pitch": {
+                    "type": "string",
+                    "enum": list(SpeechPitch.values()),
+                    "description": "音高档位：low=偏低，medium=中等，high=偏高（只选枚举）",
+                },
                 "accent": {"type": "string", "description": "口音或用词习惯，如「带江南口音，爱用反问」"},
                 "catchphrases": {
                     "type": "array",
@@ -3207,9 +3220,9 @@ _CHARACTER_DESC_RULES = (
     "不要写成否定句堆砌；\n"
     "6) appearance_negative_en：英文 negative prompt，逗号分隔的排除项（如 glasses, beard, scar），"
     "不要写 not/no 句式；\n"
-    "7) speech_style：写作时直接进提示词的口吻约束，必须给 tempo（语速）、pitch（音高/音色）、"
-    "accent（口音或用词习惯）、catchphrases（1-3 句口头禅）；四个人物之间的语速、用词和口头禅要能明显区分，"
-    "不能千篇一律。"
+    "7) speech_style：写作时直接进提示词的口吻约束，必须给 tempo（语速，只能取 slow/medium/fast）、"
+    "pitch（音高，只能取 low/medium/high）、accent（口音或用词习惯）、catchphrases（1-3 句口头禅）；"
+    "四个人物之间的语速、用词和口头禅要能明显区分，不能千篇一律。"
 )
 
 #: 龙套条目 schema：在人物 schema 上要求 stock
@@ -4395,6 +4408,28 @@ def generate_characters(
     }
 
 
+def _clean_age_range(value, owner: str) -> str | None:
+    """清洗年龄段：只接受分档枚举，模型给出的数字区间按中点归入分档。
+
+    参数:
+        value: 模型返回的年龄段（可能是「18-24」「30s」「青年」等写法）。
+        owner: 角色名的中文描述，用于报错，如「人物 张三」。
+
+    返回:
+        合法分档值；未填写返回 None。
+
+    异常:
+        ValueError: 无法归入任何分档（消息含可选值）。
+    """
+    raw = _check_text(value, 40, f"{owner} 的年龄段")
+    if not raw:
+        return None
+    age = AgeRange.normalize(raw)
+    if age is None:
+        raise ValueError(f"{owner} 的年龄段「{raw}」无法归入分档；可选值：{'/'.join(AgeRange.values())}")
+    return age
+
+
 def _clean_speech_style(value) -> dict | None:
     """清洗人物说话方式（写作时直接注入提示词）。
 
@@ -4406,9 +4441,17 @@ def _clean_speech_style(value) -> dict | None:
     """
     if not isinstance(value, dict):
         return None
+    raw_tempo = _check_text(value.get("tempo"), 40, "说话方式的语速")
+    raw_pitch = _check_text(value.get("pitch"), 40, "说话方式的音高")
+    tempo = SpeechTempo.normalize(raw_tempo) if raw_tempo else None
+    pitch = SpeechPitch.normalize(raw_pitch) if raw_pitch else None
+    if raw_tempo and tempo is None:
+        raise ValueError(f"说话方式的语速「{raw_tempo}」不在可选范围；只能取 { '/'.join(SpeechTempo.values()) }")
+    if raw_pitch and pitch is None:
+        raise ValueError(f"说话方式的音高「{raw_pitch}」不在可选范围；只能取 { '/'.join(SpeechPitch.values()) }")
     clean = {
-        "tempo": _check_text(value.get("tempo"), 40, "说话方式的语速"),
-        "pitch": _check_text(value.get("pitch"), 40, "说话方式的音高"),
+        "tempo": tempo,
+        "pitch": pitch,
         "accent": _check_text(value.get("accent"), 40, "说话方式的口音"),
         "catchphrases": _clean_str_list(value.get("catchphrases"), 60, "说话方式的口头禅")[:3],
     }
@@ -4442,7 +4485,7 @@ def _clean_character_row(row, index: int) -> dict:
         "name": name,
         "role": role,
         "gender": gender,
-        "age_range": _check_text(row.get("age_range"), 40, f"人物 {name} 的年龄区间") or None,
+        "age_range": _clean_age_range(row.get("age_range"), f"人物 {name}"),
         "personality": _clean_str_list(row.get("personality"), 120, f"人物 {name} 的性格"),
         "background": _check_text(row.get("background"), 2000, f"人物 {name} 的背景"),
         "speech_style": _clean_speech_style(row.get("speech_style")),
@@ -4606,7 +4649,7 @@ def _build_stock_characters(rows: list[dict], seen: set[str]) -> list[dict]:
             "name": name,
             "role": "minor",
             "gender": gender,
-            "age_range": _check_text(row.get("age_range"), 40, f"龙套 {name} 的年龄区间") or None,
+            "age_range": _clean_age_range(row.get("age_range"), f"龙套 {name}"),
             "personality": _clean_str_list(row.get("personality"), 120, f"龙套 {name} 的性格"),
             "background": _check_text(row.get("background"), 1200, f"龙套 {name} 的背景"),
             "appearance_prompt": _check_text(row.get("appearance_prompt"), 1200, f"龙套 {name} 的外貌提示词"),
@@ -4672,7 +4715,7 @@ def _clean_character_entry(row: dict) -> dict:
         "name": name,
         "role": role,
         "gender": gender,
-        "age_range": _check_text(row.get("age_range"), 40, f"人物 {name} 的年龄区间") or None,
+        "age_range": _clean_age_range(row.get("age_range"), f"人物 {name}"),
         "personality": _clean_str_list(row.get("personality"), 120, f"人物 {name} 的性格"),
         "background": _check_text(row.get("background"), 2000, f"人物 {name} 的背景"),
         "speech_style": _clean_speech_style(row.get("speech_style")),

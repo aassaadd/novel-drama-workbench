@@ -13,6 +13,7 @@ from .cli_common import PreconditionError, _emit, _resolve_store, cast_hint
 from .config import AppConfig
 from .media.art import render_character_sheet
 from .models import entities
+from .models.enums import AgeRange, SpeechPitch, SpeechTempo, choices_text
 from .models.ids import now_iso
 from .writing import generate_characters
 
@@ -34,6 +35,34 @@ def _split_items(text: str) -> list[str]:
     import re
 
     return [part.strip() for part in re.split(r"[、,，;；]+", text or "") if part.strip()]
+
+
+def _clean_speech_style(style: dict) -> dict:
+    """清洗说话方式：语速 / 音高只接受枚举值，口音与口头禅保留自由文本。
+
+    参数:
+        style: 界面或命令行传入的说话方式对象。
+
+    返回:
+        `{tempo, pitch, accent, catchphrases}`，未填写项为 None / 空数组。
+
+    异常:
+        ValueError: 语速或音高不在可选范围（中文消息含可选值）。
+    """
+    raw_tempo = str(style.get("tempo") or "").strip()
+    raw_pitch = str(style.get("pitch") or "").strip()
+    tempo = SpeechTempo.coerce(raw_tempo) if raw_tempo else None
+    pitch = SpeechPitch.coerce(raw_pitch) if raw_pitch else None
+    if raw_tempo and tempo is None:
+        raise ValueError(f"语速「{raw_tempo}」不在可选范围；可选值：{choices_text(SpeechTempo)}")
+    if raw_pitch and pitch is None:
+        raise ValueError(f"音高「{raw_pitch}」不在可选范围；可选值：{choices_text(SpeechPitch)}")
+    return {
+        "tempo": tempo,
+        "pitch": pitch,
+        "accent": str(style.get("accent") or "").strip()[:40] or None,
+        "catchphrases": [str(item).strip()[:60] for item in (style.get("catchphrases") or []) if str(item).strip()],
+    }
 
 
 def append_characters(store, rows: list[dict]) -> dict:
@@ -74,7 +103,7 @@ def append_characters(store, rows: list[dict]) -> dict:
         gender = str(row.get("gender") or "unknown").strip()
         character = entities.new_character(name, role=role)
         character["gender"] = gender if gender in GENDER_CHOICES else "unknown"
-        character["age_range"] = str(row.get("age_range") or "").strip() or None
+        character["age_range"] = AgeRange.normalize(row.get("age_range")) if str(row.get("age_range") or "").strip() else None
         character["personality"] = [str(item).strip() for item in (row.get("personality") or []) if str(item).strip()]
         character["background"] = str(row.get("background") or "").strip()
         character["appearance_prompt"] = str(row.get("appearance_prompt") or "").strip()
@@ -240,7 +269,14 @@ def cmd_character_update(args, config: AppConfig) -> int:
         target["gender"] = args.gender
         changed.append(f"gender={args.gender}")
     if getattr(args, "age_range", None) is not None:
-        target["age_range"] = args.age_range.strip() or None
+        raw_age = args.age_range.strip()
+        if not raw_age:
+            target["age_range"] = None
+        else:
+            age = AgeRange.coerce(raw_age)
+            if age is None:
+                raise ValueError(f"年龄段「{raw_age}」不在可选范围；可选值：{choices_text(AgeRange)}")
+            target["age_range"] = age
         changed.append("age_range")
     if getattr(args, "personality", None):
         target["personality"] = _split_items(args.personality)
@@ -306,14 +342,7 @@ def cmd_character_update(args, config: AppConfig) -> int:
                 raise ValueError(f"speech_style 不是合法 JSON: {exc}") from exc
             if not isinstance(style, dict):
                 raise ValueError("speech_style 必须是 JSON 对象")
-            target["speech_style"] = {
-                "tempo": str(style.get("tempo") or "").strip()[:40] or None,
-                "pitch": str(style.get("pitch") or "").strip()[:40] or None,
-                "accent": str(style.get("accent") or "").strip()[:40] or None,
-                "catchphrases": [
-                    str(item).strip()[:60] for item in (style.get("catchphrases") or []) if str(item).strip()
-                ],
-            }
+            target["speech_style"] = _clean_speech_style(style)
         else:
             target["speech_style"] = {"tempo": None, "pitch": None, "accent": None, "catchphrases": []}
         changed.append("speech_style")

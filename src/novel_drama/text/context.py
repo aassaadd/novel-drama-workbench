@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from ..adapters.base import Message, TextGenRequest
 from ..models.entities import NARRATOR_ID
+from ..models.enums import SpeechPitch, SpeechTempo
 
 #: 前序章节缺少摘要时，回退取正文末尾的字数
 SYNOPSIS_FALLBACK_CHARS = 800
@@ -278,9 +279,9 @@ class ContextAssembler:
             catchphrases = [str(item) for item in (speech.get("catchphrases") or []) if _text(item)]
             speech_parts: list[str] = []
             if tempo:
-                speech_parts.append(f"语速{tempo}")
+                speech_parts.append(f"语速{SpeechTempo.label_of(tempo) or tempo}")
             if pitch:
-                speech_parts.append(f"音高{pitch}")
+                speech_parts.append(f"音高{SpeechPitch.label_of(pitch) or pitch}")
             if accent:
                 speech_parts.append(accent)
             if catchphrases:

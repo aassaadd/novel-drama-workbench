@@ -57,7 +57,7 @@ CHARACTERS = [
         "aliases": ["沈队"],
         "personality": ["克制", "多疑"],
         "background": "旧案唯一的目击者",
-        "speech_style": {"tempo": "缓慢", "pitch": "偏低"},
+        "speech_style": {"tempo": "slow", "pitch": "low"},
         "state": {"relationship_notes": {"林见夏": "互相试探，谁都不肯先低头"}},
     },
     {
@@ -67,7 +67,7 @@ CHARACTERS = [
         "aliases": [],
         "personality": ["敏锐"],
         "background": "电台同事，隐瞒了一件事",
-        "speech_style": {"tempo": "轻快", "pitch": "中性"},
+        "speech_style": {"tempo": "fast", "pitch": "medium"},
         "state": {"relationship_notes": {}},
     },
 ]
@@ -153,7 +153,7 @@ class ContextAssemblerTest(unittest.TestCase):
         # 角色卡必须含性格、背景、说话方式、关系备注
         self.assertIn("性格：克制、多疑", system)
         self.assertIn("背景：旧案唯一的目击者", system)
-        self.assertIn("说话方式：语速缓慢；音高偏低", system)
+        self.assertIn("说话方式：语速慢；音高偏低", system)
         self.assertIn("关系：林见夏——互相试探", system)
         self.assertNotIn("- 旁白", system)
         # 前情摘要 → 本章大纲与节拍 → 前文摘录 → 任务指令

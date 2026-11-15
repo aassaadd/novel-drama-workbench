@@ -58,8 +58,8 @@ class CharacterLinkageTest(unittest.TestCase):
         self.lead = entities.new_character("沈砚", role="protagonist")
         self.lead["personality"] = ["克制", "多疑"]
         self.lead["speech_style"] = {
-            "tempo": "偏慢",
-            "pitch": "低沉",
+            "tempo": "slow",
+            "pitch": "low",
             "accent": "北方口音",
             "catchphrases": ["先别急"],
         }
@@ -72,8 +72,8 @@ class CharacterLinkageTest(unittest.TestCase):
         }
         self.peer = entities.new_character("林见夏", role="supporting")
         self.peer["speech_style"] = {
-            "tempo": "偏快",
-            "pitch": "清亮",
+            "tempo": "fast",
+            "pitch": "high",
             "accent": "南方口音",
             "catchphrases": ["我早说过"],
         }
@@ -183,7 +183,7 @@ class CharacterLinkageTest(unittest.TestCase):
         self.assertIn("视角人物：沈砚（第三人称有限视角）", user)
         self.assertIn("出场：沈砚）", user)
         self.assertIn("出场：沈砚、林见夏", user)
-        self.assertIn("说话方式：语速偏慢；音高低沉；北方口音；口头禅「先别急」", system)
+        self.assertIn("说话方式：语速慢；音高偏低；北方口音；口头禅「先别急」", system)
         self.assertIn("当前处境：刚到档案楼", system)
         self.assertIn("已知信息：旧信的存在", system)
         self.assertIn("沈砚：只想查账 → 决定追查旧信", user)
