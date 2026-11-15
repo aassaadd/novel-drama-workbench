@@ -24,22 +24,30 @@ from fastapi import HTTPException
 from fastapi.responses import StreamingResponse
 
 from ..adapters.base import AdapterError
+from ..application.cast.character_plan import (
+    generate_from_plan,
+    load_plan,
+    plan_characters,
+)
+from ..application.cast.generate_characters import generate_characters
+from ..application.script.annotate import suggest_script
+from ..application.story.act_batch import (
+    ActBatchCanceled,
+    generate_act_chapters,
+    resolve_act,
+)
+from ..application.story.chapter_limits import DEFAULT_CHAPTER_WORDS
+from ..application.story.continue_chapter import continue_chapter
+from ..application.story.generate_chapter import generate_chapter
+from ..application.story.generate_outline import generate_outline
+from ..application.story.outline_expand import expand_outline
+from ..application.story.outline_hierarchical import generate_hierarchical_outline
+from ..application.story.settings_generate import generate_worlds
 from ..cancel import GenerationCanceled
 from ..config import load_config
 from ..oplog import set_llm_abort_reason
 from ..store import ProjectStore
 from .job_tracker import UiJob
-from ..application.story.act_batch import ActBatchCanceled, generate_act_chapters, resolve_act
-from ..application.cast.character_plan import generate_from_plan, load_plan, plan_characters
-from ..application.story.continue_chapter import continue_chapter
-from ..application.story.outline_expand import expand_outline
-from ..application.story.outline_hierarchical import generate_hierarchical_outline
-from ..application.story.chapter_limits import DEFAULT_CHAPTER_WORDS
-from ..application.story.generate_chapter import generate_chapter
-from ..application.cast.generate_characters import generate_characters
-from ..application.story.generate_outline import generate_outline
-from ..application.story.settings_generate import generate_worlds
-from ..application.script.annotate import suggest_script
 
 #: SSE 响应头：禁用缓存与反向代理缓冲，保证逐条到达浏览器
 _SSE_HEADERS = {
@@ -982,8 +990,8 @@ def register_stream_routes(app, config_path: str | None = None) -> None:
                 result["markup_path"] = str(out_path)
             # 有失败批次时不应用，避免把不完整的标注写入章节
             if body.get("apply") and not result.get("partial"):
-                from ..store.schema_validator import validate
                 from ..cli_voice import _apply_script_to_chapter
+                from ..store.schema_validator import validate
 
                 validate(result["script"], "director-script.schema.json")
                 store.save_script(result["script"])

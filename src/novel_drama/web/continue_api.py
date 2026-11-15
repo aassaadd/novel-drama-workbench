@@ -11,9 +11,10 @@ from __future__ import annotations
 from fastapi import HTTPException
 
 from ..adapters.base import AdapterError
+from ..application.story.continue_chapter import continue_chapter, load_continue_draft
+from ..application.story.continue_outline import continue_outline
 from ..config import load_config
 from ..store import ProjectStore
-from ..application.story.continue_chapter import continue_chapter, continue_outline, load_continue_draft
 
 
 def _store(path: str | None) -> ProjectStore:

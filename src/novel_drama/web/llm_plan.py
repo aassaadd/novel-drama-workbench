@@ -15,9 +15,13 @@ import math
 from collections.abc import Callable
 from typing import Any
 
+from ..domain.production.rules.thinking_policy import (
+    collect_overrides,
+    resolve_thinking,
+    stage_label,
+)
 from ..store import ProjectStore
 from ..store.settings_store import SettingsStore
-from ..domain.production.rules.thinking_policy import collect_overrides, resolve_thinking, stage_label
 
 #: 动作清单：键 -> 说明与次数计算
 #: - title/what: 弹窗标题与「这次做什么」

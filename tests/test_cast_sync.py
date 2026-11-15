@@ -19,7 +19,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from novel_drama.adapters.offline_writing import OfflineWritingAdapter
 from novel_drama.application.cast.sync_cast import apply_chapter_cast
-from novel_drama.application.story.continue_chapter import continue_outline
+from novel_drama.application.story.continue_outline import continue_outline
 from novel_drama.application.story.generate_outline import generate_outline
 from novel_drama.application.story.outline_expand import expand_outline
 from novel_drama.application.story.outline_hierarchical import (
@@ -360,7 +360,7 @@ class CastSyncTest(unittest.TestCase):
     def test_continue_outline_uses_same_logic(self):
         """CLI 续写：新增章节的角色同样来自同一次节拍调用。"""
         adapter = CountingAdapter()
-        with patch("novel_drama.application.story.continue_chapter.build_writing_adapter", return_value=adapter):
+        with patch("novel_drama.application.story.continue_outline.build_writing_adapter", return_value=adapter):
             result = continue_outline(
                 self.store,
                 self.config,

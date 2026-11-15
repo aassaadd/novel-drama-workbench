@@ -969,7 +969,8 @@ def register_voice_tools_routes(app, config_path: str | None = None) -> None:
                 handle.write(payload)
                 raw_path = Path(handle.name)
             try:
-                from ..media.ffmpeg import binary_available, run as ffmpeg_run
+                from ..media.ffmpeg import binary_available
+                from ..media.ffmpeg import run as ffmpeg_run
 
                 if not binary_available("ffmpeg"):
                     raise HTTPException(status_code=500, detail="未找到 ffmpeg，无法转码录音（macOS 可用 brew install ffmpeg）")
@@ -1176,10 +1177,15 @@ def register_voice_tools_routes(app, config_path: str | None = None) -> None:
             HTTPException 400: 角色没有台词，或候选音色没有可用参考音频。
             HTTPException 500: 合成失败（中文原因）。
         """
+        from ..store.voice_store import (
+            find_voice,
+            pick_variant,
+            resolve_for_character,
+            variant_ref,
+        )
         from ..tts.errors import TtsError
         from ..tts.service import TtsService
         from ..tts.types import Requirement, VoiceRef
-        from ..store.voice_store import find_voice, pick_variant, variant_ref, resolve_for_character
 
         store = _store(body.get("path"))
         character_id = str(body.get("character_id") or "").strip()

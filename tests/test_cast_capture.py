@@ -17,8 +17,10 @@ from novel_drama.application.cast.capture_cast import (
     cast_capture_plan,
     cast_status_overview,
     ensure_chapter_cast,
-    latest_capture_job,
     pending_overview,
+)
+from novel_drama.application.cast.capture_jobs import (
+    latest_capture_job,
     start_capture_job,
 )
 from novel_drama.application.cast.sync_cast import discard_pending, promote_pending

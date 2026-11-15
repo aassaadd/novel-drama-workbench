@@ -25,6 +25,12 @@ from fastapi import HTTPException
 from .. import __version__
 from ..adapters.base import AdapterError
 from ..adapters.writing import OmlxWritingAdapter
+from ..application.story.edit_chapter import (
+    edit_chapter,
+    restore_chapter_version,
+    save_chapter_content,
+)
+from ..application.story.summarize_chapter import apply_summary, summarize_chapter
 from ..cli_line import chapter_consistency
 from ..config import DEFAULT_UI_CONFIG_PATH, load_config
 from ..media import comfy_media
@@ -33,18 +39,11 @@ from ..models.ids import now_iso
 from ..store import ProjectStore, list_workspaces
 from ..store.project_store import WORKSPACE_INDEX
 from ..store.queue_store import QueueStore
-from ..application.story.edit_chapter import edit_chapter, restore_chapter_version, save_chapter_content
-from ..application.story.summarize_chapter import apply_summary, summarize_chapter
 from .actions import fail_body, run
-from .models_api import register_models_routes, resolve_llm_settings
-from .voice_tools_api import register_voice_tools_routes
 from .align_api import register_align_routes
+from .bgm_api import register_bgm_routes
 from .character_desc_api import register_character_desc_routes
 from .continue_api import register_continue_routes
-from .outline_edit_api import register_outline_edit_routes
-from .stream_api import register_stream_routes
-from .bgm_api import register_bgm_routes
-from .sfx_api import register_sfx_routes
 from .job_tracker import (
     UiJob,
     active_jobs,
@@ -54,6 +53,11 @@ from .job_tracker import (
     update_job,
 )
 from .logs_api import register_logs_routes
+from .models_api import register_models_routes, resolve_llm_settings
+from .outline_edit_api import register_outline_edit_routes
+from .sfx_api import register_sfx_routes
+from .stream_api import register_stream_routes
+from .voice_tools_api import register_voice_tools_routes
 
 #: 唯一前端目录（仓库根 web-next/）；直接挂到根路径，旧 static 界面已废弃
 WEB_NEXT_DIR = Path(__file__).resolve().parents[3] / "web-next"
@@ -1626,8 +1630,8 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         result = {"ok": True, "chapter_id": chapter_id, "outline_removed": False, "warnings": []}
         # 已落章通常也在大纲里：一并删除，避免章节列表删掉后大纲还留着悬空引用
         try:
-            from ..store.settings_store import SettingsStore
             from ..application.story.outline_edit import delete_outline_chapter
+            from ..store.settings_store import SettingsStore
 
             settings_store = SettingsStore(store.root)
             if settings_store.exists():
@@ -4178,7 +4182,7 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         返回:
             `{job}`。
         """
-        from ..application.cast.capture_cast import start_capture_job
+        from ..application.cast.capture_jobs import start_capture_job
 
         store = _store(body.get("path"))
         try:
@@ -4203,7 +4207,7 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         返回:
             `{job}`；没有任务时 job 为空对象。
         """
-        from ..application.cast.capture_cast import latest_capture_job
+        from ..application.cast.capture_jobs import latest_capture_job
 
         return {"job": latest_capture_job(_store(path))}
 
@@ -4217,7 +4221,7 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         返回:
             `{job}`。
         """
-        from ..application.cast.capture_cast import cancel_capture_job
+        from ..application.cast.capture_jobs import cancel_capture_job
 
         try:
             job = cancel_capture_job(_store(body.get("path")), str(body.get("job_id") or ""))
@@ -4377,7 +4381,12 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         返回:
             `{ok, errors, check?, plan?}`。
         """
-        from ..store.voice_cast import check_cast, narrator_plan, normalize_cast, validate_cast_config
+        from ..store.voice_cast import (
+            check_cast,
+            narrator_plan,
+            normalize_cast,
+            validate_cast_config,
+        )
 
         store = _store(body.get("path"))
         project = store.load_project()
@@ -4641,7 +4650,10 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         返回:
             `{chapters: [{index, title, items: [{id, name, created_at}]}]}`。
         """
-        from ..application.cast.sync_cast import created_in_chapter, list_created_chapters
+        from ..application.cast.sync_cast import (
+            created_in_chapter,
+            list_created_chapters,
+        )
 
         store = _store(path)
         if chapter is not None:
@@ -4960,8 +4972,11 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         异常:
             HTTPException 400: 缺少参数或节拍不存在。
         """
+        from ..application.story.outline_bind import (
+            bind_beat_characters,
+            chapter_binding,
+        )
         from ..models import entities as model_entities
-        from ..application.story.outline_bind import bind_beat_characters, chapter_binding
 
         store = _store(body.get("path"))
         chapter_id = str(body.get("chapter") or "")
