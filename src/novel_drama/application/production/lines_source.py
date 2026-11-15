@@ -7,8 +7,8 @@
 - `scenes_from_script` 是派生产出：深拷贝旧场景后只覆盖内容字段，未知字段与生产态不丢。
 
 本模块提供只读换算与读入口，以及步骤 3 的唯一内容写点 `save_lines`（只写台本、
-场景由台本派生）。开关 `NDW_LINES_SOURCE=scenes|script` 用于逐步切换与差异对照，
-默认 `scenes`，步骤 3 末尾切到 `script`。
+场景由台本派生）。开关 `NDW_LINES_SOURCE=scenes|script` 用于切换与差异对照，
+默认 `script`；设成 `scenes` 可回退到「直读落盘场景」的旧行为。
 """
 
 from __future__ import annotations
@@ -89,10 +89,11 @@ def lines_source() -> str:
     """返回当前台词读取来源。
 
     返回:
-        `script` 或 `scenes`；非法值按 `scenes` 处理，默认也是 `scenes`。
+        `script` 或 `scenes`；默认 `script`（台本是内容唯一可写源），
+        非法值按 `script` 处理。设置 `NDW_LINES_SOURCE=scenes` 可回退到旧的落盘场景。
     """
-    value = os.environ.get("NDW_LINES_SOURCE", "scenes").strip().lower()
-    return "script" if value == "script" else "scenes"
+    value = os.environ.get("NDW_LINES_SOURCE", "script").strip().lower()
+    return "scenes" if value == "scenes" else "script"
 
 
 def script_from_scenes(chapter: dict) -> dict:
@@ -523,8 +524,8 @@ def _shot_lines_from_scene(scene: dict, shot: dict) -> list[dict]:
 def read_scenes(store: ProjectStore | None, chapter: dict) -> list[dict]:
     """统一读入口：返回章节的场景列表（含台词行）。
 
-    `NDW_LINES_SOURCE=scenes`（默认）时直接返回落盘的场景；
-    切到 `script` 时读取台本并派生（无台本则内存引导），供逐步对照。
+    `NDW_LINES_SOURCE=script`（默认）时读取台本并派生（无台本则内存引导）；
+    设成 `scenes` 时直接返回落盘的场景，用于回退对照。
 
     参数:
         store: 工程，可为空（只在 script 模式下用于读台本）。
@@ -541,18 +542,17 @@ def read_scenes(store: ProjectStore | None, chapter: dict) -> list[dict]:
 def chapter_view(store: ProjectStore | None, chapter: dict) -> dict:
     """返回用于读取的章节视图（adapter 与展示层只认这一份场景数据）。
 
-    `NDW_LINES_SOURCE=scenes`（默认）时原样返回入参章节，行为与改造前完全一致；
-    切到 `script` 时返回浅拷贝，`scenes` 换成由台本派生的场景，其余字段共享。
+    `NDW_LINES_SOURCE=script`（默认）时返回浅拷贝，`scenes` 换成由台本派生的场景；
+    设成 `scenes` 时原样返回入参章节，行为与改造前一致。
 
-    约定：视图只用于读路径，调用方不得把视图回写章节（内容写点统一走步骤 3 的
-    `save_lines`）；写路径在步骤 3 之前继续直接使用 `store.load_chapter`。
+    约定：读路径拿到的派生视图不得回写章节；内容写点统一走 `save_lines`。
 
     参数:
         store: 工程，可为空（只做纯换算时不必传）。
         chapter: 从工程读出的章节 dict。
 
     返回:
-        章节 dict；默认源下与入参是同一对象。
+        章节 dict；`scenes` 源下与入参是同一对象。
     """
     if lines_source() != "script":
         return chapter

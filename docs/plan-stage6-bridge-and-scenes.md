@@ -289,3 +289,34 @@
 - 三套语料逐章 `script_from_scenes` → 过 `director-script.schema.json` → `scenes_from_script` 与落盘场景逐字段相等（含 tt1 6 场景 / 256 行章节）。
 - `parse_markup` 解析结果行字段为 `anchor/emotion/id/index/kind/revision/speaker_id/text`，无 `tts`，schema 校验通过。
 - 步骤 1～3 读点全部复跑：`line list`、`tts plan`、`timeline build --dry-run`、image/video dry-run、`cast check`、`chapter show`、`chapter_binding`、`chapter_references`、`script.suggest` 预估在 scenes / script 两源下仍逐字节一致；`pytest` 253 passed / 10 skipped，分层 234 文件 0 违规。
+
+#### 9.4 步骤 3 进度（2026-11-16，已完成）
+
+写点收敛为「一次改造 + 一个统一写点」：调用方照旧就地改 `chapter["scenes"]`，保存语句换成 `save_lines`；由 `lines_source` 负责同步台本、派生场景、按变化落盘。这样每个写点的语义改动最小，且内容字段只可能落在台本里。
+
+| 提交 | 范围 |
+| --- | --- |
+| 15c7283 | `lines_source` 新增 `ensure_script` / `save_lines` / 内部 `_sync_script_from_scenes`；`line_edit.py` 五处内容写点（改参、改文本、合并、批量合并旁白、单行切分）改走 `save_lines` |
+| ad907a0 | `pipeline.split_chapter_scenes` / `split_scene_lines` 改走 `save_lines`；入口先 `read_scenes` 换成派生视图，避免用过期的落盘场景做「保留旧行」匹配 |
+| a01b97c | `apply_script_to_chapter` 改为「台本落盘 → 整章派生 → 物化媒体」；保留标注解析的文本兜底（空白/引号差异）时把新行 ID 挂回旧行，配音不丢 |
+| 34aa433 | `tts/line_state.revert_line` 改走 `save_lines`（函数内延迟导入，避免 batch → pipeline → line_state 循环） |
+| 5b09c74 | `character_merge`、`character_crud.remove_character` 改读派生视图 + `save_lines`；`groups_store.apply_group` 去掉 `store` 参数、只改内存（adapter 不回读工程），落盘由 CLI `group apply` 走 `save_lines`；`produce.py` / `suggest_apply.py` / `stream.py` 删除 apply 前的重复 `save_script` |
+| 本轮 | `lines_source()` 默认值切到 `script`（`NDW_LINES_SOURCE=scenes` 仍可回退对照） |
+
+`save_lines` 的口径：
+
+1. **只同步内容层字段**（`CONTENT_LINE_FIELDS` + 场景描述字段）；`tts`、`confidence`、媒体数组、场景身份一律不写进台本，派生时按行 ID / 条目 ID 从旧场景原样保留。
+2. **镜头对齐**：优先行 ID 重合度，其次 `index`；镜头里台本自有字段（锚点、音效/画面/动画、过渡等）原样保留。
+3. **按变化落盘**：台本有变化才写台本；章节与磁盘（除 `updated_at`）不同才写章节，因此同一命令连跑两次第二次 0 文件变化。
+4. **新行补锚点**：台本 schema 要求镜头行必带 `anchor`，新行按原文合成，旧行沿用原锚点。
+
+验证（默认源 `script`）：
+
+- 三套语料 `line list` / `tts plan` / `timeline build --dry-run` 在两源下逐字节一致；`timelines/<chapter>.timeline.json` 与 `exports/` 产物（srt + manifest）在独立副本上构建后逐字节一致（tt1 91 684 字符时间轴、annotate 3 068 字符时间轴；turn_ui_check 无场景章节）。
+- 写命令：`line set` 连跑两次第二次 0 文件变化；`line split-at` + `line merge` 后文本与行 ID 复原，`timelines/`、`exports/` 与基线无差异；`scene split` / `line split --force` 后「台本派生结果 == 章节场景」且二次 `save_lines` 无写入。
+- `script apply`：引导台本 apply 一次统计全 0、场景内容不变（仅媒体物化按历史行为递增 `revision`）；改台本情绪后场景同步且 `tts` 保留；标注新行 ID 经文本兜底挂回旧行后配音保留。
+- 参数撤回：伪造 sidecar 后撤回，场景与台本同时更新、`tts` 保留、台本行不含 `tts`；二次撤回 `changed=false`。
+- `pytest` 253 passed / 10 skipped，分层 234 文件 0 违规。
+
+已知沿用行为（未在本步改动）：`timeline build` 每次 +1 `revision`，`materialize_media` 每次 +1 场景 `revision`——因此「同一命令连跑两次 0 变化」对这两个构建类命令不成立，行编辑类命令成立。
+
