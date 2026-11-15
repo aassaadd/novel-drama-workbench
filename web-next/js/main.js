@@ -23,9 +23,60 @@ import { renderExport, leaveExport } from './pages/export.js';
 import { decodePath } from './shell.js';
 import { bindEnumWarnings } from './enums.js';
 import { loadUIPrefs } from './store.js';
+import { postJSON } from './api.js';
+import { esc } from './dom.js';
 
 const root = document.getElementById('app');
 let currentView = '';
+/** 每个工程只自检一次（页面存活期内），避免每次路由跳转都写盘 */
+const selfchecked = new Set();
+
+/**
+ * 打开工程自检：迁移旧内嵌场景、补台本、清点孤儿行。
+ * 有改动或孤儿行时在页面顶部固定展示一条可关闭的提示，孤儿行列出具体条目。
+ * @param {string} path 工程目录
+ */
+async function selfcheck(path) {
+  if (!path || selfchecked.has(path)) return;
+  selfchecked.add(path);
+  let report;
+  try {
+    report = await postJSON('/api/ui/project/selfcheck', { path });
+  } catch (error) {
+    // 自检失败不阻塞页面使用，只在控制台记一笔
+    console.warn('工程自检失败：', error?.message || error);
+    return;
+  }
+  if (!report || report.skipped) return;
+  const parts = [];
+  if (report.migrated) parts.push(`迁移旧场景 ${report.migrated} 章`);
+  if (report.scripts_created) parts.push(`补出台本 ${report.scripts_created} 章`);
+  if (report.orphan_count) parts.push(`孤儿台词行 ${report.orphan_count} 条（已不参与渲染）`);
+  if (!parts.length) return;
+  const orphans = (report.orphans || []).slice(0, 8);
+  const listHTML = orphans.length
+    ? `<ul style="margin:6px 0 0;padding-left:18px">${orphans
+        .map(
+          (item) =>
+            `<li>${esc(item.chapter_title || item.chapter_id)} · 场景 ${Number(item.scene_index || 0) + 1} · ${esc(
+              item.line_id || ''
+            )} · ${esc(item.text || '')}</li>`
+        )
+        .join('')}</ul>${report.orphan_count > orphans.length ? `<div>另有 ${report.orphan_count - orphans.length} 条未列出</div>` : ''}`
+    : '';
+  const node = document.createElement('div');
+  node.setAttribute('role', 'status');
+  node.style.cssText =
+    'position:fixed;top:12px;left:50%;transform:translateX(-50%);z-index:9999;max-width:min(820px,94vw);' +
+    'padding:10px 14px;border:1px solid #d7a23a;border-radius:8px;background:#fff8e6;color:#7a5200;' +
+    'font-size:13px;line-height:1.6;box-shadow:0 6px 20px rgba(0,0,0,.12)';
+  node.innerHTML = `<div style="display:flex;gap:12px;align-items:flex-start">
+      <div style="flex:1"><b>工程自检</b>：${esc(parts.join('，'))}${listHTML}</div>
+      <button type="button" style="border:0;background:transparent;color:#7a5200;cursor:pointer;font-size:13px">知道了</button>
+    </div>`;
+  node.querySelector('button').addEventListener('click', () => node.remove());
+  document.body.appendChild(node);
+}
 
 /** 解析当前 hash（支持 `?line=` 直达台词行） */
 function parseRoute() {
@@ -68,6 +119,8 @@ function parseRoute() {
 /** 路由切换 */
 async function route() {
   const target = parseRoute();
+  // 自检结果挂在 body 上，不受页面重绘影响；同一工程只跑一次
+  if (target.path) selfcheck(target.path);
   if (currentView === 'editor') leaveEditor();
   if (currentView === 'export') leaveExport();
   if (currentView === 'tasks') leaveTasks();

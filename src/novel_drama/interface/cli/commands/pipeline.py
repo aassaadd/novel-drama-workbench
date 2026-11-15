@@ -76,6 +76,14 @@ def cmd_serve(args, config: AppConfig) -> int:
     from novel_drama.interface.http.app import serve
 
     root = args.project or config.project_root
+    if root:
+        # 打开工程自检：迁移旧内嵌场景、补台本、清点孤儿行（结果提示到 stderr）
+        from novel_drama.composition import ProjectStore
+        from novel_drama.interface.cli.common import _report_upgrade
+
+        store = ProjectStore(str(root))
+        if store.exists():
+            _report_upgrade(store)
     serve(
         host=args.host,
         port=args.port,

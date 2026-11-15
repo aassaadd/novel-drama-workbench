@@ -12,7 +12,7 @@ from pathlib import Path
 from fastapi import HTTPException, Query
 
 from novel_drama import __version__
-from novel_drama.application.production.lines_source import chapter_view
+from novel_drama.application.production.lines_source import chapter_view, upgrade_project
 from novel_drama.application.story.queries import (
     settings_view,
 )
@@ -670,6 +670,23 @@ def register_config_routes(app, project_root: str | None = None, config_path: st
         if result.returncode != 0:
             raise HTTPException(status_code=500, detail={"code": 3, "message": f"移入废纸篓失败：{result.stderr.strip() or result.returncode}"})
         return {"ok": True, "path": str(root)}
+
+    @app.post("/api/ui/project/selfcheck")
+    def project_selfcheck(body: dict) -> dict:
+        """打开工程自检：迁移旧内嵌场景、补台本、清点孤儿行（幂等写盘）。
+
+        参数:
+            body: `{"path": 工程目录}`。
+
+        返回:
+            `{"skipped", "migrated", "scripts_created", "chapters", "orphan_count", "orphans"}`。
+
+        异常:
+            HTTPException 400: 缺少工程路径。
+            HTTPException 404: 目录不是工程。
+        """
+        root = _project_dir(body.get("path"))
+        return upgrade_project(ProjectStore(str(root)))
 
     @app.get("/api/ui/projects/overview")
     def projects_overview() -> list[dict]:

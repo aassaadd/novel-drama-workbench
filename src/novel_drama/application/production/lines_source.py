@@ -392,6 +392,144 @@ def save_lines(store: ProjectStore, chapter: dict) -> dict:
     return {"script_saved": script_changed, "chapter_saved": chapter_changed}
 
 
+# ---------------- 打开工程自检：补台本 / 迁移生产态 / 孤儿行 ----------------
+
+
+def ensure_scripts(store: ProjectStore) -> dict:
+    """为还没有台本的章节补出台本（从场景引导，幂等）。
+
+    旧工程的台词行只存在于场景里；台本成为内容源后，缺台本的章节需要先补一份。
+    该函数是写盘动作，调用方必须把结果提示给用户（CLI 打印、页面展示）。
+
+    参数:
+        store: 工程。
+
+    返回:
+        `{"created": 补出的章节数, "chapters": [{"id", "title", "lines"}]}`。
+    """
+    created = []
+    for meta in store.list_chapters():
+        chapter_id = str(meta.get("id") or "")
+        if not chapter_id or store.script_path(chapter_id).exists():
+            continue
+        try:
+            chapter = store.load_chapter(chapter_id)
+        except (OSError, ValueError):
+            continue
+        if not chapter.get("scenes"):
+            # 没有场景就没有台词行，暂时不用补台本
+            continue
+        script = script_from_scenes(chapter)
+        store.save_script(script)
+        created.append(
+            {
+                "id": chapter_id,
+                "title": chapter.get("title") or "",
+                "lines": sum(len(shot.get("lines") or []) for shot in script.get("shots") or []),
+            }
+        )
+    return {"created": len(created), "chapters": created}
+
+
+def migrate_production(store: ProjectStore) -> dict:
+    """把仍内嵌在 chapter.json 里的旧场景迁到生产态文件（幂等）。
+
+    缺失生产文件且章节也没有内嵌场景时视为空生产态，不建空文件、不报错。
+
+    参数:
+        store: 工程。
+
+    返回:
+        `{"migrated": 迁移的章节数, "chapters": [章节 ID]}`。
+    """
+    migrated = []
+    for meta in store.list_chapters():
+        chapter_id = str(meta.get("id") or "")
+        if not chapter_id:
+            continue
+        try:
+            chapter = store.load_chapter(chapter_id)
+        except (OSError, ValueError, FileNotFoundError):
+            continue
+        if store.has_embedded_scenes(chapter_id) or (
+            chapter.get("scenes") and not store.scenes_path(chapter_id).exists()
+        ):
+            store.save_chapter(chapter)
+            migrated.append(chapter_id)
+    return {"migrated": len(migrated), "chapters": migrated}
+
+
+def find_orphan_lines(store: ProjectStore) -> dict:
+    """找出生产态里存在、但台本已经没有对应行 ID 的孤儿台词行。
+
+    孤儿行不参与渲染（读取时按台本派生），这里只负责给出可见明细。
+
+    参数:
+        store: 工程。
+
+    返回:
+        `{"count": 孤儿行数, "chapters": 受影响章节数, "orphans": [{chapter_id, chapter_title, scene_index, line_id, text}]}`。
+    """
+    orphans: list[dict] = []
+    affected = set()
+    for meta in store.list_chapters():
+        chapter_id = str(meta.get("id") or "")
+        if not chapter_id:
+            continue
+        try:
+            script = store.load_script(chapter_id)
+        except FileNotFoundError:
+            continue
+        known = {
+            line.get("id")
+            for shot in script.get("shots") or []
+            for line in shot.get("lines") or []
+        }
+        for scene in store.load_scenes(chapter_id):
+            for line in scene.get("lines") or []:
+                if line.get("id") in known:
+                    continue
+                affected.add(chapter_id)
+                orphans.append(
+                    {
+                        "chapter_id": chapter_id,
+                        "chapter_title": meta.get("title") or "",
+                        "scene_index": scene.get("index"),
+                        "line_id": line.get("id"),
+                        "text": (line.get("text") or "")[:60],
+                    }
+                )
+    return {"count": len(orphans), "chapters": len(affected), "orphans": orphans}
+
+
+def upgrade_project(store: ProjectStore) -> dict:
+    """打开工程时的一次性自检：迁移生产态、补台本、清点孤儿行。
+
+    `NDW_SCENES_UPGRADE=off` 时整体跳过（只做读取，不写盘）。
+
+    参数:
+        store: 工程。
+
+    返回:
+        `{"skipped", "migrated", "scripts_created", "chapters", "orphan_count", "orphans"}`。
+    """
+    if os.environ.get("NDW_SCENES_UPGRADE", "on").strip().lower() == "off":
+        return {"skipped": True, "migrated": 0, "scripts_created": 0, "chapters": [], "orphan_count": 0, "orphans": []}
+    migration = migrate_production(store)
+    scripts = ensure_scripts(store)
+    orphans = find_orphan_lines(store)
+    return {
+        "skipped": False,
+        "migrated": migration["migrated"],
+        "migrated_chapters": migration["chapters"],
+        "scripts_created": scripts["created"],
+        "chapters": scripts["chapters"],
+        "orphan_count": orphans["count"],
+        "orphan_chapters": orphans["chapters"],
+        "orphans": orphans["orphans"],
+    }
+
+
 def _chapter_changed_on_disk(store: ProjectStore, chapter: dict) -> bool:
     """判断章节除 `updated_at` 外是否与磁盘不一致（用于避免无改动的二次写盘）。
 

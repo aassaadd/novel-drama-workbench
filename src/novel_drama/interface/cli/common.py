@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sys
 
+from novel_drama.application.production.lines_source import upgrade_project
 from novel_drama.composition import ProjectStore
 from novel_drama.domain.shared.errors import PreconditionError, TaskFailedError
 from novel_drama.infrastructure.config import AppConfig
@@ -36,7 +37,10 @@ def _emit(args, text: str = "", payload=None) -> None:
 
 
 def _resolve_store(args, config: AppConfig) -> ProjectStore:
-    """定位当前工程目录。
+    """定位当前工程目录，并执行打开工程自检。
+
+    自检动作（迁移旧内嵌场景、补台本、清点孤儿行）幂等且只写工程内文件；
+    有改动或孤儿行时在 **stderr** 打一行中文提示，避免污染 `--json` 的 stdout。
 
     参数:
         args: 已解析参数。
@@ -54,7 +58,35 @@ def _resolve_store(args, config: AppConfig) -> ProjectStore:
     store = ProjectStore(root)
     if not store.exists():
         raise PreconditionError(f"工程不存在或未初始化: {store.root}（先执行 ndw init <dir> --title 书名）")
+    _report_upgrade(store)
     return store
+
+
+def _report_upgrade(store: ProjectStore) -> None:
+    """执行打开工程自检并把结果提示到 stderr。
+
+    参数:
+        store: 工程。
+
+    返回:
+        无。
+    """
+    try:
+        report = upgrade_project(store)
+    except Exception as error:  # 自检失败不影响主命令
+        print(f"提示：打开工程自检失败（{error}），已跳过", file=sys.stderr)
+        return
+    if report.get("skipped"):
+        return
+    parts = []
+    if report["migrated"]:
+        parts.append(f"迁移旧场景 {report['migrated']} 章")
+    if report["scripts_created"]:
+        parts.append(f"补出台本 {report['scripts_created']} 章")
+    if report["orphan_count"]:
+        parts.append(f"孤儿台词行 {report['orphan_count']} 条（已不参与渲染）")
+    if parts:
+        print("提示：" + "，".join(parts), file=sys.stderr)
 
 
 def cast_hint(store: ProjectStore, chapter_id: str | None = None) -> None:

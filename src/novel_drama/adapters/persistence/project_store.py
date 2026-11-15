@@ -531,6 +531,23 @@ class ProjectStore:
         chapter["scenes"] = self.load_scenes(chapter_id) or embedded or []
         return chapter
 
+    def has_embedded_scenes(self, chapter_id: str) -> bool:
+        """判断章节文件里是否还内嵌着 `scenes`（步骤 4 之前保存的旧工程）。
+
+        参数:
+            chapter_id: 章节 ID。
+
+        返回:
+            旧格式返回 True；文件缺失或读取失败返回 False。
+        """
+        path = self.chapter_path(chapter_id)
+        if not path.exists():
+            return False
+        try:
+            return "scenes" in self._read_json(path)
+        except (OSError, ValueError):
+            return False
+
     def load_scenes(self, chapter_id: str) -> list[dict]:
         """读取章节生产态场景（缺失或损坏时按空态返回）。
 
