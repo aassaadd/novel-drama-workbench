@@ -7,6 +7,11 @@ from __future__ import annotations
 
 import copy
 
+from novel_drama.application.production.line_query import (
+    chapter_lines,
+    find_line,
+    line_diff,
+)
 from novel_drama.application.story.scene_split import scene_split_impact, split_scenes
 from novel_drama.domain.story.rules.chapter_rules import bump_revision, count_words
 from novel_drama.infrastructure.config import AppConfig
@@ -20,59 +25,6 @@ from ..common import EXIT_OK, EXIT_REJECTED, _emit, _resolve_store, cast_hint
 
 # 正文与切分数据对不上时的统一提示：宁可拒绝写盘，也不静默改到错误位置
 _CONTENT_MISMATCH = "正文已变更，请先重新切分"
-
-
-def normalize_chapter_indexes(store, chapter: dict) -> bool:
-    """把场景/台词的 index 按当前顺序重排为连续序号，必要时回写一次。
-
-    `index` 的语义不变：场景 index 是章内场景序号（0 基），台词 index 是场景内行号（0 基）。
-    这里只修负数、重复、跳号这类历史脏数据；不改 line_id、不改 tts/音频引用，
-    因此已配音行不会失联，重编号也不会触发重新合成。
-
-    参数:
-        store: 工程（用于回写）。
-        chapter: 章节 dict（就地修改）。
-
-    返回:
-        是否发生了改动并已回写。
-    """
-    changed = False
-    for scene_no, scene in enumerate(chapter.get("scenes") or []):
-        if scene.get("index") != scene_no:
-            scene["index"] = scene_no
-            changed = True
-        for line_no, line in enumerate(scene.get("lines") or []):
-            if line.get("index") != line_no:
-                line["index"] = line_no
-                changed = True
-    if changed:
-        # 只重排序号，不动 updated_at 之外的任何字段；save_chapter 会校验 schema 并原子写盘
-        store.save_chapter(chapter)
-    return changed
-
-
-def ordinal_map(chapter: dict) -> dict[str, tuple[int, int, int]]:
-    """建立「行 ID → (全章序号, 场景序号, 场景内行号)」，三个序号均从 1 开始。
-
-    参数:
-        chapter: 章节 dict。
-
-    返回:
-        行 ID 到三段序号的映射；供台词表新增的展示列使用（不写入 schema）。
-    """
-    mapping: dict[str, tuple[int, int, int]] = {}
-    ordinal = 0
-    for scene_no, scene in enumerate(chapter.get("scenes") or [], start=1):
-        for line_no, line in enumerate(scene.get("lines") or [], start=1):
-            line_id = line.get("id")
-            if not line_id:
-                continue
-            ordinal += 1
-            mapping[str(line_id)] = (ordinal, scene_no, line_no)
-    return mapping
-
-
-# ---------------- scene / line ----------------
 
 
 def cmd_scene_split(args, config: AppConfig) -> int:
@@ -151,6 +103,7 @@ def cmd_line_split(args, config: AppConfig) -> int:
     return EXIT_OK
 
 
+
 def cmd_line_list(args, config: AppConfig) -> int:
     """列出台词行（可按派生状态与行 ID 筛选）。
 
@@ -159,63 +112,12 @@ def cmd_line_list(args, config: AppConfig) -> int:
     筛选与 `tts plan` 共用 `line_state` 的同一套判定，计数天然一致。
     """
     store = _resolve_store(args, config)
-    chapter = store.load_chapter(args.chapter)
-    # 历史数据自愈：按当前场景/行顺序重排 index（脏号只修一次，之后不再写盘）
-    normalize_chapter_indexes(store, chapter)
-    ordinals = ordinal_map(chapter)
-    characters = {item["id"]: item for item in store.load_characters()["characters"]}
-    snapshots = line_state.load_snapshots(store.root, chapter)
-    live_ids = line_state.live_line_ids(store)
-    engine = line_state.engine_params(config)
-    statuses = line_state.parse_states(args.status)
-    only_unknown = "unknown" in statuses
-    states = line_state.chapter_states(
-        chapter, characters, snapshots, root=store.root, live_ids=live_ids, engine=engine
+    payload = chapter_lines(
+        store, args.chapter, config, statuses_raw=args.status, line_ids=args.line
     )
-    picked = line_state.select_states(
-        states,
-        scope="selected" if args.line else "chapter",
-        line_ids=args.line,
-        statuses=tuple(name for name in statuses if name != "unknown"),
-    )
-    if only_unknown:
-        picked = [row for row in picked if row["line"].get("speaker_id") == entities.UNKNOWN_SPEAKER_ID]
-    rows = []
-    for row in picked:
-        line = row["line"]
-        ordinal, scene_ordinal, scene_line_ordinal = ordinals.get(str(line.get("id")), (0, 0, 0))
-        rows.append(
-            {
-                "scene_id": row["scene_id"],
-                "line_id": line["id"],
-                "index": line.get("index"),
-                # 展示用派生字段：全章连续序号与「第 N 场 · 第 M 行」，不落盘、不进 schema
-                "ordinal": ordinal,
-                "scene_ordinal": scene_ordinal,
-                "scene_line_ordinal": scene_line_ordinal,
-                "kind": line.get("kind"),
-                "speaker": entities.speaker_display_name(line.get("speaker_id"), characters),
-                "speaker_id": line.get("speaker_id"),
-                "text": line.get("text"),
-                "emotion": line.get("emotion"),
-                "emotion_intensity": line.get("emotion_intensity"),
-                "speed": line.get("speed"),
-                "pause_before_ms": line.get("pause_before_ms"),
-                "pause_after_ms": line.get("pause_after_ms"),
-                "delivery_note": line.get("delivery_note"),
-                "state": row["state"],
-                "state_reason": row["reason"],
-                "tts_status": row["persisted"],
-                "changes": row["changes"],
-                "duration_ms": (line.get("tts") or {}).get("duration_ms"),
-                # 上次失败的结构化原因（code/message/at），供行内直接展示与重试
-                "error": (line.get("tts") or {}).get("error"),
-                # 已生成音频的相对路径，供页面直接试听
-                "audio": (line.get("tts") or {}).get("asset_id"),
-            }
-        )
+    rows = payload["lines"]
     if getattr(args, "json", False):
-        _emit(args, payload={"chapter": chapter["id"], "counts": line_state.state_counts(picked), "lines": rows})
+        _emit(args, payload=payload)
         return EXIT_OK
     if not rows:
         print("没有匹配的台词行")
@@ -229,27 +131,6 @@ def cmd_line_list(args, config: AppConfig) -> int:
             f"{row['emotion']:<8} {(row['text'] or '')[:24]}{tail}"
         )
     return EXIT_OK
-
-
-def _find_line(store, chapter: dict, line_id: str):
-    """按行 ID 定位台词行，找不到时给出可执行提示。
-
-    参数:
-        store: 工程。
-        chapter: 章节 dict。
-        line_id: 台词行 ID。
-
-    返回:
-        `(scene, line)`。
-
-    异常:
-        ValueError: 行 ID 不在本章内（CLI 转成退出码 2）。
-    """
-    for scene in chapter.get("scenes") or []:
-        for line in scene.get("lines") or []:
-            if line.get("id") == line_id:
-                return scene, line
-    raise ValueError(f"台词行不存在: {line_id}（用 line list --chapter {chapter['id']} 查看可用行 ID）")
 
 
 def cmd_line_split_at(args, config: AppConfig) -> int:
@@ -270,7 +151,7 @@ def cmd_line_split_at(args, config: AppConfig) -> int:
     """
     store = _resolve_store(args, config)
     chapter = store.load_chapter(args.chapter)
-    scene, line = _find_line(store, chapter, args.line)
+    scene, line = find_line(store, chapter, args.line)
     text = str(line.get("text") or "")
     offset = int(args.offset)
     if offset <= 0 or offset >= len(text):
@@ -329,34 +210,19 @@ def cmd_line_diff(args, config: AppConfig) -> int:
     没有侧车快照时拒绝输出差异（不猜），返回退出码 1。
     """
     store = _resolve_store(args, config)
-    chapter = store.load_chapter(args.chapter)
-    _, line = _find_line(store, chapter, args.line)
-    snapshot = line_state.snapshot_for_line(store.root, line)
-    if snapshot is None:
+    payload = line_diff(store, args.chapter, args.line, config)
+    if not payload["snapshot_available"]:
         _emit(
             args,
             f"{args.line} 没有参数快照（未生成过或侧车是旧版），无法比对差异；先执行 tts run 生成一次",
-            {"line_id": args.line, "snapshot_available": False, "changes": []},
+            payload,
         )
         return EXIT_REJECTED
-    characters = {item["id"]: item for item in store.load_characters()["characters"]}
-    live_ids = line_state.live_line_ids(store)
-    engine = line_state.engine_params(config)
-    state = line_state.resolve_line_state(
-        line, characters, snapshot, root=store.root, live_ids=live_ids, engine=engine
-    )
-    payload = {
-        "line_id": line["id"],
-        "snapshot_available": True,
-        "state": state["state"],
-        "state_reason": state["reason"],
-        "changes": state["changes"],
-    }
-    if not state["changes"]:
-        _emit(args, f"{line['id']} 与上次生成参数一致（{state['state']}）", payload)
+    if not payload["changes"]:
+        _emit(args, f"{payload['line_id']} 与上次生成参数一致（{payload['state']}）", payload)
         return EXIT_OK
-    text = f"{line['id']}  state={state['state']}  共 {len(state['changes'])} 项变更"
-    for item in state["changes"]:
+    text = f"{payload['line_id']}  state={payload['state']}  共 {len(payload['changes'])} 项变更"
+    for item in payload["changes"]:
         text += f"\n  [{item['group']}] {item['text']}"
     _emit(args, text, payload)
     return EXIT_OK
@@ -369,7 +235,7 @@ def cmd_line_revert(args, config: AppConfig) -> int:
     """
     store = _resolve_store(args, config)
     chapter = store.load_chapter(args.chapter)
-    _, line = _find_line(store, chapter, args.line)
+    _, line = find_line(store, chapter, args.line)
     snapshot = line_state.snapshot_for_line(store.root, line)
     if snapshot is None:
         _emit(

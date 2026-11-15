@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 
 from fastapi import HTTPException, Query
@@ -10,6 +11,9 @@ from novel_drama.interface.cli.commands.line import chapter_consistency
 
 logger = logging.getLogger(__name__)
 
+from novel_drama.application.production.line_query import chapter_lines, line_diff
+from novel_drama.infrastructure.config import load_config
+from novel_drama.interface.http import use_cases
 from novel_drama.interface.http.deps import run_cli, store_for
 from novel_drama.interface.http.routers.common import (
     _require,
@@ -92,10 +96,12 @@ def register_voice_line_routes(app, project_root: str | None = None, config_path
 
         `status` 支持逗号分隔的 `pending,stale,ready,failed,unknown`，与终端用法一致。
         """
-        argv = ["--project", path, "--json", "line", "list", "--chapter", chapter]
-        if status:
-            argv += ["--status", status]
-        payload = _respond(_cli(*argv))
+        store = _store(path)
+        payload = use_cases.call(
+            lambda: chapter_lines(
+                store, chapter, load_config(config_path), statuses_raw=status
+            )
+        )
         # 正文与切分是否还对得上：只读检查，让编辑区能直接给出「重新切分」出口
         try:
             payload["consistency"] = chapter_consistency(_store(path).load_chapter(chapter))
@@ -115,12 +121,31 @@ def register_voice_line_routes(app, project_root: str | None = None, config_path
     @app.get("/api/ui/line/diff")
     def ui_line_diff(path: str = Query(...), chapter: str = Query(...), line: str = Query(...)) -> dict:
         """单行参数差异（`line diff --json`）。"""
-        return _respond(_cli("--project", path, "--json", "line", "diff", "--chapter", chapter, "--line", line))
+        store = _store(path)
+        payload = use_cases.call(
+            lambda: line_diff(store, chapter, line, load_config(config_path))
+        )
+        if not payload.get("snapshot_available"):
+            # 沿用原有语义：没有参数快照属于「拒绝执行」，返回 409 且不改盘
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": 1,
+                    # 与原实现一致：拒绝时把 payload 原文写进 message，界面按原样展示
+                    "message": json.dumps(payload, ensure_ascii=False, indent=2),
+                },
+            )
+        return payload
 
     @app.get("/api/ui/line")
     def ui_line(path: str = Query(...), chapter: str = Query(...), line: str = Query(...)):
         """单行详情（`line list --line --json`），供队列完成后按行回填。"""
-        return _respond(_cli("--project", path, "--json", "line", "list", "--chapter", chapter, "--line", line))
+        store = _store(path)
+        return use_cases.call(
+            lambda: chapter_lines(
+                store, chapter, load_config(config_path), line_ids=[line]
+            )
+        )
 
     @app.post("/api/ui/line/set")
     def ui_line_set(body: dict) -> dict:
