@@ -7,6 +7,11 @@ import os
 import sys
 from pathlib import Path
 
+from novel_drama.application.production.media_ops import (
+    cast_warning_text,
+    export_chapter,
+    run_media_kind,
+)
 from novel_drama.application.production.mix import mix_chapter
 from novel_drama.application.production.timeline import (
     build_chapter_timeline,
@@ -27,7 +32,6 @@ from novel_drama.composition import (
     run_media,
     summarize_timeline,
     templates_dir,
-    write_export,
 )
 from novel_drama.infrastructure.config import AppConfig
 from novel_drama.interface.cli.commands.sfx import cmd_sfx_generate, cmd_sfx_providers
@@ -93,10 +97,10 @@ def cmd_media(args, config: AppConfig) -> int:
         _emit(args, f"[plan] {kind} 共 {plan['total']} 条，已就绪 {plan['skipped']} 条，待生成 {plan['total'] - plan['skipped']} 条（adapter={adapter}）", plan)
         return EXIT_OK
 
-    result = run_media(
+    result = run_media_kind(
         store,
         config,
-        chapter,
+        args.chapter,
         kind,
         force=bool(getattr(args, "force", False)),
         limit=getattr(args, "limit", None),
@@ -678,33 +682,14 @@ def cmd_export(args, config: AppConfig) -> int:
     path = store.timeline_path(args.chapter)
     if not path.exists():
         raise PreconditionError("时间轴不存在，先执行 ndw timeline build")
-    timeline = json.loads(path.read_text(encoding="utf-8"))
-    chapter = store.load_chapter(args.chapter)
-    characters = {item["id"]: item for item in store.load_characters()["characters"]}
-    out_dir = Path(args.out_dir) if args.out_dir else store.root / "exports"
-    from novel_drama.composition import check_cast
-
-    cast_warnings = check_cast(store, chapter["id"])["findings"]
-    if cast_warnings:
-        detail = "；".join(item["message"] for item in cast_warnings[:5])
-        print(f"[warn] 音色/BGM 编排提示 {len(cast_warnings)} 条：{detail}", file=sys.stderr)
-    silences = silence_events(store, chapter["id"])
-    if getattr(args, "format", "srt") == "jianying":
-        from novel_drama.composition import JianyingExportError, export_jianying
-
-        try:
-            result = export_jianying(
-                store,
-                chapter,
-                timeline,
-                drafts_root=config.get("export.jianying.drafts_root"),
-                ffprobe=config.get("ffmpeg.probe_binary", "ffprobe"),
-                out_dir=(Path(args.out_dir) if args.out_dir else store.root / "exports" / "jianying"),
-            )
-        except JianyingExportError as error:
-            # 素材缺失等属于前置条件未满足：转成 PreconditionError，
-            # 命令行与网页都能拿到可读原因，而不是 500 或裸异常。
-            raise PreconditionError(str(error)) from error
+    fmt = getattr(args, "format", "srt")
+    warning = cast_warning_text(store, args.chapter)
+    if warning:
+        print(warning, file=sys.stderr)
+    result = export_chapter(
+        store, config, args.chapter, fmt=fmt, out_dir=getattr(args, "out_dir", None)
+    )
+    if fmt == "jianying":
         counts = result["counts"]
         reconcile = result["reconcile"]
         lines = [
@@ -730,18 +715,7 @@ def cmd_export(args, config: AppConfig) -> int:
             lines.extend(["告警："] + [f"  ! {item}" for item in result["warnings"]])
         _emit(args, "\n".join(lines), result)
         return EXIT_OK
-    if getattr(args, "format", "srt") == "bundle":
-        from novel_drama.composition import export_bundle
-
-        result = export_bundle(
-            store,
-            chapter,
-            timeline,
-            characters,
-            silences,
-            out_dir=out_dir,
-            binary=config.get("ffmpeg.binary", "ffmpeg"),
-        )
+    if fmt == "bundle":
         lines = [f"交付包: {result['dir']}"]
         for item in result["artifacts"]:
             lines.append(f"  - {item['kind']:<8} {item['status']:<8} {item['path']}")
@@ -751,7 +725,6 @@ def cmd_export(args, config: AppConfig) -> int:
             lines.extend(["缺失项："] + [f"  ! {item}" for item in result["missing"]])
         _emit(args, "\n".join(lines), result)
         return EXIT_OK
-    result = write_export(timeline, chapter, characters, out_dir, silences)
     _emit(
         args,
         f"SRT: {result['srt']}\n清单: {result['manifest']}\n时间表: {result['schedule']}\n字幕条目: {result['entries']}",

@@ -8,16 +8,26 @@ from pathlib import Path
 
 from fastapi import HTTPException, Query
 
-from novel_drama.composition import ProjectStore, collect_references, comfy_media
+from novel_drama.application.production.line_query import chapter_lines
+from novel_drama.application.production.media_ops import (
+    cast_warning_text,
+    export_chapter,
+    run_media_kind,
+)
+from novel_drama.application.production.timeline import build_chapter_timeline
+from novel_drama.composition import (
+    ProjectStore,
+    SchemaValidationError,
+    collect_references,
+    comfy_media,
+)
 from novel_drama.infrastructure.config import load_config
 
 logger = logging.getLogger(__name__)
 
-from novel_drama.interface.http.deps import run_cli, store_for
-from novel_drama.interface.http.routers.common import (
-    _require,
-    _respond,
-)
+from novel_drama.interface.http import use_cases
+from novel_drama.interface.http.deps import store_for
+from novel_drama.interface.http.routers.common import _require
 
 
 def _export_preflight(store: ProjectStore, chapter_id: str) -> dict:
@@ -104,17 +114,6 @@ def register_media_routes(app, project_root: str | None = None, config_path: str
     """
     _store = store_for(project_root)
 
-    def _cli(*argv: str):
-        """按 `serve --config` 的同一份配置执行 CLI。
-
-        参数:
-            argv: 不含 `--config` 的参数串。
-
-        返回:
-            `actions.CliResult`。
-        """
-        return run_cli(config_path, *argv)
-
     @app.post("/api/ui/timeline/save")
     def ui_timeline_save(body: dict) -> dict:
         """保存页面上调整过的时间轴（片段平移 / 淡入淡出）。
@@ -193,13 +192,23 @@ def register_media_routes(app, project_root: str | None = None, config_path: str
         )
         store = _store(body.get("path"))
         chapter_id = body.get("chapter")
-        result = _cli("--project", str(store.root), "--json", "timeline", "build", "--chapter", chapter_id)
-        if result.code != 0:
-            raise HTTPException(status_code=500, detail={"code": result.code, "message": result.text.strip() or "时间轴构建失败"})
-        timeline_path = store.timeline_path(chapter_id)
-        if not timeline_path.exists():
+        try:
+            timeline = use_cases.call(lambda: build_chapter_timeline(store, chapter_id))
+        except HTTPException as error:
+            # 沿用原有语义：构建失败对页面是「服务端处理失败」，返回 500 + 旧文案
+            code = 5
+            cause = error.__cause__ or error.__context__
+            if isinstance(cause, FileNotFoundError):
+                code = 4
+            elif isinstance(cause, SchemaValidationError):
+                code = 6
+            raise HTTPException(
+                status_code=500,
+                detail={"code": code, "message": "时间轴构建失败"},
+            ) from error
+        if not store.timeline_path(chapter_id).exists():
             raise HTTPException(status_code=500, detail={"code": 3, "message": "时间轴构建后没有产物"})
-        return json.loads(timeline_path.read_text(encoding="utf-8"))
+        return timeline
 
     @app.get("/api/ui/media")
     def ui_media(path: str = Query(...), chapter: str = Query(...)) -> dict:
@@ -343,12 +352,19 @@ def register_media_routes(app, project_root: str | None = None, config_path: str
         kind = body["kind"]
         if kind not in ("sfx", "image", "video"):
             raise HTTPException(status_code=400, detail={"code": 2, "message": f"未知媒体类型: {kind}"})
-        argv = ["--project", body["path"], "--json", kind, "run", "--chapter", body["chapter"]]
-        if body.get("force"):
-            argv.append("--force")
-        if body.get("limit") is not None:
-            argv += ["--limit", str(body["limit"])]
-        return _respond(_cli(*argv))
+        store = _store(body["path"])
+        config = load_config(config_path)
+        limit = body.get("limit")
+        return use_cases.call(
+            lambda: run_media_kind(
+                store,
+                config,
+                body["chapter"],
+                kind,
+                force=bool(body.get("force")),
+                limit=int(limit) if limit is not None else None,
+            )
+        )
 
     @app.post("/api/ui/export/jianying")
     def ui_export_jianying(body: dict) -> dict:
@@ -359,19 +375,25 @@ def register_media_routes(app, project_root: str | None = None, config_path: str
             path="工程目录",
             chapter="章节 ID",
         )
-        argv = [
-            "--project",
-            body["path"],
-            "--json",
-            "export",
-            "--chapter",
-            body["chapter"],
-            "--format",
-            "jianying",
-        ]
-        if body.get("out_dir"):
-            argv += ["--out-dir", body["out_dir"]]
-        return _respond(_cli(*argv))
+        store = _store(body["path"])
+        config = load_config(config_path)
+        # 旧实现走 CLI：编排提示打到 stderr，失败时随 [PRECONDITION] 一起出现在 message 里
+        warning = cast_warning_text(store, body["chapter"])
+        try:
+            return use_cases.call(
+                lambda: export_chapter(
+                    store,
+                    config,
+                    body["chapter"],
+                    fmt="jianying",
+                    out_dir=body.get("out_dir"),
+                )
+            )
+        except HTTPException as error:
+            if warning and isinstance(error.detail, dict):
+                detail = {**error.detail, "message": f"{warning}\n{error.detail.get('message', '')}"}
+                raise HTTPException(status_code=error.status_code, detail=detail) from error
+            raise
 
     @app.get("/api/ui/exports")
     def ui_exports(path: str = Query(...)) -> dict:
@@ -465,12 +487,17 @@ def register_media_routes(app, project_root: str | None = None, config_path: str
                 },
             )
         # 时间轴是导出前置；重建是幂等的，避免用户改词后导出到旧时间轴
-        _respond(_cli("--project", path, "--json", "timeline", "build", "--chapter", chapter_id))
-        result = _respond(_cli("--project", path, "--json", "export", "--chapter", chapter_id, "--format", "bundle"))
+        config = load_config(config_path)
+        use_cases.call(lambda: build_chapter_timeline(store, chapter_id))
+        result = use_cases.call(
+            lambda: export_chapter(store, config, chapter_id, fmt="bundle")
+        )
         if not isinstance(result, dict):
             raise HTTPException(status_code=500, detail={"code": 3, "message": "导出结果格式异常"})
 
-        lines_payload = _respond(_cli("--project", path, "--json", "line", "list", "--chapter", chapter_id))
+        lines_payload = use_cases.call(
+            lambda: chapter_lines(store, chapter_id, config)
+        )
         rows = (lines_payload or {}).get("lines") or []
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         export_dir = store.root / "exports"

@@ -15,9 +15,8 @@ from novel_drama.application.story.edit_chapter import (
     edit_chapter,
     save_chapter_content,
 )
-from novel_drama.application.story.generate_chapter import generate_chapter
+from novel_drama.application.story.generate_chapter import generate_chapter_checked
 from novel_drama.application.story.generate_outline import generate_outline
-from novel_drama.application.story.outline_bind import validate_chapter_binding
 from novel_drama.application.story.queries import outline_view
 from novel_drama.application.story.summarize_chapter import summarize_chapter
 from novel_drama.composition import validate
@@ -26,7 +25,6 @@ from novel_drama.infrastructure.config import AppConfig
 from ..common import (
     EXIT_OK,
     PreconditionError,
-    TaskFailedError,
     _emit,
     _resolve_store,
 )
@@ -80,7 +78,7 @@ def cmd_outline(args, config: AppConfig) -> int:
             dry_run=args.dry_run,
             binding=getattr(args, "binding", "auto"),
         )
-        head = f"[dry-run] " if args.dry_run else ""
+        head = "[dry-run] " if args.dry_run else ""
         golden = result.get("golden_three") or {"passed": True, "issues": []}
         hints = ""
         if not golden["passed"]:
@@ -129,11 +127,7 @@ def cmd_chapter_generate(args, config: AppConfig) -> int:
         TaskFailedError: 章节世界/角色绑定不完整。
     """
     store = _resolve_store(args, config)
-    try:
-        validate_chapter_binding(store, args.chapter)
-    except ValueError as exc:
-        raise TaskFailedError(str(exc)) from exc
-    result = generate_chapter(
+    result = generate_chapter_checked(
         store,
         config,
         args.chapter,

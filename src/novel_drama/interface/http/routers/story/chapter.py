@@ -3,17 +3,22 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import tempfile
 from pathlib import Path
 
 from fastapi import HTTPException, Query
 
 from novel_drama.application.production.line_edit import chapter_consistency
+from novel_drama.application.story.chapter_import import (
+    import_chapters as import_chapter_text,
+)
 from novel_drama.application.story.edit_chapter import (
     edit_chapter,
     restore_chapter_version,
     save_chapter_content,
 )
+from novel_drama.application.story.generate_chapter import generate_chapter_checked
 from novel_drama.application.story.queries import (
     chapter_detail,
 )
@@ -24,11 +29,8 @@ from novel_drama.application.story.summarize_chapter import (
 from novel_drama.composition import AdapterError, ProjectStore
 from novel_drama.infrastructure.config import load_config
 from novel_drama.interface.http import use_cases
-from novel_drama.interface.http.deps import run_cli, store_for
-from novel_drama.interface.http.routers.common import (
-    _require,
-    _respond,
-)
+from novel_drama.interface.http.deps import store_for
+from novel_drama.interface.http.routers.common import _require
 
 _SUMMARY_PREVIEWS: dict[str, dict] = {}
 
@@ -103,17 +105,6 @@ def register_story_chapter_routes(app, project_root: str | None = None, config_p
     """
     _store = store_for(project_root)
 
-    def _cli(*argv: str):
-        """按 `serve --config` 的同一份配置执行 CLI。
-
-        参数:
-            argv: 不含 `--config` 的参数串。
-
-        返回:
-            `actions.CliResult`。
-        """
-        return run_cli(config_path, *argv)
-
     @app.post("/api/ui/chapter/import")
     def import_chapters(body: dict) -> dict:
         """把前端上传的纯文本按标题切章导入。
@@ -140,10 +131,27 @@ def register_story_chapter_routes(app, project_root: str | None = None, config_p
             handle.write(text)
             temp_path = handle.name
         try:
-            argv = ["--project", str(store.root), "--json", "chapter", "import", temp_path, "--on-duplicate", on_duplicate]
-            if pattern:
-                argv += ["--pattern", pattern]
-            return _respond(_cli(*argv))
+            result = use_cases.call(
+                lambda: import_chapter_text(
+                    store,
+                    text,
+                    # 与 CLI 一致：快照里记绝对路径（macOS 上 /tmp 会解析成 /private/tmp）
+                    str(Path(temp_path).resolve()),
+                    Path(temp_path).stem,
+                    pattern=pattern or None,
+                    on_duplicate=on_duplicate,
+                )
+            )
+            if result["code"]:
+                # 沿用旧语义：有章节被跳过/拒绝替换时属于「拒绝执行」，409 并把结果原文放进 message
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": 1,
+                        "message": json.dumps(result["payload"], ensure_ascii=False, indent=2),
+                    },
+                )
+            return result["payload"]
         finally:
             Path(temp_path).unlink(missing_ok=True)
 
@@ -322,19 +330,22 @@ def register_story_chapter_routes(app, project_root: str | None = None, config_p
             path="工程目录",
             chapter="章节 ID",
         )
-        argv = ["--project", body["path"], "--json", "chapter", "generate", "--chapter", body["chapter"]]
-        if body.get("regen"):
-            argv.append("--regen")
-        if body.get("dry_run"):
-            argv.append("--dry-run")
-        # 显式开关才带参数；缺省交给配置里的 writing.multi_turn 判断
-        if body.get("multi_turn") is not None:
-            argv.append("--multi-turn" if body["multi_turn"] else "--no-multi-turn")
-        if body.get("beats_per_round") is not None:
-            argv += ["--beats-per-round", str(body["beats_per_round"])]
-        if body.get("max_rounds") is not None:
-            argv += ["--max-rounds", str(body["max_rounds"])]
-        return _respond(_cli(*argv))
+        store = _store(body["path"])
+        return use_cases.call(
+            lambda: generate_chapter_checked(
+                store,
+                load_config(config_path),
+                body["chapter"],
+                regen=bool(body.get("regen")),
+                dry_run=bool(body.get("dry_run")),
+                # 显式开关才带参数；缺省交给配置里的 writing.multi_turn 判断
+                multi_turn=body.get("multi_turn"),
+                beats_per_round=(
+                    int(body["beats_per_round"]) if body.get("beats_per_round") is not None else None
+                ),
+                max_rounds=int(body["max_rounds"]) if body.get("max_rounds") is not None else None,
+            )
+        )
 
     @app.post("/api/ui/chapter/save")
     def ui_chapter_save(body: dict) -> dict:

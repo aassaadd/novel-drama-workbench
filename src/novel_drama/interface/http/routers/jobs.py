@@ -21,17 +21,20 @@ from novel_drama.application.production.job_tracker import (
     request_cancel,
     update_job,
 )
+from novel_drama.application.production.queue_query import queue_jobs, run_record
+from novel_drama.application.production.tts_plan import plan_chapter
 from novel_drama.composition import ProjectStore, QueueStore
 from novel_drama.infrastructure.config import load_config
-from novel_drama.interface.http.deps import run_cli, store_for
+from novel_drama.interface.http import use_cases
+from novel_drama.interface.http.deps import store_for
 from novel_drama.interface.http.routers.common import (
     _ACTIVE_TTS_PROJECTS,
     _is_tts_process,
     _require,
-    _respond,
     _stop_tts_project,
 )
 from novel_drama.models.ids import now_iso
+from novel_drama.tts import TtsService
 
 _PRODUCE_GUARD = threading.Lock()
 
@@ -185,21 +188,20 @@ def register_jobs_routes(app, project_root: str | None = None, config_path: str 
     """
     _store = store_for(project_root)
 
-    def _cli(*argv: str):
-        """按 `serve --config` 的同一份配置执行 CLI。
-
-        参数:
-            argv: 不含 `--config` 的参数串。
-
-        返回:
-            `actions.CliResult`。
-        """
-        return run_cli(config_path, *argv)
-
     @app.get("/api/ui/plan")
     def ui_plan(path: str = Query(...), chapter: str = Query(...)):
         """本次将生成多少行（`tts plan --json`）。"""
-        return _respond(_cli("--project", path, "--json", "tts", "plan", "--chapter", chapter))
+        store = _store(path)
+        plan = use_cases.call(
+            lambda: plan_chapter(store, load_config(config_path), chapter)
+        )
+        return {
+            "scope": plan["scope"],
+            "selected": plan["selected"],
+            "counts": plan["counts"],
+            "jobs": len(plan["jobs"]),
+            "adapter": plan["adapter"],
+        }
 
     @app.get("/api/ui/queue")
     def ui_queue(path: str = Query(...)):
@@ -211,9 +213,8 @@ def register_jobs_routes(app, project_root: str | None = None, config_path: str 
         返回:
             任务数组（字段与 `queue list --json` 一致，界面任务额外带 progress）。
         """
-        payload = _respond(_cli("--project", path, "--json", "queue", "list"))
-        jobs = payload if isinstance(payload, list) else []
         store = _store(path)
+        jobs = use_cases.call(lambda: queue_jobs(store))
         _reconcile_produce_jobs(store)
         # 打上 ui 标记：只有界面发起、能在这里停的生成任务才在「操作」列给停止按钮
         ui_jobs = [{**item, "ui": True} for item in load_ui_jobs(store)]
@@ -316,10 +317,14 @@ def register_jobs_routes(app, project_root: str | None = None, config_path: str 
 
         模型缺失时不静默降级，直接把原因回给界面，由界面禁用「开始」。
         """
-        result = _cli("--json", "tts", "providers")
-        if result.code != 0:
-            return {"ready": False, "reason": f"读取 provider 状态失败：{result.message}", "providers": []}
-        rows = (result.payload or {}).get("providers") or []
+        config = load_config(config_path)
+        service = TtsService(config, config.project_root or None)
+        try:
+            rows = service.doctor()
+        except Exception as error:  # noqa: BLE001 - 读取失败与「没有可用模型」分开回报，便于排查
+            return {"ready": False, "reason": f"读取 provider 状态失败：[FAILED] {error}", "providers": []}
+        finally:
+            service.close()
         usable = [row for row in rows if row.get("enabled") and row.get("available")]
         if usable:
             return {"ready": True, "reason": "", "providers": rows}
@@ -353,7 +358,8 @@ def register_jobs_routes(app, project_root: str | None = None, config_path: str 
         ready = ui_readiness()
         if not ready["ready"]:
             raise HTTPException(status_code=412, detail={"code": 4, "message": ready["reason"]})
-        jobs = _respond(_cli("--project", path, "--json", "queue", "list")) or []
+        store = ProjectStore(path)
+        jobs = use_cases.call(lambda: queue_jobs(store))
         active = [job for job in jobs if job.get("status") in ("queued", "running")]
         if active:
             # 接管已在执行的一批：since 取这批任务里最早的创建时间，避免把历史任务算进本次进度
@@ -807,10 +813,13 @@ def register_jobs_routes(app, project_root: str | None = None, config_path: str 
     @app.get("/api/ui/produce/latest")
     def ui_produce_latest(path: str = Query(...), run_id: str | None = Query(default=None)) -> dict:
         """最近一次（或指定）编排记录（`run show --json`）。"""
-        argv = ["--project", path, "--json", "run", "show"]
-        if run_id:
-            argv += ["--run", run_id]
-        result = _cli(*argv)
-        if result.code != 0:
-            return {"run": None, "message": result.message}
-        return {"run": result.payload}
+        store = _store(path)
+        try:
+            record = run_record(store, run_id)
+        except (FileNotFoundError, KeyError) as error:
+            return {"run": None, "message": f"[NOT_FOUND] {error}"}
+        except ValueError as error:
+            return {"run": None, "message": f"[USAGE] {error}"}
+        if record is None:
+            return {"run": None, "message": "[NOT_FOUND] 还没有任何编排记录：先执行 ndw produce"}
+        return {"run": record}

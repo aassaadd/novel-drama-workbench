@@ -258,3 +258,102 @@ def plan_batch_preview(
             },
         },
     }
+
+
+def plan_chapter(
+    store: ProjectStore,
+    config,
+    chapter_id: str,
+    scope: str | None = None,
+    line_ids: list[str] | None = None,
+    scene_ids: list[str] | None = None,
+    statuses_raw: str | None = None,
+    force: bool = False,
+) -> dict:
+    """规划单章的配音任务（`tts plan` 与 `tts run` 共用的前半段）。
+
+    范围与状态筛选走 `line_state`，与 `line list --status` 同源，
+    因此 plan 的「待合成」计数必然等于 list 筛出来的行数。
+
+    参数:
+        store: 工程。
+        config: 本机配置。
+        chapter_id: 章节 ID。
+        scope: 显式范围；为空时按 line_ids / scene_ids / force 推导。
+        line_ids: 只看指定行。
+        scene_ids: 只看指定场景。
+        statuses_raw: 逗号分隔的状态筛选。
+        force: 忽略状态筛选（含已就绪行），强制重新生成。
+
+    返回:
+        `{chapter, characters, adapter, snapshots, engine, live_ids, scope, selected,
+        counts, jobs, todo_ids, run_nonce}`。
+
+    异常:
+        FileNotFoundError: 章节不存在。
+    """
+    import time
+
+    from ...orchestration.pipeline import build_tts_jobs
+
+    chapter = store.load_chapter(chapter_id)
+    characters = store.load_characters()["characters"]
+    adapter = config.adapters.get("tts", "placeholder")
+    snapshots = line_state.load_snapshots(store.root, chapter)
+    live_ids = line_state.live_line_ids(store)
+    engine = line_state.engine_params(config)
+    statuses = () if force else line_state.parse_states(statuses_raw)
+    # 默认范围：给了行就是「选中」；给了场景就是「场景」；否则「待处理」
+    if scope:
+        resolved_scope = scope
+    elif line_ids:
+        resolved_scope = "selected"
+    elif scene_ids:
+        resolved_scope = "scene"
+    else:
+        resolved_scope = "chapter" if force else "pending"
+    states = line_state.chapter_states(
+        chapter,
+        {item["id"]: item for item in characters},
+        snapshots,
+        root=store.root,
+        live_ids=live_ids,
+        engine=engine,
+    )
+    selected = line_state.select_states(
+        states, scope=resolved_scope, line_ids=line_ids, scene_ids=scene_ids, statuses=statuses
+    )
+    counts = line_state.state_counts(selected)
+    if force:
+        # 强制重生成：范围内所有行都入队（含 ready）
+        todo_ids = {row["line"]["id"] for row in selected}
+        run_nonce = f"regen-{time.time_ns()}"
+    else:
+        todo_ids = {row["line"]["id"] for row in selected if row["state"] in line_state.PENDING_STATES}
+        run_nonce = None
+    jobs = build_tts_jobs(
+        chapter,
+        characters,
+        adapter=adapter,
+        snapshots=snapshots,
+        engine=engine,
+        root=store.root,
+        live_ids=live_ids,
+        line_ids=todo_ids,
+        force=force,
+        run_nonce=run_nonce,
+    )
+    return {
+        "chapter": chapter,
+        "characters": characters,
+        "adapter": adapter,
+        "snapshots": snapshots,
+        "engine": engine,
+        "live_ids": live_ids,
+        "scope": resolved_scope,
+        "selected": len(selected),
+        "counts": counts,
+        "jobs": jobs,
+        "todo_ids": todo_ids,
+        "run_nonce": run_nonce,
+    }

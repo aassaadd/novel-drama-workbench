@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import json
-import time
 from pathlib import Path
 
+from novel_drama.application.production.tts_plan import plan_chapter
 from novel_drama.infrastructure.config import AppConfig
 from novel_drama.interface.cli.commands.media import cmd_tts_batch
 from novel_drama.interface.cli.common import (
@@ -23,8 +23,6 @@ from novel_drama.interface.cli.helpers import (
     _sort_jobs_by_group,
 )
 from novel_drama.models.ids import now_iso
-from novel_drama.orchestration.pipeline import build_tts_jobs
-from novel_drama.tts import line_state
 
 
 def cmd_tts(args, config: AppConfig) -> int:
@@ -34,50 +32,23 @@ def cmd_tts(args, config: AppConfig) -> int:
     因此 plan 的「待合成」计数必然等于 list 筛出来的行数。
     """
     store = _resolve_store(args, config)
-    chapter = store.load_chapter(args.chapter)
-    characters = store.load_characters()["characters"]
-    adapter = config.adapters.get("tts", "placeholder")
-    snapshots = line_state.load_snapshots(store.root, chapter)
-    live_ids = line_state.live_line_ids(store)
-    engine = line_state.engine_params(config)
-    # force：忽略状态筛选（含已就绪行），强制重新生成
     force = bool(getattr(args, "force", False))
-    statuses = () if force else line_state.parse_states(args.status)
-    # 默认范围：给了 --line 就是「选中」；给了 --scene 就是「场景」；否则「待处理」
-    if args.scope:
-        scope = args.scope
-    elif args.line:
-        scope = "selected"
-    elif args.scene:
-        scope = "scene"
-    else:
-        scope = "chapter" if force else "pending"
-    states = line_state.chapter_states(
-        chapter, {item["id"]: item for item in characters}, snapshots, root=store.root, live_ids=live_ids, engine=engine
-    )
-    selected = line_state.select_states(
-        states, scope=scope, line_ids=args.line, scene_ids=args.scene, statuses=statuses
-    )
-    counts = line_state.state_counts(selected)
-    if force:
-        # 强制重生成：范围内所有行都入队（含 ready）
-        todo_ids = {row["line"]["id"] for row in selected}
-        run_nonce = f"regen-{time.time_ns()}"
-    else:
-        todo_ids = {row["line"]["id"] for row in selected if row["state"] in line_state.PENDING_STATES}
-        run_nonce = None
-    jobs = build_tts_jobs(
-        chapter,
-        characters,
-        adapter=adapter,
-        snapshots=snapshots,
-        engine=engine,
-        root=store.root,
-        live_ids=live_ids,
-        line_ids=todo_ids,
+    plan = plan_chapter(
+        store,
+        config,
+        args.chapter,
+        scope=getattr(args, "scope", None),
+        line_ids=getattr(args, "line", None),
+        scene_ids=getattr(args, "scene", None),
+        statuses_raw=getattr(args, "status", None),
         force=force,
-        run_nonce=run_nonce,
     )
+    chapter = plan["chapter"]
+    characters = plan["characters"]
+    adapter = plan["adapter"]
+    scope = plan["scope"]
+    counts = plan["counts"]
+    jobs = plan["jobs"]
     if args.action == "plan":
         summary = (
             f"待合成台词行: {len(jobs)} 条（范围 {scope}，适配器 {adapter}）"
@@ -89,7 +60,7 @@ def cmd_tts(args, config: AppConfig) -> int:
             summary,
             {
                 "scope": scope,
-                "selected": len(selected),
+                "selected": plan["selected"],
                 "counts": counts,
                 "jobs": len(jobs),
                 "adapter": adapter,
@@ -213,8 +184,8 @@ def cmd_tts_providers(args, config: AppConfig) -> int:
             f"{'是' if row['available'] else '否':<6}"
             f"{'是' if row['enabled'] else '否':<6}"
             f"{'是' if row['auto_select'] else '否':<6}"
-            f"{str(row['license_gate']):<20}"
-            f"{str(row['model_version']):<12}"
+            f"{row['license_gate']!s:<20}"
+            f"{row['model_version']!s:<12}"
             f"{row['detail']}"
         )
     return EXIT_OK

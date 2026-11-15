@@ -9,6 +9,7 @@ from ...adapters.errors import AdapterError, ErrorCode
 from ...adapters.persistence import ProjectStore
 from ...cancel import GenerationCanceled
 from ...domain.production.rules.token_budget import context_budget_tokens
+from ...domain.shared.errors import TaskFailedError
 from ...domain.story.rules.chapter_rules import bump_revision
 from ...infrastructure.config import AppConfig
 from ...models.ids import now_iso
@@ -22,12 +23,57 @@ from .chapter_rounds import _generate_chapter_rounds, _generate_final_round
 from .chapter_text import _count_words, _group_words, _word_deviation
 from .content_guard import check_chapter_content
 from .length_plan import length_instruction, length_plan
+from .outline_bind import validate_chapter_binding
 from .recap import (
     final_round_summary_instruction,
     save_summary,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def generate_chapter_checked(
+    store: ProjectStore,
+    config: AppConfig,
+    chapter_id: str,
+    regen: bool = False,
+    dry_run: bool = False,
+    multi_turn: bool | None = None,
+    beats_per_round: int | None = None,
+    max_rounds: int | None = None,
+) -> dict:
+    """先校验章节的世界/角色绑定，再生成正文（CLI 与页面共用同一入口）。
+
+    参数:
+        store: 工程。
+        config: 本机配置。
+        chapter_id: 章节 ID。
+        regen: 已有正文时是否覆盖重写。
+        dry_run: 只生成不落盘。
+        multi_turn: 显式分轮开关；None 时按配置判断。
+        beats_per_round: 每轮写几个节拍。
+        max_rounds: 最大轮数。
+
+    返回:
+        `generate_chapter` 的结构化结果。
+
+    异常:
+        TaskFailedError: 章节世界/角色绑定不完整。
+    """
+    try:
+        validate_chapter_binding(store, chapter_id)
+    except ValueError as error:
+        raise TaskFailedError(str(error)) from error
+    return generate_chapter(
+        store,
+        config,
+        chapter_id,
+        regen=regen,
+        dry_run=dry_run,
+        multi_turn=multi_turn,
+        beats_per_round=beats_per_round,
+        max_rounds=max_rounds,
+    )
 
 
 def generate_chapter(
