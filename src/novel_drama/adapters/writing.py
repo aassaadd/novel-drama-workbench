@@ -26,6 +26,7 @@ from typing import Iterator
 
 from .base import AdapterError, ErrorCode, HealthStatus, TextGenChunk, TextGenRequest, TextGenResult, Usage
 from ..writing.watchdog import apply_context_limit, describe as describe_watchdog, watchdog_tokens
+from ..writing.thinking import resolve_thinking
 
 #: 日志：每次写作 LLM HTTP 调用记录地址、状态码、耗时与返回片段
 logger = logging.getLogger(__name__)
@@ -320,7 +321,9 @@ class OmlxWritingAdapter:
             self.total_timeout_s = None
         self.max_retries = max(0, int(self.settings.get("max_retries") or 0))
         self.enable_thinking = self.settings.get("enable_thinking")
-        # 思考强度：low / medium / high；仅在开启思考时随请求下发
+        #: 设置页按调用点的思考覆盖：`{stage: bool}`；没有条目即「系统自动」
+        self.thinking_stages = dict(self.settings.get("thinking_stages") or {})
+        # 思考强度：low / medium / high；仅在开启思考时随请求下发，不按阶段分档
         self.reasoning_effort = str(self.settings.get("reasoning_effort") or "").strip().lower()
         #: 最近一次请求的上下文/提示词/输出空间统计（供设置页与日志展示）
         self._budget_stats: dict = {}
@@ -1151,23 +1154,30 @@ class OmlxWritingAdapter:
         self._budget_stats["max_tokens"] = value
         return value, note
 
-    def _thinking_for(self, req: TextGenRequest) -> tuple[bool | None, str]:
-        """解析一次请求的思考开关与强度（调用点显式值 > 全局开关）。
+    def _thinking_for(self, req: TextGenRequest) -> tuple[bool, str, str, str]:
+        """解析一次请求的思考开关、强度、来源与调用点。
+
+        优先级：全局关闭（最高）> 调用点显式值 > 阶段设置 > 系统自动清单。
 
         参数:
             req: 统一文本请求。
 
         返回:
-            `(enabled, effort)`；enabled 为 None 表示配置未设置、请求里不带该字段。
+            `(enabled, effort, source, stage)`；source 取 global-off / call / stage / auto。
         """
         meta = req.metadata or {}
-        enabled = self.enable_thinking
-        if meta.get("enable_thinking") is not None:
-            enabled = bool(meta.get("enable_thinking"))
+        stage = str(meta.get("thinking_stage") or "")
+        explicit = meta.get("enable_thinking")
+        enabled, source = resolve_thinking(
+            self.enable_thinking,
+            self.thinking_stages,
+            stage,
+            None if explicit is None else bool(explicit),
+        )
         effort = str(meta.get("reasoning_effort") or "").strip().lower()
         if not effort:
             effort = self.reasoning_effort
-        return enabled, effort
+        return enabled, effort, source, stage
 
     def _build_payload(self, req: TextGenRequest, stream: bool) -> dict:
         """把统一请求映射为 OpenAI 兼容请求体。
@@ -1210,13 +1220,20 @@ class OmlxWritingAdapter:
         stop = req.stop or list(self.settings.get("stop") or [])
         if stop:
             payload["stop"] = stop
-        # 思考只有全局开关与强度；调用点可用 metadata 显式覆盖
-        enabled, effort = self._thinking_for(req)
-        if enabled is not None:
-            payload["chat_template_kwargs"] = {"enable_thinking": bool(enabled)}
-        # 开启思考时把强度一并传给服务端（OpenAI 兼容的 reasoning_effort）
+        # 思考按调用点解析：全局关闭 > 调用点显式值 > 阶段设置 > 系统自动清单；
+        # 强度统一跟随全局，不按阶段分档
+        enabled, effort, thinking_source, thinking_stage = self._thinking_for(req)
+        payload["chat_template_kwargs"] = {"enable_thinking": bool(enabled)}
         if bool(enabled) and effort in _THINKING_EFFORTS:
             payload["reasoning_effort"] = effort
+        logger.info(
+            "思考生效 task=%s stage=%s enabled=%s source=%s effort=%s",
+            str(req.task or ""),
+            thinking_stage or "(未标注)",
+            enabled,
+            thinking_source,
+            effort or "(未设置)",
+        )
         # 多轮续写前缀稳定时显式请求前缀缓存；服务不支持该字段会忽略
         if req.prompt_cache_key and bool(self.settings.get("cache_prompt", True)):
             payload["cache_prompt"] = True
@@ -1433,12 +1450,8 @@ class OmlxWritingAdapter:
         payload = self._build_payload(req, stream=bool(req.stream))
         payload["tools"] = [tool]
         payload["tool_choice"] = {"type": "function", "function": {"name": name}}
-        # 思考只有全局开关与强度；结构化输出不再叠加任何人为预算
-        enabled, effort = self._thinking_for(req)
-        if enabled is not None:
-            payload.setdefault("chat_template_kwargs", {})["enable_thinking"] = bool(enabled)
-        if bool(enabled) and effort in _THINKING_EFFORTS:
-            payload["reasoning_effort"] = effort
+        # 思考开关与强度已由 _build_payload 按调用点解析并记录日志；
+        # 结构化输出不再叠加任何人为预算
 
         started = time.monotonic()
         url = f"{str(self.endpoint).rstrip('/')}/v1/chat/completions"

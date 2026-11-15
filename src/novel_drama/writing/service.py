@@ -21,6 +21,7 @@ from ..config import AppConfig, resolve_temperature
 from ..director.markup import parse_markup
 from ..models import entities
 from ..models.ids import new_id, now_iso
+from ..oplog import set_llm_abort_reason, set_llm_call_reason
 from ..store import ProjectStore
 from ..store.settings_store import SettingsStore
 from ..store.world_store import WorldStore
@@ -46,6 +47,7 @@ from .recap import (
 from .worlds import build_art_prompt as _build_art_prompt
 from .worlds import clean_world_entry, worlds_digest
 from .watchdog import describe as describe_watchdog
+from .thinking import collect_overrides, step_stage
 
 # 默认每章目标字数
 DEFAULT_CHAPTER_WORDS = 1200
@@ -100,8 +102,10 @@ def build_writing_adapter(config: AppConfig, settings: dict | None = None):
     if name == "omlx":
         from ..adapters.writing import OmlxWritingAdapter
 
-        # 思考只有一个全局开关与强度，随 omlx 设置下发
-        return OmlxWritingAdapter(dict(config.get("omlx") or {}))
+        # 思考：全局开关 + 强度 + 设置页按调用点覆盖（没有覆盖项即系统自动）
+        settings = dict(config.get("omlx") or {})
+        settings["thinking_stages"] = collect_overrides(config)
+        return OmlxWritingAdapter(settings)
     raise AdapterError(ErrorCode.INVALID_INPUT, f"未知写作适配器: {name}（可选 offline / omlx）")
 
 
@@ -833,12 +837,16 @@ def stream_text(
                 if guard is not None:
                     reason = guard.feed(chunk.delta)
                     if reason:
+                        # 日志原因码：本轮是我们自己因退化主动停流的
+                        set_llm_abort_reason("degeneration", "service.stream_text: 退化熔断")
                         raise guard.exception(len("".join(parts)))
                 if on_delta is not None:
                     on_delta(chunk.delta)
             if chunk.usage is not None:
                 usage = chunk.usage
             if chunk.done:
+                # 上游已给 finish_reason：属于正常结束，关闭迭代器不应记成「调用方断开」
+                set_llm_abort_reason("natural_end", "service.stream_text: done 后停止读取")
                 break
     except NotImplementedError:
         result = adapter.generate(request)
@@ -1120,6 +1128,7 @@ def generate_chapter(
         **context["metadata"],
         "watchdog_target_words": target_words,
         "with_summary": not use_multi,
+        "thinking_stage": "chapter_round" if use_multi else "chapter_single",
     }
 
     summary_payload: dict | None = None
@@ -1492,6 +1501,7 @@ def compress_chapter(
             "watchdog_target_words": target_words,
             "with_summary": False,
             "before_words": before_words,
+            "thinking_stage": "compress",
             "beats": [
                 {"summary": str(beat.get("summary") or ""), "target_words": int(beat.get("target_words") or 0)}
                 for beat in beats
@@ -1795,6 +1805,7 @@ def supplement_chapter(
             "with_summary": False,
             "before_words": before_words,
             "gap_words": gap_words,
+            "thinking_stage": "supplement",
             "uncovered_beats": [
                 {"index": number, "summary": str(beat.get("summary") or "")} for number, beat in uncovered
             ],
@@ -2191,6 +2202,7 @@ def _generate_validated(
                         )
                     )
                     current = replace(req, messages=base_messages + extra)
+                    set_llm_call_reason("degeneration", "service._generate_validated: 退化后局部续写")
                     continue
                 if not rewritten:
                     rewritten = True
@@ -2203,6 +2215,7 @@ def _generate_validated(
                         req,
                         messages=base_messages + [Message("user", degeneration_retry_instruction(exc.reason))],
                     )
+                    set_llm_call_reason("degeneration", "service._generate_validated: 退化后整节重写")
                     continue
                 raise
             # 看门狗命中：不丢内容，保留已写正文、按句末收尾，再局部续写或结束本轮。
@@ -2238,6 +2251,7 @@ def _generate_validated(
                         )
                     )
                     current = replace(req, messages=base_messages + extra)
+                    set_llm_call_reason("watchdog", "service._generate_validated: 看门狗后续写")
                     continue
                 accepted = accepted[: keep_at_sentence_end(accepted)] or (result.text or "")
                 notice(
@@ -2280,6 +2294,7 @@ def _generate_validated(
         + [Message("user", strict_retry_instruction() + retry_suffix)],
     )
     try:
+        set_llm_call_reason("content_retry", "service._generate_validated: 内容校验未通过重试")
         result = call(retry_request)
     except DegenerationDetected as exc:
         raise AdapterError(
@@ -2792,7 +2807,7 @@ def suggest_script(
             system=system_prompt,
             messages=[Message("user", base_prompt + "\n\n" + "\n\n".join(body))],
             stream=True,
-            metadata={"scenes": subset, "style": bible.get("style") or {}},
+            metadata={"scenes": subset, "style": bible.get("style") or {}, "thinking_stage": "script"},
         )
         state = {"chars": 0}
 
@@ -3557,6 +3572,10 @@ def _generate_json(adapter, req: TextGenRequest, step: str, on_delta=None, tool:
     tool = tool or _gen_tool(step)
     if tool is None:
         raise ValueError(f"未知的生成步骤: {step or '(空)'}")
+    # 工具步骤自动归属思考调用点；调用点若已显式标注则不覆盖
+    stage = step_stage(step)
+    if stage and not (req.metadata or {}).get("thinking_stage"):
+        req = replace(req, metadata={**(req.metadata or {}), "thinking_stage": stage})
     generate_tool = getattr(adapter, "generate_tool", None)
     if generate_tool is None:
         raise ValueError(f"写作适配器不支持工具调用: {type(adapter).__name__}")
@@ -4842,6 +4861,7 @@ def polish_field(
             "context": context or "",
             "work": {"title": work.get("title"), "genre": work.get("genre") or []},
             "seed": work.get("id"),
+            "thinking_stage": "rewrite",
         },
     )
     result = adapter.generate(req)

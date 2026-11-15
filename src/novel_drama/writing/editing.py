@@ -316,7 +316,7 @@ def edit_chapter(
             excerpt_blocks=[],
         )
         req = assembler.build("chapter", instruction_text, context["speaker_ids"])
-        req.metadata = context["metadata"]
+        req.metadata = {**context["metadata"], "thinking_stage": "rewrite"}
         work_id = str(context["work"].get("id") or "").strip()
         if work_id:
             req.prompt_cache_key = f"{work_id}:{chapter_id}:edit"
@@ -375,7 +375,7 @@ def edit_chapter(
         )
         req = assembler.build("chapter", instruction_text, context["speaker_ids"])
         # 离线适配器依赖 metadata 产出确定性正文；编辑时沿用同一份，真实模型只用到 prompt
-        req.metadata = context["metadata"]
+        req.metadata = {**context["metadata"], "thinking_stage": "rewrite"}
 
         try:
             result = context["adapter"].generate(req)

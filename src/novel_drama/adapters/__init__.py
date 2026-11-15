@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..config import REPO_ROOT, AppConfig
+from ..writing.thinking import collect_overrides
 from .base import AdapterError, ComfyGateway, ErrorCode, SfxAdapter, TtsAdapter, WritingAdapter
 from .comfyui import LocalComfyGateway
 from .sfx import PlaceholderSfxAdapter
@@ -62,6 +63,8 @@ def build_adapters(config: AppConfig, project_settings: dict | None = None) -> A
         if value not in (None, "", [])
     }
     omlx_settings.update(project_writing)
+    # 思考按调用点覆盖：没有覆盖项即系统自动，回落到内置清单
+    omlx_settings["thinking_stages"] = collect_overrides(config)
     writing = OmlxWritingAdapter(omlx_settings)
 
     # 默认走真实 provider：只有显式写 placeholder 才会落到占位实现，避免静默降级

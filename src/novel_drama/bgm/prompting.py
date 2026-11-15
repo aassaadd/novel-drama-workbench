@@ -256,6 +256,7 @@ def _llm_rewrite(prompt: str, settings: dict) -> str:
         messages=[Message(role="user", content=f"中文配乐描述：{prompt}")],
         temperature=float(settings.get("temperature") or 0.2),
         stream=False,
+        metadata={"thinking_stage": "bgm_prompt"},
     )
     text = (adapter.generate(request).text or "").strip()
     # 去掉代码块围栏与首尾引号，只保留第一段有效文本

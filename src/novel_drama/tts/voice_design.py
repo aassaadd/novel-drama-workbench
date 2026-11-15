@@ -207,7 +207,7 @@ def build_profile(adapter, character: dict, config=None) -> dict:
         messages=[Message(role="user", content=_character_brief(character))],
         temperature=resolve_temperature(config, "polish") if config is not None else 0.6,
         stream=False,
-        metadata={"purpose": "voice_design_profile"},
+        metadata={"purpose": "voice_design_profile", "thinking_stage": "voice_profile"},
     )
     try:
         raw = adapter.generate_tool(req, _PROFILE_TOOL, timeout_s=90)

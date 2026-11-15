@@ -205,6 +205,7 @@ def propose_character_updates(
             "characters": state_brief,
             "content": content[:excerpt_chars],
             "summary": chapter.get("synopsis"),
+            "thinking_stage": "character_updates",
         },
     )
     result = adapter.generate(req)

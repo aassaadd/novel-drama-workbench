@@ -312,6 +312,7 @@ def _llm_rewrite(prompt: str, duration_s: float, settings: dict) -> str:
         messages=[Message(role="user", content=f"中文描述：{prompt}\n目标时长：{duration_s:g} 秒")],
         temperature=float(settings.get("temperature") or 0.2),
         stream=False,
+        metadata={"thinking_stage": "sfx_prompt"},
     )
     text = (adapter.generate(request).text or "").strip()
     # 去掉代码块围栏与首尾引号，只保留第一段有效文本

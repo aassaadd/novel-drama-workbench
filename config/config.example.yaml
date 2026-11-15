@@ -37,7 +37,7 @@ omlx:
   max_retries: 2                # 仅对可重试错误（超时/限流/5xx/不可达）重试，且只在未收到内容前
   temperature: 0.8
   stop: []
-  enable_thinking: false        # 通过 chat_template_kwargs 关闭思考，降低延迟
+  enable_thinking: true         # 全局思考总开关：开启时按调用点清单决定，关闭时全部不思考
   # 反重复采样参数（正文类任务才下发；留空=温和档 1.05）
   # 调研：vLLM 的 repetition_penalty 会把提示词里的字一起罚，强度必须 ≤1.05
   repetition_penalty: null

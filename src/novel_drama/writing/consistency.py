@@ -227,6 +227,7 @@ def check_chapter_consistency(
             "content": content[:excerpt_chars],
             "pov_name": pov.get("name"),
             "pov_mode": pov_mode,
+            "thinking_stage": "consistency",
         },
     )
     result = adapter.generate(req)

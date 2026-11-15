@@ -586,7 +586,7 @@ def continue_chapter(
         pov_mode=context.get("pov_mode"),
     )
     req = assembler.build("chapter", instruction_text, context["speaker_ids"])
-    req.metadata = context["metadata"]
+    req.metadata = {**context["metadata"], "thinking_stage": "continuation"}
     # 输出侧不设人为上限：max_tokens 由适配器按上下文剩余空间计算
     work_id = str(context["work"].get("id") or "").strip()
     if work_id:

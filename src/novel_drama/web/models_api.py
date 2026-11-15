@@ -34,6 +34,8 @@ from ..config import (
 from ..media import comfy_media, comfy_models
 from ..tts import model_store
 from ..writing.budgets import context_status
+from ..writing.thinking import STAGES as THINKING_STAGES
+from ..writing.thinking import STAGE_CONFIG_PREFIX, resolve_thinking
 
 #: 本模块日志：配置键等排查信息只写日志，不回显到界面
 logger = logging.getLogger(__name__)
@@ -1039,6 +1041,106 @@ def register_models_routes(app, config_path: str | None = None) -> None:
             ) from exc
         state = _connection_state(load_config(config_path))
         state["saved_to"] = str(target)
+        return state
+
+    def _thinking_state(config) -> dict:
+        """读取按调用点的思考三态、实际生效值与来源。
+
+        参数:
+            config: AppConfig。
+
+        返回:
+            `{global, items}`；items 每项含 stage/label/note/default/state/effective/source。
+        """
+        global_value = config.get("omlx.enable_thinking")
+        global_off = global_value is False
+        items = []
+        for stage, meta in THINKING_STAGES.items():
+            raw = config.get(STAGE_CONFIG_PREFIX + stage)
+            if raw is None:
+                state = "auto"
+            else:
+                state = "on" if bool(raw) else "off"
+            enabled, _reason = resolve_thinking(
+                global_value,
+                {stage: bool(raw)} if raw is not None else {},
+                stage,
+            )
+            items.append(
+                {
+                    "stage": stage,
+                    "label": meta["label"],
+                    "note": meta["note"],
+                    "default": bool(meta["default"]),
+                    "state": state,
+                    "effective": bool(enabled),
+                    "source": "global-off" if global_off else ("page" if raw is not None else "auto"),
+                }
+            )
+        return {
+            "global": {
+                "enabled": global_value,
+                "off": global_off,
+                "effort": config.get("omlx.reasoning_effort"),
+            },
+            "items": items,
+        }
+
+    @app.get("/api/ui/config/thinking")
+    def ui_thinking_status() -> dict:
+        """读取按调用点的思考设置（三态：系统自动 / 开 / 关）。"""
+        return _thinking_state(load_config(config_path))
+
+    @app.post("/api/ui/config/thinking")
+    def ui_save_thinking(body: dict | None = None) -> dict:
+        """保存单个调用点的思考三态，写覆盖层并立即生效。
+
+        参数:
+            body: `{values: {stage: true | false | null}}`；null 表示恢复「系统自动」。
+
+        返回:
+            保存后的思考设置状态。
+
+        异常:
+            400：不支持的调用点或非布尔值。
+            500：覆盖层写入失败。
+        """
+        if body is not None and not isinstance(body, dict):
+            raise HTTPException(status_code=400, detail={"code": 2, "message": "请求体必须是对象"})
+        values = dict((body or {}).get("values") or {})
+        updates: dict = {}
+        removals: list[str] = []
+        for stage, value in values.items():
+            if stage not in THINKING_STAGES:
+                logger.warning("拒绝修改未知的思考调用点：%s", stage)
+                raise HTTPException(
+                    status_code=400,
+                    detail={"code": 2, "message": "该调用点不支持单独设置思考开关"},
+                )
+            if value is None or (isinstance(value, str) and not value.strip()):
+                removals.append(STAGE_CONFIG_PREFIX + stage)
+                continue
+            if not isinstance(value, bool):
+                raise HTTPException(
+                    status_code=400,
+                    detail={"code": 2, "message": "思考开关只能是开、关或系统自动"},
+                )
+            updates.setdefault("writing", {}).setdefault("thinking", {}).setdefault("stages", {})[
+                stage
+            ] = value
+        targets: list[Path] = []
+        try:
+            if updates:
+                targets.append(save_ui_config(updates))
+            if removals:
+                targets.append(remove_ui_config(removals))
+        except OSError as exc:
+            raise HTTPException(
+                status_code=500,
+                detail={"code": 3, "message": f"配置写入失败：{exc.strerror or exc}"},
+            ) from exc
+        state = _thinking_state(load_config(config_path))
+        state["saved_to"] = str(targets[-1] if targets else DEFAULT_UI_CONFIG_PATH)
         return state
 
     @app.get("/api/ui/config/generation")

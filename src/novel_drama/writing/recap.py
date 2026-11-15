@@ -133,6 +133,7 @@ def update_rolling_summary(
             "title": chapter.get("title"),
             "content": excerpt,
             "book_summary": previous_book,
+            "thinking_stage": "recap",
         },
     )
     try:

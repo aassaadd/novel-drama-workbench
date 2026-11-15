@@ -173,6 +173,7 @@ def _build_request(context: dict, chapter: dict, excerpt: str, intro: str | None
             "style": style,
             "tone": style.get("tone"),
             "pov": style.get("pov"),
+            "thinking_stage": "outline_extract",
         },
     )
 
@@ -361,7 +362,7 @@ def _chunk_notes_request(chapter: dict, work: dict, chunk: str) -> TextGenReques
         system="你是长篇小说的结构编辑，擅长从正文提取事件要点。只输出要点列表，不要解释。",
         messages=[Message("user", instruction)],
         stream=True,
-        metadata={"title": chapter.get("title"), "content": chunk},
+        metadata={"title": chapter.get("title"), "content": chunk, "thinking_stage": "compress"},
     )
 
 

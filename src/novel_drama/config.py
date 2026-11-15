@@ -51,7 +51,8 @@ _FALLBACK = {
         "temperature_polish": 0.6,
         "temperature_audio": 0.2,
         "stop": [],
-        "enable_thinking": False,
+        # 全局思考总开关：开启时按调用点清单决定；关闭时所有调用点都不思考
+        "enable_thinking": True,
         # 思考强度：low / medium / high；仅在 enable_thinking 打开时随请求下发
         "reasoning_effort": "medium",
         "unload": {"enabled": True, "path": "/v1/models/{model_id}/unload", "policy": "after_text_task"},

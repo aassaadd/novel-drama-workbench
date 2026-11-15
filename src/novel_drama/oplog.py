@@ -24,6 +24,7 @@ import json
 import os
 import queue
 import re
+import socket
 import threading
 import time
 import traceback
@@ -52,6 +53,64 @@ _MAX_SSE_EVENTS = 300
 _MAX_SEARCH_CHARS = 2_000_000
 #: 写入队列上限；写日志不能阻塞业务，队列满时直接丢弃
 _QUEUE_MAX = 5_000
+
+#: LLM 调用/流中断的原因码与中文标签（日志与页面共用同一份口径）。
+#: 补这些码的目的：把「调用方提前关闭流」这一句笼统文案拆成可统计的来源。
+LLM_REASON_LABELS = {
+    "natural_end": "正常结束（上游已给 finish_reason，消费方在 done 后关闭迭代器）",
+    "user_cancel": "用户点了停止",
+    "page_unload": "页面离开或刷新导致断线",
+    "sse_reconnect": "SSE 预连接失败后重试",
+    "degeneration": "退化熔断中止本轮（或由此触发的续写/重写）",
+    "watchdog": "看门狗截停（或由此触发的续写）",
+    "content_retry": "内容校验未通过后的重试",
+    "superseded": "被新请求取代",
+    "timeout": "HTTP 超时",
+    "unknown": "未标记的调用方关闭",
+}
+#: 当前流被中断的原因（由消费方在关闭迭代器前设置，同线程传递）
+_ABORT_REASON: contextvars.ContextVar = contextvars.ContextVar("ndw_llm_abort_reason", default=None)
+#: 本次调用的来因（如内容校验重试 / 退化续写），在发起请求前设置，只作用于下一次调用
+_CALL_REASON: contextvars.ContextVar = contextvars.ContextVar("ndw_llm_call_reason", default=None)
+
+
+def set_llm_abort_reason(code: str, site: str = "") -> None:
+    """标记「当前这次流」被中断的原因码与调用点。
+
+    消费方在主动关闭流迭代器（取消、熔断、页面断开）之前调用；日志钩子读取后
+    写进记录的 `reason` 字段。只在同一线程内生效。
+
+    参数:
+        code: 原因码，取值见 `LLM_REASON_LABELS`。
+        site: 触发调用点（如 `stream_api: on_delta`）。
+
+    返回:
+        无。
+    """
+    _ABORT_REASON.set({"code": str(code or ""), "site": str(site or "")})
+
+
+def clear_llm_abort_reason() -> None:
+    """清空中断原因标记（同一线程内新发起调用前可调用，避免串味）。
+
+    返回:
+        无。
+    """
+    _ABORT_REASON.set(None)
+
+
+def set_llm_call_reason(code: str, site: str = "") -> None:
+    """标记「下一次 LLM 调用为什么发起」（重试 / 续写 / 重写）。
+
+    参数:
+        code: 原因码，取值见 `LLM_REASON_LABELS`。
+        site: 发起调用点。
+
+    返回:
+        无。
+    """
+    _CALL_REASON.set({"code": str(code or ""), "site": str(site or "")})
+
 
 #: 敏感字段名关键字（小写包含匹配）
 _SENSITIVE_KEYS = ("api_key", "apikey", "api-key", "token", "secret", "password", "authorization", "cookie")
@@ -786,6 +845,9 @@ class _LlmCall:
         self.tool_args: list[str] = []
         #: 非流式响应原文（由 `_request_json` 钩子写入）
         self._data: dict = {}
+        #: 本次调用的来因（内容校验重试 / 退化续写等）；只作用于当前这一次调用
+        self.call_reason: dict | None = _CALL_REASON.get()
+        _CALL_REASON.set(None)
 
     def feed(self, event: dict) -> None:
         """吞掉一条 SSE 事件并累积文本 / 用量 / 工具参数。
@@ -906,13 +968,15 @@ class _LlmCall:
             },
         }
 
-    def finish(self, status: str, error: str = "", trace_text: str = "") -> None:
+    def finish(self, status: str, error: str = "", trace_text: str = "", reason: str = "", site: str = "") -> None:
         """写出一条 LLM 调用记录。
 
         参数:
             status: `ok` / `error` / `partial`。
             error: 失败原因或备注。
             trace_text: 异常堆栈（有则一并落盘）。
+            reason: 原因码（流中断或本次调用来因），取值见 `LLM_REASON_LABELS`。
+            site: 触发该原因的调用点。
 
         返回:
             无。
@@ -923,6 +987,15 @@ class _LlmCall:
             detail["response"] = self._response_detail({}, self.started)
         else:
             detail["response"] = self._response_detail(self._data, self.started)
+        reason_info: dict = {}
+        code = str(reason or (self.call_reason or {}).get("code") or "")
+        if code:
+            reason_info = {
+                "code": code,
+                "label": LLM_REASON_LABELS.get(code, code),
+                "site": str(site or (self.call_reason or {}).get("site") or ""),
+            }
+            detail["reason"] = reason_info
         if self.first_token_ms is not None:
             detail["steps"] = [{"at": f"+{self.first_token_ms}ms", "label": "收到首个内容分片", "detail": ""}]
         if trace_text:
@@ -946,6 +1019,7 @@ class _LlmCall:
             "status": status,
             "duration_ms": duration_ms,
             "error": _clip(error or "", 4000),
+            "reason": reason_info,
             "detail": detail,
         }
         _enqueue(record)
@@ -997,6 +1071,21 @@ def _error_status(exc: BaseException) -> int | None:
     return None
 
 
+def _is_timeout(exc: BaseException) -> bool:
+    """判断异常是否为 HTTP / socket 超时（用于打 `timeout` 原因码）。
+
+    参数:
+        exc: 捕获到的异常。
+
+    返回:
+        是超时返回 True。
+    """
+    if isinstance(exc, (TimeoutError, socket.timeout)):
+        return True
+    text = str(exc).lower()
+    return "timed out" in text or "timeout" in text
+
+
 def install_llm_hooks() -> None:
     """给写作适配器的两个 HTTP 入口装采集钩子（幂等）。
 
@@ -1028,7 +1117,13 @@ def install_llm_hooks() -> None:
             data = original_request_json(self, method, path, payload, timeout_s)
         except BaseException as exc:  # noqa: BLE001 - 记录后原样抛出
             call.status_code = _error_status(exc)
-            call.finish("error", str(exc), _trace_text(exc))
+            call.finish(
+                "error",
+                str(exc),
+                _trace_text(exc),
+                reason="timeout" if _is_timeout(exc) else "",
+                site="adapter: 非流式请求异常" if _is_timeout(exc) else "",
+            )
             raise
         call.status_code = 200
         call._data = data if isinstance(data, dict) else {}
@@ -1048,15 +1143,46 @@ def install_llm_hooks() -> None:
                 yield event
         except GeneratorExit:
             call.status_code = 200
-            call.finish("partial", "调用方提前关闭流（取消或页面断开）")
+            # 消费方主动关闭迭代器：按「是否已有 finish_reason」区分正常结束与真中断。
+            # 之前所有「收到 done 后 break」的调用都被记成「调用方提前关闭流」，
+            # 是这类日志大量出现的主因。
+            info = _ABORT_REASON.get() or {}
+            code = str(info.get("code") or "")
+            site = str(info.get("site") or "")
+            if not code and call.finish_reason:
+                code = "natural_end"
+            if not code:
+                code = "unknown"
+            if code == "natural_end":
+                call.finish(
+                    "ok",
+                    "流正常结束（上游已给 finish_reason，消费方在 done 后关闭迭代器）",
+                    reason=code,
+                    site=site or "adapter: done 后关闭迭代器",
+                )
+            else:
+                label = LLM_REASON_LABELS.get(code, code)
+                call.finish(
+                    "partial",
+                    f"流被中断：{label}" + (f"（触发点：{site}）" if site else ""),
+                    reason=code,
+                    site=site,
+                )
             raise
         except BaseException as exc:  # noqa: BLE001 - 记录后原样抛出
             call.status_code = _error_status(exc)
-            call.finish("error", str(exc), _trace_text(exc))
+            if _is_timeout(exc):
+                reason, site = "timeout", "adapter: 流读取超时"
+            elif bool(getattr(exc, "retryable", False)) and call.events_total == 0:
+                # 还没收到任何事件就失败：适配器会自动重连，这类不是用户中断
+                reason, site = "sse_reconnect", "adapter: 流建立阶段失败（随后自动重试）"
+            else:
+                reason, site = "", ""
+            call.finish("error", str(exc), _trace_text(exc), reason=reason, site=site)
             raise
         else:
             call.status_code = 200
-            call.finish("ok")
+            call.finish("ok", reason="natural_end", site="adapter: SSE 迭代正常结束")
 
     OmlxWritingAdapter._request_json = _request_json
     OmlxWritingAdapter._iter_sse_with_retry = _iter_sse_with_retry
@@ -1094,6 +1220,7 @@ def _shallow(record: dict, file_name: str, line_no: int) -> dict:
         "summary": record.get("summary"),
         "status": record.get("status"),
         "duration_ms": record.get("duration_ms"),
+        "reason": record.get("reason") or {},
         "error": _clip(str(record.get("error") or ""), 300),
         "preview": preview,
         "file": file_name,

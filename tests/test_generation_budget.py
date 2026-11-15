@@ -224,23 +224,168 @@ def test_generation_settings_reject_budget_and_bad_values(
         assert response.status_code == 400
 
 
-def test_thinking_is_single_global_switch() -> None:
-    """思考只有全局开关与强度，不再按正文/摘要/审校/抽取分阶段。"""
-    adapter = _adapter({"model": "thinking-demo", "enable_thinking": True, "reasoning_effort": "high"})
-    chapter = TextGenRequest(task="chapter", system="", messages=[Message("user", "x")])
-    recap = TextGenRequest(task="recap", system="", messages=[Message("user", "x")])
+def _thinking_request(stage: str, explicit: bool | None = None) -> TextGenRequest:
+    """构造带思考调用点的请求。
 
-    assert adapter._thinking_for(chapter) == (True, "high")
-    # 摘要不再有阶段覆盖：仍跟随全局开关
-    assert adapter._thinking_for(recap) == (True, "high")
+    参数:
+        stage: 调用点键。
+        explicit: 调用点显式开关；None 表示未覆盖。
 
-    override = TextGenRequest(
-        task="recap",
-        system="",
-        messages=[Message("user", "x")],
-        metadata={"enable_thinking": False},
+    返回:
+        TextGenRequest。
+    """
+    metadata: dict = {"thinking_stage": stage}
+    if explicit is not None:
+        metadata["enable_thinking"] = explicit
+    return TextGenRequest(task="chapter", system="", messages=[Message("user", "x")], metadata=metadata)
+
+
+def test_thinking_auto_follows_builtin_stage_list() -> None:
+    """系统自动：正文关闭，大纲与节拍开启。"""
+    adapter = _adapter({"model": "thinking-auto", "enable_thinking": True, "reasoning_effort": "high"})
+
+    assert adapter._thinking_for(_thinking_request("chapter_round")) == (
+        False,
+        "high",
+        "auto",
+        "chapter_round",
     )
-    assert adapter._thinking_for(override) == (False, "high")
+    assert adapter._thinking_for(_thinking_request("chapter_single"))[0] is False
+    assert adapter._thinking_for(_thinking_request("outline_beats")) == (
+        True,
+        "high",
+        "auto",
+        "outline_beats",
+    )
+    assert adapter._thinking_for(_thinking_request("outline_acts"))[0] is True
+
+
+def test_thinking_stage_override_beats_auto() -> None:
+    """单项覆盖：世界设定关、正文单轮开；来源标为阶段设置。"""
+    adapter = _adapter(
+        {
+            "model": "thinking-stage",
+            "enable_thinking": True,
+            "thinking_stages": {"world": False, "chapter_single": True},
+        }
+    )
+
+    assert adapter._thinking_for(_thinking_request("world")) == (False, "", "stage", "world")
+    assert adapter._thinking_for(_thinking_request("chapter_single"))[0] is True
+    assert adapter._thinking_for(_thinking_request("chapter_single"))[2] == "stage"
+
+
+def test_thinking_global_off_wins_over_stage() -> None:
+    """全局总开关关闭时，即使单项写了开也不思考。"""
+    adapter = _adapter(
+        {
+            "model": "thinking-global-off",
+            "enable_thinking": False,
+            "thinking_stages": {"outline_beats": True},
+        }
+    )
+
+    enabled, _effort, source, _stage = adapter._thinking_for(_thinking_request("outline_beats"))
+    assert enabled is False
+    assert source == "global-off"
+
+
+def test_thinking_explicit_call_wins_over_stage() -> None:
+    """调用点显式值优先于阶段设置。"""
+    adapter = _adapter(
+        {
+            "model": "thinking-call",
+            "enable_thinking": True,
+            "thinking_stages": {"world": False, "chapter_round": True},
+        }
+    )
+
+    assert adapter._thinking_for(_thinking_request("world", explicit=True))[:3] == (True, "", "call")
+    assert adapter._thinking_for(_thinking_request("chapter_round", explicit=False))[:3] == (
+        False,
+        "",
+        "call",
+    )
+
+
+def test_thinking_unknown_stage_falls_back_off() -> None:
+    """清单里没有的调用点：按不思考处理，不抛错。"""
+    adapter = _adapter({"model": "thinking-unknown", "enable_thinking": True})
+
+    enabled, _effort, source, stage = adapter._thinking_for(_thinking_request("not_in_registry"))
+    assert enabled is False
+    assert source == "auto"
+    assert stage == "not_in_registry"
+
+
+def test_thinking_payload_carries_stage_value() -> None:
+    """实际请求按调用点下发开关：正文关闭、节拍开启。"""
+    adapter = _adapter(
+        {"model": "thinking-payload", "enable_thinking": True, "reasoning_effort": "high"}
+    )
+
+    chapter = adapter._build_payload(_thinking_request("chapter_round"), stream=False)
+    beats = adapter._build_payload(_thinking_request("outline_beats"), stream=False)
+
+    assert chapter["chat_template_kwargs"]["enable_thinking"] is False
+    assert "reasoning_effort" not in chapter
+    assert beats["chat_template_kwargs"]["enable_thinking"] is True
+    assert beats["reasoning_effort"] == "high"
+
+
+def test_thinking_settings_three_state_api(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """设置接口支持系统自动 / 开 / 关，并能恢复自动。"""
+    client, ui = _generation_client(tmp_path, monkeypatch)
+
+    state = client.get("/api/ui/config/thinking").json()
+    items = {item["stage"]: item for item in state["items"]}
+    assert state["global"]["off"] is False
+    assert items["world"]["state"] == "auto"
+    assert items["world"]["effective"] is True
+    assert items["world"]["source"] == "auto"
+    assert items["chapter_round"]["state"] == "auto"
+    assert items["chapter_round"]["effective"] is False
+
+    saved = client.post("/api/ui/config/thinking", json={"values": {"chapter_round": True}})
+    assert saved.status_code == 200
+    item = {row["stage"]: row for row in saved.json()["items"]}["chapter_round"]
+    assert item["state"] == "on" and item["effective"] is True and item["source"] == "page"
+    assert "chapter_round" in ui.read_text(encoding="utf-8")
+
+    reset = client.post("/api/ui/config/thinking", json={"values": {"chapter_round": None}})
+    item = {row["stage"]: row for row in reset.json()["items"]}["chapter_round"]
+    assert item["state"] == "auto" and item["effective"] is False
+
+    unknown = client.post("/api/ui/config/thinking", json={"values": {"unknown_stage": True}})
+    assert unknown.status_code == 400
+    assert "unknown_stage" not in unknown.json()["detail"]["message"]
+
+    invalid = client.post("/api/ui/config/thinking", json={"values": {"world": "yes"}})
+    assert invalid.status_code == 400
+
+
+def test_thinking_global_switch_off_disables_everything(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """全局总开关关闭时，所有调用点实际都不思考。"""
+    from fastapi.testclient import TestClient
+
+    from novel_drama.web import models_api
+    from novel_drama.web.app import create_app
+
+    base = _write(tmp_path / "config.yaml", "omlx:\n  enable_thinking: false\n")
+    ui = tmp_path / "config.ui.yaml"
+    ui.write_text("writing:\n  thinking:\n    stages:\n      outline_beats: true\n", encoding="utf-8")
+    monkeypatch.setattr("novel_drama.config.DEFAULT_UI_CONFIG_PATH", ui)
+    monkeypatch.setattr(models_api, "DEFAULT_UI_CONFIG_PATH", ui)
+    client = TestClient(create_app(config_path=str(base)))
+
+    state = client.get("/api/ui/config/thinking").json()
+    assert state["global"]["off"] is True
+    assert all(item["effective"] is False for item in state["items"])
+    assert all(item["source"] == "global-off" for item in state["items"])
 
 
 def test_finish_reason_length_is_reported() -> None:

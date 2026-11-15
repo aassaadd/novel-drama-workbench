@@ -108,7 +108,7 @@ payload = {
 - 一轮只取**第一个** `tool_calls[0].function.arguments`；同一响应里若有多个调用，其余被忽略。
 - 参数必须是 JSON 对象：dict 直接用；字符串则 `json.loads`，失败或不是对象都抛 `UPSTREAM_ERROR`。
 - 输出预算：不再单独估算；请求 `max_tokens` 与文本路径一致，取「上下文窗口 − 已用提示词」的剩余空间，窗口未知时不传。`finish_reason=length` 按异常处理。
-- 思考模式：跟随全局开关与强度；音效/BGM 等短任务在构造 omlx 设置时显式关闭。
+- 思考模式：全局总开关关闭时全部关闭；开启时按调用点三态（系统自动 / 开 / 关）与内置清单决定，强度跟随全局。清单与解析在 `writing/thinking.py`。
 - 截断：`finish_reason=length` 且没有 `tool_calls` 时返回中文错误「模型输出被截断…可重试，或减少本次生成数量后分批生成」，`retryable=True`，detail 保留 `finish_reason`、工具名、prompt/completion tokens 与响应片段；参数 JSON 被截断时给同样提示。
 - 失败策略：除此之外不重试、不追问、不降级到文本 JSON 解析（项目记忆里的「不再保留文本 JSON 兜底」与代码一致）。
 - 工具定义集中在 [service.py `_gen_tool`](file:///Users/zhaohaochen/git/novel-drama-workbench/src/novel_drama/writing/service.py#L1199-L1280)：`emit_outline` / `emit_act` / `emit_premise` / `emit_style` / `emit_world` / `emit_worlds` / `emit_character` / `emit_characters`；音色描述用 [voice_design.py `_PROFILE_TOOL`](file:///Users/zhaohaochen/git/novel-drama-workbench/src/novel_drama/tts/voice_design.py#L155-L165)。

@@ -26,6 +26,7 @@ from fastapi.responses import StreamingResponse
 from ..adapters.base import AdapterError
 from ..cancel import GenerationCanceled
 from ..config import load_config
+from ..oplog import set_llm_abort_reason
 from ..store import ProjectStore
 from .job_tracker import UiJob
 from ..writing.act_batch import ActBatchCanceled, generate_act_chapters, resolve_act
@@ -52,6 +53,21 @@ _SSE_HEADERS = {
 
 class _Cancelled(GenerationCanceled):
     """客户端断开或用户停止后用于中断生成流程。"""
+
+
+def _cancel_reason(job: UiJob | None) -> str:
+    """区分「用户点停止」与「页面断开」两种取消来源。
+
+    参数:
+        job: 本次生成登记的任务（可为 None）。
+
+    返回:
+        `user_cancel`（任务登记了取消请求）或 `page_unload`（客户端断开）。
+    """
+    try:
+        return "user_cancel" if (job is not None and job.cancel_requested()) else "page_unload"
+    except Exception:  # noqa: BLE001 - 取状态失败时按断线处理
+        return "page_unload"
 
 
 def _sse(event: str, data: dict) -> str:
@@ -302,6 +318,7 @@ def _stream_response(task, job=None, hint=None) -> StreamingResponse:
     def on_delta(text: str) -> None:
         """接收模型增量；客户端断开或用户点停止时抛异常中断生成。"""
         if stop.is_set() or (job is not None and job.cancel_requested()):
+            set_llm_abort_reason(_cancel_reason(job), "stream_api: on_delta")
             raise _Cancelled()
         received["chars"] += len(str(text))
         total_chars = int(hint.get("base_chars") or 0) + received["chars"]
@@ -401,6 +418,7 @@ def _progress_response(task, job=None) -> StreamingResponse:
     def on_progress(event: dict) -> None:
         """接收进度事件；用户点停止 / 客户端断开时抛异常中断生成。"""
         if stop.is_set() or (job is not None and job.cancel_requested()):
+            set_llm_abort_reason(_cancel_reason(job), "stream_api: on_progress")
             raise _Cancelled()
         if not isinstance(event, dict):
             return

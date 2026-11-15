@@ -16,6 +16,8 @@ let envTimer = null;
 let connection = null;
 /** 上下文与输出侧现状（/api/ui/config/generation 返回的结构，只读） */
 let generation = null;
+/** 按调用点的思考设置（/api/ui/config/thinking 返回的结构） */
+let thinking = null;
 /** 模型分组（顺序即展示顺序） */
 const MODEL_GROUPS = [
   ['audio', '配音 / 音乐权重'],
@@ -464,6 +466,7 @@ const SECTIONS = [
   ['env', '本机环境与模型', '本机环境、模型列表与下载'],
   ['conn', '连接配置', 'ComfyUI 与写作模型连接'],
   ['gen', '正文生成', '每轮节拍数与最大轮数等正文默认参数'],
+  ['thinking', '思考', '按调用点设置系统自动 / 开 / 关；强度跟随全局'],
   ['budget', '上下文与输出', '上下文上限、最近提示词占用与输出无人工上限说明'],
   ['prefs', '快捷键与界面偏好', '快捷键、字号与显示偏好'],
 ];
@@ -668,11 +671,11 @@ function connectionHTML() {
                 title="模型可用的上下文上限；测试连通后按服务端返回值回填。输入装配与请求 max_tokens 都按它计算" /></div>
           </div>
           <div class="conn-grid">
-            <div class="field"><label>思考</label>
+            <div class="field"><label>思考总开关</label>
               <label class="set-pref" style="padding-top:4px">
                 <input type="checkbox" id="conn-llm-thinking" ${llm.thinking_enabled ? 'checked' : ''}
-                  title="开启后写作 / 标注请求会带上思考参数" />
-                <span><b>开启思考</b><em>开启后请求带思考参数，速度变慢、结果更稳；关闭时强度不可选</em></span>
+                  title="关闭时所有调用点都不思考（优先级最高）" />
+                <span><b>开启思考</b><em>开启后由「思考」分组按调用点决定；关闭时全部不思考</em></span>
               </label>
             </div>
             <div class="field"><label>思考强度</label>
@@ -715,6 +718,137 @@ function connectionHTML() {
           <span class="mono">${esc(conn.config_path || 'config/config.yaml')}</span> 不会被改写）</div>
       </div>
     </div>`;
+}
+
+/**
+ * 思考开关的三态文案。
+ * @param {'auto'|'on'|'off'} state 三态
+ * @returns {string} 中文
+ */
+function thinkingStateLabel(state) {
+  return { auto: '系统自动', on: '开', off: '关' }[state] || '系统自动';
+}
+
+/**
+ * 思考来源文案（实际生效来自哪里）。
+ * @param {object} item 服务端返回的单项
+ * @returns {string} 中文
+ */
+function thinkingSourceLabel(item) {
+  if (item.source === 'global-off') return '全局总开关已关闭';
+  if (item.source === 'page') return '在设置页改过';
+  return '系统自动';
+}
+
+/** 思考（按调用点）卡片 */
+function thinkingHTML() {
+  return `
+    <div class="card" style="margin-top:14px">
+      <div class="card-head"><span class="ct">思考（按调用点）</span>
+        <div class="right"><span class="badge" id="thinking-global">正在读取…</span></div>
+      </div>
+      <div class="card-body">
+        <div class="hint">每项可选「系统自动 / 开 / 关」。系统自动按内置清单判定；全局总开关关闭时全部不思考。思考强度统一跟随连接配置，不按阶段分档。</div>
+        <div id="thinking-body">${thinkingBodyHTML()}</div>
+      </div>
+    </div>`;
+}
+
+/** 思考列表主体：每项显示三态、实际生效与来源 */
+function thinkingBodyHTML() {
+  if (thinking?.error) return `<div class="dlg-note bad">${esc(thinking.error)}</div>`;
+  const items = thinking?.items || [];
+  if (!items.length) return '<div class="empty" style="padding:12px"><span>正在读取思考设置…</span></div>';
+  return items
+    .map((item) => {
+      const changed = item.state !== 'auto';
+      return `
+      <div class="summary-line" style="align-items:flex-start;flex-wrap:wrap" data-thinking-row="${esc(item.stage)}">
+        <span style="min-width:0;flex:1">
+          <span style="color:var(--text)">${esc(item.label)}</span>
+          <span class="hint" style="display:block;font-size:11px">${esc(item.note)}</span>
+          <span class="hint" style="display:block;font-size:11px" data-thinking-status>
+            实际：${item.effective ? '思考' : '不思考'} · ${thinkingSourceLabel(item)} · 默认${
+              item.default ? '思考' : '不思考'
+            }
+          </span>
+        </span>
+        <span class="right" style="display:flex;gap:6px;align-items:center">
+          <select class="input" data-thinking-stage="${esc(item.stage)}" style="width:108px"
+            title="系统自动 / 开 / 关；立即生效">
+            ${['auto', 'on', 'off']
+              .map(
+                (value) =>
+                  `<option value="${value}" ${item.state === value ? 'selected' : ''}>${thinkingStateLabel(
+                    value
+                  )}</option>`
+              )
+              .join('')}
+          </select>
+          <button class="btn sm" data-act="think-reset" data-stage="${esc(item.stage)}"
+            ${changed ? '' : 'disabled'} title="恢复为系统自动（删除该调用点的覆盖）">恢复自动</button>
+        </span>
+      </div>`;
+    })
+    .join('');
+}
+
+/** 刷新思考卡片（全局徽标 + 列表） */
+function applyThinkingView() {
+  const body = document.getElementById('thinking-body');
+  if (body) body.innerHTML = thinkingBodyHTML();
+  const badge = document.getElementById('thinking-global');
+  if (!badge) return;
+  if (thinking?.error) {
+    badge.className = 'badge bad';
+    badge.textContent = '读取失败';
+    badge.title = thinking.error;
+    return;
+  }
+  const global = thinking?.global || {};
+  if (global.off) {
+    badge.className = 'badge bad';
+    badge.textContent = '全局已关闭';
+    badge.title = '全局总开关关闭时，所有调用点都不会思考';
+  } else {
+    badge.className = 'badge ok';
+    badge.textContent = `全局开启${global.effort ? ` · 强度 ${global.effort}` : ''}`;
+    badge.title = '思考强度统一跟随连接配置，不按调用点分档';
+  }
+}
+
+/** 读取按调用点的思考设置 */
+async function loadThinking() {
+  try {
+    thinking = await getJSON('/api/ui/config/thinking');
+  } catch (error) {
+    thinking = { error: `思考设置读取失败：${error.message}` };
+  }
+  applyThinkingView();
+}
+
+/**
+ * 保存单个调用点的思考三态：auto=删除覆盖，on/off=显式覆盖。
+ * @param {string} stage 调用点键
+ * @param {'auto'|'on'|'off'} value 三态
+ * @param {HTMLElement} control 触发控件（保存期间禁用）
+ */
+async function saveThinking(stage, value, control) {
+  const row = control?.closest('[data-thinking-row]');
+  const status = row?.querySelector('[data-thinking-status]');
+  control.disabled = true;
+  if (status) status.textContent = '正在保存…';
+  try {
+    thinking = await postJSON('/api/ui/config/thinking', {
+      values: { [stage]: value === 'auto' ? null : value === 'on' },
+    });
+    applyThinkingView();
+    toast(value === 'auto' ? '已恢复系统自动' : '思考设置已保存，立即生效', 'ok', 2200);
+    document.querySelector(`[data-thinking-stage="${stage}"]`)?.focus();
+  } catch (error) {
+    toast(error.message || '保存失败', 'bad', 4600);
+    applyThinkingView();
+  }
 }
 
 /**
@@ -1005,12 +1139,13 @@ function mainHTML() {
       <section class="set-section" data-section="global">
         ${sectionHead(
           '全局设置（本机）',
-          '模型与算力、连接配置、正文生成、上下文与输出、环境自检与模型下载、快捷键、界面偏好'
+          '模型与算力、连接配置、正文生成、思考、上下文与输出、环境自检与模型下载、快捷键、界面偏好'
         )}
         ${resumeBannerHTML()}
         <div id="env" class="set-block">${environmentHTML()}</div>
         <div id="conn" class="set-block">${connectionHTML()}</div>
         <div id="gen" class="set-block">${generationFormHTML()}</div>
+        <div id="thinking" class="set-block">${thinkingHTML()}</div>
         <div id="budget" class="set-block">${generationHTML()}</div>
         <div id="prefs" class="set-block">${shortcutsHTML()}${prefsHTML()}</div>
       </section>
@@ -1403,6 +1538,8 @@ async function saveConnection(section, button) {
     env.llm = null;
     env.comfy = null;
     await loadEnvironment();
+    // 全局思考开关可能刚改过：刷新按调用点的实际生效与来源
+    await loadThinking();
   } catch (error) {
     setConnResult(resultId, false, error.message || '保存失败');
   } finally {
@@ -1436,6 +1573,9 @@ function onRootClick(event) {
   if (button.dataset.act === 'conn-save-llm') return void saveConnection('llm', button);
   if (button.dataset.act === 'gen-save') return void saveGeneration(button);
   if (button.dataset.act === 'gen-reset') return void resetGeneration(button);
+  if (button.dataset.act === 'think-reset') {
+    return void saveThinking(button.dataset.stage, 'auto', button);
+  }
   if (button.dataset.act === 'gen-return') {
     // 只有从生成弹窗跳过来时才回退，避免普通访问设置页误触返回
     if (generationResume()) history.back();
@@ -1486,6 +1626,11 @@ function applyPref(name, value) {
 
 /** 下拉选择 / 勾选：界面偏好写本地 */
 function onRootChange(event) {
+  // 思考三态：切换即保存，auto 表示删除覆盖、回落到系统自动
+  if (event.target.dataset.thinkingStage) {
+    void saveThinking(event.target.dataset.thinkingStage, event.target.value, event.target);
+    return;
+  }
   // 每轮节拍数：勾选自动分配时禁用数字框，取消勾选后聚焦到数字框
   if (event.target.id === 'gen-auto') {
     const input = document.getElementById('gen-beats-input');
@@ -1561,6 +1706,7 @@ export async function renderSettings(root, target = {}) {
   }
   await loadConnection();
   await loadGeneration();
+  await loadThinking();
   root.innerHTML = `
     ${topbar({
       left: `<button class="btn icon" data-act="back" title="回工程列表">${icon('back')}</button>
@@ -1577,6 +1723,8 @@ export async function renderSettings(root, target = {}) {
       </section>
       <aside class="studio-right"></aside>
     </div>`;
+  // 思考卡片的数据在渲染前已读取，这里补一次徽标与列表刷新
+  applyThinkingView();
   // 渲染完再滚动，保证目标分区已存在；刷新时也停在同一分区
   // focus 来自生成弹窗的跳转（如 max_rounds），滚动后聚焦并高亮对应控件
   requestAnimationFrame(() => {
