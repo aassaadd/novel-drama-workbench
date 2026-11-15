@@ -71,8 +71,10 @@ def test_chapter_save_keeps_every_field_except_updated_at(tmp_path: Path):
 
     repo.save(chapter)
     written = json.loads(path.read_text(encoding="utf-8"))
+    # 步骤 4 起 scenes 落到 scenes/<id>.json，chapter.json 不再保存这个字段
+    assert "scenes" not in written
     diff = _diff(before, written)
-    assert set(diff) == {"updated_at"}, f"意外字段变化：{diff}"
+    assert set(diff) == {"updated_at", "scenes"}, f"意外字段变化：{diff}"
 
     reread = repo.load(chapter_id)
     assert {k: v for k, v in reread.to_dict().items() if k != "updated_at"} == {

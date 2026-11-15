@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://novel-drama.local/schema/chapter-scenes.schema.json",
+  "title": "章节生产态场景（scenes/<chapterId>.json）",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "chapter_id", "scenes"],
+  "properties": {
+    "schema_version": {"type": "integer", "minimum": 1},
+    "chapter_id": {"type": "string", "pattern": "^chp_[0-9A-Za-z]{3,32}$"},
+    "scenes": {
+      "type": "array",
+      "items": {"$ref": "scene.schema.json"},
+      "description": "生产态投影：台词内容以台本为准，这里保留 tts 与媒体条目"
+    }
+  }
+}

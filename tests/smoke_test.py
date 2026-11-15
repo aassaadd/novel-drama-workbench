@@ -88,8 +88,12 @@ def main() -> int:
         check(result["unknown"] >= 1, "未识别说话人被标记为 chr_unknown")
 
         chapter = store.load_chapter(chapter["id"])
-        validate(chapter, "chapter.schema.json")
-        check(True, "章节通过 schema 校验")
+        validate({key: value for key, value in chapter.items() if key != "scenes"}, "chapter.schema.json")
+        validate(
+            {"schema_version": 1, "chapter_id": chapter["id"], "scenes": chapter["scenes"]},
+            "chapter-scenes.schema.json",
+        )
+        check(True, "章节与生产态场景通过 schema 校验")
 
         # 时间轴（全部未合成，应全部为估算）
         timeline = build_timeline(chapter, store.settings())

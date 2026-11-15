@@ -60,7 +60,6 @@
       "items": { "$ref": "#/$defs/continuation" },
       "description": "续写/改写会话记录"
     },
-    "scenes": { "type": "array", "items": { "$ref": "scene.schema.json" }, "description": "v1 兼容：场景内嵌；v2 由导演脚本的 shots 承接" },
     "revision": { "type": "integer", "minimum": 1 },
     "created_at": { "type": "string", "format": "date-time" },
     "updated_at": { "type": "string", "format": "date-time" }

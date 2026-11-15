@@ -31,6 +31,7 @@ _REMOVED_SETTING_KEYS = {
 # 工程内固定目录
 _SUBDIRS = (
     "chapters",
+    "scenes",
     "timelines",
     "scripts",
     "settings",
@@ -193,6 +194,17 @@ class ProjectStore:
             chapters/<chapterId>.json 路径。
         """
         return self.root / "chapters" / f"{chapter_id}.json"
+
+    def scenes_path(self, chapter_id: str) -> Path:
+        """章节生产态场景文件路径（tts / 媒体投影）。
+
+        参数:
+            chapter_id: 章节 ID。
+
+        返回:
+            scenes/<chapterId>.json 路径。
+        """
+        return self.root / "scenes" / f"{chapter_id}.json"
 
     def timeline_path(self, chapter_id: str) -> Path:
         """时间轴文件路径（派生物）。
@@ -478,7 +490,9 @@ class ProjectStore:
                     "title": data.get("title"),
                     "status": data.get("status"),
                     "word_count": data.get("word_count"),
-                    "scene_count": len(data.get("scenes") or []),
+                    "scene_count": len(
+                        self.load_scenes(str(data.get("id") or "")) or data.get("scenes") or []
+                    ),
                     "revision": data.get("revision"),
                     "synopsis": data.get("synopsis"),
                 }
@@ -491,44 +505,119 @@ class ProjectStore:
         return (max(indexes) + 1) if indexes else 1
 
     def load_chapter(self, chapter_id: str) -> dict:
-        """读取章节（含场景、台词、音效、图、视频）。
+        """读取章节（元信息 + 正文），并注入生产态场景。
+
+        步骤 4 起 `chapter.json` 不再保存 `scenes`：
+        - 场景内容与结构以台本为准，读路径再经 `lines_source` 派生；
+        - 生产态（`tts` / 媒体）保存在 `scenes/<chapterId>.json`，这里原样注入
+          `chapter["scenes"]`，让既有调用点保持原有形状。
+        生产文件缺失或损坏时按空生产态返回，不当作错误。
 
         参数:
             chapter_id: 章节 ID。
 
         返回:
-            章节 dict。
+            章节 dict（含 `scenes`）。
+
+        异常:
+            FileNotFoundError: 章节文件不存在。
         """
         path = self.chapter_path(chapter_id)
         if not path.exists():
             raise FileNotFoundError(f"章节不存在: {chapter_id}")
-        return self._read_json(path)
+        chapter = self._read_json(path)
+        # 旧工程尚未拆分：`scenes` 还内嵌在 chapter.json 里，读时沿用；首次写盘会迁到生产文件
+        embedded = chapter.pop("scenes", None)
+        chapter["scenes"] = self.load_scenes(chapter_id) or embedded or []
+        return chapter
 
-    def save_chapter(self, chapter: dict) -> None:
-        """保存章节（先校验，再原子写入）。
-
-        正文发生变化时，先把当前磁盘上的旧版本完整存档到
-        `.ndw/versions/<章节ID>/<旧 revision>.json`（同 revision 冲突时追加 `-2`、`-3`）。
-        只改标题/摘要等不影响正文的字段时不产生新版本，避免版本列表被无关写入刷屏。
+    def load_scenes(self, chapter_id: str) -> list[dict]:
+        """读取章节生产态场景（缺失或损坏时按空态返回）。
 
         参数:
-            chapter: 章节 dict。
+            chapter_id: 章节 ID。
+
+        返回:
+            场景列表；文件不存在、损坏或结构不符时返回 `[]`。
+        """
+        path = self.scenes_path(chapter_id)
+        if not path.exists():
+            return []
+        try:
+            data = self._read_json(path)
+        except (OSError, ValueError):
+            return []
+        scenes = data.get("scenes") if isinstance(data, dict) else None
+        return scenes if isinstance(scenes, list) else []
+
+    def save_scenes(self, chapter_id: str, scenes: list[dict]) -> None:
+        """原子写入章节生产态场景（先校验后写，不做归档）。
+
+        生产态变化（配音状态、媒体产物）不产生历史版本，避免版本列表被刷屏；
+        内容层归档统一由 `save_chapter` 负责。
+
+        参数:
+            chapter_id: 章节 ID。
+            scenes: 完整场景列表。
+        """
+        payload = self._scenes_payload(chapter_id, scenes)
+        self._write_json(self.scenes_path(chapter_id), payload)
+
+    def _scenes_payload(self, chapter_id: str, scenes: list[dict]) -> dict:
+        """校验并组装生产态场景文件内容（不写盘）。
+
+        参数:
+            chapter_id: 章节 ID。
+            scenes: 完整场景列表。
+
+        返回:
+            `{schema_version, chapter_id, scenes}`。
+        """
+        old_scenes = self.load_scenes(chapter_id)
+        baseline = (
+            {"schema_version": 1, "chapter_id": chapter_id, "scenes": old_scenes} if old_scenes else None
+        )
+        check_chapter({"scenes": scenes}, baseline={"scenes": old_scenes} if old_scenes else None)
+        payload = {"schema_version": 1, "chapter_id": chapter_id, "scenes": scenes}
+        validate(payload, "chapter-scenes.schema.json", baseline=baseline)
+        return payload
+
+    def save_chapter(self, chapter: dict) -> None:
+        """保存章节：拆出生产态场景写 `scenes/<id>.json`，其余写 `chapters/<id>.json`。
+
+        正文或内容层（台词行 / 场景结构）变化时，先把当前磁盘上的旧版本完整存档到
+        `.ndw/versions/<章节ID>/<旧 revision>.json`（同 revision 冲突时追加 `-2`、`-3`）；
+        仅生产态变化时不产生新版本。
+
+        参数:
+            chapter: 章节 dict（可含 `scenes`，写入前会被拆走）。
         """
         chapter["updated_at"] = now_iso()
-        path = self.chapter_path(chapter["id"])
+        chapter_id = str(chapter["id"])
+        scenes = chapter.get("scenes") or []
+        # 内存里保留 scenes 供调用方继续使用，磁盘上的章节文件不再写这个字段
+        payload = {key: value for key, value in chapter.items() if key != "scenes"}
+
+        path = self.chapter_path(chapter_id)
         current: dict = {}
         if path.exists():
             try:
                 current = self._read_json(path)
             except (OSError, ValueError):
                 current = {}
-        baseline = current or None
-        check_chapter(chapter, baseline=baseline)
-        validate(chapter, "chapter.schema.json", baseline=baseline)
+        old_scenes = self.load_scenes(chapter_id) or current.get("scenes") or []
+        baseline = {**current, "scenes": old_scenes} if current else None
+        check_chapter({**payload, "scenes": scenes}, baseline=baseline)
+        validate(payload, "chapter.schema.json", baseline=current or None)
+        # 生产文件不存在（旧工程内嵌 scenes）时也要落盘，否则拆分后场景会丢
+        file_scenes = self.load_scenes(chapter_id)
+        scenes_payload = self._scenes_payload(chapter_id, scenes) if scenes != file_scenes else None
         # 旧版没有正文时不存档（新建章节的首次生成不产生无意义的 0 字版本）
-        if should_archive_version(current, chapter):
-            self._archive_chapter(chapter["id"], current)
-        self._write_json(path, chapter)
+        if should_archive_version(baseline or {}, {**payload, "scenes": scenes}):
+            self._archive_chapter(chapter_id, baseline or {})
+        self._write_json(path, payload)
+        if scenes_payload is not None:
+            self._write_json(self.scenes_path(chapter_id), scenes_payload)
 
     def _archive_chapter(self, chapter_id: str, chapter: dict) -> None:
         """把一份完整章节快照写入历史版本目录。

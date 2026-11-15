@@ -52,7 +52,8 @@ def test_roundtrip_is_idempotent(name: str):
     once = Chapter.from_dict(raw).to_dict()
     twice = Chapter.from_dict(once).to_dict()
     assert once == twice
-    validate(once, "chapter.schema.json")
+    # 聚合根仍保留 scenes（内存视图）；落盘的 chapter.json 不再存这个字段
+    validate({key: value for key, value in once.items() if key != "scenes"}, "chapter.schema.json")
 
 
 @pytest.mark.parametrize("name", REAL_SAMPLES)
@@ -134,7 +135,7 @@ def test_blocks_and_source_and_continuations_roundtrip():
     assert out["source"] == raw["source"]
     assert out["continuations"] == raw["continuations"]
     assert out["scenes"] == raw["scenes"]
-    validate(out, "chapter.schema.json")
+    validate({key: value for key, value in out.items() if key != "scenes"}, "chapter.schema.json")
 
 
 def test_voice_override_requires_reason():
