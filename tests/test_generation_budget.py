@@ -20,9 +20,11 @@ from novel_drama.adapters.base import (
     TextGenResult,
 )
 from novel_drama.adapters.writing import OmlxWritingAdapter
+from novel_drama.application.story.chapter_rounds import (
+    _generate_validated as _generate_validated,
+)
 from novel_drama.config import load_config
 from novel_drama.domain.production.rules import token_budget as budgets
-from novel_drama.application.story import service as service
 
 
 def _write(path: Path, text: str) -> Path:
@@ -423,7 +425,7 @@ def test_finish_reason_length_is_reported() -> None:
     notices: list[str] = []
     request = TextGenRequest(task="chapter", system="", messages=[Message("user", "写一章")])
 
-    result, text, _, _ = service._generate_validated(
+    result, text, _, _ = _generate_validated(
         adapter, request, None, "第 1 轮正文", on_notice=notices.append
     )
 

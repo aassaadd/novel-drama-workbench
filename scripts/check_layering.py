@@ -57,12 +57,7 @@ MAX_LINES = 1500
 
 #: 迁移期超限豁免：这些文件在旧结构里就已超限，阶段 6 拆分后必须删除对应条目。
 #: 只允许登记 `adapters/` 下的历史文件；新写的文件不得进入本表。
-#: 例外：阶段 4-1 机械搬迁把 5600 行的 service.py 原样搬进 application/story，
-#: 拆分在紧接着的 4-2 提交完成，届时必须删除该条目。
-OVERSIZE_DEBT: frozenset[str] = frozenset({
-    "novel_drama/adapters/writing.py",
-    "novel_drama/application/story/service.py",
-})
+OVERSIZE_DEBT: frozenset[str] = frozenset({"novel_drama/adapters/writing.py"})
 
 #: 项目包名
 PACKAGE = "novel_drama"

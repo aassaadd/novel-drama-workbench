@@ -21,11 +21,6 @@ from collections import Counter
 from dataclasses import replace
 
 from ...adapters.base import AdapterError, ErrorCode, Message, TextGenRequest
-from ...config import AppConfig
-from ...models.ids import new_id, now_iso
-from ...store import ProjectStore
-from ...store.settings_store import SettingsStore
-from ...text.titles import strip_index_prefix
 from ...application.cast.sync_cast import (
     apply_chapter_cast,
     cast_prompt_block,
@@ -33,16 +28,21 @@ from ...application.cast.sync_cast import (
     normalize_cast,
     summarize_cast,
 )
-from .service import (
-    _act_validation,
+from ...config import AppConfig
+from ...models.ids import new_id, now_iso
+from ...store import ProjectStore
+from ...store.settings_store import SettingsStore
+from ...text.titles import strip_index_prefix
+from ..support.llm_calls import (
     _characters_payload,
     _generate_json,
-    _gen_tool,
     _progress,
-    _tolerance,
-    _validation_report,
-    bind_outline_context,
     build_writing_adapter,
+)
+from ..support.llm_schemas import _gen_tool
+from .generate_outline import _act_validation, _tolerance, _validation_report
+from .outline_bind import (
+    bind_outline_context,
     outline_binding_stats,
     sanitize_outline_character_ids,
 )

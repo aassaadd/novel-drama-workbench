@@ -1,7 +1,7 @@
 """多世界条目清洗：把模型返回的单条世界 JSON 归一化为可落盘的 world 条目。
 
 本模块只做「字段补齐 / 结构清洗 / schema 校验」，不读写文件、不调用适配器；
-章节绑定与落盘由 `writing/service.py` 负责。
+章节绑定与落盘由 `application/story/settings_generate.py` 负责。
 """
 
 from __future__ import annotations

@@ -114,7 +114,7 @@ def update_rolling_summary(
         raise ValueError("正文为空，无法生成摘要")
 
     # 延迟导入：service 在生成成功后调用本模块，避免循环依赖
-    from .service import _extract_json_object, build_writing_adapter
+    from ..support.llm_calls import _extract_json_object, build_writing_adapter
 
     rolling = store.load_rolling_summary()
     previous_book = str(rolling.get("book_summary") or "").strip()
@@ -218,7 +218,7 @@ def split_final_output(text: str) -> tuple[str, dict | None, str | None]:
         body = raw[: brace_index if brace_index >= 0 else key_index].strip()
         tail = raw[brace_index if brace_index >= 0 else key_index :].strip()
 
-    from .service import _extract_json_object
+    from ..support.llm_calls import _extract_json_object
 
     try:
         payload = _extract_json_object(tail)

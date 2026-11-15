@@ -1,6 +1,6 @@
 """续写页接口（R19）：章节末尾续写（预览 / 应用 / 重抽）与大纲追加章节。
 
-业务规则全部在 `writing.continuation`，这里只做 HTTP 包装：
+业务规则全部在 `application.story.continue_chapter`，这里只做 HTTP 包装：
 - 预览（不传 apply）会生成并把结果存为工程内 `.ndw/drafts/` 的未应用草稿；
 - 应用（apply=true）优先消费该草稿，不重复调用模型；`retry=true` 才重抽覆盖草稿；
 - 大纲续写预览不写盘，`apply=true` 逐幕写入设定库（仍需 outline apply 才建章节文件）。

@@ -16,9 +16,6 @@ import json
 import threading
 
 from ...adapters.base import Message, TextGenRequest
-from ...models.ids import new_id, now_iso
-from ...store import ProjectStore
-from ...store.settings_store import SettingsStore
 from ...application.cast.sync_cast import (
     _norm,
     apply_chapter_cast,
@@ -27,7 +24,10 @@ from ...application.cast.sync_cast import (
     load_pending,
     normalize_cast,
 )
-from ...application.story.service import _progress, build_writing_adapter
+from ...models.ids import new_id, now_iso
+from ...store import ProjectStore
+from ...store.settings_store import SettingsStore
+from ..support.llm_calls import _progress, build_writing_adapter
 
 #: 补跑一次角色识别的预估耗时（秒/章），只用于弹窗里的如实提示
 CAPTURE_SECONDS_PER_CHAPTER = 8
@@ -50,7 +50,7 @@ def _cast_tool() -> dict:
     返回:
         OpenAI tools 单项。
     """
-    from ...application.story.service import _CAST_ITEM_SCHEMA
+    from ..support.llm_schemas import _CAST_ITEM_SCHEMA
 
     return {
         "type": "function",

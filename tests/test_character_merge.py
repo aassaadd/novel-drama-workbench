@@ -13,12 +13,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from novel_drama.application.cast.sync_cast import load_pending, save_pending
 from novel_drama.character_merge import merge_characters, merge_impact
 from novel_drama.models import entities
 from novel_drama.models.ids import new_id, now_iso
 from novel_drama.store import ProjectStore
 from novel_drama.store.settings_store import SettingsStore
-from novel_drama.application.cast.sync_cast import load_pending, save_pending
 
 
 class CharacterMergeTest(unittest.TestCase):

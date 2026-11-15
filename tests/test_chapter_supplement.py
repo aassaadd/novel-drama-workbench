@@ -14,12 +14,15 @@ import pytest
 from test_chapter_resume import InlineSummaryAdapter, _offline, _patch_adapter, _project
 
 from novel_drama.application.story import chapter_checkpoint as chapter_checkpoint
-from novel_drama.application.story import service as service
-from novel_drama.application.story.service import (
-    UNDERFILL_ACTION_RATIO,
+from novel_drama.application.story.chapter_limits import UNDERFILL_ACTION_RATIO
+from novel_drama.application.story.chapter_text import _count_words as _count_words
+from novel_drama.application.story.chapter_text import (
     _split_supplement_sections,
     _uncovered_beats,
     _word_deviation,
+)
+from novel_drama.application.story.generate_chapter import (
+    generate_chapter as generate_chapter,
 )
 
 #: 与本章节拍无关的短正文：用来模拟「明显不足且要点没写到」
@@ -66,17 +69,17 @@ def test_supplement_appends_and_reports(tmp_path, monkeypatch: pytest.MonkeyPatc
     """补写按缺口续写并合并，结果写清新增字数与补的要点。"""
     store, config, chapter = _project(tmp_path)
     _patch_adapter(monkeypatch, InlineSummaryAdapter(_offline()))
-    service.generate_chapter(store, config, chapter["id"])
+    generate_chapter(store, config, chapter["id"])
 
     # 把正文换成语义明显不足的短文本（连接点前的正常状态保留）
     saved = store.load_chapter(chapter["id"])
     saved["content"] = SHORT_TEXT + "\n"
-    saved["word_count"] = service._count_words(SHORT_TEXT)
+    saved["word_count"] = _count_words(SHORT_TEXT)
     store.save_chapter(saved)
     before_revision = saved["revision"]
     before_words = saved["word_count"]
 
-    result = service.generate_chapter(store, config, chapter["id"], mode="supplement")
+    result = generate_chapter(store, config, chapter["id"], mode="supplement")
 
     assert result["mode"] == "supplement"
     assert result["before_words"] == before_words
@@ -99,11 +102,11 @@ def test_supplement_rejects_when_enough(tmp_path, monkeypatch: pytest.MonkeyPatc
     """正文达到补写阈值时拒绝执行，正文不变。"""
     store, config, chapter = _project(tmp_path)
     _patch_adapter(monkeypatch, InlineSummaryAdapter(_offline()))
-    service.generate_chapter(store, config, chapter["id"])
+    generate_chapter(store, config, chapter["id"])
     before = store.load_chapter(chapter["id"])
 
     with pytest.raises(ValueError) as exc:
-        service.generate_chapter(store, config, chapter["id"], mode="supplement")
+        generate_chapter(store, config, chapter["id"], mode="supplement")
     assert "补写阈值" in str(exc.value)
 
     after = store.load_chapter(chapter["id"])

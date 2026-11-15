@@ -15,7 +15,19 @@ import json
 from dataclasses import replace
 
 from ...adapters.base import AdapterError, Message, TextGenRequest
+from ...application.cast.sync_cast import (
+    apply_chapter_cast,
+    cast_prompt_block,
+    load_pending,
+    normalize_cast,
+)
+from ...application.story.edit_chapter import (
+    INSTRUCTION_LIMIT,
+    STALE_WARNING,
+    _usage_payload,
+)
 from ...config import AppConfig
+from ...domain.production.rules.token_budget import context_budget_tokens
 from ...domain.story.rules.chapter_rules import bump_revision
 from ...models.ids import new_id, now_iso
 from ...store import ProjectStore
@@ -23,25 +35,14 @@ from ...store.settings_store import SettingsStore
 from ...text.context import ContextAssembler
 from ...text.dialogue import normalize_dialogue
 from ...text.titles import strip_index_prefix
-from ...domain.production.rules.token_budget import context_budget_tokens
-from ...application.cast.sync_cast import (
-    apply_chapter_cast,
-    cast_prompt_block,
-    load_pending,
-    normalize_cast,
-)
-from ...application.story.edit_chapter import INSTRUCTION_LIMIT, STALE_WARNING, _usage_payload
-from .service import (
-    DEFAULT_CHAPTER_WORDS,
-    _append_segment,
+from ..support.llm_calls import (
     _characters_payload,
-    _continue_instruction,
-    _count_words,
     _generate_json,
-    build_chapter_context,
     build_writing_adapter,
-    stream_text,
 )
+from .chapter_context import build_chapter_context, stream_text
+from .chapter_limits import DEFAULT_CHAPTER_WORDS
+from .chapter_text import _append_segment, _continue_instruction, _count_words
 
 #: 正文每轮目标字数（默认）
 DEFAULT_SEGMENT_WORDS = 800

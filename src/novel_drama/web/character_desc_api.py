@@ -1,7 +1,7 @@
 """人物描述补全接口：给已有人物补生成音色 / 外貌的中英文描述。
 
 只补缺失字段，不覆盖已有内容；单个角色失败不影响其他角色。
-业务实现仍在 `writing.character_plan.fill_character_descriptions`，
+业务实现仍在 `application.cast.character_plan.fill_character_descriptions`，
 这里只做工程校验、分角色过滤与结构化返回，不复制清洗与校验规则。
 """
 

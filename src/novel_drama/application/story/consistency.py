@@ -17,7 +17,8 @@ from ...config import AppConfig, resolve_temperature
 from ...models.ids import now_iso
 from ...store import ProjectStore
 from ...store.settings_store import SettingsStore
-from .service import build_writing_adapter, chapter_binding
+from ..support.llm_calls import build_writing_adapter
+from .outline_bind import chapter_binding
 
 #: 问题类型（与页面展示的中文标签对应）
 ISSUE_KINDS = ("speech", "knowledge", "relation", "unplanned", "pov", "other")

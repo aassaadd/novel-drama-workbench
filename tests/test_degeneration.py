@@ -25,19 +25,33 @@ from test_chapter_resume import (
     _project,
 )
 
-from novel_drama.adapters.base import AdapterError, Message, TextGenRequest, TextGenResult
+from novel_drama.adapters.base import (
+    AdapterError,
+    Message,
+    TextGenRequest,
+    TextGenResult,
+)
 from novel_drama.application.story import chapter_checkpoint as chapter_checkpoint
-from novel_drama.application.story import service as service
+from novel_drama.application.story.chapter_rounds import (
+    _generate_validated as _generate_validated,
+)
 from novel_drama.application.story.degeneration import (
-    DegenerationGuard,
     SENTENCE_STOP_COUNT,
     SHINGLE_COVERAGE_STOP,
     SUFFIX_REPEATS,
+    DegenerationGuard,
     resolve_window,
     split_sentences,
 )
+from novel_drama.application.story.generate_chapter import (
+    generate_chapter as generate_chapter,
+)
 from novel_drama.application.story.recap import ROUND_SUMMARY_MARK
-from novel_drama.domain.production.rules.watchdog import apply_context_limit, describe, watchdog_tokens
+from novel_drama.domain.production.rules.watchdog import (
+    apply_context_limit,
+    describe,
+    watchdog_tokens,
+)
 
 #: 线上现象的对白循环（整段反复）
 LOOP_TEXT = "「你有。」周也说。「我没有！」九斤说。" * 40
@@ -177,7 +191,7 @@ def test_local_continuation_keeps_writing(tmp_path, monkeypatch: pytest.MonkeyPa
     _patch_adapter(monkeypatch, adapter)
 
     notices: list[str] = []
-    result = service.generate_chapter(store, config, chapter["id"], on_notice=notices.append)
+    result = generate_chapter(store, config, chapter["id"], on_notice=notices.append)
 
     saved = store.load_chapter(chapter["id"])
     assert "我没有！" not in saved["content"]
@@ -196,7 +210,7 @@ def test_rewrite_failure_does_not_write(tmp_path, monkeypatch: pytest.MonkeyPatc
     before = store.load_chapter(chapter["id"])
 
     with pytest.raises(AdapterError) as exc:
-        service.generate_chapter(store, config, chapter["id"])
+        generate_chapter(store, config, chapter["id"])
     assert "整节重写" in exc.value.message or "局部续写" in exc.value.message
     assert "未写入章节" in exc.value.message
 
@@ -240,7 +254,7 @@ def test_watchdog_hit_keeps_content() -> None:
         metadata={"watchdog_target_words": 800, "with_summary": False},
     )
 
-    result, text, _, _ = service._generate_validated(
+    result, text, _, _ = _generate_validated(
         adapter,
         request,
         None,

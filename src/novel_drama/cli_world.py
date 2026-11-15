@@ -10,13 +10,13 @@ import json
 import sys
 from pathlib import Path
 
+from .application.story.settings_generate import generate_worlds
+from .application.story.world import clean_world_entry
 from .cli_common import EXIT_OK, PreconditionError, _emit, _resolve_store
 from .config import AppConfig
 from .media.art import render_world_cover
 from .store.settings_store import SettingsStore
 from .store.world_store import WorldStore
-from .application.story.service import generate_worlds
-from .application.story.world import clean_world_entry
 
 
 def _chapter_refs(store, world_id: str) -> list[dict]:

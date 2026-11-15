@@ -18,18 +18,18 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from novel_drama.adapters.offline_writing import OfflineWritingAdapter
-from novel_drama.config import load_config
-from novel_drama.models import entities
-from novel_drama.store import ProjectStore
-from novel_drama.store.settings_store import SettingsStore
 from novel_drama.application.cast.sync_cast import apply_chapter_cast
 from novel_drama.application.story.continue_chapter import continue_outline
+from novel_drama.application.story.generate_outline import generate_outline
 from novel_drama.application.story.outline_expand import expand_outline
 from novel_drama.application.story.outline_hierarchical import (
     generate_hierarchical_outline,
     load_work,
 )
-from novel_drama.application.story.service import generate_outline
+from novel_drama.config import load_config
+from novel_drama.models import entities
+from novel_drama.store import ProjectStore
+from novel_drama.store.settings_store import SettingsStore
 
 #: 旁白保留 ID
 NARRATOR_ID = entities.NARRATOR_ID

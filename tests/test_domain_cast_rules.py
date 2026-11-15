@@ -21,6 +21,7 @@ from pathlib import Path
 import pytest
 
 from novel_drama import character_merge as legacy_merge
+from novel_drama.application.cast import sync_cast as legacy_cast
 from novel_drama.domain.cast.rules import merge as domain_merge
 from novel_drama.domain.cast.rules.naming import (
     add_aliases,
@@ -29,7 +30,6 @@ from novel_drama.domain.cast.rules.naming import (
     merge_aliases,
 )
 from novel_drama.domain.shared.text import normalize_name
-from novel_drama.application.cast import sync_cast as legacy_cast
 
 #: 改造前的合并侧归一化（冻结副本，不做 NFKC）
 _LEGACY_SPACE_RE = re.compile(r"\s+")

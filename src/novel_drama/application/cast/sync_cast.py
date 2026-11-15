@@ -22,7 +22,7 @@ from ...domain.shared.text import normalize_name
 from ...models import entities
 from ...models.ids import now_iso
 from ...store import ProjectStore
-from ...application.story.service import _clean_speech_style
+from .character_fields import _clean_speech_style
 
 #: 姓名归一化：阶段 3 起由 domain 单点实现（NFKC → 去空白 → casefold）
 _norm = normalize_name

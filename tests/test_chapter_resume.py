@@ -18,14 +18,21 @@ from pathlib import Path
 
 import pytest
 
+from novel_drama.adapters.offline_writing import OfflineWritingAdapter
+from novel_drama.application.story import chapter_checkpoint as chapter_checkpoint
+from novel_drama.application.story.apply_outline import apply_outline as apply_outline
+from novel_drama.application.story.generate_chapter import (
+    generate_chapter as generate_chapter,
+)
+from novel_drama.application.story.generate_outline import (
+    generate_outline as generate_outline,
+)
+from novel_drama.application.story.recap import ROUND_SUMMARY_MARK
 from novel_drama.cancel import GenerationCanceled
 from novel_drama.config import load_config
 from novel_drama.models import entities
 from novel_drama.store import ProjectStore
 from novel_drama.store.settings_store import SettingsStore
-from novel_drama.application.story import chapter_checkpoint as chapter_checkpoint
-from novel_drama.application.story import service as service
-from novel_drama.application.story.recap import ROUND_SUMMARY_MARK
 
 
 def _dedupe_sentences(text: str, prior: str = "") -> str:
@@ -88,7 +95,7 @@ class DedupAdapter:
 
 def _offline():
     """返回去重后的离线适配器（测试替身）。"""
-    return DedupAdapter(service.OfflineWritingAdapter({}))
+    return DedupAdapter(OfflineWritingAdapter({}))
 
 
 class RecordingAdapter:
@@ -169,8 +176,8 @@ def _project(tmp_path: Path):
         encoding="utf-8",
     )
     config = load_config(str(config_path), str(tmp_path / "missing.ui.yaml"))
-    service.generate_outline(store, config, acts=1, chapters_per_act=1, beats_per_chapter=4, chapter_words=800)
-    service.apply_outline(store)
+    generate_outline(store, config, acts=1, chapters_per_act=1, beats_per_chapter=4, chapter_words=800)
+    apply_outline(store)
 
     table = store.load_characters()
     lead = entities.new_character("沈砚", role="protagonist")
@@ -191,8 +198,11 @@ def _project(tmp_path: Path):
 
 
 def _patch_adapter(monkeypatch: pytest.MonkeyPatch, adapter) -> None:
-    """把生成链路里的适配器替换成测试替身。"""
-    monkeypatch.setattr(service, "build_writing_adapter", lambda *_args, **_kwargs: adapter)
+    """把生成链路里的适配器替换成测试替身（adapter 由章节上下文装配）。"""
+    monkeypatch.setattr(
+        "novel_drama.application.story.chapter_context.build_writing_adapter",
+        lambda *_args, **_kwargs: adapter,
+    )
 
 
 def test_resume_after_cancel_matches_single_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -203,7 +213,7 @@ def test_resume_after_cancel_matches_single_run(tmp_path: Path, monkeypatch: pyt
     # 基线：不落盘、不写断点的完整一次跑完
     baseline_adapter = InlineSummaryAdapter(_offline())
     _patch_adapter(monkeypatch, baseline_adapter)
-    baseline = service.generate_chapter(store, config, chapter_id, dry_run=True)
+    baseline = generate_chapter(store, config, chapter_id, dry_run=True)
     assert baseline["rounds"] == 4
     assert len(baseline_adapter.calls) == 4
 
@@ -211,7 +221,7 @@ def test_resume_after_cancel_matches_single_run(tmp_path: Path, monkeypatch: pyt
     cancel_adapter = CancelingAdapter(_offline(), cancel_at=2)
     _patch_adapter(monkeypatch, cancel_adapter)
     with pytest.raises(GenerationCanceled):
-        service.generate_chapter(store, config, chapter_id)
+        generate_chapter(store, config, chapter_id)
     checkpoint = chapter_checkpoint.load(store, chapter_id)
     assert checkpoint is not None, "取消后应留下断点"
     assert checkpoint["rounds_done"] == 1
@@ -223,7 +233,7 @@ def test_resume_after_cancel_matches_single_run(tmp_path: Path, monkeypatch: pyt
     # 第二次：自动续写，只跑第 2–4 轮
     resume_adapter = InlineSummaryAdapter(_offline())
     _patch_adapter(monkeypatch, resume_adapter)
-    result = service.generate_chapter(store, config, chapter_id)
+    result = generate_chapter(store, config, chapter_id)
     assert result["resume"]["resumed"] is True
     assert result["resume"]["reused_rounds"] == 1
     assert result["resume"]["from_round"] == 2
@@ -259,7 +269,7 @@ def test_stale_checkpoint_is_discarded(tmp_path: Path, monkeypatch: pytest.Monke
     )
     adapter = InlineSummaryAdapter(_offline())
     _patch_adapter(monkeypatch, adapter)
-    result = service.generate_chapter(store, config, chapter_id)
+    result = generate_chapter(store, config, chapter_id)
     assert result["resume"]["resumed"] is False
     assert result["rounds"] == 4
     assert len(adapter.calls) == 4, "断点作废后应从头跑满 4 轮"
@@ -271,7 +281,7 @@ def test_inline_summary_skips_separate_request(tmp_path: Path, monkeypatch: pyte
     store, config, chapter = _project(tmp_path)
     adapter = InlineSummaryAdapter(_offline())
     _patch_adapter(monkeypatch, adapter)
-    result = service.generate_chapter(store, config, chapter["id"])
+    result = generate_chapter(store, config, chapter["id"])
     assert result["summary_mode"] == "inline"
     assert result["requests"] == {"body": 4, "summary_fallback": 0, "total": 4}
     assert result["summary"]["mode"] == "inline"
@@ -288,7 +298,7 @@ def test_summary_parse_failure_falls_back(tmp_path: Path, monkeypatch: pytest.Mo
     store, config, chapter = _project(tmp_path)
     adapter = InlineSummaryAdapter(_offline(), broken=True)
     _patch_adapter(monkeypatch, adapter)
-    result = service.generate_chapter(store, config, chapter["id"])
+    result = generate_chapter(store, config, chapter["id"])
     assert result["summary_mode"] == "fallback"
     assert result["requests"]["summary_fallback"] == 1
     assert result["requests"]["total"] == 5
@@ -303,7 +313,7 @@ def test_offline_multi_turn_falls_back_without_summary_block(tmp_path: Path, mon
     store, config, chapter = _project(tmp_path)
     adapter = RecordingAdapter(_offline())
     _patch_adapter(monkeypatch, adapter)
-    result = service.generate_chapter(store, config, chapter["id"])
+    result = generate_chapter(store, config, chapter["id"])
     assert result["summary_mode"] == "fallback"
     assert result["requests"]["body"] == 4
     assert result["requests"]["total"] == 5

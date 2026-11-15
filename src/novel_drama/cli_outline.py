@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import re
 
+from .application.story.outline_validate import check_golden_three
 from .cli_common import EXIT_FAILED, _emit, _resolve_store
 from .config import AppConfig
 from .store.settings_store import SettingsStore
 from .store.world_store import WorldStore
-from .application.story.service import check_golden_three
 
 
 def cmd_outline_check(args, config: AppConfig) -> int:
@@ -103,7 +103,7 @@ def cmd_outline_bind(args, config: AppConfig) -> int:
 
     bible = settings.save(bible)
     # POV 以设定库为主源，同时写通章节副本，避免画本/大纲两处看到不同的值
-    from .application.story.service import sync_chapter_pov
+    from .application.story.outline_bind import sync_chapter_pov
 
     sync_result = sync_chapter_pov(
         store,

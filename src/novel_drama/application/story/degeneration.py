@@ -2,7 +2,7 @@
 
 线上出现的退化形态是模型在流式输出里反复来回同一段对白（「你有。」「我没有！」…），
 直到上下文被填满才停。本模块只在**文本层**做检测并给出「从哪里截断」，不做任何
-长度上限；截断后的续写编排在 `writing.service`。
+长度上限；截断后的续写编排在 `application.story.generate_chapter`。
 
 阈值集中在本模块，出处见《docs/research-degeneration-and-length-control.md》
 第 2.2 / 6.3 节（除注明外均为工程建议值，需按线上样本标定）：

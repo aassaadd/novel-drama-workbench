@@ -19,7 +19,11 @@ from novel_drama.media import build_timeline  # noqa: E402
 from novel_drama.models import entities  # noqa: E402
 from novel_drama.models.ids import new_id  # noqa: E402
 from novel_drama.orchestration import GpuQueue  # noqa: E402
-from novel_drama.orchestration.pipeline import build_tts_jobs, split_chapter_scenes, split_scene_lines  # noqa: E402
+from novel_drama.orchestration.pipeline import (  # noqa: E402
+    build_tts_jobs,
+    split_chapter_scenes,
+    split_scene_lines,
+)
 from novel_drama.store import ProjectStore, validate  # noqa: E402
 
 CHAPTER_TEXT = """沈砚推开门，屋里一片漆黑。

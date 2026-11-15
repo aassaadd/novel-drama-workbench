@@ -17,7 +17,8 @@ from ...config import AppConfig, resolve_temperature
 from ...models.ids import now_iso
 from ...store import ProjectStore
 from ...store.settings_store import SettingsStore
-from ...application.story.service import build_writing_adapter, chapter_binding
+from ..story.outline_bind import chapter_binding
+from ..support.llm_calls import build_writing_adapter
 
 #: 提案中允许写回的角色状态字段
 UPDATE_FIELDS = ("situation", "knowledge_add", "relations")

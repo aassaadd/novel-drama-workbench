@@ -1,7 +1,7 @@
 """页面实时流（SSE）：章节正文生成 / 正文续写。
 
 只**新增**流式接口，原有非流式接口保持不变；业务逻辑仍由
-`writing.service` / `writing.continuation` 承担，这里只把模型增量
+`application.story.generate_chapter` / `application.story.continue_chapter` 承担，这里只把模型增量
 透给浏览器：
 
 - `event: start` 开始；
@@ -34,14 +34,12 @@ from ..application.cast.character_plan import generate_from_plan, load_plan, pla
 from ..application.story.continue_chapter import continue_chapter
 from ..application.story.outline_expand import expand_outline
 from ..application.story.outline_hierarchical import generate_hierarchical_outline
-from ..application.story.service import (
-    DEFAULT_CHAPTER_WORDS,
-    generate_chapter,
-    generate_characters,
-    generate_outline,
-    generate_worlds,
-    suggest_script,
-)
+from ..application.story.chapter_limits import DEFAULT_CHAPTER_WORDS
+from ..application.story.generate_chapter import generate_chapter
+from ..application.cast.generate_characters import generate_characters
+from ..application.story.generate_outline import generate_outline
+from ..application.story.settings_generate import generate_worlds
+from ..application.script.annotate import suggest_script
 
 #: SSE 响应头：禁用缓存与反向代理缓冲，保证逐条到达浏览器
 _SSE_HEADERS = {

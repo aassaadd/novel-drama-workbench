@@ -1,6 +1,6 @@
 """写作侧 CLI：`ndw outline ...` / `ndw chapter generate` / `ndw script suggest ...`。
 
-模型调用由 `writing/service.py` 统一装配：默认离线实现，零依赖可跑通。
+模型调用由 `application/support/llm_calls.py` 与各用例模块 统一装配：默认离线实现，零依赖可跑通。
 """
 
 from __future__ import annotations
@@ -9,6 +9,13 @@ import json
 import sys
 from pathlib import Path
 
+from .application.script.annotate import suggest_script
+from .application.story.apply_outline import apply_outline
+from .application.story.edit_chapter import edit_chapter, save_chapter_content
+from .application.story.generate_chapter import generate_chapter
+from .application.story.generate_outline import generate_outline
+from .application.story.outline_bind import validate_chapter_binding
+from .application.story.summarize_chapter import summarize_chapter
 from .cli_common import (
     EXIT_OK,
     PreconditionError,
@@ -19,14 +26,6 @@ from .cli_common import (
 from .config import AppConfig
 from .store import validate
 from .store.settings_store import SettingsStore
-from .application.story.service import apply_outline
-from .application.story.edit_chapter import edit_chapter
-from .application.story.service import generate_chapter
-from .application.story.service import generate_outline
-from .application.story.edit_chapter import save_chapter_content
-from .application.story.service import suggest_script
-from .application.story.summarize_chapter import summarize_chapter
-from .application.story.service import validate_chapter_binding
 
 
 def _fmt_outline(acts: list[dict]) -> str:

@@ -25,11 +25,14 @@ from test_chapter_resume import (
 
 from novel_drama.adapters.base import AdapterError
 from novel_drama.application.story import chapter_checkpoint as chapter_checkpoint
-from novel_drama.application.story import service as service
-from novel_drama.application.story.service import (
+from novel_drama.application.story.chapter_limits import (
     OVERSHOOT_ACTION_RATIO,
     OVERSHOOT_NOTICE_RATIO,
-    _word_deviation,
+)
+from novel_drama.application.story.chapter_text import _count_words as _count_words
+from novel_drama.application.story.chapter_text import _word_deviation
+from novel_drama.application.story.generate_chapter import (
+    generate_chapter as generate_chapter,
 )
 
 
@@ -68,7 +71,7 @@ def _long_chapter(store, chapter_id: str, times: int = 3) -> dict:
     content = (chapter.get("content") or "").strip()
     assert content
     chapter["content"] = "\n\n".join([content] * times)
-    chapter["word_count"] = service._count_words(chapter["content"])
+    chapter["word_count"] = _count_words(chapter["content"])
     store.save_chapter(chapter)
     return store.load_chapter(chapter_id)
 
@@ -78,7 +81,7 @@ def test_compress_keeps_every_beat(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     store, config, chapter = _project(tmp_path)
     adapter = InlineSummaryAdapter(_offline())
     _patch_adapter(monkeypatch, adapter)
-    service.generate_chapter(store, config, chapter["id"])
+    generate_chapter(store, config, chapter["id"])
     long_chapter = _long_chapter(store, chapter["id"])
     before_words = long_chapter["word_count"]
     before_revision = long_chapter["revision"]
@@ -94,7 +97,7 @@ def test_compress_keeps_every_beat(tmp_path: Path, monkeypatch: pytest.MonkeyPat
         },
     )
 
-    result = service.generate_chapter(store, config, chapter["id"], mode="compress")
+    result = generate_chapter(store, config, chapter["id"], mode="compress")
     assert result["mode"] == "compress"
     assert result["before_words"] == before_words
     assert result["word_count"] < before_words
@@ -127,13 +130,13 @@ def test_compress_rejects_missing_beats(tmp_path: Path, monkeypatch: pytest.Monk
     store, config, chapter = _project(tmp_path)
     adapter = InlineSummaryAdapter(_offline())
     _patch_adapter(monkeypatch, adapter)
-    service.generate_chapter(store, config, chapter["id"])
+    generate_chapter(store, config, chapter["id"])
     long_chapter = _long_chapter(store, chapter["id"])
     before = store.load_chapter(chapter["id"])
 
     _patch_adapter(monkeypatch, MissingBeatAdapter(_offline()))
     with pytest.raises(AdapterError) as exc:
-        service.generate_chapter(store, config, chapter["id"], mode="compress")
+        generate_chapter(store, config, chapter["id"], mode="compress")
     assert "不能靠删节拍" in exc.value.message
 
     after = store.load_chapter(chapter["id"])
@@ -147,16 +150,16 @@ def test_rewrite_reports_before_and_after(tmp_path: Path, monkeypatch: pytest.Mo
     store, config, chapter = _project(tmp_path)
     adapter = InlineSummaryAdapter(_offline())
     _patch_adapter(monkeypatch, adapter)
-    service.generate_chapter(store, config, chapter["id"])
+    generate_chapter(store, config, chapter["id"])
     long_chapter = _long_chapter(store, chapter["id"], times=2)
     before_words = long_chapter["word_count"]
     before_revision = long_chapter["revision"]
 
-    result = service.generate_chapter(store, config, chapter["id"], mode="rewrite")
+    result = generate_chapter(store, config, chapter["id"], mode="rewrite")
     assert result["mode"] == "rewrite"
     assert "已按「重写」处理" in result["overshoot_note"]
     assert str(before_words) in result["overshoot_note"]
     assert str(result["word_count"]) in result["overshoot_note"]
     saved = store.load_chapter(chapter["id"])
     assert saved["revision"] == before_revision + 1
-    assert service._count_words(saved["content"]) == result["word_count"]
+    assert _count_words(saved["content"]) == result["word_count"]

@@ -67,8 +67,8 @@ def _cmd_backfill(args, store, config: AppConfig) -> int:
     changed = 0
 
     if want_profiles:
+        from .application.support.llm_calls import build_writing_adapter
         from .tts.voice_design import build_profile
-        from .application.story.service import build_writing_adapter
 
         adapter = build_writing_adapter(config, SettingsStore(store.root).load_or_none() or {})
         for character in table.get("characters") or []:

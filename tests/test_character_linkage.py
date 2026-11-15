@@ -15,26 +15,26 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from novel_drama.adapters.base import AdapterError
+from novel_drama.application.cast.character_updates import (
+    apply_character_updates,
+    load_character_updates,
+    propose_character_updates,
+)
+from novel_drama.application.story.apply_outline import apply_outline
+from novel_drama.application.story.consistency import check_chapter_consistency
+from novel_drama.application.story.generate_chapter import generate_chapter
+from novel_drama.application.story.generate_outline import generate_outline
+from novel_drama.application.story.outline_bind import (
+    bind_beat_characters,
+    chapter_binding,
+    sync_chapter_pov,
+)
 from novel_drama.cli_character import _clean_speech_style
 from novel_drama.config import load_config
 from novel_drama.models import entities
 from novel_drama.store import ProjectStore
 from novel_drama.store.settings_store import SettingsStore
 from novel_drama.text.context import ContextAssembler
-from novel_drama.application.cast.character_updates import (
-    apply_character_updates,
-    load_character_updates,
-    propose_character_updates,
-)
-from novel_drama.application.story.consistency import check_chapter_consistency
-from novel_drama.application.story.service import (
-    apply_outline,
-    bind_beat_characters,
-    chapter_binding,
-    generate_chapter,
-    generate_outline,
-    sync_chapter_pov,
-)
 
 
 class CharacterLinkageTest(unittest.TestCase):

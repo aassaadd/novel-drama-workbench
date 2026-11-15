@@ -2595,7 +2595,7 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         """保存手工编辑后的章节正文。
 
         正文可能有上万字：拼进 argv 会撞命令行长度上限，还会出现在进程列表里，
-        因此这里不转发 CLI，直接调用 `writing.editing.save_chapter_content`
+        因此这里不转发 CLI，直接调用 `application.story.edit_chapter.save_chapter_content`
         （与上方直接读 store 的只读接口是同一取舍）。
 
         参数:
@@ -4961,7 +4961,7 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
             HTTPException 400: 缺少参数或节拍不存在。
         """
         from ..models import entities as model_entities
-        from ..application.story.service import bind_beat_characters, chapter_binding
+        from ..application.story.outline_bind import bind_beat_characters, chapter_binding
 
         store = _store(body.get("path"))
         chapter_id = str(body.get("chapter") or "")
@@ -5887,7 +5887,7 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         异常:
             HTTPException 400: 角色不存在或视角写法非法。
         """
-        from ..application.story.service import chapter_binding, sync_chapter_pov
+        from ..application.story.outline_bind import chapter_binding, sync_chapter_pov
 
         store = _store(body.get("path"))
         chapter_id = str(body.get("chapter") or "")
@@ -5921,7 +5921,7 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         返回:
             `chapter_binding` 的完整结果；页面据此显示绑定条与生成阻断提示。
         """
-        from ..application.story.service import chapter_binding
+        from ..application.story.outline_bind import chapter_binding
 
         return chapter_binding(_store(path), chapter)
 
@@ -5938,7 +5938,7 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         异常:
             HTTPException 400: 缺少参数或角色 ID 非法。
         """
-        from ..application.story.service import bind_beat_characters
+        from ..application.story.outline_bind import bind_beat_characters
 
         path = body.get("path")
         store = _store(path)

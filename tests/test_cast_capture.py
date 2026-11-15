@@ -12,11 +12,6 @@ from pathlib import Path
 
 import pytest
 
-from novel_drama.config import load_config
-from novel_drama.models import entities
-from novel_drama.store import ProjectStore
-from novel_drama.store.settings_store import SettingsStore
-from novel_drama.application.story import service as service
 from novel_drama.application.cast.capture_cast import (
     capture_chapter_cast,
     cast_capture_plan,
@@ -27,7 +22,15 @@ from novel_drama.application.cast.capture_cast import (
     start_capture_job,
 )
 from novel_drama.application.cast.sync_cast import discard_pending, promote_pending
+from novel_drama.application.story.apply_outline import apply_outline as apply_outline
+from novel_drama.application.story.generate_outline import (
+    generate_outline as generate_outline,
+)
 from novel_drama.application.story.summarize_chapter import apply_summary
+from novel_drama.config import load_config
+from novel_drama.models import entities
+from novel_drama.store import ProjectStore
+from novel_drama.store.settings_store import SettingsStore
 
 
 class CastAdapter:
@@ -100,8 +103,8 @@ def _project(tmp_path: Path):
     store = ProjectStore(tmp_path / "proj")
     store.create("角色捕获测试", author="ndw")
     config = _offline_config(tmp_path)
-    service.generate_outline(store, config, acts=1, chapters_per_act=2, beats_per_chapter=3, chapter_words=600)
-    service.apply_outline(store)
+    generate_outline(store, config, acts=1, chapters_per_act=2, beats_per_chapter=3, chapter_words=600)
+    apply_outline(store)
 
     table = store.load_characters()
     narrator = [item for item in table["characters"] if item.get("id") == entities.NARRATOR_ID]
