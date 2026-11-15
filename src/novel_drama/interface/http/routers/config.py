@@ -12,6 +12,7 @@ from pathlib import Path
 from fastapi import HTTPException, Query
 
 from novel_drama import __version__
+from novel_drama.application.production.lines_source import chapter_view
 from novel_drama.application.story.queries import (
     settings_view,
 )
@@ -701,7 +702,7 @@ def register_config_routes(app, project_root: str | None = None, config_path: st
                 total_lines = 0
                 for chapter in chapters:
                     try:
-                        data = store.load_chapter(chapter["id"])
+                        data = chapter_view(store, store.load_chapter(chapter["id"]))
                     except Exception:  # noqa: BLE001 - 单章损坏不影响其它统计
                         continue
                     for scene in data.get("scenes") or []:
@@ -936,7 +937,7 @@ def register_config_routes(app, project_root: str | None = None, config_path: st
                 names = {}
             for meta in store.list_chapters():
                 try:
-                    chapter = store.load_chapter(meta.get("id"))
+                    chapter = chapter_view(store, store.load_chapter(meta.get("id")))
                 except Exception:  # noqa: BLE001 - 损坏章节跳过
                     continue
                 chapter_id = str(chapter.get("id") or meta.get("id"))

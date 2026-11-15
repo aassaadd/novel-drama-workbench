@@ -16,6 +16,7 @@ from novel_drama.application.cast.character_crud import (
 )
 from novel_drama.application.cast.generate_characters import preview_characters
 from novel_drama.application.cast.queries import character_list
+from novel_drama.application.production.lines_source import chapter_view
 from novel_drama.infrastructure.config import load_config
 from novel_drama.interface.http import use_cases
 from novel_drama.interface.http.deps import store_for
@@ -303,7 +304,7 @@ def register_cast_characters_routes(app, project_root: str | None = None, config
             chapter_id = chapter.get("id")
             if not chapter_id:
                 continue
-            data = store.load_chapter(chapter_id)
+            data = chapter_view(store, store.load_chapter(chapter_id))
             chapter_lines: dict[str, int] = {}
             chapter_scenes: dict[str, int] = {}
             for scene in data.get("scenes") or []:

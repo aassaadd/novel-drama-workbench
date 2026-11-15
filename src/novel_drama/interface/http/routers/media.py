@@ -218,7 +218,7 @@ def register_media_routes(app, project_root: str | None = None, config_path: str
         图像/视频额外补只读的模板与画幅字段；单项解析失败只留空值，不让接口 500。
         """
         store = _store(path)
-        chapter_data = store.load_chapter(chapter)
+        chapter_data = chapter_view(store, store.load_chapter(chapter))
         config = load_config(config_path)
         project_settings = store.settings()
         try:

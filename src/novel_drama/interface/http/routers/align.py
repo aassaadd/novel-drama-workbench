@@ -15,6 +15,7 @@ from pathlib import Path
 
 from fastapi import HTTPException, Request
 
+from novel_drama.application.production.lines_source import chapter_view
 from novel_drama.composition import ProjectStore
 from novel_drama.models.ids import now_iso
 
@@ -117,7 +118,7 @@ def _chapter_range(store: ProjectStore, start: str, end: str) -> list[dict]:
     head, tail = ids.index(start), ids.index(end)
     if head > tail:
         raise HTTPException(status_code=400, detail="起始章节不能晚于结束章节")
-    return [store.load_chapter(chapter_id) for chapter_id in ids[head : tail + 1]]
+    return [chapter_view(store, store.load_chapter(chapter_id)) for chapter_id in ids[head : tail + 1]]
 
 
 def _ordered_lines(chapters: list[dict]) -> list[tuple[str, dict]]:

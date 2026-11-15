@@ -20,7 +20,7 @@ from pathlib import Path
 
 from fastapi import HTTPException, Request
 
-from novel_drama.application.production.lines_source import chapter_views
+from novel_drama.application.production.lines_source import chapter_view, chapter_views
 from novel_drama.application.production.timeline import build_chapter_timeline
 from novel_drama.application.production.tts_plan import plan_batch_preview
 from novel_drama.composition import (
@@ -102,7 +102,7 @@ def _find_line(store: ProjectStore, chapter_id: str, line_id: str) -> dict:
         HTTPException 404: 章节或台词行不存在。
     """
     try:
-        chapter = store.load_chapter(chapter_id)
+        chapter = chapter_view(store, store.load_chapter(chapter_id))
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=f"章节不存在: {chapter_id}") from exc
     for scene in chapter.get("scenes") or []:
@@ -371,7 +371,7 @@ def _sample_line(store: ProjectStore, character_id: str, prefer_chapter: str | N
         chapters = sorted(chapters, key=lambda item: 0 if item.get("id") == prefer_chapter else 1)
     for item in chapters:
         try:
-            chapter = store.load_chapter(item["id"])
+            chapter = chapter_view(store, store.load_chapter(item["id"]))
         except FileNotFoundError:
             continue
         for scene in chapter.get("scenes") or []:

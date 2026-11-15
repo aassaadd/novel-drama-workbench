@@ -10,6 +10,7 @@ from pathlib import Path
 from fastapi import HTTPException, Query
 
 from novel_drama.application.production.line_edit import chapter_consistency
+from novel_drama.application.production.lines_source import chapter_view
 from novel_drama.application.story.chapter_import import (
     import_chapters as import_chapter_text,
 )
@@ -265,8 +266,9 @@ def register_story_chapter_routes(app, project_root: str | None = None, config_p
     @app.get("/api/project/chapter/{chapter_id}")
     def chapter(chapter_id: str, path: str | None = Query(default=None)) -> dict:
         """章节详情（含场景与台词）。"""
+        store = _store(path)
         try:
-            return _store(path).load_chapter(chapter_id)
+            return chapter_view(store, store.load_chapter(chapter_id))
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -311,7 +313,8 @@ def register_story_chapter_routes(app, project_root: str | None = None, config_p
     @app.get("/api/ui/chapter/consistency")
     def ui_chapter_consistency(path: str = Query(...), chapter: str = Query(...)) -> dict:
         """正文与切分对位检查（只读）：任务页、配音页共用同一出口。"""
-        return chapter_consistency(_store(path).load_chapter(chapter))
+        store = _store(path)
+        return chapter_consistency(chapter_view(store, store.load_chapter(chapter)))
 
     @app.post("/api/ui/chapter/generate")
     def ui_chapter_generate(body: dict) -> dict:

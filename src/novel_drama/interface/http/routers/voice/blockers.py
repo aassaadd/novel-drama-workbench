@@ -12,6 +12,7 @@ from pathlib import Path
 
 from fastapi import HTTPException
 
+from novel_drama.application.production.lines_source import chapter_view
 from novel_drama.composition import ProjectStore
 
 #: 单行重录串行锁：同一时间只允许一个重录，避免两个进程同时改同一章
@@ -63,7 +64,7 @@ def _find_line(store: ProjectStore, chapter_id: str, line_id: str) -> dict:
         HTTPException 404: 章节或台词行不存在。
     """
     try:
-        chapter = store.load_chapter(chapter_id)
+        chapter = chapter_view(store, store.load_chapter(chapter_id))
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=f"章节不存在: {chapter_id}") from exc
     for scene in chapter.get("scenes") or []:
@@ -358,7 +359,7 @@ def _sample_line(store: ProjectStore, character_id: str, prefer_chapter: str | N
         chapters = sorted(chapters, key=lambda item: 0 if item.get("id") == prefer_chapter else 1)
     for item in chapters:
         try:
-            chapter = store.load_chapter(item["id"])
+            chapter = chapter_view(store, store.load_chapter(item["id"]))
         except FileNotFoundError:
             continue
         for scene in chapter.get("scenes") or []:
@@ -513,7 +514,7 @@ def _split_blockers(store: ProjectStore, scope: str, chapter_id: str | None, lin
     """
     if scope == "chapter" and chapter_id:
         try:
-            chapter = store.load_chapter(chapter_id)
+            chapter = chapter_view(store, store.load_chapter(chapter_id))
         except FileNotFoundError:
             return []
         lines = sum(

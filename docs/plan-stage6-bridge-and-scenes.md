@@ -260,7 +260,7 @@
 | A | `line_query`（台词表/单行 diff）、`tts_plan`（批量预演/单章规划）、`production/timeline`、`media_ops.export_chapter`、`story/chapters` 的过期汇总与 facets | 已完成 |
 | B | `adapters/media/*`（timeline_builder / export / jianying / runner）改为由 application 传场景 | 已完成（runner.plan_media 改入参；其余三个本就只接收 chapter） |
 | C | `adapters/persistence/voice_cast` 的读点（写点留步骤 3） | 已完成（`chapter_override_rows` / `check_cast` / `unresolved_speaker_lines` 改收章节视图；覆盖写函数改为返回章节，由调用方派生视图） |
-| D | 其余 interface 读模型（media / sfx / voice tools / blockers / align / config） | 待做 |
+| D | 其余 interface 读模型（media / sfx / voice tools / blockers / align / config） | 已完成（`media`、`voice/tools` 的 `_find_line`/`_sample_line`、`voice/blockers` 三处、`align._chapter_range`、`config` 工程统计与全局搜索、`story/chapter` 章节详情与对位检查、`cast/characters` 统计、`script` 标注回显改 `chapter_view`；`sfx`、重录/上传/删除录音等写路径不动） |
 | E | `application/story`、`application/cast`、`support/llm_plan` 等场景统计读点 | 待做 |
 
 批次 A 验证（同一份 tt1 副本、`chp_01M7CY5ZD243JZHJXJJAMM6Y0E`，25 章中唯一有场景的一章）：

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from fastapi import Query
 
+from novel_drama.application.production.lines_source import chapter_view
 from novel_drama.application.script.suggest_apply import suggest_and_apply
 from novel_drama.infrastructure.config import load_config
 from novel_drama.interface.http import use_cases
@@ -44,7 +45,7 @@ def register_script_routes(app, project_root: str | None = None, config_path: st
                 warning_items = []
                 script = parse_markup(
                     markup,
-                    store.load_chapter(chapter),
+                    chapter_view(store, store.load_chapter(chapter)),
                     store.load_characters()["characters"],
                     store.settings(),
                     diagnostics=warning_items,
