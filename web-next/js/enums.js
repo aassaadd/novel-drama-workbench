@@ -190,6 +190,16 @@ export const ENUMS = {
       ['bgm', 'BGM'],
     ],
   },
+  track_kind: {
+    label: '轨道类型',
+    options: [
+      ['voice', '配音'],
+      ['sfx', '音效'],
+      ['music', '音乐'],
+      ['video', '视频'],
+      ['image', '画面'],
+    ],
+  },
   asset_status: {
     // 音效/配图/视频三类素材共用：视频段落会带 generating / candidates_ready / selected
     label: '素材状态',
@@ -532,6 +542,27 @@ function warnUnknown(key, value, where) {
   console.warn(`[枚举] ${where}遇到未识别的取值：${key} = ${JSON.stringify(value)}；已按中文兜底展示`);
 }
 
+/** 已报过错的枚举键，避免每帧重复刷控制台 */
+const unknownKeys = new Set();
+
+/**
+ * 取枚举定义；漏登记的键属于开发期问题，直接报 error（每个键只报一次），
+ * 让它在开发时就暴露，而不是等某个页面渲染出「未识别」。
+ * @param {string} key 枚举键
+ * @param {string} where 调用位置（labelOf / selectHTML / optionsHTML）
+ * @returns {object|null} 枚举定义；未登记返回 null
+ */
+function specOf(key, where) {
+  const spec = ENUMS[key];
+  if (spec) return spec;
+  const token = `${key}@${where}`;
+  if (!unknownKeys.has(token)) {
+    unknownKeys.add(token);
+    console.error(`[枚举] 未登记的枚举键：${key}（${where}）；请在 web-next/js/enums.js 的 ENUMS 中补齐`);
+  }
+  return null;
+}
+
 /**
  * 把取值解析成枚举项：先按落盘值匹配，再按中文标签匹配。
  * 旧数据里存过中文标签（如「快」「偏高」）时按标签认回枚举值，展示正常且下拉自动选中该项，
@@ -575,13 +606,10 @@ export function isEnumValue(key, value) {
  * @returns {string} 中文标签
  */
 export function labelOf(key, value, fallback = '未设置') {
-  const spec = ENUMS[key];
+  const spec = specOf(key, 'labelOf');
   const text = String(value ?? '').trim();
-  if (!spec) {
-    // 枚举键写错属于开发期问题，明确告警，避免静默显示裸值
-    console.warn(`[枚举] 未登记的枚举键：${key}`);
-    return fallback;
-  }
+  // 枚举键写错属于开发期问题，specOf 会报 error，这里按占位兜底
+  if (!spec) return fallback;
   if (!text) return fallback;
   const hit = resolveEnum(key, text);
   if (hit) return hit.label;
@@ -617,7 +645,8 @@ export function suggestEnum(key, value) {
  * @returns {string} `<option>` 拼接结果
  */
 export function optionsHTML(key, current, { emptyLabel = '' } = {}) {
-  const spec = ENUMS[key] || { options: [] };
+  const spec = specOf(key, 'optionsHTML');
+  if (!spec) return '';
   const now = String(current ?? '').trim();
   const hit = resolveEnum(key, now);
   // 旧数据存的是中文标签时，直接选中对应的规范选项，保存即写成落盘值
@@ -659,7 +688,8 @@ export function bindEnumWarnings() {
  * @returns {string} `<select>` HTML（含修复提示）
  */
 export function selectHTML(key, { id = '', current = '', title = '', emptyLabel = '', className = 'select', attrs = '' } = {}) {
-  const spec = ENUMS[key] || { label: key };
+  const spec = specOf(key, 'selectHTML');
+  if (!spec) return '';
   const now = String(current ?? '').trim();
   const invalid = Boolean(now) && !resolveEnum(key, now);
   const select = `<select class="${className}"${id ? ` id="${id}"` : ''} data-enum="${key}"
