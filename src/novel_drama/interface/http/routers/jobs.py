@@ -27,6 +27,7 @@ from novel_drama.interface.http.deps import run_cli, store_for
 from novel_drama.interface.http.routers.common import (
     _ACTIVE_TTS_PROJECTS,
     _is_tts_process,
+    _require,
     _respond,
     _stop_tts_project,
 )
@@ -338,6 +339,12 @@ def register_jobs_routes(app, project_root: str | None = None, config_path: str 
         消费放在独立进程里（`tts run --wait`），避免阻塞请求线程，
         也避免在请求线程里重定向 stdout 与其它请求相互干扰。
         """
+        _require(
+            body,
+            "本接口需要 path（工程目录）与 chapter（章节 ID）",
+            path="工程目录",
+            chapter="章节 ID",
+        )
         path = body["path"]
         chapter = body["chapter"]
         # regenerate：已就绪行也重新合成（绕过同键去重与产物缓存）；continue：只补未生成/过期/失败
@@ -411,6 +418,7 @@ def register_jobs_routes(app, project_root: str | None = None, config_path: str 
         返回:
             {stopped 是否确实停下, killed 是否终止了进程, canceled 被取消的任务数}。
         """
+        _require(body, "本接口需要 path（工程目录）", path="工程目录")
         store = ProjectStore(body["path"])
         result = _stop_tts_project(body["path"])
         _ACTIVE_TTS_PROJECTS.discard(str(store.root))

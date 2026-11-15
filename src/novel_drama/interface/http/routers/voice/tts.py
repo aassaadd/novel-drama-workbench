@@ -6,6 +6,7 @@ from fastapi import Query
 
 from novel_drama.composition import QueueStore
 from novel_drama.interface.http.deps import store_for
+from novel_drama.interface.http.routers.common import _require
 from novel_drama.models.ids import now_iso
 
 
@@ -50,6 +51,7 @@ def register_voice_tts_routes(app, project_root: str | None = None, config_path:
         返回:
             `{paused}`。
         """
+        _require(body, "本接口需要 path（工程目录）", path="工程目录")
         store = _store(body["path"])
         paused = bool(body.get("paused"))
         marker = store.root / ".ndw" / "tts.paused"

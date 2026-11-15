@@ -26,6 +26,7 @@ from novel_drama.interface.cli.commands.line import chapter_consistency
 from novel_drama.interface.http import use_cases
 from novel_drama.interface.http.deps import run_cli, store_for
 from novel_drama.interface.http.routers.common import (
+    _require,
     _respond,
 )
 
@@ -289,6 +290,7 @@ def register_story_chapter_routes(app, project_root: str | None = None, config_p
         title = str(body.get("title") or "").strip()
         if not title:
             raise HTTPException(status_code=400, detail={"code": 2, "message": "章节标题不能为空"})
+        _require(body, "本接口需要 path（工程目录）", path="工程目录")
         store = _store(body["path"])
         index = body.get("index")
         return store.create_chapter(
@@ -314,6 +316,12 @@ def register_story_chapter_routes(app, project_root: str | None = None, config_p
         返回:
             CLI 的 JSON 负载（含 words / rounds / beats_total / beats_done / stop_reason）。
         """
+        _require(
+            body,
+            "本接口需要 path（工程目录）与 chapter（章节 ID）",
+            path="工程目录",
+            chapter="章节 ID",
+        )
         argv = ["--project", body["path"], "--json", "chapter", "generate", "--chapter", body["chapter"]]
         if body.get("regen"):
             argv.append("--regen")

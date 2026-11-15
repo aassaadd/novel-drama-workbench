@@ -12,6 +12,7 @@ logger = logging.getLogger(__name__)
 
 from novel_drama.interface.http.deps import run_cli, store_for
 from novel_drama.interface.http.routers.common import (
+    _require,
     _respond,
 )
 
@@ -124,6 +125,13 @@ def register_voice_line_routes(app, project_root: str | None = None, config_path
     @app.post("/api/ui/line/set")
     def ui_line_set(body: dict) -> dict:
         """改行参数（`line set`）；只传实际改动的字段。"""
+        _require(
+            body,
+            "本接口需要 path（工程目录）、chapter（章节 ID）与 line（行 ID）",
+            path="工程目录",
+            chapter="章节 ID",
+            line="行 ID",
+        )
         argv = ["--project", body["path"], "line", "set", "--chapter", body["chapter"], "--line", body["line"]]
         mapping = {
             "speaker": "--speaker",
@@ -154,6 +162,12 @@ def register_voice_line_routes(app, project_root: str | None = None, config_path
         异常:
             HTTPException 400: 没有选中行。
         """
+        _require(
+            body,
+            "本接口需要 path（工程目录）、chapter（章节 ID）与 lines（行 ID 列表）",
+            path="工程目录",
+            chapter="章节 ID",
+        )
         lines = [str(item).strip() for item in (body.get("lines") or []) if str(item).strip()]
         if not lines:
             raise HTTPException(status_code=400, detail={"code": 2, "message": "没有选中任何行"})
@@ -197,6 +211,12 @@ def register_voice_line_routes(app, project_root: str | None = None, config_path
         异常:
             HTTPException 400: 少于两行、跨场景、不相邻或正文对不上。
         """
+        _require(
+            body,
+            "本接口需要 path（工程目录）、chapter（章节 ID）与 lines（行 ID 列表）",
+            path="工程目录",
+            chapter="章节 ID",
+        )
         lines = [str(item).strip() for item in (body.get("lines") or []) if str(item).strip()]
         if len(lines) < 2:
             raise HTTPException(status_code=400, detail={"code": 2, "message": "至少选择两行才能合并"})
@@ -225,6 +245,12 @@ def register_voice_line_routes(app, project_root: str | None = None, config_path
         返回:
             `{mode, dry_run, groups, counts, changed?}`。
         """
+        _require(
+            body,
+            "本接口需要 path（工程目录）与 chapter（章节 ID）",
+            path="工程目录",
+            chapter="章节 ID",
+        )
         argv = ["--project", body["path"], "--json", "line", "merge-narration", "--chapter", body["chapter"]]
         scenes = body.get("scenes") or ([body["scene"]] if body.get("scene") else [])
         for scene in scenes:
@@ -241,6 +267,14 @@ def register_voice_line_routes(app, project_root: str | None = None, config_path
 
         正文对不上时 CLI 返回退出码 2，界面会收到「正文已变更，请先重新切分」。
         """
+        _require(
+            body,
+            "本接口需要 path（工程目录）、chapter（章节 ID）、line（行 ID）与 text（新文本）",
+            path="工程目录",
+            chapter="章节 ID",
+            line="行 ID",
+            text="新文本",
+        )
         return _respond(
             _cli(
                 "--project",
@@ -260,6 +294,13 @@ def register_voice_line_routes(app, project_root: str | None = None, config_path
     @app.post("/api/ui/line/revert")
     def ui_line_revert(body: dict) -> dict:
         """回滚到上次生成时的参数（`line revert`）。"""
+        _require(
+            body,
+            "本接口需要 path（工程目录）、chapter（章节 ID）与 line（行 ID）",
+            path="工程目录",
+            chapter="章节 ID",
+            line="行 ID",
+        )
         return _respond(
             _cli("--project", body["path"], "--json", "line", "revert", "--chapter", body["chapter"], "--line", body["line"])
         )
@@ -267,6 +308,12 @@ def register_voice_line_routes(app, project_root: str | None = None, config_path
     @app.post("/api/ui/line/split")
     def ui_line_split(body: dict) -> dict:
         """切分台词（`line split`）；force 覆盖，keep_manual 保留人工修改的台词行。"""
+        _require(
+            body,
+            "本接口需要 path（工程目录）与 chapter（章节 ID）",
+            path="工程目录",
+            chapter="章节 ID",
+        )
         argv = ["--project", body["path"], "--json", "line", "split", "--chapter", body["chapter"]]
         if body.get("force"):
             argv.append("--force")
@@ -284,6 +331,13 @@ def register_voice_line_routes(app, project_root: str | None = None, config_path
         返回:
             `{changed, line_id, new_line_id, first_text, second_text}`。
         """
+        _require(
+            body,
+            "本接口需要 path（工程目录）、chapter（章节 ID）与 line（行 ID）",
+            path="工程目录",
+            chapter="章节 ID",
+            line="行 ID",
+        )
         return _respond(
             _cli(
                 "--project",
@@ -303,6 +357,12 @@ def register_voice_line_routes(app, project_root: str | None = None, config_path
     @app.post("/api/ui/line/split/impact")
     def ui_line_split_impact(body: dict) -> dict:
         """重切台词的影响清单（`line split --impact`，只读）。"""
+        _require(
+            body,
+            "本接口需要 path（工程目录）与 chapter（章节 ID）",
+            path="工程目录",
+            chapter="章节 ID",
+        )
         argv = ["--project", body["path"], "--json", "line", "split", "--chapter", body["chapter"], "--impact"]
         if body.get("keep_manual"):
             argv.append("--keep-manual")

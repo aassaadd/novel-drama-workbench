@@ -6,6 +6,7 @@ from fastapi import Query
 
 from novel_drama.interface.http.deps import run_cli, store_for
 from novel_drama.interface.http.routers.common import (
+    _require,
     _respond,
 )
 
@@ -75,6 +76,12 @@ def register_script_routes(app, project_root: str | None = None, config_path: st
     @app.post("/api/ui/script/suggest")
     def ui_script_suggest(body: dict) -> dict:
         """生成标注建议（`script suggest`），可同时应用。"""
+        _require(
+            body,
+            "本接口需要 path（工程目录）与 chapter（章节 ID）",
+            path="工程目录",
+            chapter="章节 ID",
+        )
         argv = ["--project", body["path"], "--json", "script", "suggest", "--chapter", body["chapter"]]
         if body.get("apply"):
             argv.append("--apply")

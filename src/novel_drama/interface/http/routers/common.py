@@ -21,6 +21,35 @@ logger = logging.getLogger(__name__)
 
 _ACTIVE_TTS_PROJECTS: set[str] = set()
 
+
+def _require(body: dict, usage: str, **labels: str) -> None:
+    """校验请求体必填字段，缺失时按「参数错误」返回 400。
+
+    参数:
+        body: 请求体。
+        usage: 本接口需要哪些参数的说明，直接拼进错误消息。
+        **labels: `字段名=中文名`，如 `path="工程目录"`。
+
+    返回:
+        无。
+
+    异常:
+        HTTPException: 任一字段缺失或为空字符串时返回 400（中文说明缺哪个、接口要什么）。
+    """
+    missing = [
+        f"{name}（{label}）"
+        for name, label in labels.items()
+        if body.get(name) is None or str(body.get(name)).strip() == ""
+    ]
+    if missing:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": 2,
+                "message": f"缺少必填参数：{'、'.join(missing)}；{usage}",
+            },
+        )
+
 def _business_error(result):
     """把新接口的 CLI 失败结果转成中文说明 + 分级状态码。
 

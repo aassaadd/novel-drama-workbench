@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 
 from novel_drama.interface.http.deps import run_cli, store_for
 from novel_drama.interface.http.routers.common import (
+    _require,
     _respond,
 )
 
@@ -129,6 +130,12 @@ def register_media_routes(app, project_root: str | None = None, config_path: str
         异常:
             HTTPException 400: 时间轴结构不合法。
         """
+        _require(
+            body,
+            "本接口需要 path（工程目录）与 chapter（章节 ID）",
+            path="工程目录",
+            chapter="章节 ID",
+        )
         store = _store(body["path"])
         chapter_id = body["chapter"]
         data = body.get("timeline") or {}
@@ -178,6 +185,12 @@ def register_media_routes(app, project_root: str | None = None, config_path: str
         返回:
             时间轴 JSON（与 `GET /api/project/timeline/{chapter}` 相同结构）。
         """
+        _require(
+            body,
+            "本接口需要 path（工程目录）与 chapter（章节 ID）",
+            path="工程目录",
+            chapter="章节 ID",
+        )
         store = _store(body.get("path"))
         chapter_id = body.get("chapter")
         result = _cli("--project", str(store.root), "--json", "timeline", "build", "--chapter", chapter_id)
@@ -320,6 +333,13 @@ def register_media_routes(app, project_root: str | None = None, config_path: str
     @app.post("/api/ui/media/run")
     def ui_media_run(body: dict) -> dict:
         """执行一类媒体生成（`media sfx|image|video run`）。"""
+        _require(
+            body,
+            "本接口需要 path（工程目录）、chapter（章节 ID）与 kind（媒体类型）",
+            path="工程目录",
+            chapter="章节 ID",
+            kind="媒体类型",
+        )
         kind = body["kind"]
         if kind not in ("sfx", "image", "video"):
             raise HTTPException(status_code=400, detail={"code": 2, "message": f"未知媒体类型: {kind}"})
@@ -333,6 +353,12 @@ def register_media_routes(app, project_root: str | None = None, config_path: str
     @app.post("/api/ui/export/jianying")
     def ui_export_jianying(body: dict) -> dict:
         """导出剪映草稿 zip（`export --format jianying`）。"""
+        _require(
+            body,
+            "本接口需要 path（工程目录）与 chapter（章节 ID）",
+            path="工程目录",
+            chapter="章节 ID",
+        )
         argv = [
             "--project",
             body["path"],
@@ -414,6 +440,12 @@ def register_media_routes(app, project_root: str | None = None, config_path: str
         import zipfile
         from datetime import datetime
 
+        _require(
+            body,
+            "本接口需要 path（工程目录）与 chapter（章节 ID）",
+            path="工程目录",
+            chapter="章节 ID",
+        )
         path = body["path"]
         chapter_id = body["chapter"]
         store = _store(path)

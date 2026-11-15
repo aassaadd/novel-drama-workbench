@@ -5,6 +5,7 @@ from __future__ import annotations
 from novel_drama.application.story.scene_split import scene_split_impact, split_scenes
 from novel_drama.interface.http import use_cases
 from novel_drama.interface.http.deps import store_for
+from novel_drama.interface.http.routers.common import _require
 
 
 def register_story_scene_routes(app, project_root: str | None = None, config_path: str | None = None) -> None:
@@ -24,8 +25,13 @@ def register_story_scene_routes(app, project_root: str | None = None, config_pat
     @app.post("/api/ui/scene/split")
     def ui_scene_split(body: dict) -> dict:
         """切分场景（`scene split`）；force 覆盖，keep_lines 保留未变化场景的台词。"""
+        _require(
+            body,
+            "本接口需要 path（工程目录）与 chapter（章节 ID）",
+            path="工程目录",
+            chapter="章节 ID",
+        )
         store = _store(body["path"])
-        # 缺 chapter 属于请求体错误：与旧实现一致，直接抛 KeyError（500），不走用例翻译
         chapter_id = body["chapter"]
         scenes = use_cases.call(
             lambda: split_scenes(
@@ -40,6 +46,12 @@ def register_story_scene_routes(app, project_root: str | None = None, config_pat
     @app.post("/api/ui/scene/split/impact")
     def ui_scene_split_impact(body: dict) -> dict:
         """重切场景的影响清单（`scene split --impact`，只读）。"""
+        _require(
+            body,
+            "本接口需要 path（工程目录）与 chapter（章节 ID）",
+            path="工程目录",
+            chapter="章节 ID",
+        )
         store = _store(body["path"])
         chapter_id = body["chapter"]
         return use_cases.call(

@@ -1012,6 +1012,14 @@ def register_config_routes(app, project_root: str | None = None, config_path: st
     @app.post("/api/ui/project/init")
     def ui_project_init(body: dict) -> dict:
         """新建工程（`init`），返回可直接用于后续请求的绝对路径。"""
+        if not body.get("dir") or not body.get("title"):
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": 2,
+                    "message": "缺少必填参数：dir（工程目录）/ title（作品名）；本接口需要 dir、title，可选 author、genres",
+                },
+            )
         root = body["dir"]
         genres = [str(item) for item in (body.get("genres") or []) if item]
         payload = use_cases.call(
