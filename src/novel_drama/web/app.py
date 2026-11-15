@@ -39,6 +39,14 @@ from ..application.cast.character_crud import (
     update_character,
 )
 from ..application.cast.queries import character_list
+from ..application.production.job_tracker import (
+    UiJob,
+    active_jobs,
+    clear_finished,
+    load_ui_jobs,
+    request_cancel,
+    update_job,
+)
 from ..application.story.apply_outline import apply_outline
 from ..application.story.edit_chapter import (
     edit_chapter,
@@ -65,14 +73,6 @@ from .align_api import register_align_routes
 from .bgm_api import register_bgm_routes
 from .character_desc_api import register_character_desc_routes
 from .continue_api import register_continue_routes
-from .job_tracker import (
-    UiJob,
-    active_jobs,
-    clear_finished,
-    load_ui_jobs,
-    request_cancel,
-    update_job,
-)
 from .logs_api import register_logs_routes
 from .models_api import register_models_routes, resolve_llm_settings
 from .outline_edit_api import register_outline_edit_routes
@@ -4072,7 +4072,7 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         异常:
             HTTPException 400: 动作未登记。
         """
-        from .llm_plan import llm_plan
+        from ..application.support.llm_plan import llm_plan
 
         store = _store(path)
         ctx = {

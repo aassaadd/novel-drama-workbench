@@ -16,13 +16,13 @@ import json
 import threading
 import time
 
-from ..adapters.persistence.project_store import ProjectStore
-from ..cancel import is_requested as _cancel_requested
-from ..cancel import register as _cancel_register
-from ..cancel import release as _cancel_release
-from ..cancel import request as _cancel_request
-from ..models.enum_check import check_ui_jobs
-from ..models.ids import new_id, now_iso
+from ...adapters.persistence.project_store import ProjectStore
+from ...cancel import is_requested as _cancel_requested
+from ...cancel import register as _cancel_register
+from ...cancel import release as _cancel_release
+from ...cancel import request as _cancel_request
+from ...models.enum_check import check_ui_jobs
+from ...models.ids import new_id, now_iso
 
 #: 进程内写锁：所有 UI 任务都写同一个文件
 _LOCK = threading.Lock()

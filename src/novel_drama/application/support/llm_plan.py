@@ -15,9 +15,9 @@ import math
 from collections.abc import Callable
 from typing import Any
 
-from ..adapters.persistence import ProjectStore
-from ..adapters.persistence.settings_store import SettingsStore
-from ..domain.production.rules.thinking_policy import (
+from ...adapters.persistence import ProjectStore
+from ...adapters.persistence.settings_store import SettingsStore
+from ...domain.production.rules.thinking_policy import (
     collect_overrides,
     resolve_thinking,
     stage_label,
@@ -460,7 +460,7 @@ def _describe_calls(store: ProjectStore, ctx: dict) -> int:
 
 def _capture_calls(store: ProjectStore, ctx: dict) -> int:
     """角色识别补跑的调用次数（每章一次）。"""
-    from ..application.cast.capture_cast import cast_capture_plan
+    from ..cast.capture_cast import cast_capture_plan
 
     plan = cast_capture_plan(
         store,

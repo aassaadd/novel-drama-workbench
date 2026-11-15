@@ -12,8 +12,8 @@ from fastapi.responses import StreamingResponse
 
 from ..adapters.persistence import ProjectStore
 from ..application.cast.character_plan import fill_character_descriptions
+from ..application.production.job_tracker import UiJob
 from ..infrastructure.config import load_config
-from .job_tracker import UiJob
 from .stream_api import _progress_response
 
 

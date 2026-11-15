@@ -32,6 +32,7 @@ from ..application.cast.character_plan import (
     plan_characters,
 )
 from ..application.cast.generate_characters import generate_characters
+from ..application.production.job_tracker import UiJob
 from ..application.script.annotate import suggest_script
 from ..application.story.act_batch import (
     ActBatchCanceled,
@@ -47,7 +48,6 @@ from ..application.story.outline_hierarchical import generate_hierarchical_outli
 from ..application.story.settings_generate import generate_worlds
 from ..cancel import GenerationCanceled
 from ..infrastructure.config import load_config
-from .job_tracker import UiJob
 
 #: SSE 响应头：禁用缓存与反向代理缓冲，保证逐条到达浏览器
 _SSE_HEADERS = {

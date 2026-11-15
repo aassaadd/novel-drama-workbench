@@ -312,7 +312,7 @@ def test_capture_works_for_unlanded_chapter(tmp_path: Path) -> None:
 
 def test_llm_plan_counts_and_thinking(tmp_path: Path) -> None:
     """统一确认弹窗的事实来自后端：次数、思考、耗时与取消能力都可解释。"""
-    from novel_drama.web.llm_plan import llm_plan
+    from novel_drama.application.support.llm_plan import llm_plan
 
     store, config, chapters = _project(tmp_path)
     chapter_id = chapters[0]["id"]
