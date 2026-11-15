@@ -362,4 +362,24 @@
 4. 真机页面走查：渲染、点击入口、控制台 0 warn 0 error。
 5. `main` 快进同步到步骤 4 末提交。
 
+#### 9.6 步骤 4 进度（2026-11-16，已完成）
+
+| 提交 | 范围 |
+| --- | --- |
+| 13bed37 | 生产态拆到 `scenes/<chapterId>.json`（批次 A）：新增 `scenes_path`/`load_scenes`/`save_scenes`/`has_embedded_scenes`；`load_chapter` 读后注入生产态、`save_chapter` 拆出生产态并原子写；`chapter.schema.json` 删 `scenes`，新增 `chapter-scenes.schema.json` |
+| e360605 | 归档触发改内容层指纹、快照带台本；`restore_chapter_version` 恢复正文 + 台本并重新派生（批次 B） |
+| 34c4690 | 打开工程自检：`migrate_production` / `ensure_scripts` / `find_orphan_lines` 串成 `upgrade_project`；CLI 走 stderr、`serve` 启动前执行、`POST /api/ui/project/selfcheck`、页面固定横幅（批次 C） |
+
+与 9.5 的偏差：方案里的 `ensure_production` 落名为 `migrate_production`（迁内嵌场景到生产文件）；「生产文件缺失按空态重建」由 `load_scenes` 返回 `[]` + `save_chapter` 在场景非空时补写实现，不额外建空文件。其余按方案执行。
+
+验证：
+
+- 拆分读写：`chapter.json` 无 `scenes`、`scenes/<id>.json` 生成；缺失生产文件读为空态、写回后补齐；双源（`script`/`scenes`）读输出逐字节一致。
+- 原子写：沿用 `_write_json` 的临时文件 + `os.replace`；场景 payload 写盘前按 `chapter-scenes.schema.json` 校验。
+- 孤儿行：`find_orphan_lines` 返回 `{chapter_id, chapter_title, scene_index, line_id, text}`，CLI 提示「孤儿台词行 N 条（已不参与渲染）」，页面横幅列出前 8 条。
+- 归档与回滚：`tts`/媒体变化不归档，行内容与场景结构变化归档；快照 `{...chapter, "script": {...}}`；`chapter restore` 后 `line list`、`tts plan`、`timelines/`、`exports/` 与归档前逐字节一致（timeline 的 `revision`/`built_at`/`id` 按既有口径归一化比较）。
+- 全链路：init → chapter add → scene split → line split → line set → timeline build → export 全部通过；同一写命令二次执行 0 文件变化；二次自检各项计数全 0。
+- `pytest` 254 passed / 10 skipped（14 subtests），分层 234 文件 0 违规。
+- 真机走查（8791，未迁移语料副本）：章节标题与正文/台词渲染正常；首次打开出现「工程自检：迁移旧场景 1 章，补出台本 1 章」横幅，点「知道了」后消失（第二次打开不再出现，符合幂等）；点台词出详情面板；录音视图（6 待录）、后期制作视图（时间轴 00:47）均可打开；控制台 0 warning 0 error。打开未构建时间轴的章节时 `/api/project/timeline/<id>` 返回 404 后前端自动 `POST /api/ui/timeline/build`，为既有设计，非本次改动。
+
 
