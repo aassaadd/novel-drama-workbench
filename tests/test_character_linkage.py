@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from novel_drama.adapters.base import AdapterError
+from novel_drama.cli_character import _clean_speech_style
 from novel_drama.config import load_config
 from novel_drama.models import entities
 from novel_drama.store import ProjectStore
@@ -309,6 +310,27 @@ class CharacterLinkageTest(unittest.TestCase):
         self.assertIn("unplanned", kinds)
         self.assertIn("other", kinds)
         self.assertGreaterEqual(record["counts"]["total"], 2)
+
+
+class CleanSpeechStyleTest(unittest.TestCase):
+    """说话方式清洗：历史非法值原样提交时放行，改成新的非法值仍然拒绝。"""
+
+    def test_unchanged_legacy_value_passes(self):
+        """只修语速时，另一处历史非法音高原样保留，不再连带报错。"""
+        cleaned = _clean_speech_style(
+            {"tempo": "fast", "pitch": "高", "accent": "北方口音"},
+            {"tempo": "快", "pitch": "高"},
+        )
+        self.assertEqual(cleaned["tempo"], "fast")
+        self.assertEqual(cleaned["pitch"], "高")
+        self.assertEqual(cleaned["accent"], "北方口音")
+
+    def test_new_illegal_value_rejected(self):
+        """新写入的非法语速仍然抛出中文错误并列出可选值。"""
+        with self.assertRaises(ValueError) as ctx:
+            _clean_speech_style({"tempo": "飞快"}, {"tempo": "快"})
+        self.assertIn("语速", str(ctx.exception))
+        self.assertIn("可选值", str(ctx.exception))
 
 
 if __name__ == "__main__":

@@ -37,11 +37,13 @@ def _split_items(text: str) -> list[str]:
     return [part.strip() for part in re.split(r"[、,，;；]+", text or "") if part.strip()]
 
 
-def _clean_speech_style(style: dict) -> dict:
+def _clean_speech_style(style: dict, current: dict | None = None) -> dict:
     """清洗说话方式：语速 / 音高只接受枚举值，口音与口头禅保留自由文本。
 
     参数:
         style: 界面或命令行传入的说话方式对象。
+        current: 磁盘上现有的说话方式；传入时，与现有值完全相同的旧非法值原样保留，
+            这样只修一个字段（如语速）不会因为另一个历史字段（如音高「高」）被连带拒绝。
 
     返回:
         `{tempo, pitch, accent, catchphrases}`，未填写项为 None / 空数组。
@@ -51,12 +53,18 @@ def _clean_speech_style(style: dict) -> dict:
     """
     raw_tempo = str(style.get("tempo") or "").strip()
     raw_pitch = str(style.get("pitch") or "").strip()
+    old_tempo = str((current or {}).get("tempo") or "").strip()
+    old_pitch = str((current or {}).get("pitch") or "").strip()
     tempo = SpeechTempo.coerce(raw_tempo) if raw_tempo else None
     pitch = SpeechPitch.coerce(raw_pitch) if raw_pitch else None
     if raw_tempo and tempo is None:
-        raise ValueError(f"语速「{raw_tempo}」不在可选范围；可选值：{choices_text(SpeechTempo)}")
+        if raw_tempo != old_tempo:
+            raise ValueError(f"语速「{raw_tempo}」不在可选范围；可选值：{choices_text(SpeechTempo)}")
+        tempo = raw_tempo
     if raw_pitch and pitch is None:
-        raise ValueError(f"音高「{raw_pitch}」不在可选范围；可选值：{choices_text(SpeechPitch)}")
+        if raw_pitch != old_pitch:
+            raise ValueError(f"音高「{raw_pitch}」不在可选范围；可选值：{choices_text(SpeechPitch)}")
+        pitch = raw_pitch
     return {
         "tempo": tempo,
         "pitch": pitch,
@@ -275,7 +283,10 @@ def cmd_character_update(args, config: AppConfig) -> int:
         else:
             age = AgeRange.coerce(raw_age)
             if age is None:
-                raise ValueError(f"年龄段「{raw_age}」不在可选范围；可选值：{choices_text(AgeRange)}")
+                # 历史非法值原样提交时放行（由界面提示修正），改动成新的非法值仍然拒绝
+                if raw_age != str(target.get("age_range") or "").strip():
+                    raise ValueError(f"年龄段「{raw_age}」不在可选范围；可选值：{choices_text(AgeRange)}")
+                age = raw_age
             target["age_range"] = age
         changed.append("age_range")
     if getattr(args, "personality", None):
@@ -342,7 +353,7 @@ def cmd_character_update(args, config: AppConfig) -> int:
                 raise ValueError(f"speech_style 不是合法 JSON: {exc}") from exc
             if not isinstance(style, dict):
                 raise ValueError("speech_style 必须是 JSON 对象")
-            target["speech_style"] = _clean_speech_style(style)
+            target["speech_style"] = _clean_speech_style(style, target.get("speech_style"))
         else:
             target["speech_style"] = {"tempo": None, "pitch": None, "accent": None, "catchphrases": []}
         changed.append("speech_style")

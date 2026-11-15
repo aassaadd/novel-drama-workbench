@@ -89,6 +89,10 @@ let overrideCache = { character: '', data: null };
 let createdChapters = [];
 /** 待定角色队列：第二次出现才建卡的候选人（含出现次数与归属线索） */
 let pendingCast = [];
+/** 历史遗留的非法枚举值（`/api/ui/characters` 的 enum_issues，含原值与建议值） */
+let enumIssues = [];
+/** 修正进行中：避免连点重复提交 */
+let enumFixing = false;
 
 /** 更新顶栏保存态（参考：输入后显示「待保存」，落盘后「已自动保存」） */
 function setSaveState(kind, text) {
@@ -565,6 +569,171 @@ function collectRelations() {
     .filter(Boolean);
 }
 
+/**
+ * 历史枚举值的「改前」展示：纯中文原样显示，含英文字母的旧值统一显示「未识别」，
+ * 原始值放在 title 里备查，不在页面上裸露英文。
+ * @param {object} issue 枚举问题（含 value）
+ * @returns {string} 展示文案
+ */
+function legacyValueText(issue) {
+  const text = String(issue.value ?? '').trim();
+  if (!text) return '（空值）';
+  return /[A-Za-z]/.test(text) ? '未识别' : text;
+}
+
+/**
+ * 把一条枚举问题换算成 PATCH 字段：语速 / 音高要连带整份 speech_style，
+ * 其余字段直接按路径末段提交。
+ * @param {object} character 角色对象
+ * @param {object} issue 枚举问题
+ * @returns {object|null} PATCH 补丁；没有建议值时返回 null
+ */
+function enumPatchOf(character, issue) {
+  const suggestion = issue.suggestion?.value;
+  if (!character || !suggestion) return null;
+  const field = String(issue.path || '').split('/').filter(Boolean).pop() || '';
+  if (field === 'tempo' || field === 'pitch') {
+    return { speech_style: { ...(character.speech_style || {}), [field]: suggestion } };
+  }
+  return { [field]: suggestion };
+}
+
+/**
+ * 把问题列表换算成可执行的改动（丢弃没有建议值或找不到角色的项）。
+ * @param {object[]} issues 枚举问题列表
+ * @returns {{issue:object,character:object,patch:object}[]} 改动列表
+ */
+function enumChangesOf(issues) {
+  return issues
+    .map((issue) => {
+      const character = characters.find((row) => row.id === issue.character_id);
+      return { issue, character, patch: enumPatchOf(character, issue) };
+    })
+    .filter((row) => row.patch);
+}
+
+/** 历史枚举值告警卡片：逐条给出「按建议修正」，也可一次全部修正 */
+function enumIssuesCardHTML() {
+  if (!enumIssues.length) return '';
+  const fixable = enumIssues.filter((item) => item.suggestion?.value).length;
+  const rows = enumIssues
+    .map((issue) => {
+      const before = legacyValueText(issue);
+      const after = issue.suggestion?.label || '';
+      // 「快 → 快」这种旧写法与标准值同名的，补一句说明，避免看起来没变化
+      const sameText = issue.suggestion && before === after;
+      return `
+      <div class="summary-line" style="align-items:flex-start">
+        <span style="min-width:0">
+          <b>${esc(issue.character_name || '未知角色')}</b>
+          <span class="badge mute" style="margin-left:6px">${esc(issue.field || '枚举字段')}</span>
+          <span style="font-size:11.5px;color:var(--text-3);margin-left:8px">
+            当前：<span title="原值：${esc(String(issue.value ?? ''))}">${esc(before)}</span>${
+              sameText ? '（旧写法）' : ''
+            }
+            ${
+              issue.suggestion
+                ? `→ 建议改为：<b style="color:var(--text)">${esc(after)}</b>${sameText ? '（标准写法）' : ''}`
+                : '；没有可用建议值，请在下方下拉里手动选择'
+            }
+          </span>
+        </span>
+        <span class="right">${
+          issue.suggestion?.value
+            ? `<button class="btn sm" data-act="enum-fix" data-char="${esc(issue.character_id || '')}"
+                 data-path="${esc(issue.path || '')}"
+                 title="把「${esc(issue.field || '')}」改成建议值并立即保存">按建议修正</button>`
+            : ''
+        }</span>
+      </div>`;
+    })
+    .join('');
+  return `
+    <div class="card" id="chara-enum-issues" style="margin-bottom:14px">
+      <div class="card-head"><span class="ct">历史枚举值待修正</span>
+        <div class="right"><span class="badge warn">${enumIssues.length} 处</span></div>
+      </div>
+      <div class="card-body" style="padding:0">
+        ${rows}
+        <div class="summary-line" style="gap:10px">
+          <span class="hint">这些值来自旧工程，只有点「按建议修正」才会写入；没有建议值的项不会自动改。</span>
+          <span class="right">${
+            fixable
+              ? `<button class="btn primary sm" data-act="enum-fix-all">全部按建议修正（${fixable} 处）</button>`
+              : ''
+          }</span>
+        </div>
+      </div>
+    </div>`;
+}
+
+/**
+ * 修正枚举问题：多处改动先弹确认并逐条列出，单处直接提交。
+ * @param {object[]} issues 待修正的枚举问题
+ */
+function confirmEnumFixes(issues) {
+  const changes = enumChangesOf(issues);
+  if (!changes.length) return toast('这些历史值没有可自动修正的建议值，请在对应下拉里手动选择', 'warn', 4200);
+  if (changes.length === 1) {
+    void applyEnumFixes(changes);
+    return;
+  }
+  const rows = changes
+    .map(
+      ({ issue, character }) => `
+      <div class="summary-line">
+        <span style="min-width:0">${esc(character.name || character.id)} · ${esc(issue.field || '枚举字段')}</span>
+        <span class="right">${esc(legacyValueText(issue))} → <b>${esc(issue.suggestion.label || '')}</b></span>
+      </div>`
+    )
+    .join('');
+  const mask = openDialog({
+    title: `按建议修正 ${changes.length} 处历史枚举值`,
+    body: `<div class="dlg-note">确认后会把下面每一处改成建议值并立即保存；未列出的字段保持不动。</div>${rows}`,
+    foot: `<div class="right"><button class="btn" data-dlg-close>取消</button>
+      <button class="btn primary" id="enum-fix-ok">确认修正</button></div>`,
+  });
+  mask.querySelector('#enum-fix-ok').addEventListener('click', (event) => {
+    event.currentTarget.disabled = true;
+    event.currentTarget.textContent = '修正中…';
+    closeDialog();
+    void applyEnumFixes(changes);
+  });
+}
+
+/**
+ * 通过现有保存接口逐条提交枚举修正，结束后刷新页面数据。
+ * @param {{issue:object,character:object,patch:object}[]} changes 改动列表
+ */
+async function applyEnumFixes(changes) {
+  if (enumFixing) return;
+  enumFixing = true;
+  const failures = [];
+  for (const { issue, character, patch } of changes) {
+    try {
+      await patchJSON('/api/ui/characters', { path: state.path, id: character.id, ...patch });
+    } catch (error) {
+      failures.push(`${character.name || character.id} · ${issue.field || '枚举字段'}：${error.message}`);
+    }
+  }
+  enumFixing = false;
+  await reloadPreservingView();
+  if (!failures.length) {
+    toast(`已按建议修正 ${changes.length} 处历史枚举值`, 'ok');
+    return;
+  }
+  if (failures.length === 1) {
+    toast(`修正失败：${failures[0]}`, 'bad', 6000);
+    return;
+  }
+  openDialog({
+    title: '部分枚举值修正失败',
+    body: `<div class="dlg-note">以下 ${failures.length} 处没有改成功，原因如上；可修正后重试。</div>
+      ${failures.map((text) => `<div class="summary-line"><span>${esc(text)}</span></div>`).join('')}`,
+    foot: `<div class="right"><button class="btn" data-dlg-close>知道了</button></div>`,
+  });
+}
+
 /** 主区档案表单 */
 function profileHTML() {
   const item = current();
@@ -712,6 +881,7 @@ function profileHTML() {
         <div class="hint">音色绑定在下方或「音色」视图完成；档案改动自动保存并写回 characters.json。</div>
       </div>
     </div>
+    ${enumIssuesCardHTML()}
     ${relationsCardHTML(item)}
     ${imageCardHTML(item)}
     ${voiceBindingHTML(item)}
@@ -737,6 +907,7 @@ async function loadAll(path) {
     state.chapterId = state.chapters[0]?.id || '';
   }
   characters = charaPayload?.characters || [];
+  enumIssues = charaPayload?.enum_issues || [];
   voices = castPayload?.voices || [];
   check = checkPayload;
   stats = statsPayload?.characters || {};
@@ -2033,6 +2204,14 @@ async function onRootClick(event) {
   if (act === 'back') return goProjects();
   if (act === 'to-editor') return goChapter(state.path, state.chapterId);
   if (act === 'consistency') return openConsistencyMatrix();
+  if (act === 'enum-fix') {
+    const issue = enumIssues.find(
+      (row) => row.character_id === button.dataset.char && row.path === button.dataset.path
+    );
+    if (!issue) return toast('这条枚举告警已不存在，请刷新后再试', 'warn');
+    return confirmEnumFixes([issue]);
+  }
+  if (act === 'enum-fix-all') return confirmEnumFixes(enumIssues.filter((row) => row.suggestion?.value));
   if (act === 'new-character') return newCharacter();
   if (act === 'ai-generate') return openAiGenerate();
   if (act === 'ai-fill') return openAiFill();
