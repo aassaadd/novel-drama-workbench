@@ -379,7 +379,10 @@ def revert_line(
         # 撤回后指纹能重新对上，因此不需要把 tts.status 改回 pending：
         # revision 只承担并发锁职责，过期与否由读取路径按指纹派生
         line["revision"] = int(line.get("revision") or 1) + 1
-        store.save_chapter(chapter)
+        # 内容层字段归台本：延迟导入避免 batch → pipeline → line_state 的循环
+        from ..application.production.lines_source import save_lines
+
+        save_lines(store, chapter)
     state = resolve_line_state(line, characters, snapshot, root=root, engine=engine)["state"]
     text_changed = normalize_value(line.get("text")) != normalize_value(params.get("text"))
     return {"changed": changed, "state": state, "text_changed": text_changed}
