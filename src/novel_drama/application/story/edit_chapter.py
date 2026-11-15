@@ -18,6 +18,7 @@ from ...domain.story.rules.chapter_rules import bump_revision, count_words
 from ...infrastructure.config import AppConfig
 from ...models.ids import new_id, now_iso
 from ...text.context import EXCERPT_CHARS, ContextAssembler
+from ..production.lines_source import scenes_from_script
 from .chapter_context import build_chapter_context
 
 #: 已有下游产物时给用户的提示：正文变了，场景与台词需要重新切分
@@ -503,12 +504,13 @@ def save_chapter_content(store: ProjectStore, chapter_id: str, content: str) -> 
 
 
 def restore_chapter_version(store: ProjectStore, chapter_id: str, version_id: str) -> dict:
-    """把某个历史版本恢复为当前正文。
+    """把某个历史版本恢复为当前正文（含对应台本行内容）。
 
     处理规则：
-    - 恢复文本字段（title/outline/synopsis/content）与字数，不恢复场景、脚本等下游产物；
-    - `revision` 在当前值上继续 +1（不回退），当前正文会先被存档；
-    - 已有 `scenes` 或 `script_path` 时 `status` 置为 `stale`，正常触发重新切分判定。
+    - 恢复文本字段（title/outline/synopsis/content）与字数；
+    - 快照里带台本时，同时恢复台本镜头行内容，并按行 ID 重新派生场景（生产态保留）；
+    - `revision` 在当前值上继续 +1（不回退），当前版本会先被存档；
+    - 只有正文可恢复、台本不在快照里时，`status` 置为 `stale`，触发重新切分判定。
 
     参数:
         store: 工程。
@@ -516,7 +518,8 @@ def restore_chapter_version(store: ProjectStore, chapter_id: str, version_id: st
         version_id: 历史版本文件名（不含 .json，见 `list_chapter_versions`）。
 
     返回:
-        {"chapter_id", "version_id", "revision", "status", "word_count", "restored_from", "warnings"}。
+        {"chapter_id", "version_id", "revision", "status", "word_count",
+         "restored_from", "script_restored", "warnings"}。
 
     异常:
         ValueError: 版本号非法或该版本没有正文。
@@ -535,12 +538,20 @@ def restore_chapter_version(store: ProjectStore, chapter_id: str, version_id: st
     chapter["word_count"] = count_words(text)
 
     warnings: list[str] = []
-    has_downstream = bool(chapter.get("scenes") or chapter.get("script_path"))
-    if has_downstream:
-        warnings.append(STALE_WARNING)
-    chapter["status"] = "stale" if has_downstream else "written"
+    script = snapshot.get("script")
+    script_restored = isinstance(script, dict) and bool(script.get("shots"))
+    if script_restored:
+        # 台本是内容源：先写回旧台本，再按行 ID 派生场景，配音/媒体按行与条目保留
+        store.save_script(script)
+        chapter["scenes"] = scenes_from_script(chapter, script)
+        chapter["status"] = str(snapshot.get("status") or chapter.get("status") or "stale")
+    else:
+        has_downstream = bool(chapter.get("scenes") or chapter.get("script_path"))
+        if has_downstream:
+            warnings.append(STALE_WARNING)
+        chapter["status"] = "stale" if has_downstream else "written"
     bump_revision(chapter)
-    store.save_chapter(chapter)
+    store.save_chapter(chapter, archive_script=script if script_restored else None)
 
     return {
         "chapter_id": chapter_id,
@@ -549,5 +560,6 @@ def restore_chapter_version(store: ProjectStore, chapter_id: str, version_id: st
         "status": chapter["status"],
         "word_count": chapter["word_count"],
         "restored_from": snapshot.get("revision"),
+        "script_restored": script_restored,
         "warnings": warnings,
     }

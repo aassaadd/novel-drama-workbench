@@ -104,6 +104,29 @@ def test_chapter_content_change_archives_old_version(tmp_path: Path):
     assert json.loads(archived[0].read_text(encoding="utf-8"))["content"] == before["content"]
 
 
+def test_scene_content_change_archives_but_tts_does_not(tmp_path: Path):
+    """台词行内容变化归档（快照带台本），仅配音状态变化不归档。"""
+    store = _fixture_project(tmp_path, ["chapter_scenes_real.json"], None)
+    chapter_id = "chp_01M7CY5ZD243JZHJXJJAMM6Y0E"
+    from novel_drama.application.production.lines_source import script_from_scenes
+
+    store.save_script(script_from_scenes(store.load_chapter(chapter_id)))
+
+    chapter = store.load_chapter(chapter_id)
+    line = chapter["scenes"][0]["lines"][0]
+    line.setdefault("tts", {})["status"] = "ready"
+    store.save_chapter(chapter)
+    assert not store.chapter_versions_dir(chapter_id).exists(), "仅生产态变化不应归档"
+
+    chapter = store.load_chapter(chapter_id)
+    chapter["scenes"][0]["lines"][0]["emotion"] = "angry"
+    store.save_chapter(chapter)
+    archived = sorted(store.chapter_versions_dir(chapter_id).glob("*.json"))
+    assert len(archived) == 1, "台词行内容变化应归档"
+    snapshot = json.loads(archived[0].read_text(encoding="utf-8"))
+    assert snapshot.get("script", {}).get("shots"), "归档快照应包含台本行内容"
+
+
 def test_cast_save_is_byte_stable(tmp_path: Path):
     """角色表读 → 写后与磁盘内容完全一致（含历史非法枚举值）。"""
     store = _fixture_project(tmp_path, [], "characters_real.json")

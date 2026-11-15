@@ -364,7 +364,19 @@ def save_lines(store: ProjectStore, chapter: dict) -> dict:
     返回:
         `{"script_saved": 台本是否写盘, "chapter_saved": 章节是否写盘}`。
     """
-    script = ensure_script(store, chapter)
+    chapter_id = str(chapter.get("id") or "")
+    try:
+        script = store.load_script(chapter_id)
+        before_script = copy.deepcopy(script)
+    except FileNotFoundError:
+        # 旧工程首写：内存里的场景已经改过，引导台本与归档快照都要按磁盘上的「改动前」状态来
+        try:
+            seed = store.load_chapter(chapter_id)
+        except FileNotFoundError:
+            seed = chapter
+        before_script = script_from_scenes(seed)
+        script = copy.deepcopy(before_script)
+        store.save_script(script)
     script_changed = _sync_script_from_scenes(chapter, script)
     scenes = scenes_from_script(chapter, script)
     scenes_changed = scenes != (chapter.get("scenes") or [])
@@ -375,7 +387,8 @@ def save_lines(store: ProjectStore, chapter: dict) -> dict:
         store.save_script(script)
     chapter_changed = scenes_changed or _chapter_changed_on_disk(store, chapter)
     if chapter_changed:
-        store.save_chapter(chapter)
+        # 归档要存「改动前」的台本，此时磁盘上的台本已经是新内容
+        store.save_chapter(chapter, archive_script=before_script if script_changed else None)
     return {"script_saved": script_changed, "chapter_saved": chapter_changed}
 
 

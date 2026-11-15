@@ -582,7 +582,7 @@ class ProjectStore:
         validate(payload, "chapter-scenes.schema.json", baseline=baseline)
         return payload
 
-    def save_chapter(self, chapter: dict) -> None:
+    def save_chapter(self, chapter: dict, archive_script: dict | None = None) -> None:
         """保存章节：拆出生产态场景写 `scenes/<id>.json`，其余写 `chapters/<id>.json`。
 
         正文或内容层（台词行 / 场景结构）变化时，先把当前磁盘上的旧版本完整存档到
@@ -591,6 +591,7 @@ class ProjectStore:
 
         参数:
             chapter: 章节 dict（可含 `scenes`，写入前会被拆走）。
+            archive_script: 需要随快照存档的旧台本；为空时归档时从磁盘读取当前台本。
         """
         chapter["updated_at"] = now_iso()
         chapter_id = str(chapter["id"])
@@ -614,21 +615,30 @@ class ProjectStore:
         scenes_payload = self._scenes_payload(chapter_id, scenes) if scenes != file_scenes else None
         # 旧版没有正文时不存档（新建章节的首次生成不产生无意义的 0 字版本）
         if should_archive_version(baseline or {}, {**payload, "scenes": scenes}):
-            self._archive_chapter(chapter_id, baseline or {})
+            self._archive_chapter(chapter_id, baseline or {}, archive_script)
         self._write_json(path, payload)
         if scenes_payload is not None:
             self._write_json(self.scenes_path(chapter_id), scenes_payload)
 
-    def _archive_chapter(self, chapter_id: str, chapter: dict) -> None:
-        """把一份完整章节快照写入历史版本目录。
+    def _archive_chapter(self, chapter_id: str, chapter: dict, script: dict | None = None) -> None:
+        """把一份完整章节快照写入历史版本目录（含对应台本行内容）。
 
         参数:
             chapter_id: 章节 ID。
             chapter: 待存档的旧章节（原样保存，不修改字段）。
+            script: 待存档的旧台本；为空时尝试从磁盘读取（无台本则省略该字段）。
 
         返回:
             无。
         """
+        snapshot = dict(chapter)
+        if script is None:
+            try:
+                script = self.load_script(chapter_id)
+            except FileNotFoundError:
+                script = None
+        if script is not None:
+            snapshot["script"] = script
         directory = self.chapter_versions_dir(chapter_id)
         directory.mkdir(parents=True, exist_ok=True)
         revision = version_id_of(chapter)
@@ -637,7 +647,7 @@ class ProjectStore:
         while target.exists():
             target = directory / f"{revision}-{suffix}.json"
             suffix += 1
-        self._write_json(target, chapter)
+        self._write_json(target, snapshot)
 
     def list_chapter_versions(self, chapter_id: str) -> list[dict]:
         """列出章节的历史版本（新版本在前，只返回展示所需字段）。
