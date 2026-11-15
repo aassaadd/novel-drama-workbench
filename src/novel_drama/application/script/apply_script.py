@@ -1,4 +1,8 @@
-"""把导演脚本同步进章节：镜头 → 场景、台词 → 台词行，并物化音效/画面/动画。"""
+"""把导演脚本同步进章节：台本落盘 → 派生场景 → 物化音效/画面/动画。
+
+步骤 3 起台本是内容唯一可写源：本用例先保存台本，再由台本整章派生场景，
+不再向场景增量写台词，避免同一行在台本与场景各存一份。
+"""
 
 from __future__ import annotations
 
@@ -9,6 +13,10 @@ from ...director.materialize import materialize_media
 from ...domain.story.rules.chapter_rules import bump_revision
 from ...models import entities
 from ...models.ids import now_iso
+from ..production.lines_source import read_scenes, scenes_from_script
+
+#: 统计「更新」时比较的内容字段（与改造前的增量同步口径一致）
+_COMPARE_FIELDS = ("speaker_id", "emotion", "kind", "text")
 
 
 def _text_key(text: str) -> str:
@@ -17,88 +25,75 @@ def _text_key(text: str) -> str:
     return value.strip("“”\"'「」『』")
 
 
+def _reuse_fallback_ids(script: dict, scenes: list[dict]) -> None:
+    """把标注新生成的行 ID 挂回同场景里「同文本 + 未识别说话人」的旧行。
+
+    标注解析只对完全相同文本复用行 ID；这里补上「空白/引号差异」的兜底，
+    让旧行的配音（`tts`）在派生时按行 ID 继续保留。就地修改 `script`。
+
+    参数:
+        script: 导演脚本 dict。
+        scenes: 改造前的场景视图（用于取候选旧行）。
+    """
+    by_index = {int(scene.get("index") or 0): scene for scene in scenes}
+    used = {line.get("id") for shot in script.get("shots") or [] for line in shot.get("lines") or []}
+    for shot in script.get("shots") or []:
+        scene = by_index.get(int(shot.get("index") or 1) - 1)
+        if scene is None:
+            continue
+        scene_lines = scene.get("lines") or []
+        scene_ids = {item.get("id") for item in scene_lines}
+        for line in shot.get("lines") or []:
+            if line.get("id") in scene_ids:
+                continue
+            key = _text_key(line.get("text"))
+            if not key or line.get("speaker_id") in (None, "", entities.UNKNOWN_SPEAKER_ID):
+                continue
+            for candidate in scene_lines:
+                candidate_id = candidate.get("id")
+                if candidate_id in used:
+                    continue
+                if candidate.get("speaker_id") != entities.UNKNOWN_SPEAKER_ID:
+                    continue
+                if _text_key(candidate.get("text")) == key:
+                    line["id"] = candidate_id
+                    line["inferred"] = False
+                    used.add(candidate_id)
+                    break
+
+
 def apply_script_to_chapter(store: ProjectStore, chapter: dict, script: dict) -> dict:
-    """把导演脚本的镜头/台词同步进章节（只增改台词，不动物理产物）。
+    """把导演脚本落盘并从台本整章派生场景（含媒体物化）。
 
     参数:
         store: 工程。
         chapter: 章节 dict（就地修改并保存）。
-        script: 导演脚本文档。
+        script: 导演脚本文档（会先校验并写入 `scripts/<chapter>.json`）。
 
     返回:
         `{scenes_created, lines_added, lines_updated, sfx_added, images_added, videos_added}`。
     """
-    scenes = sorted(chapter.get("scenes") or [], key=lambda item: item.get("index") or 0)
-    by_index = {scene.get("index"): scene for scene in scenes}
-    line_lookup = {}
-    for scene in scenes:
-        for line in scene.get("lines") or []:
-            line_lookup[line["id"]] = line
-    added = updated = created = 0
-    for shot in sorted(script.get("shots") or [], key=lambda item: item.get("index") or 0):
-        scene_index = int(shot.get("index") or 1) - 1
-        scene = by_index.get(scene_index)
-        if scene is None:
-            scene = entities.new_scene(chapter["id"], scene_index, shot.get("scene_label") or "")
-            scene["location"] = shot.get("location")
-            scene["time_of_day"] = shot.get("time_of_day") or "unknown"
-            scene["mood"] = shot.get("mood")
-            scene["goal"] = shot.get("goal")
-            chapter.setdefault("scenes", []).append(scene)
-            by_index[scene_index] = scene
-            created += 1
+    before = read_scenes(store, chapter)
+    chapter["scenes"] = before
+    old_lines = {line["id"]: line for scene in before for line in scene.get("lines") or []}
+    old_indexes = {int(scene.get("index") or 0) for scene in before}
+    _reuse_fallback_ids(script, before)
+
+    created = len({int(shot.get("index") or 1) - 1 for shot in script.get("shots") or []} - old_indexes)
+    added = updated = 0
+    for shot in script.get("shots") or []:
         for line in shot.get("lines") or []:
-            existing = line_lookup.get(line["id"])
-            if existing is not None:
-                changed = False
-                for key in ("speaker_id", "emotion", "kind", "text"):
-                    if line.get(key) is not None and existing.get(key) != line[key]:
-                        existing[key] = line[key]
-                        changed = True
-                if changed:
-                    existing["revision"] = int(existing.get("revision") or 1) + 1
-                    if (existing.get("tts") or {}).get("status") == "ready":
-                        existing["tts"]["status"] = "stale"
-                    updated += 1
-                continue
-            # 旧行是 chr_unknown、文本只是空白/引号差异时，按新映射结果更新旧行，避免叠加新行
-            key = _text_key(line.get("text"))
-            fallback = None
-            if key and line.get("speaker_id") not in (None, "", entities.UNKNOWN_SPEAKER_ID):
-                for candidate in scene.get("lines") or []:
-                    if candidate.get("speaker_id") != entities.UNKNOWN_SPEAKER_ID:
-                        continue
-                    if _text_key(candidate.get("text")) == key:
-                        fallback = candidate
-                        break
-            if fallback is not None:
-                changed = False
-                for key_name in ("speaker_id", "emotion", "kind", "text"):
-                    if line.get(key_name) is not None and fallback.get(key_name) != line[key_name]:
-                        fallback[key_name] = line[key_name]
-                        changed = True
-                if changed:
-                    fallback["revision"] = int(fallback.get("revision") or 1) + 1
-                    if (fallback.get("tts") or {}).get("status") == "ready":
-                        fallback["tts"]["status"] = "stale"
-                    fallback["inferred"] = False
-                    updated += 1
-                continue
-            new_line = entities.new_line(
-                scene["id"],
-                len(scene.get("lines") or []),
-                line["text"],
-                kind=line.get("kind") or "dialogue",
-                speaker_id=line.get("speaker_id") or entities.UNKNOWN_SPEAKER_ID,
-                emotion=line.get("emotion") or "neutral",
-            )
-            new_line["id"] = line["id"]
-            if line.get("anchor"):
-                new_line["anchor"] = line["anchor"]
-            new_line["inferred"] = False
-            scene.setdefault("lines", []).append(new_line)
-            line_lookup[new_line["id"]] = new_line
-            added += 1
+            old = old_lines.get(line.get("id"))
+            if old is None:
+                added += 1
+            elif any(
+                line.get(field) is not None and old.get(field) != line[field] for field in _COMPARE_FIELDS
+            ):
+                updated += 1
+
+    # 台本是唯一可写源：先落盘，再派生场景；场景里按行 ID / 条目 ID 保留生产态与媒体
+    store.save_script(script)
+    chapter["scenes"] = scenes_from_script(chapter, script)
     bump_revision(chapter)
     chapter["updated_at"] = now_iso()
     # 把镜头里的音效/画面/动画物化进场景，供时间轴与渲染使用
