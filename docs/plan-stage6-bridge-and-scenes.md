@@ -90,3 +90,45 @@
 2. `chapter.scenes` 只读保留多久：一个版本周期，还是确认无读点后立即移除？
 3. 是否需要提供旧工程迁移命令（`ndw migrate scenes`），还是只在加载时懒回填？
 4. 「拒绝执行 exit 1」在 application 里用哪种异常表达（新增 `RefusedError` / 复用 `PreconditionError` 带 code）？
+
+## 交接：阶段 6-2 进度（2026-11-16）
+
+### 已完成（每步单独提交，可单笔 revert）
+
+| 提交 | 内容 |
+| --- | --- |
+| `a2544c5` | `RefusedError(code)`；`use_cases` 退出码 1 → 412；12 条异常翻译单测 |
+| `bd1943b` | config 路由直调 `work_meta`（init / work 读写） |
+| `940cf51` | `timeline` / `mix` 下沉 `application/production/`；新增 `interface/http/executor.py`（入参是应用入口，不拼 CLI 串） |
+| `544592d` | `tts_plan.py` 下沉 batch 计划；voice tools 的建轴/计划/providers/cast check 直调 |
+| `f55f629` | setting / worlds 直调应用用例 |
+| `2a163e9` | setting/worlds 的 adapters 依赖下沉（修分层违规） |
+| `943658e` | `scene_split.py`；scene 路由直调 |
+| `9f2a329` | 缺必填参数统一 400（`routers/common._require`，21 个入口） |
+| `2c846e3` | `outline_bind.update_chapter_binding`；outline generate/bind 直调 |
+
+### 剩余调用点（`_cli` / `run_cli`，共 56 处）
+
+| 文件 | 数量 | 备注 |
+| --- | --- | --- |
+| `voice/line.py` | 15 | 依赖 `cli/commands/line.py` 的行写逻辑：建议把 `normalize_chapter_indexes`、`ordinal_map`、`cmd_line_list` 的派生行数据下沉 `application/production/line_ops.py` 与 `line_list.py` |
+| `media.py` | 8 | `line list`（章节台词表）、`media sfx/image/video run`、`export --format jianying`、`timeline build`；后三者是长任务，走 `executor.run_application` |
+| `jobs.py` | 7 | 队列入队/停止/批量，需把 `cli queue ...` 的进程启动改为应用入口 |
+| `story/chapter.py` | 4 | `summarize`、`generate`、`import` 等；generate/summarize 已在离线清单里验证过 |
+| `cast/characters.py` | 4 | `character generate` / `image` / `merge` |
+| `story/chapters.py` | 3 | 仅 1 个实际调用：`line list`（与 media.py 同一份下沉即可） |
+| `script.py` | 3 | `script suggest` / `apply` / 流式建议 |
+| `cast/cast.py` | 3 | `cast check` / `capture` / `fill` |
+
+### 比对口径（沿用）
+
+- 环境：`/tmp/ndw_s6/{base(旧 worktree),old_tt1,new_tt1,config-*.yaml}`；脚本 `compare_step*.py`、`check_require.py`、`probe_long_mix.py`。
+- 每次重建：`rm -rf old_tt1 new_tt1 && cp -R /Volumes/other/ndw_runs/tt1 ...`，旧服务 8903 / 新服务 8904。
+- 归一化：工程路径（含 `/private` 前缀）、时间戳、`[a-z]{3}_<26 位 ID>`、`elapsed_ms`、`peak_rss_mb`。
+- 错误路径要按状态码逐条比对；唯一允许的既定变化是「缺参 500 → 400」（`9f2a329`）与「拒绝执行 409 → 412」（`a2544c5`）。
+
+### 收尾（全部迁完后）
+
+1. 删除 `interface/http/cli_bridge.py` 与 `deps.run_cli`、`routers/common._respond*`。
+2. `scripts/check_layering.py` 增加规则：`interface/**` 禁止 `subprocess` 调用 `novel_drama.cli`。
+3. 再进 `chapter.scenes` 四步（读入口 → Line 值对象 → 单一写点 → 删字段）。
