@@ -1,5 +1,1 @@
-"""展示层：本地 Web 工作台的 HTTP 接口。"""
-
-from .app import create_app, serve
-
-__all__ = ["create_app", "serve"]
+"""展示层遗留模块：Web 调 CLI 的动作封装与页面用例（HTTP 路由已迁至 `interface/http`）。"""

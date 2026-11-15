@@ -10,11 +10,13 @@ from __future__ import annotations
 
 from fastapi import HTTPException
 
-from ..adapters.errors import AdapterError
-from ..adapters.persistence import ProjectStore
-from ..application.story.continue_chapter import continue_chapter, load_continue_draft
-from ..application.story.continue_outline import continue_outline
-from ..infrastructure.config import load_config
+from novel_drama.application.story.continue_chapter import (
+    continue_chapter,
+    load_continue_draft,
+)
+from novel_drama.application.story.continue_outline import continue_outline
+from novel_drama.composition import AdapterError, ProjectStore
+from novel_drama.infrastructure.config import load_config
 
 
 def _store(path: str | None) -> ProjectStore:

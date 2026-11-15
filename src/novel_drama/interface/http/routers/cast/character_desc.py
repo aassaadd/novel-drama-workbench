@@ -10,11 +10,11 @@ from __future__ import annotations
 from fastapi import HTTPException
 from fastapi.responses import StreamingResponse
 
-from ..adapters.persistence import ProjectStore
-from ..application.cast.character_plan import fill_character_descriptions
-from ..application.production.job_tracker import UiJob
-from ..infrastructure.config import load_config
-from .stream_api import _progress_response
+from novel_drama.application.cast.character_plan import fill_character_descriptions
+from novel_drama.application.production.job_tracker import UiJob
+from novel_drama.composition import ProjectStore
+from novel_drama.infrastructure.config import load_config
+from novel_drama.interface.http.routers.stream import _progress_response
 
 
 def register_character_desc_routes(app, config_path: str | None = None) -> None:

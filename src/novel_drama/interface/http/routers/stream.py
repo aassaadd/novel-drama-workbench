@@ -23,31 +23,31 @@ import time
 from fastapi import HTTPException
 from fastapi.responses import StreamingResponse
 
-from ..adapters.errors import AdapterError
-from ..adapters.observability import set_llm_abort_reason
-from ..adapters.persistence import ProjectStore
-from ..application.cast.character_plan import (
+from novel_drama.application.cast.character_plan import (
     generate_from_plan,
     load_plan,
     plan_characters,
 )
-from ..application.cast.generate_characters import generate_characters
-from ..application.production.job_tracker import UiJob
-from ..application.script.annotate import suggest_script
-from ..application.story.act_batch import (
+from novel_drama.application.cast.generate_characters import generate_characters
+from novel_drama.application.production.job_tracker import UiJob
+from novel_drama.application.script.annotate import suggest_script
+from novel_drama.application.story.act_batch import (
     ActBatchCanceled,
     generate_act_chapters,
     resolve_act,
 )
-from ..application.story.chapter_limits import DEFAULT_CHAPTER_WORDS
-from ..application.story.continue_chapter import continue_chapter
-from ..application.story.generate_chapter import generate_chapter
-from ..application.story.generate_outline import generate_outline
-from ..application.story.outline_expand import expand_outline
-from ..application.story.outline_hierarchical import generate_hierarchical_outline
-from ..application.story.settings_generate import generate_worlds
-from ..cancel import GenerationCanceled
-from ..infrastructure.config import load_config
+from novel_drama.application.story.chapter_limits import DEFAULT_CHAPTER_WORDS
+from novel_drama.application.story.continue_chapter import continue_chapter
+from novel_drama.application.story.generate_chapter import generate_chapter
+from novel_drama.application.story.generate_outline import generate_outline
+from novel_drama.application.story.outline_expand import expand_outline
+from novel_drama.application.story.outline_hierarchical import (
+    generate_hierarchical_outline,
+)
+from novel_drama.application.story.settings_generate import generate_worlds
+from novel_drama.cancel import GenerationCanceled
+from novel_drama.composition import AdapterError, ProjectStore, set_llm_abort_reason
+from novel_drama.infrastructure.config import load_config
 
 #: SSE 响应头：禁用缓存与反向代理缓冲，保证逐条到达浏览器
 _SSE_HEADERS = {
@@ -881,7 +881,7 @@ def register_stream_routes(app, config_path: str | None = None) -> None:
         返回:
             SSE：start → item/batch/chars* → done(result)；断线只退订不取消任务。
         """
-        from ..tts import voice_batch
+        from novel_drama.tts import voice_batch
 
         store = _store(body.get("path"))
         if not voice_batch.read_job(store, job_id):
@@ -909,7 +909,7 @@ def register_stream_routes(app, config_path: str | None = None) -> None:
             SSE：start → scan/item/progress* → finished(job, stats)；
             断线只退订，不会取消服务端任务（停止请调用 fill/stop）。
         """
-        from ..tts import voice_fill
+        from novel_drama.tts import voice_fill
 
         store = _store(body.get("path"))
         if not voice_fill.read_job(store):
@@ -938,7 +938,7 @@ def register_stream_routes(app, config_path: str | None = None) -> None:
             SSE：start → stage/batch/chars/candidate/candidate_error* → done(result)；
             断线只退订，不会取消服务端任务（中断请调用 cancel 接口）。
         """
-        from ..tts import voice_design
+        from novel_drama.tts import voice_design
 
         store = _store(body.get("path"))
         if not voice_design.read_batch(store, batch_id):
@@ -990,8 +990,8 @@ def register_stream_routes(app, config_path: str | None = None) -> None:
                 result["markup_path"] = str(out_path)
             # 有失败批次时不应用，避免把不完整的标注写入章节
             if body.get("apply") and not result.get("partial"):
-                from ..adapters.persistence.schema_validator import validate
-                from ..cli_voice import _apply_script_to_chapter
+                from novel_drama.cli_voice import _apply_script_to_chapter
+                from novel_drama.composition import validate
 
                 validate(result["script"], "director-script.schema.json")
                 store.save_script(result["script"])
@@ -1024,9 +1024,9 @@ def register_stream_routes(app, config_path: str | None = None) -> None:
         if not markup:
             raise HTTPException(status_code=400, detail="没有可写入的标注内容：请先生成预览")
 
-        from ..adapters.persistence.schema_validator import validate
-        from ..cli_voice import _apply_script_to_chapter
-        from ..director.markup import parse_markup
+        from novel_drama.cli_voice import _apply_script_to_chapter
+        from novel_drama.composition import validate
+        from novel_drama.director.markup import parse_markup
 
         chapter = store.load_chapter(chapter_id)
         characters = store.load_characters()["characters"]

@@ -15,8 +15,8 @@ from pathlib import Path
 
 from fastapi import HTTPException, Request
 
-from ..adapters.persistence import ProjectStore
-from ..models.ids import now_iso
+from novel_drama.composition import ProjectStore
+from novel_drama.models.ids import now_iso
 
 #: 允许上传的音频后缀
 ALLOWED_SUFFIX = {".mp3", ".wav", ".m4a"}
@@ -150,7 +150,7 @@ def _speech_intervals(path: Path) -> list[tuple[float, float]]:
     异常:
         HTTPException: ffmpeg 缺失或执行失败。
     """
-    from ..adapters.media.ffmpeg import run
+    from novel_drama.composition import run
 
     try:
         result = run(
@@ -172,7 +172,7 @@ def _speech_intervals(path: Path) -> list[tuple[float, float]]:
         hours, minutes, seconds = duration_match.groups()
         total = int(hours) * 3600 + int(minutes) * 60 + float(seconds)
     if not total:
-        from ..adapters.media.ffmpeg import probe_duration_ms
+        from novel_drama.composition import probe_duration_ms
 
         total = probe_duration_ms(path) / 1000
     intervals: list[tuple[float, float]] = []
@@ -196,7 +196,7 @@ def _convert_upload(raw: Path, target: Path) -> None:
     异常:
         HTTPException: 转码失败。
     """
-    from ..adapters.media.ffmpeg import run
+    from novel_drama.composition import run
 
     try:
         run(
@@ -222,7 +222,7 @@ def _cut_segment(source: Path, target: Path, start_s: float, end_s: float) -> in
     返回:
         片段时长（毫秒）。
     """
-    from ..adapters.media.ffmpeg import probe_duration_ms, run
+    from novel_drama.composition import probe_duration_ms, run
 
     run(
         [
@@ -247,7 +247,7 @@ def _apply_take(store: ProjectStore, line: dict, rel: str, duration_ms: int, tas
         duration_ms: 音频时长。
         task_id: 对轨任务 ID，记进版本元数据。
     """
-    from .voice_tools_api import _load_takes, _save_takes
+    from novel_drama.interface.http.routers.voice.tools import _load_takes, _save_takes
 
     revision = int(line.get("revision") or 1) + 1
     line["revision"] = revision
@@ -424,7 +424,7 @@ def register_align_routes(app, config_path: str | None = None) -> None:
 
         if task["status"] == "ready" and config_path is not None:
             # 已有时间轴时重建，让新写入的录音立刻进入时间轴
-            from .actions import run
+            from novel_drama.web.actions import run
 
             for chapter in chapters:
                 if store.timeline_path(chapter["id"]).exists():

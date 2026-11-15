@@ -10,20 +10,21 @@ import logging
 
 from fastapi import HTTPException
 
-from ..adapters.errors import AdapterError, ErrorCode
-from ..adapters.media.bgm import load_cues
-from ..adapters.media.music import (
+from novel_drama.bgm.registry import build_providers, pick_provider
+from novel_drama.composition import (
     LONG_BED_SECONDS,
     MODE_BED,
     MODE_LABELS,
     MODE_NARRATIVE,
+    AdapterError,
+    ErrorCode,
+    ProjectStore,
+    load_cues,
     load_generation_records,
     render_bgm,
     resolve_mode,
 )
-from ..adapters.persistence import ProjectStore
-from ..bgm.registry import build_providers, pick_provider
-from ..infrastructure.config import load_config
+from novel_drama.infrastructure.config import load_config
 
 logger = logging.getLogger(__name__)
 

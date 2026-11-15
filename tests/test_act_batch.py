@@ -27,8 +27,8 @@ from novel_drama.application.story.act_batch import (
 from novel_drama.application.story.apply_outline import apply_outline
 from novel_drama.application.story.generate_outline import generate_outline
 from novel_drama.infrastructure.config import load_config
+from novel_drama.interface.http.app import create_app
 from novel_drama.models import entities
-from novel_drama.web.app import create_app
 
 
 class ActBatchTest(unittest.TestCase):

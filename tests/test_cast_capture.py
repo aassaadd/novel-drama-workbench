@@ -354,7 +354,7 @@ def test_llm_plan_endpoint(tmp_path: Path) -> None:
     """接口层：未登记动作返回 400，正常动作返回统一字段。"""
     from fastapi.testclient import TestClient
 
-    from novel_drama.web.app import create_app
+    from novel_drama.interface.http.app import create_app
 
     store, _config, chapters = _project(tmp_path)
     client = TestClient(create_app(project_root=str(store.root), config_path=str(tmp_path / "offline.yaml")))
@@ -390,7 +390,7 @@ def test_cast_pending_and_status_endpoints(tmp_path: Path) -> None:
     """接口层：待定队列可读、可建卡；状态口径与补跑计划一致；手动补跑可启动。"""
     from fastapi.testclient import TestClient
 
-    from novel_drama.web.app import create_app
+    from novel_drama.interface.http.app import create_app
 
     store, _config, chapters = _project(tmp_path)
     capture_chapter_cast(store, chapters[0]["id"], adapter=CastAdapter(_cast_rows("林九斤")))

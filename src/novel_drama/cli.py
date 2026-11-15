@@ -948,7 +948,7 @@ def cmd_pipeline(args, config: AppConfig) -> int:
 
 def cmd_serve(args, config: AppConfig) -> int:
     """启动本地 Web 工作台。"""
-    from .web.app import serve
+    from .interface.http.app import serve
 
     root = args.project or config.project_root
     serve(

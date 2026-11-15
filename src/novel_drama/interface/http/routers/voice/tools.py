@@ -21,10 +21,9 @@ from pathlib import Path
 
 from fastapi import HTTPException, Request
 
-from ..adapters.persistence import ProjectStore
-from ..adapters.persistence.queue_store import QueueStore
-from ..infrastructure.config import load_config
-from .actions import fail_body, run
+from novel_drama.composition import ProjectStore, QueueStore
+from novel_drama.infrastructure.config import load_config
+from novel_drama.web.actions import fail_body, run
 
 #: 单行重录串行锁：同一时间只允许一个重录，避免两个进程同时改同一章
 _RERUN_LOCK = threading.Lock()
@@ -173,7 +172,7 @@ def _safe_duration(path: Path) -> int:
         时长毫秒。
     """
     try:
-        from ..adapters.media.ffmpeg import probe_duration_ms
+        from novel_drama.composition import probe_duration_ms
 
         return int(probe_duration_ms(path) or 0)
     except Exception:  # noqa: BLE001 - 探测失败不应阻断版本列表
@@ -437,288 +436,14 @@ def _prune_previews(folder: Path, keep: int = PREVIEW_KEEP) -> int:
 
 
 #: 音色校验错误码 → 页面上给用户看的直白说法（不出现错误码等内部术语）
-_CAST_BLOCKER_TEXT = {
-    "VOICE_PROFILE_MISSING": {
-        "label": "还没有音色描述",
-        "detail": "人物档案里没有音色描述，系统无法为这个角色准备音色。",
-        "action": "去补音色",
-    },
-    "VOICE_BINDING_UNRESOLVED": {
-        "label": "还没有可用音色",
-        "detail": "这个角色没有绑定能用的音色，相关台词配音时会失败。",
-        "action": "去补音色",
-    },
-    "VOICE_VARIANT_NOT_READY": {
-        "label": "音色还没准备好",
-        "detail": "绑定的音色还没生成完成或已经不可用，需要换一个能用的音色。",
-        "action": "去换音色",
-    },
-    "STOCK_SLOT_CONFLICT": {
-        "label": "和别的角色共用了同一个龙套名额",
-        "detail": "同一个龙套名额只能对应一个角色，否则两个角色会混用同一条音色。",
-        "action": "去角色页处理",
-    },
-    "CHAPTER_OVERRIDE_FORBIDDEN": {
-        "label": "单独换了音色",
-        "detail": "只有旁白和龙套可以按章换音色，这个角色要跟随全局音色。",
-        "action": "去调整音色",
-    },
-    "NARRATOR_SWITCH_ILLEGAL": {
-        "label": "旁白换了音色但没登记切换点",
-        "detail": "旁白换声要登记从哪一章开始切换，否则前面的章节也会跟着变。",
-        "action": "去登记切换点",
-    },
-    "NARRATOR_DRIFT": {
-        "label": "旁白音色前后不一致",
-        "detail": "不同章节的旁白用了不同音色，但没有登记切换点，听感会突然变化。",
-        "action": "去登记切换点",
-    },
-    "CHARACTER_VOICE_DRIFT": {
-        "label": "在不同章节用了不同音色",
-        "detail": "同一个角色的音色应当全剧统一，这里解析到了两种以上音色。",
-        "action": "去核对音色",
-    },
-    "BGM_PLAN_MISSING": {
-        "label": "有镜头没规划 BGM",
-        "detail": "工程开启了严格 BGM 检查，有镜头没规划 BGM 会挡住本次配音。",
-        "action": "去补 BGM",
-        "target": "chapter",
-    },
-}
-
-
-def _blocker(
-    code: str,
-    title: str,
-    detail: str,
-    action: dict,
-    *,
-    count: int = 0,
-    unit: str = "处",
-    chapters: list[str] | None = None,
-    skippable: bool = False,
-) -> dict:
-    """构造一条阻断项（页面直接展示，不暴露内部错误码）。
-
-    参数:
-        code: 内部错误码，仅用于排查。
-        title: 一行能看懂的结论（名称）。
-        detail: 为什么阻断。
-        action: 下一步 `{label, kind, chapter_id?, line_id?, character_id?, act?}`。
-        count: 影响数量（台词行数 / 处数）。
-        unit: 数量单位（「行」或「处」）。
-        chapters: 涉及的章节标题。
-        skippable: 是否可由用户选择跳过（如未指定说话人的行）。
-
-    返回:
-        阻断项 dict。
-    """
-    return {
-        "code": code,
-        "title": title,
-        "detail": detail,
-        "count": int(count or 0),
-        "unit": unit,
-        "chapters": list(dict.fromkeys([item for item in chapters or [] if item])),
-        "action": action,
-        "skippable": bool(skippable),
-    }
-
-
-def _chapter_labels(store: ProjectStore) -> dict[str, str]:
-    """章节 ID → 页面可读的章节名（`第 3 章《标题》`）。"""
-    labels = {}
-    for item in store.list_chapters():
-        index = item.get("index")
-        title = item.get("title") or ""
-        prefix = f"第 {index} 章" if index else "章节"
-        labels[item.get("id")] = f"{prefix}《{title}》" if title else prefix
-    return labels
-
-
-def _split_blockers(store: ProjectStore, scope: str, chapter_id: str | None, lines_total: int) -> list[dict]:
-    """「还没有切分台词」的阻断项：说明为什么没有可配音的行，并给出切分入口。
-
-    参数:
-        store: 工程。
-        scope: `chapter` 或 `all`。
-        chapter_id: scope=chapter 时的章节 ID。
-        lines_total: 本次范围内的台词行数。
-
-    返回:
-        阻断项列表（有台词行时为空）。
-    """
-    if scope == "chapter" and chapter_id:
-        try:
-            chapter = store.load_chapter(chapter_id)
-        except FileNotFoundError:
-            return []
-        lines = sum(
-            1
-            for scene in chapter.get("scenes") or []
-            for line in scene.get("lines") or []
-            if (line.get("text") or "").strip()
-        )
-        if lines:
-            return []
-        words = int(chapter.get("word_count") or 0)
-        scenes = len(chapter.get("scenes") or [])
-        if scenes:
-            detail = f"正文 {words} 字、场景 {scenes} 个，但一句台词都没切出来，配音没有可处理的内容。"
-        else:
-            detail = f"正文 {words} 字，但场景和台词都还没切分，配音没有可处理的内容。"
-        return [
-            _blocker(
-                "NO_LINES",
-                "本章还没有切分出台词",
-                detail,
-                {"label": "去画本切分场景与台词", "kind": "chapter", "chapter_id": chapter_id, "act": "split"},
-                chapters=[chapter.get("title") or ""],
-            )
-        ]
-    if lines_total <= 0:
-        return [
-            _blocker(
-                "NO_LINES",
-                "所选章节都还没有切分出台词",
-                "正文保存后会自动切分场景与台词；没有台词就没有可以配音的行。",
-                {"label": "去小说页处理", "kind": "novel"},
-            )
-        ]
-    return []
-
-
-def _cast_blockers(
-    store: ProjectStore,
-    findings: list[dict],
-    unknown_ids: set[str],
-    labels: dict[str, str],
-    fallback_label: str = "",
-) -> list[dict]:
-    """把音色/BGM 校验错误翻译成逐条、可操作的阻断项。
-
-    同一角色 / 同一章节的同类问题会按行重复几十条，这里按「错误码 + 角色或章节」
-    聚合，页面只出现一条带数量与章节的可读说明。
-
-    参数:
-        store: 工程。
-        findings: `cast check` 的 findings。
-        unknown_ids: 已由用户选择跳过的未识别说话人行 ID。
-        labels: 章节 ID → 可读章节名。
-        fallback_label: 角色级问题没有章节信息时，补上本次检查的章节名。
-
-    返回:
-        阻断项列表。
-    """
-    characters = {
-        item.get("id"): item for item in (store.load_characters().get("characters") or [])
-    }
-    grouped: dict[tuple, dict] = {}
-    for item in findings:
-        if item.get("level") != "error" or item.get("line_id") in unknown_ids:
-            continue
-        code = item.get("code") or ""
-        text = _CAST_BLOCKER_TEXT.get(code) or {
-            "label": "需要处理",
-            "detail": item.get("message") or "配音前的检查没有通过。",
-            "action": "去角色页查看",
-        }
-        character_id = item.get("character_id")
-        chapter_id = item.get("chapter_id")
-        key = (code, character_id or chapter_id or "")
-        bucket = grouped.setdefault(
-            key,
-            {
-                "code": code,
-                "text": text,
-                "character_id": character_id,
-                "chapter_id": chapter_id,
-                "count": 0,
-                "chapters": [],
-            },
-        )
-        bucket["count"] += 1
-        label = labels.get(chapter_id)
-        if label:
-            bucket["chapters"].append(label)
-
-    result: list[dict] = []
-    for bucket in grouped.values():
-        text = bucket["text"]
-        character_id = bucket["character_id"]
-        chapter_id = bucket["chapter_id"]
-        if character_id:
-            name = (characters.get(character_id) or {}).get("name") or "未命名角色"
-            title = f"角色「{name}」{text['label']}"
-        else:
-            title = f"{labels.get(chapter_id, '章节')}{text['label']}"
-        if text.get("target") == "chapter" and chapter_id:
-            action = {"label": text["action"], "kind": "chapter", "chapter_id": chapter_id}
-        elif character_id:
-            action = {"label": text["action"], "kind": "character", "character_id": character_id}
-        else:
-            action = {"label": text["action"], "kind": "characters"}
-        result.append(
-            _blocker(
-                bucket["code"],
-                title,
-                text["detail"],
-                action,
-                count=bucket["count"],
-                unit="行" if bucket["code"] in ("VOICE_BINDING_UNRESOLVED", "VOICE_VARIANT_NOT_READY") else "处",
-                chapters=bucket["chapters"] or ([fallback_label] if fallback_label else []),
-            )
-        )
-    return result
-
-
-def _unknown_speaker_blocker(unknown_rows: list[dict], unknown_total: int) -> dict | None:
-    """「说话人未识别」的阻断项：给出数量、章节与首个可定位的行。
-
-    参数:
-        unknown_rows: CLI 返回的未识别行明细。
-        unknown_total: 未识别行数。
-
-    返回:
-        阻断项；没有未识别行时返回 None。
-    """
-    if not unknown_total:
-        return None
-    first = unknown_rows[0] if unknown_rows else {}
-    chapters = [row.get("chapter_title") or "" for row in unknown_rows]
-    if first.get("chapter_id"):
-        action = {
-            "label": "去指定说话人",
-            "kind": "chapter",
-            "chapter_id": first.get("chapter_id"),
-            "line_id": first.get("line_id") or "",
-        }
-    else:
-        action = {"label": "去画本指定说话人", "kind": "characters"}
-    return _blocker(
-        "UNKNOWN_SPEAKER",
-        f"{unknown_total} 行台词没指定说话人",
-        "这些台词无法确定用谁的音色；可以先指定说话人，或在补齐时选择跳过这些行。",
-        action,
-        count=unknown_total,
-        unit="行",
-        chapters=chapters,
-        skippable=True,
-    )
-
-
-def _avg_ms_per_line(store: ProjectStore) -> int | None:
-    """从最近的批次报告估算「单行平均合成耗时」。
-
-    参数:
-        store: 工程。
-
-    返回:
-        毫秒/行；没有可用历史时返回 None。
-    """
-    from ..tts.batch import history_avg_ms_per_line
-
-    return history_avg_ms_per_line(store.root)
+from novel_drama.interface.http.routers.voice.blockers import (
+    _avg_ms_per_line,
+    _blocker,
+    _cast_blockers,
+    _chapter_labels,
+    _split_blockers,
+    _unknown_speaker_blocker,
+)
 
 
 def register_voice_tools_routes(app, config_path: str | None = None) -> None:
@@ -969,8 +694,8 @@ def register_voice_tools_routes(app, config_path: str | None = None) -> None:
                 handle.write(payload)
                 raw_path = Path(handle.name)
             try:
-                from ..adapters.media.ffmpeg import binary_available
-                from ..adapters.media.ffmpeg import run as ffmpeg_run
+                from novel_drama.composition import binary_available
+                from novel_drama.composition import run as ffmpeg_run
 
                 if not binary_available("ffmpeg"):
                     raise HTTPException(status_code=500, detail="未找到 ffmpeg，无法转码录音（macOS 可用 brew install ffmpeg）")
@@ -1177,15 +902,15 @@ def register_voice_tools_routes(app, config_path: str | None = None) -> None:
             HTTPException 400: 角色没有台词，或候选音色没有可用参考音频。
             HTTPException 500: 合成失败（中文原因）。
         """
-        from ..adapters.persistence.voice_store import (
+        from novel_drama.composition import (
             find_voice,
             pick_variant,
             resolve_for_character,
             variant_ref,
         )
-        from ..tts.errors import TtsError
-        from ..tts.service import TtsService
-        from ..tts.types import Requirement, VoiceRef
+        from novel_drama.tts.errors import TtsError
+        from novel_drama.tts.service import TtsService
+        from novel_drama.tts.types import Requirement, VoiceRef
 
         store = _store(body.get("path"))
         character_id = str(body.get("character_id") or "").strip()

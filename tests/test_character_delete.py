@@ -143,7 +143,7 @@ class CharacterDeleteTest(unittest.TestCase):
         """页面接口与用例同口径：未确认 412，确认后 200 并清理。"""
         from fastapi.testclient import TestClient
 
-        from novel_drama.web.app import create_app
+        from novel_drama.interface.http.app import create_app
 
         with TestClient(create_app(project_root=self.tmp.name)) as client:
             refs = client.get("/api/ui/characters/refs", params={"path": self.tmp.name, "character": self.target["id"]})

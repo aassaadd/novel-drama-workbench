@@ -133,7 +133,7 @@ class CharacterMergeTest(unittest.TestCase):
         """页面用到的三个接口：影响面、合并、本章新建。"""
         from fastapi.testclient import TestClient
 
-        from novel_drama.web.app import create_app
+        from novel_drama.interface.http.app import create_app
 
         config_path = Path(self.tmp.name) / "offline.yaml"
         config_path.write_text(

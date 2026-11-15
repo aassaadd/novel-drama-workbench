@@ -110,8 +110,8 @@ def test_output_budget_is_not_a_setting(tmp_path: Path, monkeypatch: pytest.Monk
     """设置页与接口不再暴露任何输出预算设置；状态接口只读。"""
     from fastapi.testclient import TestClient
 
-    from novel_drama.web import models_api
-    from novel_drama.web.app import create_app
+    from novel_drama.interface.http.app import create_app
+    from novel_drama.interface.http.routers import models_admin as models_api
 
     base = _write(tmp_path / "config.yaml", "omlx:\n  context_window: 65536\n")
     # 隔离真实页面覆盖层，避免本机 config.ui.yaml 里的上下文窗口干扰断言
@@ -151,8 +151,8 @@ def _generation_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """
     from fastapi.testclient import TestClient
 
-    from novel_drama.web import models_api
-    from novel_drama.web.app import create_app
+    from novel_drama.interface.http.app import create_app
+    from novel_drama.interface.http.routers import models_admin as models_api
 
     base = _write(tmp_path / "config.yaml", "")
     ui = tmp_path / "config.ui.yaml"
@@ -370,8 +370,8 @@ def test_thinking_global_switch_off_disables_everything(
     """全局总开关关闭时，所有调用点实际都不思考。"""
     from fastapi.testclient import TestClient
 
-    from novel_drama.web import models_api
-    from novel_drama.web.app import create_app
+    from novel_drama.interface.http.app import create_app
+    from novel_drama.interface.http.routers import models_admin as models_api
 
     base = _write(tmp_path / "config.yaml", "omlx:\n  enable_thinking: false\n")
     ui = tmp_path / "config.ui.yaml"
@@ -432,7 +432,7 @@ def test_finish_reason_length_is_reported() -> None:
 
 def test_stream_notices_cover_chapter_results() -> None:
     """整幕结果里的逐章提醒也会进任务通知，完成文案带上第一条与剩余条数。"""
-    from novel_drama.web.stream_api import (
+    from novel_drama.interface.http.routers.stream import (
         _emit_notices,
         _finish_message,
         _result_notices,

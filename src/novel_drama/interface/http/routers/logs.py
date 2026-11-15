@@ -19,8 +19,8 @@ import traceback
 from fastapi import HTTPException, Query
 from starlette.responses import Response
 
-from ..adapters import observability
-from ..infrastructure.config import load_config
+from novel_drama.composition import observability
+from novel_drama.infrastructure.config import load_config
 
 #: 需要记录日志的 HTTP 方法（只读 GET 不记）
 _MUTATING = {"POST", "PATCH", "PUT", "DELETE"}
