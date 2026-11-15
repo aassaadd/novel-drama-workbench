@@ -4,11 +4,13 @@ from __future__ import annotations
 
 from fastapi import HTTPException, Query
 
+from novel_drama.application.cast.cast_backfill import backfill_cast
 from novel_drama.infrastructure.config import load_config
-from novel_drama.interface.http.deps import run_cli, store_for
+from novel_drama.interface.http import use_cases
+from novel_drama.interface.http.deps import store_for
 from novel_drama.interface.http.routers.common import (
+    _require,
     _resolve_voice_binding,
-    _respond,
     _voice_binding_index,
     _watch_background_job,
 )
@@ -26,17 +28,6 @@ def register_cast_routes(app, project_root: str | None = None, config_path: str 
         无。
     """
     _store = store_for(project_root)
-
-    def _cli(*argv: str):
-        """按 `serve --config` 的同一份配置执行 CLI。
-
-        参数:
-            argv: 不含 `--config` 的参数串。
-
-        返回:
-            `actions.CliResult`。
-        """
-        return run_cli(config_path, *argv)
 
     def _tts_config():
         """读取本机配置（与 serve 同源），供音色相关接口使用。"""
@@ -570,11 +561,17 @@ def register_cast_routes(app, project_root: str | None = None, config_path: str 
         返回:
             `{changed, applied}`。
         """
-        path = body.get("path")
-        _store(path)
-        argv = ["--project", path, "--json", "cast", "backfill", "--profiles", "--apply"]
-        if body.get("all"):
-            argv.append("--all")
-        if body.get("force"):
-            argv.append("--force")
-        return _respond(_cli(*argv))
+        _require(body, "本接口需要 path（工程目录）", path="工程目录")
+        path = body["path"]
+        store = _store(path)
+        result = use_cases.call(
+            lambda: backfill_cast(
+                store,
+                _tts_config(),
+                apply=True,
+                force=bool(body.get("force")),
+                profiles=True,
+                all=bool(body.get("all")),
+            )
+        )
+        return {"changed": result["changed"], "applied": result["applied"]}
