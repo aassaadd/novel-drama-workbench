@@ -320,3 +320,46 @@
 
 已知沿用行为（未在本步改动）：`timeline build` 每次 +1 `revision`，`materialize_media` 每次 +1 场景 `revision`——因此「同一命令连跑两次 0 变化」对这两个构建类命令不成立，行编辑类命令成立。
 
+#### 9.5 步骤 4 方案（已确认，2026-11-16）
+
+**目标布局**
+
+| 文件 | 内容 | 角色 |
+| --- | --- | --- |
+| `chapters/<id>.json` | 章节元信息 + 正文（**无 `scenes`**） | 章节事实 |
+| `scenes/<id>.json` | `{schema_version, chapter_id, scenes:[...]}`，`tts` 按行 ID、媒体按条目 ID | 生产态投影 |
+| `scripts/<id>.json` | 镜头 + 台词行内容字段 | 内容唯一可写源 |
+
+**持久化（`ProjectStore`）**
+
+1. 新增 `scenes_path` / `load_scenes`（缺失返回 `[]`，不报错）/ `save_scenes`（原子写：临时文件 + `os.replace`；按 `scene.schema.json` 逐条校验）。
+2. `load_chapter` 读 `chapter.json` 后注入 `chapter["scenes"] = load_scenes(id)`，保持现有 92 处调用点形状不变；`save_chapter` 拆出 `scenes` 写生产文件、其余按新 `chapter.schema.json` 校验并原子写。
+3. `list_chapters` 的 `scene_count` 改读生产文件，不再依赖 `chapter.json`。
+
+**归档与回滚**
+
+1. `should_archive_version` 从「仅正文变化」扩为内容层任一变化：正文、台词行内容（`CONTENT_LINE_FIELDS` + `revision`）、场景结构（数量/顺序/`source_text`/`character_ids`）。仅 `tts` 状态或媒体条目变化不归档。
+2. 归档快照在旧章节之外追加 `script`（对应台本的镜头行内容），格式 `{...chapter, "script": {...}}`。
+3. `restore_chapter_version` 恢复正文 + 台本镜头行内容（内容字段），`revision` 继续 +1；生产态不随归档回退，孤儿行由自检告警兜底。
+4. 回滚实测：归档 → 改台词 → `chapter restore` → `line list` / `tts plan` / `timelines/` / `exports/` 与归档前逐字节一致。
+
+**打开工程自检（可见告警）**
+
+1. `ensure_scripts(store)`：缺台本的章节从生产态引导补台本，返回补了几个工程/章节；写盘动作，CLI 与页面都要显示摘要。
+2. `ensure_production(store)`：生产文件缺失按空生产态重建，不报错。
+3. 孤儿检查：生产文件里出现台本已不存在的行 ID，按孤儿处理（不参与渲染），返回明细 `[{chapter_id, line_id, text}]`，页面列出具体行而不是只写日志。
+4. 入口：`serve` 启动与 CLI 打开工程时执行；`NDW_SCENES_UPGRADE=off` 可关闭补台本。
+
+**schema**
+
+- `chapter.schema.json` 删除 `scenes` 属性；新增 `chapter-scenes.schema.json` 校验生产文件。
+
+**验收**
+
+1. 三套语料：新建工程跑 init → import → scene split → line split → annotate/apply → timeline/export 全链路；`line list`、`tts plan`、`timelines/`、`exports/` 与切换前基线逐字节一致。
+2. 原子写：写盘中途失败不产生半截文件；生产文件缺失/多余行 ID 两种用例按上述口径处理。
+3. 归档回滚实测通过；`pytest` 与分层守卫全绿。
+4. 真机页面走查：渲染、点击入口、控制台 0 warn 0 error。
+5. `main` 快进同步到步骤 4 末提交。
+
+
