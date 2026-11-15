@@ -492,3 +492,70 @@ def validate_chapter_binding(store: ProjectStore, chapter_id: str) -> dict:
         "pov_mode": binding.get("pov_mode"),
         "character_ids": sorted(valid),
     }
+
+
+def update_chapter_binding(
+    store: ProjectStore,
+    chapter_id: str,
+    world_ids: list[str] | None = None,
+    pov_character_id: str | None = None,
+    pov_mode: str | None = None,
+) -> dict:
+    """更新大纲某一章的世界 / POV 绑定（页面与 CLI 共用）。
+
+    参数:
+        store: 工程。
+        chapter_id: 大纲章节 ID（`chp_...`）。
+        world_ids: 新的世界 ID 列表；None 表示不改。
+        pov_character_id: 新的 POV 角色 ID；空串表示清空；None 表示不改。
+        pov_mode: 视角写法；None 表示不改。
+
+    返回:
+        `{chapter, world_ids, pov_character_id, pov_mode, settings_revision}`。
+
+    异常:
+        TaskFailedError: 大纲章节 / 世界条目 / 角色不存在。
+        ValueError: 三个绑定参数都没给。
+    """
+    from ...domain.shared.errors import TaskFailedError
+
+    settings = SettingsStore(store.root)
+    bible = settings.ensure()
+    chapter = settings.find_outline_chapter(bible, chapter_id)
+    if chapter is None:
+        raise TaskFailedError("大纲章节不存在")
+    if world_ids is None and pov_character_id is None and pov_mode is None:
+        raise ValueError("缺少绑定参数")
+
+    if world_ids is not None:
+        if world_ids:
+            known = {item.get("id") for item in WorldStore(store.root).ensure().get("worlds") or []}
+            missing = [world_id for world_id in world_ids if world_id not in known]
+            if missing:
+                raise TaskFailedError(f"世界条目不存在：{'、'.join(missing)}；请先在世界页生成世界")
+        chapter["world_ids"] = list(world_ids)
+
+    if pov_character_id is not None:
+        pov = pov_character_id.strip() or None
+        if pov is not None:
+            cast_ids = {item.get("id") for item in store.load_characters()["characters"]}
+            if pov not in cast_ids:
+                raise TaskFailedError(f"角色不存在：{pov}；请先在人物页生成人物")
+        chapter["pov_character_id"] = pov
+
+    bible = settings.save(bible)
+    # POV 以设定库为主源，同时写通章节副本，避免画本/大纲两处看到不同的值
+    sync_result = sync_chapter_pov(
+        store,
+        chapter_id,
+        chapter.get("pov_character_id"),
+        pov_mode=pov_mode or None,
+        update_mode=pov_mode is not None,
+    )
+    return {
+        "chapter": chapter_id,
+        "world_ids": chapter.get("world_ids") or [],
+        "pov_character_id": chapter.get("pov_character_id"),
+        "pov_mode": sync_result.get("pov_mode"),
+        "settings_revision": bible.get("settings_revision"),
+    }

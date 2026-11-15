@@ -5,16 +5,16 @@ from __future__ import annotations
 from fastapi import HTTPException, Query
 
 from novel_drama.application.story.apply_outline import apply_outline
+from novel_drama.application.story.generate_outline import generate_outline
+from novel_drama.application.story.outline_bind import update_chapter_binding
 from novel_drama.application.story.queries import (
     golden_check,
     outline_view,
 )
+from novel_drama.infrastructure.config import load_config
 from novel_drama.interface.http import use_cases
-from novel_drama.interface.http.deps import run_cli, store_for
-from novel_drama.interface.http.routers.common import (
-    _respond,
-    _respond_business,
-)
+from novel_drama.interface.http.deps import store_for
+from novel_drama.interface.http.routers.common import _require
 
 
 def register_story_outline_routes(app, project_root: str | None = None, config_path: str | None = None) -> None:
@@ -30,16 +30,7 @@ def register_story_outline_routes(app, project_root: str | None = None, config_p
     """
     _store = store_for(project_root)
 
-    def _cli(*argv: str):
-        """按 `serve --config` 的同一份配置执行 CLI。
-
-        参数:
-            argv: 不含 `--config` 的参数串。
-
-        返回:
-            `actions.CliResult`。
-        """
-        return run_cli(config_path, *argv)
+    _store = store_for(project_root)
 
     @app.get("/api/ui/outline")
     def ui_outline(path: str = Query(...)):
@@ -57,13 +48,36 @@ def register_story_outline_routes(app, project_root: str | None = None, config_p
         返回:
             CLI 的 JSON 负载（含 validation / summary）。
         """
-        argv = ["--project", body["path"], "--json", "outline", "generate"]
-        for key, flag in (("acts", "--acts"), ("chapters_per_act", "--chapters-per-act"), ("beats_per_chapter", "--beats-per-chapter"), ("words", "--words")):
+        _require(body, "本接口需要 path（工程目录）", path="工程目录")
+        store = _store(body["path"])
+        options: dict[str, int] = {}
+        for key in ("acts", "chapters_per_act", "beats_per_chapter"):
             if body.get(key) is not None:
-                argv += [flag, str(body[key])]
-        if body.get("dry_run"):
-            argv.append("--dry-run")
-        return _respond(_cli(*argv))
+                try:
+                    options[key] = int(body[key])
+                except (TypeError, ValueError):
+                    raise HTTPException(
+                        status_code=400,
+                        detail={"code": 2, "message": f"{key} 必须是整数"},
+                    )
+        words = body.get("words")
+        chapter_words = 1200
+        if words is not None:
+            try:
+                chapter_words = int(words)
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400, detail={"code": 2, "message": "words 必须是整数"})
+        return use_cases.call(
+            lambda: generate_outline(
+                store,
+                load_config(config_path),
+                acts=options.get("acts", 3),
+                chapters_per_act=options.get("chapters_per_act", 3),
+                beats_per_chapter=options.get("beats_per_chapter", 3),
+                chapter_words=chapter_words,
+                dry_run=bool(body.get("dry_run")),
+            )
+        )
 
     @app.post("/api/ui/outline/apply")
     def ui_outline_apply(body: dict) -> dict:
@@ -94,17 +108,29 @@ def register_story_outline_routes(app, project_root: str | None = None, config_p
         chapter = body.get("chapter")
         if not chapter:
             raise HTTPException(status_code=400, detail={"code": 2, "message": "缺少 chapter 参数"})
-        argv = ["--project", path, "--json", "outline", "bind", "--chapter", str(chapter)]
-        if body.get("world_ids") is not None:
-            world_ids = body["world_ids"]
-            if isinstance(world_ids, list):
-                world_ids = ",".join(str(item) for item in world_ids)
-            argv += ["--worlds", str(world_ids)]
-        if body.get("pov_character_id") is not None:
-            argv += ["--pov", str(body["pov_character_id"])]
-        if body.get("pov_mode") is not None:
-            argv += ["--pov-mode", str(body["pov_mode"])]
-        return _respond_business(_cli(*argv))
+        store = _store(path)
+        world_ids = body.get("world_ids")
+        if world_ids is not None:
+            if isinstance(world_ids, str):
+                world_ids = [item.strip() for item in world_ids.split(",") if item.strip()]
+            else:
+                world_ids = [str(item) for item in world_ids]
+        return use_cases.call(
+            lambda: update_chapter_binding(
+                store,
+                str(chapter),
+                world_ids=world_ids,
+                pov_character_id=(
+                    None
+                    if body.get("pov_character_id") is None
+                    else str(body["pov_character_id"])
+                ),
+                pov_mode=(
+                    None if body.get("pov_mode") is None else str(body["pov_mode"])
+                ),
+            ),
+            business=True,
+        )
 
     @app.post("/api/ui/outline/pov")
     def ui_outline_pov(body: dict) -> dict:

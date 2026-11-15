@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import re
 
+from novel_drama.application.story.outline_bind import update_chapter_binding
 from novel_drama.application.story.queries import golden_check
-from novel_drama.composition import SettingsStore, WorldStore
+from novel_drama.domain.shared.errors import TaskFailedError
 from novel_drama.infrastructure.config import AppConfig
 from novel_drama.interface.cli.commands.continuation import cmd_outline_continue
 from novel_drama.interface.cli.commands.writing import cmd_outline
@@ -63,63 +64,30 @@ def cmd_outline_bind(args, config: AppConfig) -> int:
         无：错误以返回值 + 中文提示表达。
     """
     store = _resolve_store(args, config)
-    settings = SettingsStore(store.root)
-    bible = settings.ensure()
-    chapter = settings.find_outline_chapter(bible, args.chapter)
-    if chapter is None:
-        _emit(
-            args,
-            f"大纲章节不存在: {args.chapter}（先用 ndw outline generate / apply 生成大纲）",
-            {"chapter": args.chapter, "message": "大纲章节不存在"},
-        )
-        return EXIT_FAILED
-
     raw_worlds = getattr(args, "worlds", None)
     raw_pov = getattr(args, "pov", None)
     raw_pov_mode = getattr(args, "pov_mode", None)
-    if raw_worlds is None and raw_pov is None and raw_pov_mode is None:
-        _emit(args, "至少给 --worlds / --pov / --pov-mode 之一", {"chapter": args.chapter, "message": "缺少绑定参数"})
+    try:
+        payload = update_chapter_binding(
+            store,
+            args.chapter,
+            world_ids=_split_ids(raw_worlds) if raw_worlds is not None else None,
+            pov_character_id=raw_pov if raw_pov is not None else None,
+            pov_mode=raw_pov_mode if raw_pov_mode is not None else None,
+        )
+    except TaskFailedError as exc:
+        text = str(exc)
+        if text == "大纲章节不存在":
+            text = f"大纲章节不存在: {args.chapter}（先用 ndw outline generate / apply 生成大纲）"
+        _emit(args, text, {"chapter": args.chapter, "message": str(exc)})
+        return EXIT_FAILED
+    except ValueError:
+        _emit(
+            args,
+            "至少给 --worlds / --pov / --pov-mode 之一",
+            {"chapter": args.chapter, "message": "缺少绑定参数"},
+        )
         return 2
-
-    if raw_worlds is not None:
-        world_ids = _split_ids(raw_worlds)
-        if world_ids:
-            known = {item.get("id") for item in WorldStore(store.root).ensure().get("worlds") or []}
-            missing = [world_id for world_id in world_ids if world_id not in known]
-            if missing:
-                message = f"世界条目不存在：{'、'.join(missing)}；请先在世界页生成世界"
-                _emit(args, message, {"chapter": args.chapter, "message": message})
-                return EXIT_FAILED
-        chapter["world_ids"] = world_ids
-
-    if raw_pov is not None:
-        pov = raw_pov.strip() or None
-        if pov is not None:
-            cast_ids = {item.get("id") for item in store.load_characters()["characters"]}
-            if pov not in cast_ids:
-                message = f"角色不存在：{pov}；请先在人物页生成人物"
-                _emit(args, message, {"chapter": args.chapter, "message": message})
-                return EXIT_FAILED
-        chapter["pov_character_id"] = pov
-
-    bible = settings.save(bible)
-    # POV 以设定库为主源，同时写通章节副本，避免画本/大纲两处看到不同的值
-    from novel_drama.application.story.outline_bind import sync_chapter_pov
-
-    sync_result = sync_chapter_pov(
-        store,
-        args.chapter,
-        chapter.get("pov_character_id"),
-        pov_mode=(getattr(args, "pov_mode", None) or None),
-        update_mode=getattr(args, "pov_mode", None) is not None,
-    )
-    payload = {
-        "chapter": args.chapter,
-        "world_ids": chapter.get("world_ids") or [],
-        "pov_character_id": chapter.get("pov_character_id"),
-        "pov_mode": sync_result.get("pov_mode"),
-        "settings_revision": bible.get("settings_revision"),
-    }
     _emit(
         args,
         f"已更新章节绑定 {args.chapter}：世界 {len(payload['world_ids'])} 个，POV {payload['pov_character_id'] or '未设置'}",
