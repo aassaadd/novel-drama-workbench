@@ -37,7 +37,9 @@ var/logs/
 2026-11-12/bgm-codes-ab/outputs/A_codes_on_norm.wav
 config/config.ui.yaml
 .trae-html-share-packages
-docs/
+# 文档目录默认不入库；只放行架构方案文档（docs/architecture-*.md）
+docs/*
+!docs/architecture-*.md
 design/
 
 # 内部参考 / 功能核验资料（含来源与对照细节，不入库；原件备份在仓库外）
