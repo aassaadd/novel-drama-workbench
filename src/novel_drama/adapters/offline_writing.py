@@ -54,6 +54,27 @@ NARRATION_POOL = (
 EMOTION_CYCLE = ("neutral", "tender", "sad", "angry", "surprise", "fear", "joy")
 # 镜头时间候选
 TIME_CYCLE = ("night", "day", "dusk", "morning")
+# 叙述句尾池：与 NARRATION_POOL 组合，保证离线正文不出现重复句（避免退化检测误报）
+NARRATION_TAILS = (
+    "像是要确认什么。",
+    "没有人接话。",
+    "声音轻得几乎听不见。",
+    "这句话谁也没有接。",
+    "屋里只剩下风声。",
+    "两个人都停了一下。",
+    "像是早就料到会这样。",
+    "没有人解释。",
+)
+# 叙述主语 / 动作池：组合出足量且互不雷同的短句，离线正文与补写都用它，
+# 避免同一片段反复出现触发退化熔断
+NARRATION_SUBJECTS = (
+    "他", "她", "两个人", "门外的人", "楼道里的灯", "风", "雨声", "桌上的杯子",
+    "窗缝里的光", "楼下的门", "墙上的钟", "巷口的车",
+)
+NARRATION_ACTIONS = (
+    "又停了一下", "慢慢移开", "没有立刻回应", "把声音压低", "顺着墙边过去", "在原地等了很久",
+    "被风吹得晃了晃", "始终没有动", "落在地砖上", "亮了一瞬又暗下去", "响了半声就断", "再没有出现",
+)
 
 # ---------- 设定生成素材（确定性抽取，保证离线可复现） ----------
 WORLD_ERAS = (
@@ -156,6 +177,8 @@ class OfflineWritingAdapter:
             text = self._chapter(meta, req)
         elif task == "chapter_compress":
             text = self._chapter_compress(meta)
+        elif task == "chapter_supplement":
+            text = self._chapter_supplement(meta)
         elif task == "summarize":
             text = self._summarize(meta)
         elif task == "recap":
@@ -178,7 +201,7 @@ class OfflineWritingAdapter:
             text = self._freeform(req)
         else:
             raise ValueError(
-                f"离线写作不支持的 task={task!r}（可选 outline/chapter/chapter_compress/summarize/recap/character_updates/consistency/script/image_prompt/setting/character/polish/freeform）"
+                f"离线写作不支持的 task={task!r}（可选 outline/chapter/chapter_compress/chapter_supplement/summarize/recap/character_updates/consistency/script/image_prompt/setting/character/polish/freeform）"
             )
         return TextGenResult(
             text=text,
@@ -448,6 +471,7 @@ class OfflineWritingAdapter:
         target_total = max(200, int(meta.get("target_words") or 1200))
         per_beat = max(120, target_total // max(1, len(beats)))
         rng = self._rng(meta, "chapter")
+        used: set[str] = set()
         paragraphs: list[str] = []
 
         for beat_index, beat in enumerate(beats):
@@ -462,7 +486,7 @@ class OfflineWritingAdapter:
             other = present[1] if len(present) > 1 else present[0]
             # 叙述段：把节拍摘要展开成两句可读叙述
             paragraphs.append(f"{lead}停在门口，先看了一眼屋里的人。{summary}。")
-            paragraphs.append(rng.choice(NARRATION_POOL))
+            paragraphs.append(self._narration(rng, used))
             # 对白段：说话人名字必须出现在引号前 30 字内，供规则切分识别
             line_text = self._dialogue_line(summary, beat_index, rng)
             catchphrases = [
@@ -474,10 +498,10 @@ class OfflineWritingAdapter:
                 # 口头禅直接进入对白，便于验证「说话方式」确实影响了输出
                 line_text = f"{catchphrases[beat_index % len(catchphrases)]}……{line_text}"
             paragraphs.append(f"{other}把手里的东西放下，看着他：“{line_text}”")
-            paragraphs.append(f"{lead}没有马上接话。{rng.choice(NARRATION_POOL)}")
+            paragraphs.append(f"{lead}没有马上接话。{self._narration(rng, used)}")
             # 补足该节拍目标字数
             while self._count_words("\n\n".join(paragraphs)) < per_beat * (beat_index + 1):
-                paragraphs.append(rng.choice(NARRATION_POOL))
+                paragraphs.append(self._narration(rng, used))
                 if len(paragraphs) > 400:
                     break
             if beat.get("turning_point"):
@@ -511,12 +535,78 @@ class OfflineWritingAdapter:
             lines.append(f"【节拍 {index + 1}】{summary}。")
         return "\n\n".join(lines)
 
+    def _chapter_supplement(self, meta: dict) -> str:
+        """离线补写：按未覆盖要点逐段输出「【补写节拍 N】」，并按缺口字数补足叙述。
+
+        供离线用例验证「补写必须覆盖要求的要点、且只追加不改写」的解析与合并逻辑，
+        不追求文采。
+
+        参数:
+            meta: 请求元数据（含 uncovered_beats / gap_words / before_words）。
+
+        返回:
+            带「【补写节拍 N】」标记的新增正文（无未覆盖要点时返回纯叙述段）。
+        """
+        uncovered = [item for item in (meta.get("uncovered_beats") or []) if isinstance(item, dict)]
+        try:
+            gap_words = max(0, int(meta.get("gap_words") or 0))
+        except (TypeError, ValueError):
+            gap_words = 0
+        rng = self._rng(meta, "chapter-supplement")
+        used: set[str] = set()
+        if not uncovered:
+            return self._fill_paragraphs(max(120, gap_words), rng, "章末顺延续写。", used)
+        per_beat = max(120, gap_words // len(uncovered)) if gap_words else 200
+        blocks = []
+        for item in uncovered:
+            number = int(item.get("index") or 0)
+            summary = str(item.get("summary") or "").strip() or "情节继续推进"
+            body = self._fill_paragraphs(per_beat, rng, summary, used)
+            blocks.append(f"【补写节拍 {number}】\n{body}")
+        return "\n\n".join(blocks).strip() + "\n"
+
+    def _fill_paragraphs(self, target_words: int, rng: random.Random, lead: str, used: set[str]) -> str:
+        """用确定性叙述句补足目标字数（离线补写用）。
+
+        参数:
+            target_words: 目标字数。
+            rng: 确定性随机源。
+            lead: 首段内容。
+            used: 已用句集合（跨段共享，避免整段文本出现重复句）。
+
+        返回:
+            段落之间空行分隔的正文；不重复同一句。
+        """
+        paragraphs = [lead]
+        while self._count_words("\n\n".join(paragraphs)) < target_words:
+            paragraphs.append(self._narration(rng, used))
+            if len(paragraphs) > 400:
+                break
+        return "\n\n".join(paragraphs)
+
+    @staticmethod
+    def _narration(rng: random.Random, used: set[str]) -> str:
+        """产出不重复的叙述句（句池组合，避免离线样本文本触发退化检测）。
+
+        参数:
+            rng: 确定性随机源。
+            used: 已用句集合（原地更新）。
+
+        返回:
+            未被用过的叙述句。
+        """
+        for _ in range(len(NARRATION_SUBJECTS) * len(NARRATION_ACTIONS)):
+            sentence = f"{rng.choice(NARRATION_SUBJECTS)}{rng.choice(NARRATION_ACTIONS)}。"
+            if sentence not in used:
+                used.add(sentence)
+                return sentence
+        sentence = f"这一刻没有别人再开口，只剩钟摆声（{len(used) + 1}）。"
+        used.add(sentence)
+        return sentence
+
     @staticmethod
     def _last_user_content(req: TextGenRequest) -> str:
         """取最后一条 user 消息的正文（多轮续写的输入）。
-
-        参数:
-            req: 统一文本请求。
 
         返回:
             最后一条 user 消息的 content；没有 user 消息时返回空串。
@@ -560,9 +650,10 @@ class OfflineWritingAdapter:
         target = self._segment_target(instruction)
         # 轮次不同 → 消息条数不同 → 种子不同，保证每轮新增内容不重复且可复现
         rng = self._rng(meta, f"chapter-continue:{len(req.messages)}:{instruction}")
+        used: set[str] = set()
         paragraphs: list[str] = []
         while self._count_words("\n\n".join(paragraphs)) < target:
-            paragraphs.append(rng.choice(NARRATION_POOL))
+            paragraphs.append(self._narration(rng, used))
             if len(paragraphs) > 60:
                 break
         return "\n\n".join(paragraphs).strip() + "\n"

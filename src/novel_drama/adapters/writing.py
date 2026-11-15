@@ -25,6 +25,7 @@ import urllib.request
 from typing import Iterator
 
 from .base import AdapterError, ErrorCode, HealthStatus, TextGenChunk, TextGenRequest, TextGenResult, Usage
+from ..writing.watchdog import apply_context_limit, describe as describe_watchdog, watchdog_tokens
 
 #: 日志：每次写作 LLM HTTP 调用记录地址、状态码、耗时与返回片段
 logger = logging.getLogger(__name__)
@@ -96,6 +97,107 @@ _OUTPUT_FIELDS = ("max_output_tokens", "max_completion_tokens", "max_tokens", "m
 _THINKING_EFFORTS = ("low", "medium", "high")
 #: 思考内容进日志时的截断长度（完整思考仍由 oplog 的 response.reasoning 单独保存）
 _REASONING_LOG_CHARS = 300
+#: 需要压制退化重复的正文类任务（结构化 JSON 任务不下发，避免破坏格式）
+_REPETITION_TASKS = ("chapter", "chapter_compress", "chapter_supplement")
+#: 反重复采样参数的温和档默认值：调研 6.2 指出 vLLM 的 `repetition_penalty`
+#: 会把提示词里的字一起罚，强度必须 ≤1.05；这里统一取 1.05，
+#: 配置 `omlx.repetition_penalty` 可覆盖，实际下发值写日志。
+DEFAULT_REPETITION_PENALTY = 1.05
+#: 温和档上限：超过该值的 `repetition_penalty` 会破坏正常行文（调研 1.4 / 6.2）
+MAX_REPETITION_PENALTY = 1.05
+#: llama.cpp 系 DRY 的温和档默认值（调研 6.2）
+DRY_DEFAULTS = {
+    "dry_multiplier": 0.8,
+    "dry_base": 1.75,
+    "dry_allowed_length": 2,
+    "dry_penalty_last_n": 512,
+}
+#: 采样能力探测缓存：endpoint -> {"fields": set[str], "family": str, "checked": bool}
+_SAMPLING_CACHE: dict[str, dict] = {}
+#: 探测 `/openapi.json` 时关注的采样字段名
+_SAMPLING_FIELDS = (
+    "repetition_penalty",
+    "presence_penalty",
+    "frequency_penalty",
+    "repetition_context_size",
+    "dry_multiplier",
+    "dry_base",
+    "dry_allowed_length",
+    "dry_penalty_last_n",
+    "xtc_probability",
+    "min_p",
+)
+
+
+def _to_float(value) -> float | None:
+    """把配置值转成浮点数，空值与非法值返回 None。
+
+    参数:
+        value: 配置里的原始值（可能是字符串、数字或 None）。
+
+    返回:
+        浮点数；无法解析时返回 None（调用方按「未配置」处理）。
+    """
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def probe_sampling_support(endpoint: str, api_key: str = "", timeout_s: float = 5.0) -> dict:
+    """探测本机 OpenAI 兼容服务支持哪些采样字段（读 `/openapi.json`，结果按 endpoint 缓存）。
+
+    只做字段名匹配，不实际发采样请求：调研 6.5 建议的「字段探测」在服务端有
+    schema 时可用；探测失败时返回空字段集，调用方按兼容模式处理。
+
+    参数:
+        endpoint: 服务地址（不含 /v1）。
+        api_key: Bearer 鉴权。
+        timeout_s: 探测超时（秒）。
+
+    返回:
+        `{"fields": set[str], "family": str, "checked": bool}`；
+        family 为 llama.cpp / vllm / mlx / unknown。
+    """
+    key = (endpoint or "").rstrip("/")
+    if not key:
+        return {"fields": set(), "family": "unknown", "checked": False}
+    cached = _SAMPLING_CACHE.get(key)
+    if cached is not None:
+        return cached
+    info: dict = {"fields": set(), "family": "unknown", "checked": False}
+    try:
+        request = urllib.request.Request(
+            f"{key}/openapi.json",
+            headers={"Accept": "application/json"},
+        )
+        if api_key:
+            request.add_header("Authorization", f"Bearer {api_key}")
+        with urllib.request.urlopen(request, timeout=timeout_s) as response:
+            text = response.read().decode("utf-8", "replace")
+    except Exception as exc:  # noqa: BLE001 - 探测失败不能影响生成
+        logger.info("采样能力探测失败（%s）：%s；按兼容模式处理", key, exc)
+        _SAMPLING_CACHE[key] = info
+        return info
+    lowered = text.lower()
+    info["fields"] = {name for name in _SAMPLING_FIELDS if name in lowered}
+    if "dry_multiplier" in info["fields"] or "llama" in lowered:
+        info["family"] = "llama.cpp"
+    elif "vllm" in lowered or "repetition_detection" in lowered:
+        info["family"] = "vllm"
+    elif "mlx" in lowered:
+        info["family"] = "mlx"
+    info["checked"] = True
+    _SAMPLING_CACHE[key] = info
+    logger.info(
+        "采样能力探测：endpoint=%s family=%s fields=%s",
+        key,
+        info["family"],
+        sorted(info["fields"]),
+    )
+    return info
 
 
 def _split_delta(delta: dict) -> tuple[str, str]:
@@ -222,6 +324,8 @@ class OmlxWritingAdapter:
         self.reasoning_effort = str(self.settings.get("reasoning_effort") or "").strip().lower()
         #: 最近一次请求的上下文/提示词/输出空间统计（供设置页与日志展示）
         self._budget_stats: dict = {}
+        # 反重复采样参数：显式配置优先；为空时正文类任务用保守默认值
+        self.repetition_penalty = _to_float(self.settings.get("repetition_penalty"))
         self.unload_settings = dict(self.settings.get("unload") or {})
 
     @property
@@ -1016,6 +1120,37 @@ class OmlxWritingAdapter:
         }
         return available
 
+    def _watchdog_for(self, req: TextGenRequest, available: int | None) -> tuple[int, str] | None:
+        """按本轮目标字数计算看门狗（止损线），并把计算口径写进日志。
+
+        口径统一由 `writing.watchdog` 给出：目标字数 × 1.65 × 0.886 token/字，
+        末轮加摘要额度，再与上下文剩余空间取小。
+
+        参数:
+            req: 统一文本请求；`metadata.watchdog_target_words` 优先，
+                其次 `metadata.target_words`。
+            available: 上下文剩余可用 token；None 表示窗口未知。
+
+        返回:
+            `(max_tokens, 计算说明)`；非正文任务或目标字数未知时返回 None。
+        """
+        if str(req.task or "") not in _REPETITION_TASKS:
+            return None
+        meta = req.metadata or {}
+        raw = meta.get("watchdog_target_words", meta.get("target_words"))
+        try:
+            target = int(raw or 0)
+        except (TypeError, ValueError):
+            target = 0
+        if target <= 0:
+            return None
+        with_summary = bool(meta.get("with_summary"))
+        desired = watchdog_tokens(target, with_summary)
+        value, _clamped = apply_context_limit(desired, available)
+        note = describe_watchdog(target, with_summary, available, value)
+        self._budget_stats["max_tokens"] = value
+        return value, note
+
     def _thinking_for(self, req: TextGenRequest) -> tuple[bool | None, str]:
         """解析一次请求的思考开关与强度（调用点显式值 > 全局开关）。
 
@@ -1058,7 +1193,13 @@ class OmlxWritingAdapter:
             "temperature": float(req.temperature if req.temperature is not None else self.settings.get("temperature", 0.8)),
             "stream": stream,
         }
-        if available is not None:
+        # 正文类任务：按本轮目标字数算看门狗（止损线）；其它任务仍用上下文剩余空间。
+        watchdog = self._watchdog_for(req, available)
+        if watchdog is not None:
+            value, note = watchdog
+            payload["max_tokens"] = value
+            logger.info("看门狗 max_tokens task=%s %s", str(req.task or ""), note)
+        elif available is not None:
             payload["max_tokens"] = available
         _record_budget_stats(
             at=time.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -1080,10 +1221,60 @@ class OmlxWritingAdapter:
         if req.prompt_cache_key and bool(self.settings.get("cache_prompt", True)):
             payload["cache_prompt"] = True
             payload["prompt_cache_key"] = req.prompt_cache_key
+        # 退化保护：正文类任务下发温和档反重复采样参数（先探测服务端支持哪些字段）
+        sampling, sampling_source = self._sampling_for(req)
+        if sampling:
+            payload.update(sampling)
+            logger.info(
+                "反重复采样参数 task=%s %s（来源：%s）",
+                str(req.task or ""),
+                sampling,
+                sampling_source,
+            )
         extra_body = (req.metadata or {}).get("extra_body")
         if isinstance(extra_body, dict):
             payload.update(extra_body)
         return payload
+
+    def _sampling_for(self, req: TextGenRequest) -> tuple[dict, str]:
+        """决定本次请求下发哪些温和档反重复采样参数。
+
+        口径来自调研 6.2：先探测服务端认哪些字段，只开温和档。
+        - vLLM 系 `repetition_penalty` 会连提示词一起罚，强度 ≤1.05；
+        - llama.cpp 系在支持时可加 DRY 温和档；
+        - 不开 `no_repeat_ngram_size`，也不用高强度 `repetition_penalty`。
+
+        参数:
+            req: 统一文本请求。
+
+        返回:
+            `(payload 片段, 来源说明)`；不需要下发时返回 `({}, "")`。
+        """
+        if str(req.task or "") not in _REPETITION_TASKS:
+            return {}, ""
+        info = probe_sampling_support(self.endpoint, self.api_key)
+        fields = info["fields"]
+        params: dict = {}
+        source: list[str] = []
+        if self.repetition_penalty is not None:
+            value = float(self.repetition_penalty)
+            if value > MAX_REPETITION_PENALTY:
+                logger.warning(
+                    "配置的 repetition_penalty=%s 超过温和档上限 %s：可能破坏正常行文",
+                    value,
+                    MAX_REPETITION_PENALTY,
+                )
+            params["repetition_penalty"] = value
+            source.append("config: omlx.repetition_penalty")
+        elif not fields or "repetition_penalty" in fields:
+            params["repetition_penalty"] = DEFAULT_REPETITION_PENALTY
+            source.append(f"温和档默认 {DEFAULT_REPETITION_PENALTY}")
+        if info["family"] == "llama.cpp" and (not fields or "dry_multiplier" in fields):
+            params.update(DRY_DEFAULTS)
+            source.append("llama.cpp 系 DRY 温和档")
+        if not source:
+            source.append("服务端未暴露反重复采样字段，仅靠检测与提示词兜底")
+        return params, "；".join(source)
 
     @staticmethod
     def _parse_usage(usage: dict | None) -> Usage:

@@ -38,6 +38,9 @@ omlx:
   temperature: 0.8
   stop: []
   enable_thinking: false        # 通过 chat_template_kwargs 关闭思考，降低延迟
+  # 反重复采样参数（正文类任务才下发；留空=温和档 1.05）
+  # 调研：vLLM 的 repetition_penalty 会把提示词里的字一起罚，强度必须 ≤1.05
+  repetition_penalty: null
   unload:
     enabled: true
     path: /v1/models/{model_id}/unload   # 实测可用；管理页另有 /admin/api/models/{id}/unload

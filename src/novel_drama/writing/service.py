@@ -30,6 +30,14 @@ from ..text.titles import strip_index_prefix
 from . import chapter_checkpoint
 from .budgets import context_budget_tokens
 from .content_guard import check_chapter_content, strict_retry_instruction
+from .degeneration import (
+    DegenerationDetected,
+    DegenerationGuard,
+    continue_instruction as degeneration_continue_instruction,
+    keep_at_sentence_end,
+    retry_instruction as degeneration_retry_instruction,
+)
+from .length_plan import length_instruction, length_plan
 from .recap import (
     final_round_summary_instruction,
     save_summary,
@@ -37,6 +45,7 @@ from .recap import (
 )
 from .worlds import build_art_prompt as _build_art_prompt
 from .worlds import clean_world_entry, worlds_digest
+from .watchdog import describe as describe_watchdog
 
 # 默认每章目标字数
 DEFAULT_CHAPTER_WORDS = 1200
@@ -45,11 +54,20 @@ DEFAULT_CHAPTER_WORDS = 1200
 #: > 1.5 倍只在结果里标字数；>= 2 倍才提供「按目标字数压缩」「重写」两个动作。
 OVERSHOOT_NOTICE_RATIO = 1.5
 OVERSHOOT_ACTION_RATIO = 2.0
+#: 不足阈值：低于目标 0.7 倍时提供「补写」动作
+UNDERFILL_ACTION_RATIO = 0.7
 #: 页面上展示的动作（id 与 generate_chapter 的 mode 对应）
 OVERSHOOT_ACTIONS = (
     {"id": "compress", "label": "按目标字数压缩"},
     {"id": "rewrite", "label": "重写"},
 )
+UNDERFILL_ACTIONS = ({"id": "supplement", "label": "补写"},)
+
+#: 补写时的要点覆盖判定：节拍摘要关键词在正文里的命中率低于此值，视为「尚未覆盖」。
+#: 只用于挑出要补的情节要点，不参与长度判断。
+SUPPLEMENT_COVERAGE_RATIO = 0.34
+#: 退化后的局部续写次数上限（调研 2.3 / 6.1：同一节最多回退 2 次，再失败整节重写）
+MAX_LOCAL_CONTINUATIONS = 2
 
 #: 日志：工具调用解析失败时记录原始片段，便于定位模型返回了什么
 logger = logging.getLogger(__name__)
@@ -780,19 +798,31 @@ def build_chapter_context(store: ProjectStore, config: AppConfig, chapter: dict)
     }
 
 
-def stream_text(adapter, request: TextGenRequest, on_delta) -> TextGenResult:
+def stream_text(
+    adapter,
+    request: TextGenRequest,
+    on_delta,
+    guard: DegenerationGuard | None = None,
+) -> TextGenResult:
     """流式调用写作适配器，逐段回调增量文本并聚合为 TextGenResult。
 
     适配器不支持流式（抛 NotImplementedError）时回落到一次性生成，
     并把整段文本作为一次增量回调，保证调用方逻辑一致。
+    传入 `guard` 时在接收过程中检测重复退化：命中立即停止读取并抛
+    `DegenerationDetected`，异常里带可读原因、已接收字数与建议保留长度
+    （截到循环起点前一句），由调用方决定局部续写还是整节重写。
 
     参数:
         adapter: 写作适配器。
         request: 统一文本请求。
         on_delta: 增量回调 `(text) -> None`；可为 None。
+        guard: 退化检测器；None 时不做检测。
 
     返回:
         聚合后的 TextGenResult。
+
+    异常:
+        DegenerationDetected: 命中重复退化，携带可读原因与已接收字数。
     """
     parts: list[str] = []
     usage = None
@@ -800,6 +830,10 @@ def stream_text(adapter, request: TextGenRequest, on_delta) -> TextGenResult:
         for chunk in adapter.stream(request):
             if chunk.delta:
                 parts.append(chunk.delta)
+                if guard is not None:
+                    reason = guard.feed(chunk.delta)
+                    if reason:
+                        raise guard.exception(len("".join(parts)))
                 if on_delta is not None:
                     on_delta(chunk.delta)
             if chunk.usage is not None:
@@ -808,9 +842,18 @@ def stream_text(adapter, request: TextGenRequest, on_delta) -> TextGenResult:
                 break
     except NotImplementedError:
         result = adapter.generate(request)
+        if guard is not None and result.text:
+            reason = guard.feed(result.text) or guard.check_all()
+            if reason:
+                raise guard.exception(len(result.text)) from None
         if result.text and on_delta is not None:
             on_delta(result.text)
         return result
+    # 收尾再查一次：增量不足一个检查步长时（短输出）也要判定
+    if guard is not None and guard.text:
+        reason = guard.check_all()
+        if reason:
+            raise guard.exception(len(guard.text))
     return TextGenResult(
         text="".join(parts),
         finish_reason="stop",
@@ -830,6 +873,7 @@ def generate_chapter(
     max_rounds: int | None = None,
     on_delta=None,
     on_notice=None,
+    on_progress=None,
     mode: str = "generate",
 ) -> dict:
     """生成章节正文并落盘；按本章节拍逐段推进，节拍写完即收尾。
@@ -854,6 +898,9 @@ def generate_chapter(
         on_delta: 流式增量回调 `(text) -> None`；传入时改为流式生成，仅用于页面实时预览。
         on_notice: 自动补救说明回调 `(text) -> None`；内容校验重试成功时上报，
             调用方需把说明带进最终结果，不能静默处理。
+        on_progress: 进度回调 `(event) -> None`；每轮开始时上报
+            `{"type": "round", "round", "rounds_total", "beats_done", "chars"}`，
+            供页面显示「第几轮 + 已写字数」，避免超长或退化时看起来像卡死。
         mode: generate / compress / rewrite；compress 与 rewrite 必须由用户点击触发。
 
     返回:
@@ -868,10 +915,16 @@ def generate_chapter(
         AdapterError: 模型返回空正文、压缩结果未保住全部节拍或调用失败（明确报错，不做降级）。
     """
     mode = str(mode or "generate").strip().lower()
-    if mode not in ("generate", "compress", "rewrite"):
-        raise ValueError("mode 只能是 generate（正常生成）、compress（压缩）或 rewrite（重写）")
+    if mode not in ("generate", "compress", "rewrite", "supplement"):
+        raise ValueError("mode 只能是 generate（正常生成）、compress（压缩）、rewrite（重写）或 supplement（补写）")
     if mode == "compress":
-        return compress_chapter(store, config, chapter_id, on_delta=on_delta, on_notice=on_notice)
+        return compress_chapter(
+            store, config, chapter_id, on_delta=on_delta, on_notice=on_notice, on_progress=on_progress
+        )
+    if mode == "supplement":
+        return supplement_chapter(
+            store, config, chapter_id, on_delta=on_delta, on_notice=on_notice, on_progress=on_progress
+        )
 
     notices: list[str] = []
 
@@ -903,6 +956,18 @@ def generate_chapter(
     enabled = bool(mt.get("enabled", True))
     rounds_cap = max(1, int(max_rounds or mt.get("max_rounds") or 8))
     target_words = int(context["metadata"].get("target_words") or chapter_words or 0)
+    plan = length_plan(target_words)
+    logger.info(
+        "章节长度档位：%s；目标区间 %s–%s 字；%s–%s 段；每段 %s–%s 字（目标 %s 字）",
+        plan["tier_label"],
+        plan["low"],
+        plan["high"],
+        plan["min_paragraphs"],
+        plan["max_paragraphs"],
+        plan["paragraph_low"],
+        plan["paragraph_high"],
+        target_words,
+    )
 
     # 每轮节拍数：显式指定优先；否则按节拍总数与保险轮数自动分配
     if beats_per_round is not None and int(beats_per_round) > 0:
@@ -986,7 +1051,7 @@ def generate_chapter(
         )
     tone_label = style.get("tone") or "沿用既有基调"
     instruction_lines = [
-        f"写《{chapter.get('title')}》本章正文，篇幅参考约 {chapter_words} 字。",
+        f"写《{chapter.get('title')}》本章正文。{length_instruction(chapter_words)}",
         f"本章摘要：{summary_text or '按设定推进主线'}",
         pov_line,
         "按以下节拍顺序推进：",
@@ -1017,13 +1082,17 @@ def generate_chapter(
             "不要提前写后续节拍。"
         )
         instruction_lines.append(
-            f"篇幅只作参考：全章约 {chapter_words} 字，本轮约 "
-            f"{_group_words(groups[0], total_beats, chapter_words)} 字；节拍写完即收尾，不要为凑字数续写。"
+            f"全章{length_instruction(chapter_words)}"
+            f"本轮参考约 {_group_words(groups[0], total_beats, chapter_words)} 字；"
+            f"本章目标 {plan['low']}–{plan['high']} 字；当前已写 0 字，剩余约 {target_words} 字；"
+            "节拍写完即收尾，不要为凑字数续写。"
         )
     else:
         instruction_lines.append(
             f"一次写完全部 {total_beats} 个节拍，写完最后一个节拍即收尾。"
-            f"篇幅参考约 {chapter_words} 字，只作提示，不因字数提前结束。"
+            f"{length_instruction(chapter_words)}"
+            f"本章目标 {plan['low']}–{plan['high']} 字；当前已写 0 字，剩余约 {target_words} 字；"
+            "接近目标且写到句末即可收尾。"
         )
         # 单轮模式本身就是「末轮」：同样把本章摘要并入这次请求
         instruction_lines.append(summary_contract)
@@ -1046,7 +1115,12 @@ def generate_chapter(
     )
     req = assembler.build("chapter", instruction, context["speaker_ids"])
     # metadata 保持原有字段不变：离线适配器依赖它，且产物需要确定性一致
-    req.metadata = context["metadata"]
+    # 章节目标字数同时作为看门狗的基准（单轮即整章；多轮由每轮指令覆盖）
+    req.metadata = {
+        **context["metadata"],
+        "watchdog_target_words": target_words,
+        "with_summary": not use_multi,
+    }
 
     summary_payload: dict | None = None
     summary_parse_error: str | None = None
@@ -1096,6 +1170,7 @@ def generate_chapter(
             outcome = _generate_chapter_rounds(
                 context["adapter"], req, groups, total_beats, chapter_words, rounds_cap,
                 on_delta=on_delta, name_by_id=name_by_id, on_notice=notify,
+                on_progress=on_progress,
                 summary_contract=summary_contract,
                 start_round=start_round,
                 start_content=start_content,
@@ -1360,6 +1435,7 @@ def compress_chapter(
     chapter_id: str,
     on_delta=None,
     on_notice=None,
+    on_progress=None,
 ) -> dict:
     """把已有章节正文按目标字数压缩，逐节拍分段校验，保住全部节拍要点。
 
@@ -1373,6 +1449,7 @@ def compress_chapter(
         chapter_id: 章节 ID。
         on_delta: 流式增量回调；传入时改走流式。
         on_notice: 自动补救说明回调（格式重试成功时上报）。
+        on_progress: 进度回调；上报 `{type, round, rounds_total, chars}` 供页面显示。
 
     返回:
         与 `generate_chapter` 同形的结果 dict，另含 `before_words`、
@@ -1392,6 +1469,8 @@ def compress_chapter(
     target_words = int(context["metadata"].get("target_words") or context["chapter_words"] or 0)
     before_words = int(chapter.get("word_count") or 0) or _count_words(content)
     notices: list[str] = []
+    if on_progress:
+        on_progress({"type": "round", "round": 1, "rounds_total": 1, "beats_done": 0, "chars": 0})
 
     def notify(text: str) -> None:
         """收集压缩过程的自动补救说明。"""
@@ -1410,6 +1489,8 @@ def compress_chapter(
             "index": chapter.get("index"),
             "title": chapter.get("title"),
             "target_words": target_words,
+            "watchdog_target_words": target_words,
+            "with_summary": False,
             "before_words": before_words,
             "beats": [
                 {"summary": str(beat.get("summary") or ""), "target_words": int(beat.get("target_words") or 0)}
@@ -1436,6 +1517,8 @@ def compress_chapter(
             on_notice=notify,
             counter=counter,
             extract=splitter,
+            target_chars=target_words,
+            signals=("suffix",),
         )
         if not cover_error:
             break
@@ -1524,6 +1607,320 @@ def _count_words(text: str) -> int:
     return sum(1 for char in (text or "") if not char.isspace())
 
 
+def _beat_key_tokens(summary: str) -> list[str]:
+    """把节拍摘要拆成用于覆盖判定的关键词（中文按 2 字滑窗，英文/数字整段）。
+
+    参数:
+        summary: 节拍摘要文本。
+
+    返回:
+        去重后的关键词列表；摘要为空时返回空列表。
+    """
+    chunks = re.findall(r"[\u4e00-\u9fff]{2,}|[A-Za-z0-9]{2,}", summary or "")
+    tokens: list[str] = []
+    for chunk in chunks:
+        if len(chunk) <= 3:
+            tokens.append(chunk)
+        else:
+            tokens.extend(chunk[index : index + 2] for index in range(len(chunk) - 1))
+    return list(dict.fromkeys(tokens))
+
+
+def _uncovered_beats(content: str, beats: list[dict]) -> list[tuple[int, dict]]:
+    """找出正文里尚未覆盖的节拍要点。
+
+    判定口径：节拍摘要关键词在正文里的命中率低于 `SUPPLEMENT_COVERAGE_RATIO`
+    即视为没写到。这是为了决定「补写哪几个要点」，不是字数判断。
+
+    参数:
+        content: 现有正文。
+        beats: 本章节拍列表。
+
+    返回:
+        `[(节拍序号从 1 开始, 节拍 dict)]`，按原顺序；全部覆盖时为空列表。
+    """
+    text = content or ""
+    rows: list[tuple[int, dict]] = []
+    for index, beat in enumerate(beats or [], start=1):
+        tokens = _beat_key_tokens(str(beat.get("summary") or ""))
+        if not tokens:
+            continue
+        hit = sum(1 for token in tokens if token in text)
+        if hit / len(tokens) < SUPPLEMENT_COVERAGE_RATIO:
+            rows.append((index, beat))
+    return rows
+
+
+def _split_supplement_sections(text: str, expected: list[int]) -> tuple[str, str | None]:
+    """按「【补写节拍 N】」切分补写结果，校验要求的要点全部存在。
+
+    参数:
+        text: 补写模型原始输出。
+        expected: 本次要求补写的节拍序号列表；为空时不做分段校验。
+
+    返回:
+        `(body, error)`：body 为去掉标记后的新增正文；error 为中文原因（成功为 None）。
+    """
+    raw = (text or "").strip()
+    if not expected:
+        return raw, None
+    matches = list(re.finditer(r"(?m)^\s*【\s*补写节拍\s*(\d+)\s*】\s*", raw))
+    if not matches:
+        return "", "补写结果缺少「【补写节拍 N】」分段标记"
+    sections: dict[int, str] = {}
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(raw)
+        segment = raw[match.end() : end].strip()
+        if segment:
+            sections[int(match.group(1))] = segment
+    missing = [str(number) for number in expected if number not in sections]
+    if missing:
+        return "", f"补写结果缺少第 {'、'.join(missing)} 个节拍要点"
+    extra = sorted(number for number in sections if number not in expected)
+    if extra:
+        return "", f"补写结果出现未要求的【补写节拍 {'、'.join(str(number) for number in extra)}】"
+    return "\n\n".join(sections[number] for number in sorted(sections)), None
+
+
+def _supplement_prompt(
+    chapter: dict,
+    content: str,
+    target_words: int,
+    gap_words: int,
+    uncovered: list[tuple[int, dict]],
+    tail_chars: int = 1200,
+) -> str:
+    """构造「补写」提示词：按缺口字数与未覆盖要点续写，只输出新增正文。
+
+    参数:
+        chapter: 章节 dict（用于标题）。
+        content: 现有正文。
+        target_words: 本章目标字数。
+        gap_words: 缺口字数（目标 − 现有）。
+        uncovered: `_uncovered_beats` 的结果。
+        tail_chars: 附上的正文结尾字数（让模型接得上）。
+
+    返回:
+        中文提示词。
+    """
+    actual = _count_words(content)
+    lines = [
+        f"《{chapter.get('title') or ''}》已写好的正文只有 {actual} 字，比目标 {target_words} 字少约 {gap_words} 字，需要补写。",
+        "要求：",
+        f"1. 只输出新增正文，紧接已有正文的结尾继续写，约 {gap_words} 字；不要复述已有内容，不要重写已经写过的情节。",
+        "2. 禁止复述同一句对白、同一句式或同一段落结构；每次对话都要推进新信息，禁止原地来回的重复对白。",
+    ]
+    if uncovered:
+        lines.append("3. 按下列要点逐段补写，每段都要有正文，不得省略、合并或跳过：")
+        for number, beat in uncovered:
+            summary = str(beat.get("summary") or "").strip() or "（无摘要）"
+            lines.append(f"【补写节拍 {number}】：{summary}")
+        lines.append(
+            "输出格式：每段以「【补写节拍 N】」开头，段与段之间空一行；"
+            "除这些标记外不要写标题、不要解释、不要输出字数统计。"
+        )
+    else:
+        lines.append("3. 本章节拍要点已覆盖，请顺着上文继续推进情节、补足篇幅，同样不要复述已有内容。")
+        lines.append("输出格式：只输出新增正文，不要写标题、不要解释、不要输出字数统计。")
+    lines.extend(["", "【已有正文结尾】", content[-tail_chars:] if tail_chars > 0 else content])
+    return "\n".join(lines)
+
+
+def supplement_chapter(
+    store: ProjectStore,
+    config: AppConfig,
+    chapter_id: str,
+    on_delta=None,
+    on_notice=None,
+    on_progress=None,
+) -> dict:
+    """按缺口字数与未覆盖要点给已有正文补写，并合并为新版本。
+
+    只在用户点击「补写」时调用，不自动触发。补写只追加、不改写已有正文；
+    有未覆盖要点时要求模型按「【补写节拍 N】」逐段输出，缺段即拒绝写入。
+
+    参数:
+        store: 工程。
+        config: 本机配置。
+        chapter_id: 章节 ID。
+        on_delta: 流式增量回调；传入时改走流式。
+        on_notice: 自动补救说明回调（重试成功时上报）。
+        on_progress: 进度回调；上报 `{type, round, rounds_total, chars}` 供页面显示。
+
+    返回:
+        与 `generate_chapter` 同形的结果 dict，另含 `before_words`、`added_words`、
+        `gap_words`、`supplemented_beats`、`overshoot_note`，`mode="supplement"`。
+
+    异常:
+        ValueError: 本章还没有正文，或当前已不低于补写阈值。
+        AdapterError: 补写结果为空、缺少要求的要点或没有新增正文。
+    """
+    chapter = store.load_chapter(chapter_id)
+    content = (chapter.get("content") or "").strip()
+    if not content:
+        raise ValueError(f"章节 {chapter_id} 还没有正文，无法补写；请先生成正文")
+
+    context = build_chapter_context(store, config, chapter)
+    beats = context["beats"] or []
+    target_words = int(context["metadata"].get("target_words") or context["chapter_words"] or 0)
+    before_words = int(chapter.get("word_count") or 0) or _count_words(content)
+    gap_words = max(0, target_words - before_words)
+    if target_words > 0 and before_words >= int(target_words * UNDERFILL_ACTION_RATIO):
+        raise ValueError(
+            f"当前正文 {before_words} 字，已达到目标 {target_words} 字的 {UNDERFILL_ACTION_RATIO} 倍补写阈值，无需补写"
+        )
+    uncovered = _uncovered_beats(content, beats)
+    notices: list[str] = []
+    if on_progress:
+        on_progress({"type": "round", "round": 1, "rounds_total": 1, "beats_done": 0, "chars": 0})
+
+    def notify(text: str) -> None:
+        """收集补写过程的自动补救说明。"""
+        notices.append(text)
+        if on_notice:
+            on_notice(text)
+
+    request = TextGenRequest(
+        task="chapter_supplement",
+        system="你是资深小说作者，只在已有正文之后续写补足篇幅，不改写已写内容。只输出新增正文。",
+        messages=[Message("user", _supplement_prompt(chapter, content, target_words, gap_words, uncovered))],
+        stream=on_delta is not None,
+        temperature=resolve_temperature(config, "writing"),
+        metadata={
+            "chapter_id": chapter_id,
+            "index": chapter.get("index"),
+            "title": chapter.get("title"),
+            "target_words": target_words,
+            "watchdog_target_words": max(gap_words, 200),
+            "with_summary": False,
+            "before_words": before_words,
+            "gap_words": gap_words,
+            "uncovered_beats": [
+                {"index": number, "summary": str(beat.get("summary") or "")} for number, beat in uncovered
+            ],
+            "beats": [
+                {"summary": str(beat.get("summary") or ""), "target_words": int(beat.get("target_words") or 0)}
+                for beat in beats
+            ],
+            "content": content,
+        },
+    )
+
+    expected = [number for number, _beat in uncovered]
+
+    def splitter(text: str) -> tuple[str, dict | None, str | None]:
+        """按「【补写节拍 N】」拆出新增正文；缺段时返回中文原因。"""
+        body, error = _split_supplement_sections(text, expected)
+        return body, None, error
+
+    counter = {"calls": 0}
+    body, cover_error = "", None
+    result = None
+    for attempt in range(2):
+        result, body, _payload, cover_error = _generate_validated(
+            context["adapter"],
+            request,
+            on_delta,
+            "补写正文",
+            on_notice=notify,
+            counter=counter,
+            extract=splitter,
+            target_chars=max(gap_words, 200),
+        )
+        if not cover_error:
+            break
+        logger.warning("补写结果缺少要点：%s；追加约束后重试一次", cover_error)
+        if attempt == 0:
+            marks = "、".join(f"【补写节拍 {number}】" for number in expected)
+            request = replace(
+                request,
+                messages=list(request.messages)
+                + [
+                    Message(
+                        "user",
+                        f"上一次输出不合格（{cover_error}）。请严格按 {marks} 逐段输出新增正文，"
+                        "每个要点都要有正文，不要合并或省略。",
+                    )
+                ],
+            )
+    if cover_error:
+        raise AdapterError(
+            ErrorCode.UPSTREAM_ERROR,
+            f"补写结果未覆盖要求的节拍要点（{cover_error}）：未写入章节，请重试或改用「重写」",
+            retryable=True,
+        )
+
+    body = (body or "").strip()
+    if not body:
+        raise AdapterError(ErrorCode.UPSTREAM_ERROR, "补写模型返回了空正文", retryable=True)
+    body, dialogue_warnings = normalize_dialogue(
+        body, [str(item.get("name") or "") for item in context["characters"]]
+    )
+    # 只追加不改写：裁掉与已有结尾重叠的部分，避免拼接处复述
+    merged = _append_segment(content, body).strip()
+    words = _count_words(merged)
+    added_words = words - before_words
+    if added_words <= 0:
+        raise AdapterError(
+            ErrorCode.UPSTREAM_ERROR,
+            "补写没有产生新增内容（与已有正文重复）：未写入章节，请重试",
+            retryable=True,
+        )
+    word_deviation = _word_deviation(words, target_words)
+    before_ratio = round(before_words / target_words, 2) if target_words else None
+    ratio_text = f"{before_ratio} 倍" if before_ratio is not None else "倍率未知"
+    if expected:
+        beats_text = "第 " + "、".join(str(number) for number in expected) + " 个节拍"
+    else:
+        beats_text = "本章节拍要点已覆盖，按缺口字数顺延续写"
+    overshoot_note = (
+        f"已按「补写」处理：原 {before_words} 字（目标 {target_words} 字，{ratio_text}，"
+        f"低于 {UNDERFILL_ACTION_RATIO} 倍补写阈值）→ 补写后 {words} 字，新增 {added_words} 字；"
+        f"补写要点：{beats_text}"
+    )
+
+    chapter["content"] = merged + "\n"
+    chapter["word_count"] = words
+    chapter["status"] = "written"
+    chapter["revision"] = int(chapter.get("revision") or 1) + 1
+    chapter["updated_at"] = now_iso()
+    store.save_chapter(chapter)
+    # 正文已变化：旧的生成断点已失去上下文，直接作废
+    chapter_checkpoint.clear(store, chapter_id)
+
+    return {
+        "chapter_id": chapter_id,
+        "status": chapter["status"],
+        "words": words,
+        "word_count": words,
+        "provider": result.model if result is not None else "",
+        "content": None,
+        "rounds": 0,
+        "beats_total": len(beats),
+        "beats_done": len(beats),
+        "beats_remaining": 0,
+        "multi_turn": False,
+        "stop_reason": "supplemented",
+        "word_deviation": word_deviation,
+        "dialogue_warnings": dialogue_warnings,
+        "notices": notices,
+        "summary": None,
+        "summary_error": None,
+        "summary_mode": None,
+        "resume": {"resumed": False},
+        "mode": "supplement",
+        "overshoot_note": overshoot_note,
+        "before_words": before_words,
+        "added_words": added_words,
+        "gap_words": gap_words,
+        "supplemented_beats": [
+            {"index": number, "summary": str(beat.get("summary") or "")} for number, beat in uncovered
+        ],
+        "requests": {"body": int(counter["calls"]), "summary_fallback": 0, "total": int(counter["calls"])},
+        "revision": chapter["revision"],
+    }
+
+
 def _append_segment(text: str, segment: str, max_overlap: int = 200) -> str:
     """把新增段落追加到正文末尾，并裁掉与结尾重复的重叠文本。
 
@@ -1596,6 +1993,7 @@ def _beats_round_instruction(
     total_beats: int,
     chapter_words: int,
     name_by_id: dict | None = None,
+    written_chars: int = 0,
 ) -> str:
     """构造第 index 轮（0 起）的续写指令。
 
@@ -1605,9 +2003,10 @@ def _beats_round_instruction(
         total_beats: 本章节拍总数。
         chapter_words: 全章参考字数。
         name_by_id: 角色 ID → 姓名；用于写明本轮每个节拍的出场角色。
+        written_chars: 已写正文字数；写进指令形成「已写 A，剩余 B」的进度口径。
 
     返回:
-        一句话续写指令，写明本轮节拍范围、出场角色与篇幅参考。
+        一句话续写指令，写明本轮节拍范围、出场角色、篇幅区间与进度。
     """
     start = sum(len(group) for group in groups[:index])
     group = groups[index]
@@ -1625,11 +2024,15 @@ def _beats_round_instruction(
 
     beat_lines = "；".join(beat_line(offset, beat) for offset, beat in enumerate(group))
     next_note = f"不要写第 {end + 1} 个及之后的节拍。" if end < total_beats else "本章节拍到此结束。"
+    plan = length_plan(chapter_words)
+    remaining = max(0, int(chapter_words or 0) - int(written_chars or 0))
     return (
         f"继续写第 {start + 1}–{end} 个节拍（全章共 {total_beats} 个），紧接上文，不要重复已写内容。"
         f"本轮节拍：{beat_lines}。只让这些出场角色行动，未出场的角色不得突然出现；"
         f"写完停在第 {end} 个节拍边界，{next_note}"
-        f"本轮参考约 {_group_words(group, total_beats, chapter_words)} 字，只作篇幅参考。只输出新增正文。"
+        f"{length_instruction(_group_words(group, total_beats, chapter_words))}"
+        f"本章目标 {plan['low']}–{plan['high']} 字；当前已写 {int(written_chars or 0)} 字，剩余约 {remaining} 字；"
+        "接近目标且写到句末即可收尾，不要为凑字数续写。只输出新增正文。"
     )
 
 
@@ -1637,7 +2040,8 @@ def _word_deviation(actual: int, target: int) -> dict:
     """计算实际字数与目标字数的偏差，按超纲阈值给出中文说明与可选动作。
 
     口径：生成过程不限制长度，写完后按目标字数判偏差；
-    - ≤ 1.5 倍：只在结果里标实际 / 目标字数，不提供动作；
+    - < 0.7 倍：明显不足，提供「补写」动作（按缺口与未覆盖要点续写并合并）；
+    - 0.7–1.5 倍：只在结果里标实际 / 目标字数；
     - > 1.5 倍且 < 2 倍：提示超纲，可自行精简，不提供动作；
     - ≥ 2 倍：视为明显超纲，返回「按目标字数压缩」「重写」两个动作（需用户点击才执行）。
 
@@ -1647,7 +2051,7 @@ def _word_deviation(actual: int, target: int) -> dict:
 
     返回:
         {"target", "actual", "ratio", "level", "notice_ratio", "action_ratio",
-         "message", "actions"}；目标未知时 ratio 为 None、level 为 none。
+         "under_ratio", "message", "actions"}；目标未知时 ratio 为 None、level 为 none。
     """
     actions = [dict(item) for item in OVERSHOOT_ACTIONS]
     base = {
@@ -1656,13 +2060,22 @@ def _word_deviation(actual: int, target: int) -> dict:
         "level": "none",
         "notice_ratio": OVERSHOOT_NOTICE_RATIO,
         "action_ratio": OVERSHOOT_ACTION_RATIO,
+        "under_ratio": UNDERFILL_ACTION_RATIO,
         "actions": [],
     }
     if target <= 0:
         return {**base, "ratio": None, "message": ""}
     ratio_value = actual / target
     ratio = round(ratio_value, 2)
-    if ratio_value < 0.8:
+    if ratio_value < UNDERFILL_ACTION_RATIO:
+        message = (
+            f"实际 {actual} 字，目标 {target} 字（{ratio} 倍）：明显不足。"
+            f"当前阈值低于 {UNDERFILL_ACTION_RATIO} 倍可补写；补写会按缺口字数与尚未覆盖的情节要点续写并合并，"
+            "需要你点击后才执行"
+        )
+        base["level"] = "action"
+        base["actions"] = [dict(item) for item in UNDERFILL_ACTIONS]
+    elif ratio_value < 0.8:
         message = f"实际 {actual} 字，比目标 {target} 字少 {int(round((1 - ratio_value) * 100))}%；节拍已写完，可按需续写补足"
     elif ratio_value >= OVERSHOOT_ACTION_RATIO:
         message = (
@@ -1692,6 +2105,8 @@ def _generate_validated(
     counter: dict | None = None,
     extract=None,
     retry_suffix: str = "",
+    target_chars: int = 0,
+    signals: tuple[str, ...] | None = None,
 ) -> tuple[TextGenResult, str, dict | None, str | None]:
     """生成正文并做内容校验；命中无效输出时追加严格约束重试一次。
 
@@ -1702,6 +2117,11 @@ def _generate_validated(
     重试仍无效时抛出明确错误，由调用方展示，不做静默写入；重试成功时通过
     `on_notice` 留下一句可读说明，避免自动补救静默发生。
 
+    退化保护按调研 2.3 / 6.1 的阶梯执行，不整轮丢弃：
+    命中检测 → 截到循环起点前一句 → 注入「推进指令 + 剩余字数」局部续写
+    （最多 `MAX_LOCAL_CONTINUATIONS` 次）→ 仍不收敛则整节重写 1 次 →
+    再失败才报错且不落盘。判定阈值见 `writing/degeneration.py`，不是长度上限。
+
     参数:
         adapter: 写作适配器。
         request: 本轮统一文本请求。
@@ -1711,33 +2131,141 @@ def _generate_validated(
         counter: 请求计数 `{"calls": n}`；每次真正调用模型加 1。
         extract: 把原始输出拆成 `(body, payload, error)`；None 时正文即原始输出。
         retry_suffix: 重试时追加在严格约束后的补充要求（如「仍要输出摘要 JSON」）。
+        target_chars: 本轮目标字数；用于推导退化判定窗口与「剩余字数」提示。
+        signals: 启用的退化检测信号；None 时用全量（压缩只留 `suffix`，
+            因为原文本身可能带重复结构，S2/S3 会误杀）。
 
     返回:
         `(result, body, payload, error)`：body 为通过校验的正文。
 
     异常:
-        AdapterError(UPSTREAM_ERROR): 重试一次后仍不是小说正文。
+        AdapterError(UPSTREAM_ERROR): 局部续写与整节重写后仍退化，或重试一次后仍不是小说正文。
     """
+    target_chars = max(0, int(target_chars or 0))
+    guard_signals = signals or ("suffix", "shingle", "sentence")
+
+    def notice(text: str) -> None:
+        """记录并转交自动补救说明（不静默）。"""
+        logger.warning(text)
+        if on_notice:
+            on_notice(text)
 
     def call(req: TextGenRequest) -> TextGenResult:
-        """按是否流式执行一次生成，并把上下文/异常提示转交出去。"""
-        if counter is not None:
-            counter["calls"] = int(counter.get("calls") or 0) + 1
-        result = stream_text(adapter, req, on_delta) if on_delta else adapter.generate(req)
-        # finish_reason=length 按异常处理：输出侧没有人为上限，
-        # 说明触发了模型自身输出上限或上游异常，不能当正常结束
-        if str(getattr(result, "finish_reason", "") or "").lower() == "length":
-            message = (
-                f"{label}以 finish_reason=length 结束（异常）：输出侧未设置人为上限，"
-                "说明触发的是模型自身输出上限或上游异常，结尾可能不完整；本轮内容已保留，请检查后重试"
-            )
-            logger.warning(message)
-            if on_notice:
-                on_notice(message)
-        return result
+        """执行一轮生成；命中退化时先局部续写、再整节重写。"""
+        base_messages = list(req.messages)
+        accepted = ""
+        continuations = 0
+        rewritten = False
+        current = req
+        while True:
+            guard = DegenerationGuard(target_chars, signals=guard_signals)
+            if counter is not None:
+                counter["calls"] = int(counter.get("calls") or 0) + 1
+            try:
+                if on_delta:
+                    result = stream_text(adapter, current, on_delta, guard=guard)
+                else:
+                    result = adapter.generate(current)
+                    if result.text:
+                        reason = guard.feed(result.text) or guard.check_all()
+                        if reason:
+                            raise guard.exception(len(result.text))
+            except DegenerationDetected as exc:
+                # 截到循环起点前一句：保留正常行文，只丢重复段落
+                accepted = (accepted + guard.text)[: len(accepted) + exc.keep_index]
+                if continuations < MAX_LOCAL_CONTINUATIONS:
+                    continuations += 1
+                    remaining = max(0, target_chars - _count_words(accepted))
+                    notice(
+                        f"{label}检测到重复退化（{exc.reason}）：已截回到循环起点前一句"
+                        f"（保留 {_count_words(accepted)} 字），改为局部续写"
+                        f"（第 {continuations}/{MAX_LOCAL_CONTINUATIONS} 次，剩余约 {remaining} 字）"
+                    )
+                    extra: list[Message] = []
+                    if accepted.strip():
+                        extra.append(Message("assistant", accepted))
+                    extra.append(
+                        Message(
+                            "user",
+                            degeneration_continue_instruction(exc.reason, remaining),
+                        )
+                    )
+                    current = replace(req, messages=base_messages + extra)
+                    continue
+                if not rewritten:
+                    rewritten = True
+                    accepted = ""
+                    notice(
+                        f"{label}局部续写 {MAX_LOCAL_CONTINUATIONS} 次仍未收敛（{exc.reason}），"
+                        "改为整节重写 1 次"
+                    )
+                    current = replace(
+                        req,
+                        messages=base_messages + [Message("user", degeneration_retry_instruction(exc.reason))],
+                    )
+                    continue
+                raise
+            # 看门狗命中：不丢内容，保留已写正文、按句末收尾，再局部续写或结束本轮。
+            # 只有带本轮目标字数的请求才有看门狗语义；目标未知时仍按 length 异常提示。
+            if str(getattr(result, "finish_reason", "") or "").lower() == "length":
+                if target_chars <= 0:
+                    notice(
+                        f"{label}以 finish_reason=length 结束（异常）：输出侧未设置人为上限，"
+                        "说明触发了模型自身输出上限或上游异常，结尾可能不完整；本轮内容已保留，请检查后重试"
+                    )
+                    accepted += result.text or ""
+                    return replace(result, text=accepted) if accepted != (result.text or "") else result
+                with_summary = bool((req.metadata or {}).get("with_summary"))
+                note = describe_watchdog(target_chars, with_summary)
+                accepted += result.text or ""
+                if continuations < MAX_LOCAL_CONTINUATIONS:
+                    continuations += 1
+                    accepted = accepted[: keep_at_sentence_end(accepted)]
+                    remaining = max(0, target_chars - _count_words(accepted))
+                    notice(
+                        f"{label}到达看门狗上限（{note}）：已保留已写 {_count_words(accepted)} 字"
+                        f"并按句末收尾，改为局部续写（第 {continuations}/{MAX_LOCAL_CONTINUATIONS} 次，"
+                        f"剩余约 {remaining} 字）"
+                    )
+                    extra: list[Message] = []
+                    if accepted.strip():
+                        extra.append(Message("assistant", accepted))
+                    extra.append(
+                        Message(
+                            "user",
+                            degeneration_continue_instruction("到达看门狗上限", remaining)
+                            + (retry_suffix if with_summary else ""),
+                        )
+                    )
+                    current = replace(req, messages=base_messages + extra)
+                    continue
+                accepted = accepted[: keep_at_sentence_end(accepted)] or (result.text or "")
+                notice(
+                    f"{label}到达看门狗上限（{note}）：续写次数已用尽，按句末收尾结束本轮"
+                    f"（保留已写 {_count_words(accepted)} 字，未丢弃正文）"
+                )
+                return replace(result, text=accepted, finish_reason="watchdog")
+            accepted += result.text or ""
+            if accepted != (result.text or ""):
+                return replace(
+                    result,
+                    text=accepted,
+                    usage=result.usage,
+                )
+            return result
 
     splitter = extract or (lambda text: (text, None, None))
-    result = call(request)
+    try:
+        result = call(request)
+    except DegenerationDetected as exc:
+        raise AdapterError(
+            ErrorCode.UPSTREAM_ERROR,
+            f"{label}检测到重复退化（{exc.reason}）：局部续写 {MAX_LOCAL_CONTINUATIONS} 次"
+            f"与整节重写 1 次后仍重复，已丢弃本轮产出（约 {exc.chars} 字），未写入章节；请重试生成",
+            retryable=True,
+            detail={"reason": exc.reason, "code": "degeneration"},
+        ) from exc
+
     body, payload, parse_error = splitter((result.text or "").strip())
     body = (body or "").strip()
     ok, reason = check_chapter_content(body)
@@ -1751,7 +2279,15 @@ def _generate_validated(
         messages=list(request.messages)
         + [Message("user", strict_retry_instruction() + retry_suffix)],
     )
-    result = call(retry_request)
+    try:
+        result = call(retry_request)
+    except DegenerationDetected as exc:
+        raise AdapterError(
+            ErrorCode.UPSTREAM_ERROR,
+            f"{label}严格重试时检测到重复退化（{exc.reason}）：已丢弃该轮产出，未写入章节；请重试生成",
+            retryable=True,
+            detail={"reason": exc.reason, "code": "degeneration"},
+        ) from exc
     body, payload, parse_error = splitter((result.text or "").strip())
     body = (body or "").strip()
     ok, reason_after = check_chapter_content(body)
@@ -1776,7 +2312,15 @@ _RETRY_SUMMARY_SUFFIX = (
 )
 
 
-def _generate_final_round(adapter, request: TextGenRequest, on_delta, label: str, on_notice=None, counter=None):
+def _generate_final_round(
+    adapter,
+    request: TextGenRequest,
+    on_delta,
+    label: str,
+    on_notice=None,
+    counter=None,
+    target_chars: int = 0,
+):
     """正文末轮生成：一次请求同时产出正文与本章摘要，并做结构化拆分。
 
     参数:
@@ -1786,6 +2330,7 @@ def _generate_final_round(adapter, request: TextGenRequest, on_delta, label: str
         label: 日志与报错里的轮次说明。
         on_notice: 自动补救说明回调。
         counter: 请求计数 `{"calls": n}`。
+        target_chars: 本轮目标字数（退化判定窗口与剩余字数提示）。
 
     返回:
         `(result, body, payload, error, calls)`；payload 为
@@ -1801,6 +2346,7 @@ def _generate_final_round(adapter, request: TextGenRequest, on_delta, label: str
         counter=local,
         extract=split_final_output,
         retry_suffix=_RETRY_SUMMARY_SUFFIX,
+        target_chars=target_chars,
     )
     return result, body, payload, error, int(local["calls"])
 
@@ -1815,6 +2361,7 @@ def _generate_chapter_rounds(
     on_delta=None,
     name_by_id: dict | None = None,
     on_notice=None,
+    on_progress=None,
     summary_contract: str = "",
     start_round: int = 0,
     start_content: str = "",
@@ -1841,6 +2388,7 @@ def _generate_chapter_rounds(
         on_delta: 流式增量回调；传入时每轮改为流式生成。
         name_by_id: 角色 ID → 姓名，用于本轮指令写明出场角色。
         on_notice: 自动补救说明回调；内容校验重试成功时上报一句可读说明。
+        on_progress: 进度回调；每轮开始时上报轮次与已写字数，供页面显示进展。
         summary_contract: 末轮追加的摘要输出约定；空串表示不产出内联摘要。
         start_round: 断点续写起点（已完成轮数）。
         start_content: 断点里已写好的正文。
@@ -1874,14 +2422,33 @@ def _generate_chapter_rounds(
             break
         group = groups[index]
         final = index == len(groups) - 1
-        instruction = _beats_round_instruction(groups, index, total_beats, chapter_words, name_by_id)
+        if on_progress:
+            # 进度口径：轮次 + 已写字数。超长 / 退化中止时用户也能看到仍在推进
+            on_progress(
+                {
+                    "type": "round",
+                    "round": index + 1,
+                    "rounds_total": len(groups),
+                    "beats_done": beats_done,
+                    "chars": len(content),
+                }
+            )
+        instruction = _beats_round_instruction(
+            groups, index, total_beats, chapter_words, name_by_id, written_chars=len(content)
+        )
         if final and summary_contract:
             instruction = f"{instruction}\n{summary_contract}"
+        round_words = _group_words(group, total_beats, chapter_words)
+        round_meta = dict(req.metadata or {})
+        # 看门狗按本轮目标字数算；末轮同时出摘要，额外加摘要额度
+        round_meta["watchdog_target_words"] = round_words
+        round_meta["with_summary"] = bool(final and summary_contract)
         if index == 0:
-            request = req
+            request = replace(req, metadata=round_meta)
         else:
             request = replace(
                 req,
+                metadata=round_meta,
                 messages=list(req.messages)
                 + [Message("assistant", content), Message("user", instruction)],
             )
@@ -1893,6 +2460,7 @@ def _generate_chapter_rounds(
                 f"第 {index + 1} 轮正文",
                 on_notice=on_notice,
                 counter=counter,
+                target_chars=round_words,
             )
             summary_payload = payload
             summary_error = parse_error
@@ -1904,6 +2472,7 @@ def _generate_chapter_rounds(
                 f"第 {index + 1} 轮正文",
                 on_notice=on_notice,
                 counter=counter,
+                target_chars=round_words,
             )
         provider = result.model or provider
         rounds = index + 1

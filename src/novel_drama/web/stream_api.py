@@ -282,12 +282,14 @@ def _finish_message(notices: list[str]) -> str:
     return f"生成完成 · ⚠ {notices[0]}{tail}"
 
 
-def _stream_response(task, job=None) -> StreamingResponse:
+def _stream_response(task, job=None, hint=None) -> StreamingResponse:
     """在后台线程执行生成任务，把增量与最终结果转成 SSE。
 
     参数:
         task: `task(on_delta) -> dict`，内部应把模型增量交给 on_delta。
         job: 可选的 `UiJob`，用于把本次生成登记到任务页。
+        hint: 可选的进度上下文 dict；任务可通过它更新 `round` / `rounds_total` /
+            `base_chars`，增量事件与任务页会展示「第几轮 + 已写字数」。
 
     返回:
         StreamingResponse（text/event-stream）。
@@ -295,20 +297,31 @@ def _stream_response(task, job=None) -> StreamingResponse:
     events: queue.Queue = queue.Queue()
     stop = threading.Event()
     received = {"chars": 0}
+    hint = hint if hint is not None else {}
 
     def on_delta(text: str) -> None:
         """接收模型增量；客户端断开或用户点停止时抛异常中断生成。"""
         if stop.is_set() or (job is not None and job.cancel_requested()):
             raise _Cancelled()
         received["chars"] += len(str(text))
+        total_chars = int(hint.get("base_chars") or 0) + received["chars"]
+        payload = {"text": text, "chars": total_chars}
+        if hint.get("rounds_total"):
+            payload["round"] = int(hint.get("round") or 1)
+            payload["rounds_total"] = int(hint.get("rounds_total") or 1)
+            label = f"第 {payload['round']}/{payload['rounds_total']} 轮 · 已接收 {total_chars} 字"
+        else:
+            label = f"已接收 {total_chars} 字"
         if job:
-            job.progress(f"已接收 {received['chars']} 字")
-        events.put(("delta", {"text": text}))
+            job.progress(label)
+        events.put(("delta", payload))
 
     def worker() -> None:
         """后台生成线程。"""
         if job:
             job.start("已提交生成请求")
+            # 流式任务没有可预估的总量：显示「进行中」，不要停在 0%
+            job.progress("已提交生成请求", clear_percent=True, force=True)
         try:
             result = task(on_delta)
             notices = _result_notices(result)
@@ -492,11 +505,12 @@ def register_stream_routes(app, config_path: str | None = None) -> None:
 
         参数:
             body: `{path, chapter, regen?, dry_run?, multi_turn?, beats_per_round?,
-                   max_rounds?, mode?}`；mode 为 generate / compress / rewrite，
-                   compress 与 rewrite 只能由用户在超纲结果里点击动作后传入。
+                   max_rounds?, mode?}`；mode 为 generate / compress / rewrite / supplement，
+                   compress / rewrite / supplement 只能由用户在结果动作里点击后传入。
 
         返回:
-            SSE：start → delta* → done(result) / error(message)。
+            SSE：start → delta* → done(result) / error(message)；delta 事件带
+            `chars` 与（有轮次时）`round/rounds_total`，页面可显示当前进展。
         """
         store = _store(body.get("path"))
         chapter_id = str(body.get("chapter") or "")
@@ -504,9 +518,25 @@ def register_stream_routes(app, config_path: str | None = None) -> None:
             raise HTTPException(status_code=400, detail="缺少 chapter 参数（章节 ID）")
         config = load_config(config_path)
         mode = str(body.get("mode") or "generate").strip().lower()
-        if mode not in ("generate", "compress", "rewrite"):
-            raise HTTPException(status_code=400, detail="mode 只能是 generate、compress 或 rewrite")
-        job_title = {"generate": "生成本章正文", "compress": "按目标字数压缩", "rewrite": "重写本章正文"}[mode]
+        if mode not in ("generate", "compress", "rewrite", "supplement"):
+            raise HTTPException(
+                status_code=400, detail="mode 只能是 generate、compress、rewrite 或 supplement"
+            )
+        job_title = {
+            "generate": "生成本章正文",
+            "compress": "按目标字数压缩",
+            "rewrite": "重写本章正文",
+            "supplement": "按缺口补写本章",
+        }[mode]
+        hint: dict = {}
+
+        def on_progress(event: dict) -> None:
+            """记录当前轮次与已写字数，供 delta 事件与任务页展示。"""
+            if not isinstance(event, dict):
+                return
+            hint["round"] = int(event.get("round") or 1)
+            hint["rounds_total"] = int(event.get("rounds_total") or 1)
+            hint["base_chars"] = int(event.get("chars") or 0)
 
         def task(on_delta):
             """调用 service 生成正文，增量交给 SSE。"""
@@ -520,10 +550,12 @@ def register_stream_routes(app, config_path: str | None = None) -> None:
                 beats_per_round=body.get("beats_per_round"),
                 max_rounds=body.get("max_rounds"),
                 on_delta=on_delta,
+                on_progress=on_progress,
                 mode=mode,
             )
 
-        return _stream_response(task, UiJob(store, "chapter", _chapter_target(store, chapter_id), job_title))
+        job = UiJob(store, "chapter", _chapter_target(store, chapter_id), job_title)
+        return _stream_response(task, job, hint=hint)
 
     @app.post("/api/ui/act/generate/stream")
     def ui_act_generate_stream(body: dict) -> StreamingResponse:

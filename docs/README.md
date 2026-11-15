@@ -40,7 +40,8 @@
 | [spec-r31-anchor-orphan-fix.md](spec-r31-anchor-orphan-fix.md) | 标注锚点误判 orphan（游标漂移 / 标点差异）修复 | 已实现；真实工程副本 orphan 148→0 |
 | [spec-r32-warning-locator.md](spec-r32-warning-locator.md) | 标注/配音告警点击定位：台词行 / 镜头 / 告警区三级跳转与降级说明 | 已实现；真实浏览器验证三类目标与降级 |
 | [spec-r33-generation-budget-settings.md](spec-r33-generation-budget-settings.md) | 上下文上限与输出口径：输出侧取消人为预算，请求 `max_tokens` 取「上下文窗口 − 已用提示词」；设置页只读、思考只留全局开关 | 已实现；离线用例通过，未做真机 LLM 实测 |
-| [spec-r34-chapter-resume-inline-recap.md](spec-r34-chapter-resume-inline-recap.md) | 章内断点续写（每轮落盘、取消/失败/重启可续）+ 摘要并入正文末轮（解析失败才回退）+ 超纲压缩/重写（用户点击才执行，压缩不得删节拍） | 已实现；离线用例 9 项通过，未做真机实测 |
+| [spec-r34-chapter-resume-inline-recap.md](spec-r34-chapter-resume-inline-recap.md) | 章内断点续写（每轮落盘、取消/失败/重启可续）+ 摘要并入正文末轮（解析失败才回退）+ 超纲压缩/重写/补写（用户点击才执行，压缩不得删节拍）+ 退化熔断与看门狗（局部续写优先、不丢正文） | 已实现；离线用例 16 项通过，未做真机实测 |
+| [research-degeneration-and-length-control.md](research-degeneration-and-length-control.md) | 退化重复与长度控制的调研：检测阈值出处、采样参数取舍、token 换算实测口径（0.886 token/汉字） | 调研结论已接入退化熔断、看门狗与采样层 |
 
 ## 调研（只作依据，不改生产代码）
 

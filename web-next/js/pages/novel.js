@@ -3818,8 +3818,8 @@ async function openGenerateDialog(hasBody, prefill = {}) {
  * 执行正文生成（SSE）；进度走统一浮层，完成后可刷新正文。
  * @param {object} body 生成参数
  * @param {boolean} [hadBody] 打开弹窗时本章是否已有正文
- * @param {{resumeNote?: string, mode?: 'generate'|'compress'|'rewrite', note?: string}} [options]
- *   mode 由「超纲后用户点击动作」传入；note 说明本次动作的来源（如压缩/重写原因）
+ * @param {{resumeNote?: string, mode?: 'generate'|'compress'|'rewrite'|'supplement', note?: string}} [options]
+ *   mode 由「超纲/不足后用户点击动作」传入；note 说明本次动作的来源（如压缩/补写/重写原因）
  */
 async function runGenerate(body, hadBody = false, options = {}) {
   const mode = options.mode || 'generate';
@@ -3853,17 +3853,21 @@ async function runGenerate(body, hadBody = false, options = {}) {
       ? '正在按目标字数压缩本章…'
       : mode === 'rewrite'
         ? '正在重写本章正文…'
-        : body.regen
-          ? '正在重新生成本章正文…'
-          : '正在生成本章正文…';
+        : mode === 'supplement'
+          ? '正在补写本章正文…'
+          : body.regen
+            ? '正在重新生成本章正文…'
+            : '正在生成本章正文…';
   const panelHint =
     mode === 'compress'
       ? '保留全部节拍要点，只压缩描写与铺陈'
       : mode === 'rewrite'
         ? '按原目标字数整章重写'
-        : `${body.beats_per_round ? `每轮 ${Number(body.beats_per_round)} 个节拍` : '每轮节拍数自动分配'} · 最多 ${Number(
-            body.max_rounds || 8
-          )} 轮${body.regen ? ' · 覆盖现有正文' : ''}`;
+        : mode === 'supplement'
+          ? '按缺口字数与尚未覆盖的情节要点续写，只追加不改写'
+          : `${body.beats_per_round ? `每轮 ${Number(body.beats_per_round)} 个节拍` : '每轮节拍数自动分配'} · 最多 ${Number(
+              body.max_rounds || 8
+            )} 轮${body.regen ? ' · 覆盖现有正文' : ''}`;
   const panel = openProgress({
     title: panelTitle,
     hint: panelHint,
@@ -3879,6 +3883,17 @@ async function runGenerate(body, hadBody = false, options = {}) {
       if (event === 'start') {
         panel.update({ stage: '模型正在写作…', percent: null });
       } else if (event === 'delta') {
+        // 进度口径：轮次 + 已接收字数，超长或退化中止时也能看出仍在推进
+        const chars = Number(data?.chars || 0);
+        const round = Number(data?.round || 0);
+        const roundsTotal = Number(data?.rounds_total || 0);
+        if (chars || round) {
+          panel.update({
+            stage: round
+              ? `第 ${round}/${roundsTotal || round} 轮 · 已接收 ${chars} 字`
+              : `已接收 ${chars} 字`,
+          });
+        }
         panel.append(data?.text || '');
       } else if (event === 'done') {
         settled = true;
@@ -3900,20 +3915,32 @@ async function runGenerate(body, hadBody = false, options = {}) {
             : result.summary_mode === 'fallback'
               ? '本章摘要：末轮未产出可解析摘要，已回退到单独摘要请求'
               : '';
-        // 超纲动作：只有用户点击才执行；阈值文案直接来自后端，避免前后端口径不一致
-        const overshootLimit = Number(deviationData.notice_ratio || 1.5);
-        const overshootAction = Number(deviationData.action_ratio || 2);
+        // 偏差动作：只有用户点击才执行；阈值与动作文案直接来自后端，避免前后端口径不一致
+        const overshootLimit = Number(deviationData.notice_ratio || 0);
+        const overshootAction = Number(deviationData.action_ratio || 0);
+        const underfillRatio = Number(deviationData.under_ratio || 0);
+        const isUnderfill = (deviationData.actions || []).some((action) => action.id === 'supplement');
+        const deviationHint =
+          deviationData.level !== 'action'
+            ? ''
+            : isUnderfill
+              ? `补写处理：低于 ${underfillRatio} 倍可补写；补写会按缺口字数与尚未覆盖的情节要点续写并合并，需要你点击后才执行`
+              : `超纲处理：当前阈值 ${overshootLimit} 倍只提示，${overshootAction} 倍及以上可选择「按目标字数压缩」或「重写」；两个动作都需要你点击后才执行`;
         const overshootButtons =
           deviationData.level === 'action'
             ? (deviationData.actions || []).map((action) => ({
-                label: action.label || (action.id === 'compress' ? '按目标字数压缩' : '重写'),
-                primary: action.id === 'compress',
+                label:
+                  action.label ||
+                  (action.id === 'compress' ? '按目标字数压缩' : action.id === 'supplement' ? '补写' : '重写'),
+                primary: action.id === 'compress' || action.id === 'supplement',
                 onClick: (close) => {
                   close();
-                  runGenerate({ ...body, regen: true, mode: action.id }, true, {
+                  const actionBody =
+                    action.id === 'supplement' ? { ...body, mode: action.id } : { ...body, regen: true, mode: action.id };
+                  runGenerate(actionBody, true, {
                     note: `按你的选择执行「${action.label}」：原 ${words} 字，目标 ${Number(
                       deviationData.target || 0
-                    )} 字（${overshootAction} 倍动作阈值）`,
+                    )} 字`,
                   });
                 },
               }))
@@ -3922,7 +3949,13 @@ async function runGenerate(body, hadBody = false, options = {}) {
         if (overshootNote) panel.note(overshootNote);
         notices.forEach((text) => panel.note(`自动处理：${text}`));
         const modeLabel =
-          result.mode === 'compress' ? '压缩完成' : result.mode === 'rewrite' ? '重写完成' : '正文生成完成';
+          result.mode === 'compress'
+            ? '压缩完成'
+            : result.mode === 'rewrite'
+              ? '重写完成'
+              : result.mode === 'supplement'
+                ? '补写完成'
+                : '正文生成完成';
         panel.finish({
           message: `${modeLabel}：${words} 字 · 节拍 ${beats}${result.status ? ` · ${result.status}` : ''}`,
           detail: [
@@ -3933,9 +3966,7 @@ async function runGenerate(body, hadBody = false, options = {}) {
             ...notices.map((text) => `自动处理：${text}`),
             overshootNote,
             deviation,
-            deviationData.level === 'action'
-              ? `超纲处理：当前阈值 ${overshootLimit} 倍只提示，${overshootAction} 倍及以上可选择「按目标字数压缩」或「重写」；两个动作都需要你点击后才执行`
-              : '',
+            deviationHint,
             summaryError,
             '结果已写入本章正文，可点「刷新正文」查看；如需回退可在「版本记录」恢复旧版本。',
           ]
