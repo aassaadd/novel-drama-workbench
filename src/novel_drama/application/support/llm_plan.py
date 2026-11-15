@@ -22,6 +22,7 @@ from ...domain.production.rules.thinking_policy import (
     resolve_thinking,
     stage_label,
 )
+from ..production.lines_source import chapter_view
 
 #: 动作清单：键 -> 说明与次数计算
 #: - title/what: 弹窗标题与「这次做什么」
@@ -502,7 +503,7 @@ def _script_calls(store: ProjectStore, config, ctx: dict) -> int:
     """脚本标注的分批调用次数。"""
     chapter_id = str(ctx.get("chapter") or "")
     try:
-        scenes = len(store.load_chapter(chapter_id).get("scenes") or [])
+        scenes = len(chapter_view(store, store.load_chapter(chapter_id)).get("scenes") or [])
     except (OSError, ValueError, KeyError):
         scenes = 0
     try:

@@ -8,6 +8,7 @@ from __future__ import annotations
 from ...adapters.persistence import ProjectStore
 from ...adapters.persistence.settings_store import SettingsStore
 from ...adapters.persistence.world_store import WorldStore
+from ..production.lines_source import chapter_view
 from .outline_validate import check_golden_three
 
 
@@ -36,7 +37,7 @@ def chapter_detail(store: ProjectStore, chapter_id: str) -> dict:
     异常:
         FileNotFoundError: 章节不存在。
     """
-    return store.load_chapter(chapter_id)
+    return chapter_view(store, store.load_chapter(chapter_id))
 
 
 def settings_view(store: ProjectStore) -> dict:

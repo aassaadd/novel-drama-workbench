@@ -6,6 +6,7 @@ from ...adapters.persistence import ProjectStore
 from ...adapters.persistence.settings_store import SettingsStore
 from ...adapters.persistence.world_store import WorldStore
 from ...models import entities
+from ..production.lines_source import chapter_view
 
 
 def bind_outline_context(bible: dict, worlds: list[dict], characters: list[dict]) -> dict:
@@ -282,7 +283,7 @@ def chapter_binding(store: ProjectStore, chapter_id: str) -> dict:
     bible = settings.ensure()
     entry = settings.find_outline_chapter(bible, chapter_id)
     try:
-        chapter = store.load_chapter(chapter_id)
+        chapter = chapter_view(store, store.load_chapter(chapter_id))
     except FileNotFoundError:
         # 大纲章还没落地：绑定信息仍要能看，实际出场视为空
         chapter = {"pov_character_id": None, "scenes": []}

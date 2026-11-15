@@ -14,6 +14,7 @@ from ...domain.shared.errors import PreconditionError
 from ...models import entities
 from ...models.enums import AgeRange, SpeechPitch, SpeechTempo, choices_text
 from ...models.ids import now_iso
+from ..production.lines_source import chapter_view
 
 #: 允许写入的角色定位（narrator 由系统保留）
 ROLE_CHOICES = ("protagonist", "antagonist", "supporting", "minor")
@@ -479,7 +480,7 @@ def chapter_references(store: ProjectStore, character_id: str) -> dict:
     totals = {"scenes": 0, "lines": 0, "overrides": 0}
     for meta in store.list_chapters():
         try:
-            chapter = store.load_chapter(meta["id"])
+            chapter = chapter_view(store, store.load_chapter(meta["id"]))
         except (OSError, ValueError):
             continue
         lines = [
