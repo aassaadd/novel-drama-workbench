@@ -369,6 +369,23 @@ def chapter_view(store: ProjectStore | None, chapter: dict) -> dict:
     return view
 
 
+def chapter_views(store: ProjectStore | None, chapter_ids: list[str] | None = None) -> list[dict]:
+    """批量返回章节视图，供只能拿数据、不能回读工程的 adapter 使用。
+
+    参数:
+        store: 工程。
+        chapter_ids: 章节 ID 列表；为空表示全部章节（按工程章节顺序）。
+
+    返回:
+        章节视图列表；默认源下元素就是原始的章节 dict。
+    """
+    if chapter_ids:
+        chapters = [store.load_chapter(chapter_id) for chapter_id in chapter_ids]
+    else:
+        chapters = [store.load_chapter(item["id"]) for item in store.list_chapters()]
+    return [chapter_view(store, chapter) for chapter in chapters]
+
+
 def read_line(store: ProjectStore | None, chapter: dict, line_id: str) -> tuple[dict, dict]:
     """统一读入口：按行 ID 定位台词行。
 

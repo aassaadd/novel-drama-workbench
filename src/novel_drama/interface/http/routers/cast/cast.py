@@ -44,10 +44,11 @@ def register_cast_routes(app, project_root: str | None = None, config_path: str 
         返回:
             `{level, findings: [...], stats: {...}}`。
         """
+        from novel_drama.application.production.lines_source import chapter_views
         from novel_drama.composition import check_cast
 
         store = _store(path)
-        return check_cast(store, chapter)
+        return check_cast(store, chapter_views(store, [chapter] if chapter else None))
 
     @app.get("/api/ui/cast")
     def ui_cast_get(path: str = Query(...)) -> dict:
@@ -119,10 +120,12 @@ def register_cast_routes(app, project_root: str | None = None, config_path: str 
         返回:
             `{chapter, rows, voices}`；rows 含 mode / inherited / override / effective。
         """
+        from novel_drama.application.production.lines_source import chapter_view
         from novel_drama.composition import chapter_override_rows
 
+        store = _store(path)
         try:
-            return chapter_override_rows(_store(path), chapter)
+            return chapter_override_rows(store, chapter_view(store, store.load_chapter(chapter)))
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail={"code": 4, "message": str(exc)})
 
@@ -137,7 +140,9 @@ def register_cast_routes(app, project_root: str | None = None, config_path: str 
         返回:
             `{ok, chapter, rows, voices}`。
         """
+        from novel_drama.application.production.lines_source import chapter_view
         from novel_drama.composition import (
+            chapter_override_rows,
             clear_chapter_overrides,
             set_chapter_override,
         )
@@ -148,14 +153,15 @@ def register_cast_routes(app, project_root: str | None = None, config_path: str 
         store = _store(body.get("path"))
         try:
             if body.get("all"):
-                data = clear_chapter_overrides(store, chapter_id)
+                saved = clear_chapter_overrides(store, chapter_id)
             else:
-                data = set_chapter_override(
+                saved = set_chapter_override(
                     store,
                     chapter_id,
                     str(body.get("character_id") or "").strip(),
                     body.get("voice_id") or None,
                 )
+            data = chapter_override_rows(store, chapter_view(store, saved))
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail={"code": 4, "message": str(exc)})
         except ValueError as exc:
@@ -173,6 +179,7 @@ def register_cast_routes(app, project_root: str | None = None, config_path: str 
         返回:
             `{character, chapters: [{id, index, title, overridable, mode, override, inherited, effective}], voices}`。
         """
+        from novel_drama.application.production.lines_source import chapter_view
         from novel_drama.composition import chapter_override_rows
 
         store = _store(path)
@@ -180,7 +187,8 @@ def register_cast_routes(app, project_root: str | None = None, config_path: str 
         voices: list[dict] = []
         for meta in store.list_chapters():
             try:
-                data = chapter_override_rows(store, meta["id"])
+                chapter = chapter_view(store, store.load_chapter(meta["id"]))
+                data = chapter_override_rows(store, chapter)
             except FileNotFoundError:
                 continue
             row = next((item for item in data.get("rows") or [] if item.get("character_id") == character), None)
@@ -513,6 +521,7 @@ def register_cast_routes(app, project_root: str | None = None, config_path: str 
         返回:
             `{ok, errors, check?, plan?}`。
         """
+        from novel_drama.application.production.lines_source import chapter_views
         from novel_drama.composition import (
             check_cast,
             narrator_plan,
@@ -547,7 +556,7 @@ def register_cast_routes(app, project_root: str | None = None, config_path: str 
         return {
             "ok": True,
             "errors": [],
-            "check": check_cast(store),
+            "check": check_cast(store, chapter_views(store)),
             "plan": narrator_plan(cast, chapters),
         }
 

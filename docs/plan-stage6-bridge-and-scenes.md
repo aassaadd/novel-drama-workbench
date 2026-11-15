@@ -259,9 +259,15 @@
 | --- | --- | --- |
 | A | `line_query`（台词表/单行 diff）、`tts_plan`（批量预演/单章规划）、`production/timeline`、`media_ops.export_chapter`、`story/chapters` 的过期汇总与 facets | 已完成 |
 | B | `adapters/media/*`（timeline_builder / export / jianying / runner）改为由 application 传场景 | 已完成（runner.plan_media 改入参；其余三个本就只接收 chapter） |
-| C | `adapters/persistence/voice_cast` 的读点（写点留步骤 3） | 待做 |
+| C | `adapters/persistence/voice_cast` 的读点（写点留步骤 3） | 已完成（`chapter_override_rows` / `check_cast` / `unresolved_speaker_lines` 改收章节视图；覆盖写函数改为返回章节，由调用方派生视图） |
 | D | 其余 interface 读模型（media / sfx / voice tools / blockers / align / config） | 待做 |
 | E | `application/story`、`application/cast`、`support/llm_plan` 等场景统计读点 | 待做 |
 
 批次 A 验证（同一份 tt1 副本、`chp_01M7CY5ZD243JZHJXJJAMM6Y0E`，25 章中唯一有场景的一章）：
 `line list --json`、`tts plan --json`、`timeline build --dry-run --json` 在 `NDW_LINES_SOURCE=scenes` 与 `script` 下 stdout 归一化后逐字节一致；`export --format srt` 的 `.srt` / `.schedule.tsv` / `.manifest.json` 逐字节一致；`line diff` 返回码与输出一致。`pytest` 253 passed / 10 skipped，分层 233 文件 0 违规。
+
+批次 C 验证：
+- 新增 `lines_source.chapter_views(store, chapter_ids=None)`，供只能拿数据的 adapter 批量取视图。
+- `chapter_override_rows(store, chapter)`、`check_cast(store, chapters)`、`unresolved_speaker_lines(store, chapters)` 不再回读章节；单章/全剧的取舍由调用方传列表决定。
+- `set_chapter_override` / `clear_chapter_overrides` 仍只写 `voice_overrides`，返回值由「展示行」改为「写后的章节」，路由再 `chapter_view` 派生视图取行——写点行为不变，读点已统一。
+- 双模式（A=scenes / B=script）比对：`check_cast` 全剧、单章 `cast check`、`chapter_override_rows`（全部 25 章）、`unresolved_speaker_lines` 全部逐字节一致；ndw_annotate_check 与 turn_ui_check 两份副本同样一致。`pytest` 253 passed / 10 skipped，分层 233 文件 0 违规。

@@ -239,15 +239,7 @@ class UnresolvedSpeakerTest(unittest.TestCase):
                 """返回角色卡。"""
                 return {"characters": CHARS}
 
-            def list_chapters(self):
-                """返回章节列表。"""
-                return [{"id": chapter["id"]}]
-
-            def load_chapter(self, chapter_id):
-                """按 ID 返回章节。"""
-                return chapter
-
-        rows = unresolved_speaker_lines(Store())
+        rows = unresolved_speaker_lines(Store(), [chapter])
         self.assertEqual([row["text"] for row in rows], ["台词。"])
 
 

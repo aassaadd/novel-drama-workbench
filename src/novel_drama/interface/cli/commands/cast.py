@@ -12,6 +12,7 @@ import json
 import re
 
 from novel_drama.application.cast.cast_backfill import backfill_cast
+from novel_drama.application.production.lines_source import chapter_views
 from novel_drama.composition import check_cast
 from novel_drama.infrastructure.config import AppConfig
 
@@ -20,7 +21,8 @@ from ..common import EXIT_OK, EXIT_PRECONDITION, EXIT_REJECTED, _emit, _resolve_
 
 def _cmd_check(args, store) -> int:
     """执行一致性校验并按 error 设置退出码。"""
-    result = check_cast(store, getattr(args, "chapter", None))
+    chapter = getattr(args, "chapter", None)
+    result = check_cast(store, chapter_views(store, [chapter] if chapter else None))
     if getattr(args, "json", False):
         print(json.dumps(result, ensure_ascii=False, indent=2))
     else:

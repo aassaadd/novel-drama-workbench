@@ -384,7 +384,7 @@ def _resolve_one(store, characters_table: dict, chapter: dict, character_id: str
     }
 
 
-def chapter_override_rows(store, chapter_id: str) -> dict:
+def chapter_override_rows(store, chapter: dict) -> dict:
     """构造某章的章节音色覆盖表（读取用）。
 
     每行默认给出该角色「跟随全局」时的生效音色与来源，只有确实存在
@@ -392,12 +392,11 @@ def chapter_override_rows(store, chapter_id: str) -> dict:
 
     参数:
         store: ProjectStore。
-        chapter_id: 章节 ID。
+        chapter: 章节视图（由 application 按统一读入口派生后传入，adapter 不回读工程）。
 
     返回:
         `{chapter, rows, voices}`；rows 元素见函数内注释。
     """
-    chapter = store.load_chapter(chapter_id)
     characters_table = store.load_characters()
     characters = characters_table.get("characters") or []
     by_id = {item.get("id"): item for item in characters}
@@ -473,7 +472,7 @@ def set_chapter_override(store, chapter_id: str, character_id: str, voice_id: st
         voice_id: 覆盖音色 ID；空值表示清除。
 
     返回:
-        刷新后的 `chapter_override_rows` 结构。
+        写后的章节 dict；调用方需按统一读入口派生视图，再用 `chapter_override_rows` 取展示行。
 
     异常:
         ValueError: 角色不存在、角色不支持覆盖或音色不存在。
@@ -492,7 +491,7 @@ def set_chapter_override(store, chapter_id: str, character_id: str, voice_id: st
             else:
                 chapter.pop("voice_overrides", None)
             store.save_chapter(chapter)
-        return chapter_override_rows(store, chapter_id)
+        return chapter
 
     if not character:
         raise ValueError(f"角色不存在：{character_id}")
@@ -505,7 +504,7 @@ def set_chapter_override(store, chapter_id: str, character_id: str, voice_id: st
     overrides[character_id] = {"voice_id": voice_id, "reason": UI_OVERRIDE_REASON}
     chapter["voice_overrides"] = overrides
     store.save_chapter(chapter)
-    return chapter_override_rows(store, chapter_id)
+    return chapter
 
 
 def clear_chapter_overrides(store, chapter_id: str) -> dict:
@@ -516,13 +515,13 @@ def clear_chapter_overrides(store, chapter_id: str) -> dict:
         chapter_id: 章节 ID。
 
     返回:
-        刷新后的 `chapter_override_rows` 结构。
+        写后的章节 dict；调用方需按统一读入口派生视图后再取展示行。
     """
     chapter = store.load_chapter(chapter_id)
     if chapter.get("voice_overrides"):
         chapter.pop("voice_overrides", None)
         store.save_chapter(chapter)
-    return chapter_override_rows(store, chapter_id)
+    return chapter
 
 
 def _voice_of(entry: dict) -> str | None:
@@ -535,12 +534,13 @@ def _add(findings: list[dict], level: str, code: str, message: str, **where) -> 
     findings.append({"level": level, "code": code, "message": message, **{k: v for k, v in where.items() if v}})
 
 
-def check_cast(store, chapter_id: str | None = None) -> dict:
+def check_cast(store, chapters: list[dict]) -> dict:
     """跑全剧音色/BGM 一致性校验。
 
     参数:
         store: ProjectStore。
-        chapter_id: 只校验该章；为空校验全剧。
+        chapters: 待校验的章节视图列表（由 application 按统一读入口派生后传入；
+                  单章校验就只传一章，adapter 不回读工程）。
 
     返回:
         {"level": error|warn|ok, "findings": [...], "stats": {...}}。
@@ -552,7 +552,6 @@ def check_cast(store, chapter_id: str | None = None) -> dict:
     settings = store.settings()
     strict_minor = bool(cast.get("strict_minor"))
     strict_bgm = bool(cast.get("strict_bgm"))
-    chapters = [store.load_chapter(chapter_id)] if chapter_id else [store.load_chapter(item["id"]) for item in store.list_chapters()]
     findings: list[dict] = []
     stats = {"chapters": len(chapters), "lines": 0, "speakers": 0, "resolved": 0, "warnings": 0}
 
@@ -779,7 +778,7 @@ def check_cast(store, chapter_id: str | None = None) -> dict:
     }
 
 
-def unresolved_speaker_lines(store, chapter_ids: list[str] | None = None) -> list[dict]:
+def unresolved_speaker_lines(store, chapters: list[dict]) -> list[dict]:
     """列出说话人无法归属的台词行（chr_unknown 或不在角色表里）。
 
     批量配音用这批行做「跳过」提示：这些行保持原样（不写音频、不改说话人），
@@ -787,17 +786,13 @@ def unresolved_speaker_lines(store, chapter_ids: list[str] | None = None) -> lis
 
     参数:
         store: 工程。
-        chapter_ids: 只扫描这些章节；为空扫描全部章节。
+        chapters: 待扫描的章节视图列表（由 application 按统一读入口派生后传入）。
 
     返回:
         `[{chapter_id, chapter_title, scene_id, scene_index, line_id, line_index,
            speaker_id, text}]`；场景序号与场景内行号均从 1 开始。
     """
     characters = {item.get("id") for item in store.load_characters().get("characters") or []}
-    if chapter_ids:
-        chapters = [store.load_chapter(chapter_id) for chapter_id in chapter_ids]
-    else:
-        chapters = [store.load_chapter(item["id"]) for item in store.list_chapters()]
     rows: list[dict] = []
     for chapter in chapters:
         scenes = sorted(chapter.get("scenes") or [], key=lambda item: item.get("index") or 0)

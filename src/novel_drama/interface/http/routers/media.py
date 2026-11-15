@@ -9,6 +9,7 @@ from pathlib import Path
 from fastapi import HTTPException, Query
 
 from novel_drama.application.production.line_query import chapter_lines
+from novel_drama.application.production.lines_source import chapter_view
 from novel_drama.application.production.media_ops import (
     cast_warning_text,
     export_chapter,
@@ -43,7 +44,7 @@ def _export_preflight(store: ProjectStore, chapter_id: str) -> dict:
     """
     from novel_drama.composition import check_cast
 
-    chapter = store.load_chapter(chapter_id)
+    chapter = chapter_view(store, store.load_chapter(chapter_id))
     characters = {item["id"]: item for item in store.load_characters().get("characters") or []}
     lines = [line for scene in chapter.get("scenes") or [] for line in scene.get("lines") or []]
     missing = [
@@ -68,7 +69,7 @@ def _export_preflight(store: ProjectStore, chapter_id: str) -> dict:
             }
         )
     try:
-        findings = check_cast(store, chapter_id).get("findings") or []
+        findings = check_cast(store, [chapter]).get("findings") or []
     except Exception as exc:  # 检查失败必须让用户看见，而不是当成「无问题」
         logger.warning("导出前音色检查失败（chapter=%s）：%s", chapter_id, exc, exc_info=True)
         findings = []

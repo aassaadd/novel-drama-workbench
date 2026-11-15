@@ -15,6 +15,7 @@ from ...composition import ProjectStore, check_cast
 from ...domain.shared.errors import PreconditionError
 from ...infrastructure.config import AppConfig, load_config
 from ...models.ids import now_iso
+from .lines_source import chapter_view, chapter_views
 
 #: 队列执行遇到普通失败时的退出码（与 CLI 语义一致）
 EXIT_FAILED = 5
@@ -177,7 +178,10 @@ def unknown_line_ids(store: ProjectStore, chapters: list[dict], skip_unknown: bo
         return set()
     from ...composition import unresolved_speaker_lines
 
-    return {row["line_id"] for row in unresolved_speaker_lines(store, [chapter.get("id") for chapter in chapters])}
+    return {
+        row["line_id"]
+        for row in unresolved_speaker_lines(store, [chapter_view(store, chapter) for chapter in chapters])
+    }
 
 
 def planned_counts(
@@ -320,7 +324,7 @@ def check_cast_gate(
     """
     if skip_cast_check:
         return
-    gate = check_cast(store, chapter_ids[0]) if len(chapter_ids) == 1 else check_cast(store)
+    gate = check_cast(store, chapter_views(store, chapter_ids if len(chapter_ids) == 1 else None))
     errors = [item for item in gate["findings"] if item["level"] == "error"]
     if skip_ids:
         # 这些行已由用户显式选择跳过（保持原样不动），不再计入阻断项

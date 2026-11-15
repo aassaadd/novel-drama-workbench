@@ -32,7 +32,7 @@ def cast_warning_text(store: ProjectStore, chapter_id: str) -> str | None:
     返回:
         有提示时返回 `[warn] …` 一行；没有问题返回 None。
     """
-    warnings = check_cast(store, chapter_id)["findings"]
+    warnings = check_cast(store, [chapter_view(store, store.load_chapter(chapter_id))])["findings"]
     if not warnings:
         return None
     detail = "；".join(item["message"] for item in warnings[:5])

@@ -67,10 +67,11 @@ def cast_hint(store: ProjectStore, chapter_id: str | None = None) -> None:
     返回:
         无。
     """
+    from novel_drama.application.production.lines_source import chapter_views
     from novel_drama.composition import check_cast
 
     try:
-        result = check_cast(store, chapter_id)
+        result = check_cast(store, chapter_views(store, [chapter_id] if chapter_id else None))
     except Exception as exc:  # 提示性校验不能反过来中断主流程
         print(f"[提示] 音色/BGM 编排检查未完成：{exc}", file=sys.stderr)
         return

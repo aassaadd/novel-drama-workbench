@@ -20,6 +20,7 @@ from pathlib import Path
 
 from fastapi import HTTPException, Request
 
+from novel_drama.application.production.lines_source import chapter_views
 from novel_drama.application.production.timeline import build_chapter_timeline
 from novel_drama.application.production.tts_plan import plan_batch_preview
 from novel_drama.composition import (
@@ -1007,7 +1008,7 @@ def register_voice_tools_routes(app, config_path: str | None = None) -> None:
         config = load_config(config_path)
         # 说话人无法归属的行不参与预演，与「补齐」正式执行时跳过的口径一致
         skip_ids = {
-            row["line_id"] for row in unresolved_speaker_lines(store, chapter_ids)
+            row["line_id"] for row in unresolved_speaker_lines(store, chapter_views(store, chapter_ids))
         }
         plan = use_cases.call(
             lambda: plan_batch_preview(store, config, chapter_ids, skip_ids=skip_ids)["payload"]
@@ -1030,7 +1031,10 @@ def register_voice_tools_routes(app, config_path: str | None = None) -> None:
 
         # 音色检查按同一范围做：只看本章时不要把别的章节的缺失算成本章阻断项
         try:
-            gate = check_cast(store, chapter) if scope != "all" and chapter else check_cast(store)
+            gate = check_cast(
+                store,
+                chapter_views(store, [chapter] if scope != "all" and chapter else None),
+            )
             findings: list[dict] = list(gate.get("findings") or [])
         except Exception:  # noqa: BLE001 - 检查失败只表示「查不出问题」，与原先透传空结果一致
             findings = []
