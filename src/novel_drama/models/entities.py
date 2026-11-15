@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from ..domain.shared.text import count_words
 from .duration import estimate_duration_ms
 from .ids import new_id, now_iso
 
@@ -231,7 +232,7 @@ def new_chapter(work_id: str, index: int, title: str, content: str = "", outline
         "synopsis": None,
         "content": content or None,
         "pov_character_id": None,
-        "word_count": len("".join((content or "").split())),
+        "word_count": count_words(content),
         "status": "draft",
         "scenes": [],
         "revision": 1,

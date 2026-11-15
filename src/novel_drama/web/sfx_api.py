@@ -14,6 +14,7 @@ from datetime import datetime
 from fastapi import HTTPException
 
 from ..config import load_config
+from ..domain.story.rules.chapter_rules import bump_revision
 from ..media.sfx import generate_sfx_item, get_provider, sfx_engine
 from ..sfx import SfxError
 from ..store.project_store import ProjectStore
@@ -82,7 +83,7 @@ def _run_job(job_id: str, config_path: str | None, path: str, chapter_id: str, i
             job["stage"] = "generating"
             job["provider_id"] = pid
             produced = generate_sfx_item(store, config, item, prompt_en=prompt_en, provider=provider, provider_id=pid)
-            chapter["revision"] = int(chapter.get("revision") or 1) + 1
+            bump_revision(chapter)
             chapter["updated_at"] = datetime.now().isoformat(timespec="seconds")
             store.save_chapter(chapter)
             job["result"] = produced

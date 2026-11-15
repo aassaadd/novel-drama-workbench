@@ -21,8 +21,10 @@ from ..adapters.base import AdapterError, ErrorCode
 from ..adapters.comfyui import LocalComfyGateway
 from ..cleanup import remove_dir_quietly, remove_stale_temp_dirs
 from ..config import AppConfig
+from ..domain.story.rules.chapter_rules import bump_revision
 from ..models.ids import now_iso
 from ..orchestration.gpu_queue import GpuLock
+from ..sfx import SfxError
 from ..store import ProjectStore
 from . import comfy_models
 from .comfy_media import (
@@ -35,9 +37,14 @@ from .comfy_media import (
     templates_dir,
 )
 from .generate import probe_duration_ms, render_image, render_sfx, render_video
+from .references import (
+    appearance_digest,
+    collect_references,
+    reference_options,
+    scene_characters,
+    slot_hint,
+)
 from .sfx import generate_sfx_item, get_provider, sfx_engine
-from ..sfx import SfxError
-from .references import appearance_digest, collect_references, reference_options, scene_characters, slot_hint
 from .styles import with_style
 
 logger = logging.getLogger(__name__)
@@ -824,7 +831,7 @@ def _run_comfy(
             )
 
     if processed:
-        chapter["revision"] = int(chapter.get("revision") or 1) + 1
+        bump_revision(chapter)
         chapter["updated_at"] = now_iso()
         store.save_chapter(chapter)
         # 整个批次结束后统一释放，避免逐条卸载造成每条都重新加载模型
@@ -1079,7 +1086,7 @@ def run_media(
             sfx_provider.close()
 
     if not dry_run and processed:
-        chapter["revision"] = int(chapter.get("revision") or 1) + 1
+        bump_revision(chapter)
         chapter["updated_at"] = now_iso()
         store.save_chapter(chapter)
     return stats

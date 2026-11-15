@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import re
 
+from ..domain.story.rules.chapter_rules import bump_revision
 from ..store import ProjectStore
 from ..store.settings_store import SettingsStore
 from ..text.titles import strip_index_prefix
@@ -227,7 +228,7 @@ def _sync_chapter_indexes(store: ProjectStore, entries: list[dict], ignore: set[
         if int(chapter.get("index") or 0) == order:
             continue
         chapter["index"] = order
-        chapter["revision"] = int(chapter.get("revision") or 1) + 1
+        bump_revision(chapter)
         store.save_chapter(chapter)
 
     # 孤儿章节用容错扫描：单个文件损坏或缺失不应打断整批删除
@@ -425,7 +426,7 @@ def delete_beat(store: ProjectStore, chapter_id: str, beat_index: int) -> dict:
         # 已落地章节只同步大纲文本（chapter.outline），正文 content 不动
         chapter = store.load_chapter(chapter_id)
         chapter["outline"] = _outline_text(entry)
-        chapter["revision"] = int(chapter.get("revision") or 1) + 1
+        bump_revision(chapter)
         store.save_chapter(chapter)
         warnings.append("已落地章节的正文未改动，仅同步了大纲文本")
     return {

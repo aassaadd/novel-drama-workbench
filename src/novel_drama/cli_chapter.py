@@ -11,9 +11,15 @@ from pathlib import Path
 
 from .cli_common import EXIT_OK, EXIT_REJECTED, _emit, _resolve_store
 from .config import AppConfig
-from .store.imports_store import ImportsStore, compare_texts, digest, preview, split_paragraphs
+from .domain.story.rules.chapter_rules import bump_revision, count_words
+from .store.imports_store import (
+    ImportsStore,
+    compare_texts,
+    digest,
+    preview,
+    split_paragraphs,
+)
 from .tts import line_state
-
 
 # ---------------- chapter ----------------
 
@@ -198,9 +204,9 @@ def cmd_chapter_import(args, config: AppConfig) -> int:
                 continue
             before = target.get("word_count") or 0
             target["content"] = raw.strip()
-            target["word_count"] = len("".join(target["content"].split()))
+            target["word_count"] = count_words(target["content"])
             target["scenes"] = []
-            target["revision"] = int(target.get("revision") or 1) + 1
+            bump_revision(target)
             store.save_chapter(target)
             snap = _save_source_snapshot(store, target, raw, source_path, "novel import")
             replaced.append(

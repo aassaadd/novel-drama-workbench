@@ -14,11 +14,18 @@ import math
 import re
 from dataclasses import replace
 
-from ..adapters.base import AdapterError, ErrorCode, Message, TextGenRequest, TextGenResult
+from ..adapters.base import (
+    AdapterError,
+    ErrorCode,
+    Message,
+    TextGenRequest,
+    TextGenResult,
+)
 from ..adapters.offline_writing import OfflineWritingAdapter
 from ..cancel import GenerationCanceled
 from ..config import AppConfig, resolve_temperature
 from ..director.markup import parse_markup
+from ..domain.story.rules.chapter_rules import bump_revision, count_words
 from ..models import entities
 from ..models.enums import AgeRange, SpeechPitch, SpeechTempo
 from ..models.ids import new_id, now_iso
@@ -35,8 +42,12 @@ from .content_guard import check_chapter_content, strict_retry_instruction
 from .degeneration import (
     DegenerationDetected,
     DegenerationGuard,
-    continue_instruction as degeneration_continue_instruction,
     keep_at_sentence_end,
+)
+from .degeneration import (
+    continue_instruction as degeneration_continue_instruction,
+)
+from .degeneration import (
     retry_instruction as degeneration_retry_instruction,
 )
 from .length_plan import length_instruction, length_plan
@@ -45,10 +56,10 @@ from .recap import (
     save_summary,
     split_final_output,
 )
+from .thinking import collect_overrides, step_stage
+from .watchdog import describe as describe_watchdog
 from .worlds import build_art_prompt as _build_art_prompt
 from .worlds import clean_world_entry, worlds_digest
-from .watchdog import describe as describe_watchdog
-from .thinking import collect_overrides, step_stage
 
 # 默认每章目标字数
 DEFAULT_CHAPTER_WORDS = 1200
@@ -626,7 +637,7 @@ def apply_outline(store: ProjectStore, dry_run: bool = False) -> dict:
                     chapter[key] = value
                     changed = True
             if changed:
-                chapter["revision"] = int(chapter.get("revision") or 1) + 1
+                bump_revision(chapter)
                 chapter["updated_at"] = now_iso()
                 if not dry_run:
                     store.save_chapter(chapter)
@@ -1303,7 +1314,7 @@ def generate_chapter(
     chapter["content"] = content + "\n"
     chapter["word_count"] = words
     chapter["status"] = "written"
-    chapter["revision"] = int(chapter.get("revision") or 1) + 1
+    bump_revision(chapter)
     chapter["updated_at"] = now_iso()
     store.save_chapter(chapter)
 
@@ -1583,7 +1594,7 @@ def compress_chapter(
     chapter["content"] = body + "\n"
     chapter["word_count"] = words
     chapter["status"] = "written"
-    chapter["revision"] = int(chapter.get("revision") or 1) + 1
+    bump_revision(chapter)
     chapter["updated_at"] = now_iso()
     store.save_chapter(chapter)
     # 压缩替换了正文：旧的生成断点已失去上下文，直接作废，避免下次续写覆盖压缩结果
@@ -1626,7 +1637,7 @@ def _count_words(text: str) -> int:
     返回:
         字数；None 视为 0。
     """
-    return sum(1 for char in (text or "") if not char.isspace())
+    return count_words(text)
 
 
 def _beat_key_tokens(summary: str) -> list[str]:
@@ -1913,7 +1924,7 @@ def supplement_chapter(
     chapter["content"] = merged + "\n"
     chapter["word_count"] = words
     chapter["status"] = "written"
-    chapter["revision"] = int(chapter.get("revision") or 1) + 1
+    bump_revision(chapter)
     chapter["updated_at"] = now_iso()
     store.save_chapter(chapter)
     # 正文已变化：旧的生成断点已失去上下文，直接作废

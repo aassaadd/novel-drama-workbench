@@ -8,8 +8,15 @@ import re
 import sys
 from pathlib import Path
 
+from ..domain.story.rules.chapter_rules import should_archive_version, version_id_of
 from ..models import entities
-from ..models.enum_check import check_chapter, check_character_table, check_project, check_script, check_voice_table
+from ..models.enum_check import (
+    check_chapter,
+    check_character_table,
+    check_project,
+    check_script,
+    check_voice_table,
+)
 from ..models.ids import now_iso
 from .schema_validator import SchemaValidationError, validate
 
@@ -491,7 +498,7 @@ class ProjectStore:
         check_chapter(chapter, baseline=baseline)
         validate(chapter, "chapter.schema.json", baseline=baseline)
         # 旧版没有正文时不存档（新建章节的首次生成不产生无意义的 0 字版本）
-        if current and str(current.get("content") or "").strip() and current.get("content") != chapter.get("content"):
+        if should_archive_version(current, chapter):
             self._archive_chapter(chapter["id"], current)
         self._write_json(path, chapter)
 
@@ -507,7 +514,7 @@ class ProjectStore:
         """
         directory = self.chapter_versions_dir(chapter_id)
         directory.mkdir(parents=True, exist_ok=True)
-        revision = str(int(chapter.get("revision") or 1))
+        revision = version_id_of(chapter)
         target = directory / f"{revision}.json"
         suffix = 2
         while target.exists():

@@ -6,12 +6,26 @@ import json
 import re
 from pathlib import Path
 
-from .cli_common import EXIT_FAILED, EXIT_OK, PreconditionError, _emit, _resolve_store, _tts_service
+from .cli_common import (
+    EXIT_FAILED,
+    EXIT_OK,
+    PreconditionError,
+    _emit,
+    _resolve_store,
+    _tts_service,
+)
 from .config import AppConfig
+from .domain.story.rules.chapter_rules import bump_revision
 from .models import entities
 from .models.ids import now_iso
-from .store import ProjectStore, find_variant, find_voice, validate, variant_ref, voice_binding_summary
-
+from .store import (
+    ProjectStore,
+    find_variant,
+    find_voice,
+    validate,
+    variant_ref,
+    voice_binding_summary,
+)
 
 # ---------------- 音色库变体管理 ----------------
 
@@ -467,7 +481,7 @@ def _apply_script_to_chapter(store: ProjectStore, chapter: dict, script: dict) -
             scene.setdefault("lines", []).append(new_line)
             line_lookup[new_line["id"]] = new_line
             added += 1
-    chapter["revision"] = int(chapter.get("revision") or 1) + 1
+    bump_revision(chapter)
     chapter["updated_at"] = now_iso()
     # 把镜头里的音效/画面/动画物化进场景，供时间轴与渲染使用
     from .director.materialize import materialize_media

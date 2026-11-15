@@ -16,6 +16,7 @@ from dataclasses import replace
 
 from ..adapters.base import AdapterError, Message, TextGenRequest
 from ..config import AppConfig
+from ..domain.story.rules.chapter_rules import bump_revision
 from ..models.ids import new_id, now_iso
 from ..store import ProjectStore
 from ..store.settings_store import SettingsStore
@@ -455,7 +456,7 @@ def _apply_draft(store: ProjectStore, chapter: dict, content: str, draft: dict) 
     chapter["content"] = merged + "\n"
     chapter["word_count"] = _count_words(merged)
     chapter["status"] = "stale" if has_downstream else "written"
-    chapter["revision"] = int(chapter.get("revision") or 1) + 1
+    bump_revision(chapter)
     continuations = chapter.get("continuations")
     if not isinstance(continuations, list):
         continuations = []
@@ -685,7 +686,7 @@ def continue_chapter(
             chapter["content"] = current + "\n"
             chapter["word_count"] = _count_words(current)
             chapter["status"] = "stale" if has_downstream else "written"
-            chapter["revision"] = int(chapter.get("revision") or 1) + 1
+            bump_revision(chapter)
             continuations = chapter.get("continuations")
             if not isinstance(continuations, list):
                 continuations = []

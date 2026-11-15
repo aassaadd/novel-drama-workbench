@@ -12,6 +12,7 @@ from dataclasses import replace
 
 from ..adapters.base import AdapterError, ErrorCode, Message
 from ..config import AppConfig
+from ..domain.story.rules.chapter_rules import bump_revision, count_words
 from ..models.ids import new_id, now_iso
 from ..store import ProjectStore
 from ..text.context import EXCERPT_CHARS, ContextAssembler
@@ -129,7 +130,7 @@ def _count_words(text: str) -> int:
     返回:
         字数。
     """
-    return sum(1 for char in text if not char.isspace())
+    return count_words(text)
 
 
 def _usage_payload(result) -> dict | None:
@@ -439,7 +440,7 @@ def edit_chapter(
     chapter["content"] = final
     chapter["word_count"] = word_count
     chapter["status"] = status
-    chapter["revision"] = revision + 1
+    bump_revision(chapter)
     continuations = chapter.get("continuations")
     if not isinstance(continuations, list):
         continuations = []
@@ -486,9 +487,9 @@ def save_chapter_content(store: ProjectStore, chapter_id: str, content: str) -> 
         warnings.append(STALE_WARNING)
 
     chapter["content"] = text + "\n"
-    chapter["word_count"] = sum(1 for char in text if not char.isspace())
+    chapter["word_count"] = count_words(text)
     chapter["status"] = "stale" if has_downstream else "written"
-    chapter["revision"] = int(chapter.get("revision") or 1) + 1
+    bump_revision(chapter)
     store.save_chapter(chapter)
 
     return {
@@ -530,14 +531,14 @@ def restore_chapter_version(store: ProjectStore, chapter_id: str, version_id: st
         if key in snapshot:
             chapter[key] = snapshot.get(key)
     chapter["content"] = text + "\n"
-    chapter["word_count"] = sum(1 for char in text if not char.isspace())
+    chapter["word_count"] = count_words(text)
 
     warnings: list[str] = []
     has_downstream = bool(chapter.get("scenes") or chapter.get("script_path"))
     if has_downstream:
         warnings.append(STALE_WARNING)
     chapter["status"] = "stale" if has_downstream else "written"
-    chapter["revision"] = int(chapter.get("revision") or 1) + 1
+    bump_revision(chapter)
     store.save_chapter(chapter)
 
     return {

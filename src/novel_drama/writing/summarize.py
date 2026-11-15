@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from ..adapters.base import AdapterError, ErrorCode, Message, TextGenRequest
 from ..config import AppConfig
+from ..domain.story.rules.chapter_rules import bump_revision
 from ..models.ids import new_id
 from ..store import ProjectStore
 from ..store.settings_store import SettingsStore
@@ -530,7 +531,7 @@ def _apply_preview(
         chapter["title"] = preview["title"]
         chapter["synopsis"] = preview["synopsis"]
         chapter["outline"] = preview["outline"]
-        chapter["revision"] = int(chapter.get("revision") or 1) + 1
+        bump_revision(chapter)
 
     if entry is not None:
         bible = context["bible"]

@@ -9,6 +9,7 @@ import copy
 
 from .cli_common import EXIT_OK, EXIT_REJECTED, _emit, _resolve_store, cast_hint
 from .config import AppConfig
+from .domain.story.rules.chapter_rules import bump_revision, count_words
 from .models import entities
 from .models.ids import new_id
 from .orchestration.pipeline import split_chapter_scenes, split_scene_lines
@@ -303,7 +304,7 @@ def cmd_line_split_at(args, config: AppConfig) -> int:
         item["index"] = index
         item["scene_id"] = scene.get("id")
     scene["lines"] = lines
-    chapter["revision"] = int(chapter.get("revision") or 1) + 1
+    bump_revision(chapter)
     store.save_chapter(chapter)
     _emit(
         args,
@@ -620,8 +621,8 @@ def cmd_line_edit(args, config: AppConfig) -> int:
     line["text"] = new_text
     line["revision"] = int(line.get("revision") or 1) + 1
     chapter["content"] = updated
-    chapter["word_count"] = sum(1 for char in updated if not char.isspace())
-    chapter["revision"] = int(chapter.get("revision") or 1) + 1
+    chapter["word_count"] = count_words(updated)
+    bump_revision(chapter)
     store.save_chapter(chapter)
     _emit(
         args,
@@ -755,7 +756,7 @@ def cmd_line_merge(args, config: AppConfig) -> int:
     anchors, _ = _locate_lines(chapter.get("content") or "", _ordered_lines(chapter))
     lost = _lost_audio(group)
     merged = _merge_group(scene, group, chapter.get("content") or "", anchors)
-    chapter["revision"] = int(chapter.get("revision") or 1) + 1
+    bump_revision(chapter)
     store.save_chapter(chapter)
     payload = {
         "changed": True,
@@ -879,7 +880,7 @@ def cmd_line_merge_narration(args, config: AppConfig) -> int:
     for scene, group in groups:
         lost += _lost_audio(group)
         _merge_group(scene, group, content, anchors)
-    chapter["revision"] = int(chapter.get("revision") or 1) + 1
+    bump_revision(chapter)
     store.save_chapter(chapter)
     _emit(
         args,

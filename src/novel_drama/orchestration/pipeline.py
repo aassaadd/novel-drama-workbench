@@ -10,6 +10,7 @@ from __future__ import annotations
 import copy
 
 from ..adapters.base import not_implemented
+from ..domain.story.rules.chapter_rules import bump_revision
 from ..models import entities
 from ..store import ProjectStore
 from ..text.splitter import split_lines, split_scenes
@@ -73,7 +74,7 @@ def split_chapter_scenes(
 
     chapter["scenes"] = scenes
     chapter["status"] = "split"
-    chapter["revision"] = int(chapter.get("revision") or 1) + 1
+    bump_revision(chapter)
     store.save_chapter(chapter)
     return scenes
 
@@ -134,7 +135,7 @@ def split_scene_lines(
         scene_count += 1
 
     if not dry_run and scene_count:
-        chapter["revision"] = int(chapter.get("revision") or 1) + 1
+        bump_revision(chapter)
         store.save_chapter(chapter)
     return {"scenes": scene_count, "lines": total_lines, "unknown": unknown}
 
