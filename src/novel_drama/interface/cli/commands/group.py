@@ -247,3 +247,20 @@ def cmd_group_apply(args, config) -> int:
         print(f"  {item['line_id']}  {item['before']} → {item['after']}  {_field_text(item['changed'])}")
     print("未命中的行状态未变" if not others else f"异常：未命中行状态发生变化 {', '.join(others)}")
     return EXIT_OK
+
+
+def add_parser(sub) -> None:
+    """注册 `group` 命令组。"""
+    p = sub.add_parser("group", help="虚拟分组（按条件批量改行参数，物化写入 .ndw/groups）")
+    p_sub = p.add_subparsers(dest="action", required=True)
+    q = p_sub.add_parser("list", help="列出本章分组，并检测未分组/重复分组的行")
+    q.add_argument("--chapter", required=True)
+    q.set_defaults(func=cmd_group_list)
+    q = p_sub.add_parser("diff", help="预览分组会改动哪些行、字段的旧值→新值")
+    q.add_argument("--chapter", required=True)
+    q.add_argument("--group", required=True)
+    q.set_defaults(func=cmd_group_diff)
+    q = p_sub.add_parser("apply", help="把分组物化写入行参数（命中行会派生为 stale）")
+    q.add_argument("--chapter", required=True)
+    q.add_argument("--group", required=True)
+    q.set_defaults(func=cmd_group_apply)

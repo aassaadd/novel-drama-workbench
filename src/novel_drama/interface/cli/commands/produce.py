@@ -9,6 +9,9 @@ from novel_drama.orchestration.produce import (
     load_run,
     produce,
 )
+from novel_drama.orchestration.produce import (
+    STAGES as PRODUCE_STAGES,
+)
 
 from ..common import EXIT_FAILED, EXIT_OK, _emit, _resolve_store
 
@@ -103,3 +106,28 @@ def _scope_text(record: dict) -> str:
     if record.get("chapter_id"):
         return f"章节 {record['chapter_id']}"
     return "工程级（不涉及章节）"
+
+
+def add_parser(sub) -> None:
+    """注册 `produce` 命令。"""
+    p = sub.add_parser("produce", help="全链路编排：设定 → 大纲 → 正文 → 标注 → 配音 → 音效/配图/视频 → 混流 → 导出")
+    p.add_argument(
+        "--chapter",
+        help="目标章节；缺省时工程级阶段跑一次、章节级阶段按全书逐章执行",
+    )
+    p.add_argument("--from", dest="from_stage", choices=list(PRODUCE_STAGES))
+    p.add_argument("--to", dest="to_stage", choices=list(PRODUCE_STAGES))
+    p.add_argument("--no-resume", dest="no_resume", action="store_true", help="不跳过上次已成功的阶段")
+    p.add_argument("--force", action="store_true", help="强制重跑正文/脚本/媒体")
+    p.add_argument("--keep-going", dest="keep_going", action="store_true", help="阶段失败后继续后续阶段")
+    p.add_argument("--dry-run", action="store_true", help="只体检前置条件，不写盘")
+    p.set_defaults(func=cmd_produce)
+
+
+def add_run_parser(sub) -> None:
+    """注册 `run show` 命令。"""
+    p = sub.add_parser("run", help="查看编排记录")
+    p_sub = p.add_subparsers(dest="action", required=True)
+    q = p_sub.add_parser("show", help="查看某次或最近一次编排")
+    q.add_argument("--run", help="run_id；缺省取最近一次")
+    q.set_defaults(func=cmd_run_show)

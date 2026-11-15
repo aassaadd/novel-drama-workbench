@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 import re
@@ -203,3 +204,30 @@ def cmd_cast(args, config: AppConfig) -> int:
     if args.action == "fill-descriptions":
         return _cmd_fill_descriptions(args, store, config)
     raise SystemExit(f"未知操作: {args.action}")
+
+
+def add_parser(sub) -> None:
+    """注册 `cast` 命令组。"""
+    p = sub.add_parser("cast", help="全剧音色编排（校验 / 回填 / 槽位改名）")
+    p_sub = p.add_subparsers(dest="action", required=True)
+    q = p_sub.add_parser("check", help="跑全剧音色与 BGM 一致性校验")
+    q.add_argument("--chapter", help="只校验该章节")
+    q.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    q.set_defaults(func=cmd_cast)
+    q = p_sub.add_parser("backfill", help="补音色描述 / 龙套槽位（默认 dry-run）")
+    q.add_argument("--profiles", action="store_true", help="补 character.voice_profile")
+    q.add_argument("--stock", action="store_true", help="给 role=minor 角色补 stock 槽位")
+    q.add_argument("--all", action="store_true", help="即使已有描述也重新生成")
+    q.add_argument("--force", action="store_true", help="覆盖手工改过的描述")
+    q.add_argument("--apply", action="store_true", help="真正写盘；缺省只预览")
+    q.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    q.set_defaults(func=cmd_cast)
+    q = p_sub.add_parser("rename-slot", help="龙套职业槽位改名（同步 stock_defaults 键）")
+    q.add_argument("--old", required=True)
+    q.add_argument("--new", required=True)
+    q.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    q.set_defaults(func=cmd_cast)
+    q = p_sub.add_parser("fill-descriptions", help="补全角色缺失的音色/外貌中英文描述（不覆盖已有内容）")
+    q.add_argument("--name", action="append", help="只处理指定角色（ID 或姓名），可重复")
+    q.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    q.set_defaults(func=cmd_cast)

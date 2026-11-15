@@ -16,11 +16,65 @@ from novel_drama.application.cast.character_crud import (
     update_character,
 )
 from novel_drama.application.cast.generate_characters import generate_characters
+from novel_drama.application.cast.queries import character_list
 from novel_drama.composition import render_character_sheet
 from novel_drama.infrastructure.config import AppConfig
+from novel_drama.interface.cli.common import EXIT_OK
 from novel_drama.models import entities
+from novel_drama.models.ids import now_iso
 
 from ..common import PreconditionError, _emit, _resolve_store, cast_hint
+
+
+def cmd_character_add(args, config: AppConfig) -> int:
+    """新增角色。"""
+    store = _resolve_store(args, config)
+    table = store.load_characters()
+    if any(item["name"] == args.name for item in table["characters"]):
+        raise PreconditionError(f"角色已存在: {args.name}")
+    character = entities.new_character(args.name, role=args.role, aliases=args.alias or [])
+    if args.appearance:
+        character["appearance_prompt"] = args.appearance
+    table["characters"].append(character)
+    store.save_characters(table)
+    _emit(args, f"角色已创建: {character['id']} {character['name']}（{character['role']}）", character)
+    return EXIT_OK
+
+
+def cmd_character_list(args, config: AppConfig) -> int:
+    """列出角色与音色绑定状态（JSON 里补齐 image_assets 字段）。
+
+    参数:
+        args: 已解析参数（json）。
+        config: 本机配置。
+
+    返回:
+        进程退出码。
+    """
+    store = _resolve_store(args, config)
+    rows = character_list(store)
+    characters = store.load_characters()["characters"]
+    if getattr(args, "json", False):
+        _emit(args, payload=rows)
+        return EXIT_OK
+    for item in characters:
+        voice = (item.get("voice_binding") or {}).get("voice_id") or "未绑定音色"
+        print(f"{item['id']}  {item['name']:<8} {item['role']:<12} {voice}")
+    return EXIT_OK
+
+
+def cmd_character_bind_voice(args, config: AppConfig) -> int:
+    """绑定角色音色（变更后相关台词需重跑）。"""
+    store = _resolve_store(args, config)
+    table = store.load_characters()
+    target = next((item for item in table["characters"] if item["id"] == args.character or item["name"] == args.character), None)
+    if target is None:
+        raise PreconditionError(f"角色不存在: {args.character}")
+    target["voice_binding"] = {"adapter": args.adapter, "voice_id": args.voice, "reference_audio": None, "seed": None, "speed": args.speed, "emotion_map": {}}
+    target["updated_at"] = now_iso()
+    store.save_characters(table)
+    _emit(args, f"已绑定 {target['name']} → {args.voice}（该角色台词需重跑配音）", target)
+    return EXIT_OK
 
 
 def _load_rows(args) -> list[dict]:
@@ -176,3 +230,65 @@ def cmd_character_image(args, config: AppConfig) -> int:
     state = "已生成" if result.get("created") else "已存在，复用"
     _emit(args, f"角色设定图{state}: {result.get('image_asset')}", result)
     return 0
+
+
+def add_parser(sub) -> None:
+    """注册 `character` 命令组。"""
+    p = sub.add_parser("character", help="角色与音色")
+    p_sub = p.add_subparsers(dest="action", required=True)
+    q = p_sub.add_parser("add")
+    q.add_argument("--name", required=True)
+    q.add_argument("--role", default="supporting", choices=["protagonist", "antagonist", "supporting", "minor"])
+    q.add_argument("--alias", action="append")
+    q.add_argument("--appearance", default="")
+    q.set_defaults(func=cmd_character_add)
+    p_sub.add_parser("list").set_defaults(func=cmd_character_list)
+    q = p_sub.add_parser("bind-voice")
+    q.add_argument("--character", required=True)
+    q.add_argument("--voice", required=True)
+    q.add_argument("--adapter", default="placeholder")
+    q.add_argument("--speed", type=float, default=1.0)
+    q.set_defaults(func=cmd_character_bind_voice)
+    q = p_sub.add_parser("generate", help="AI 生成人物（数量按需求自行判断）")
+    q.add_argument("--count", type=int, help="人物总数；缺省时由模型按需求决定生成几个角色")
+    q.add_argument("--brief", help="补充要求，如「一个主角和一个反派」")
+    q.add_argument("--dry-run", action="store_true", help="只预览，不写 characters.json")
+    q.set_defaults(func=cmd_character_generate)
+    q = p_sub.add_parser("image", help="生成角色全身像（母图）/ 头像 / 三视图并写回 image_assets")
+    q.add_argument("--id", required=True)
+    q.add_argument("--kind", required=True, choices=["fullbody", "closeup", "turnaround"])
+    q.add_argument("--force", action="store_true", help="强制重绘")
+    q.set_defaults(func=cmd_character_image)
+    q = p_sub.add_parser("apply", help="从 JSON 批量追加人物")
+    q.add_argument("--file", required=True, help="JSON 文件路径，- 表示从 stdin 读取")
+    q.set_defaults(func=cmd_character_apply)
+    q = p_sub.add_parser("update", help="按 ID 更新角色字段")
+    q.add_argument("--id", required=True)
+    q.add_argument("--name")
+    q.add_argument("--role", choices=["protagonist", "antagonist", "supporting", "minor"])
+    q.add_argument("--gender", choices=["male", "female", "other", "unknown"])
+    q.add_argument("--age-range", dest="age_range")
+    q.add_argument("--personality", help="性格标签，逗号/顿号分隔")
+    q.add_argument("--background")
+    q.add_argument("--aliases", help="别名，逗号/顿号分隔")
+    q.add_argument("--appearance-prompt", dest="appearance_prompt", help="角色外貌提示词（配图用，空串表示清空）")
+    q.add_argument("--negative-prompt", dest="negative_prompt", help="角色负向提示词（配图用，空串表示清空）")
+    q.add_argument("--voice-description-zh", dest="voice_description_zh", help="中文音色描述（空串表示清空）")
+    q.add_argument("--voice-description-en", dest="voice_description_en", help="英文音色描述（空串表示清空）")
+    q.add_argument("--appearance-desc-zh", dest="appearance_desc_zh", help="中文外貌描述（空串表示清空）")
+    q.add_argument("--appearance-desc-en", dest="appearance_desc_en", help="英文外貌描述（空串表示清空）")
+    q.add_argument("--appearance-negative-zh", dest="appearance_negative_zh", help="中文负向说明（空串表示清空）")
+    q.add_argument("--appearance-negative-en", dest="appearance_negative_en", help="英文负向提示词（空串表示清空）")
+    q.add_argument("--situation", help="当前处境")
+    q.add_argument("--knowledge", help="已知信息，逗号分隔或 JSON 数组（空串表示清空）")
+    q.add_argument("--relations", help="结构化关系 JSON 数组：[{target_id,label,sentiment,note}]")
+    q.add_argument("--speech-style", dest="speech_style", help="说话方式 JSON：{tempo,pitch,accent,catchphrases}")
+    q.add_argument("--voice-profile", dest="voice_profile", help="音色描述 JSON（空串表示清空）")
+    q.add_argument("--stock", help="龙套槽位 JSON（空串表示清空）")
+    q.add_argument("--relationship", action="append", help="`目标ID=备注`，可重复")
+    q.add_argument("--relationship-remove", dest="relationship_remove", action="append", help="要移除的关系目标ID，可重复")
+    q.set_defaults(func=cmd_character_update)
+    q = p_sub.add_parser("remove", help="按 ID 删除角色（旁白不可删；被引用时默认拦截）")
+    q.add_argument("--id", required=True)
+    q.add_argument("--force", action="store_true", help="确认删除并清理该角色的全部引用")
+    q.set_defaults(func=cmd_character_remove)

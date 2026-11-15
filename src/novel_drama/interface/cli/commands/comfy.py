@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import shutil
@@ -422,3 +423,47 @@ def cmd_comfy(args, config: AppConfig) -> int:
         return cmd_comfy_import(args, config)
     _emit(args, f"✗ 未知子命令 comfy {action}", {"ok": False, "error": "unknown_action"})
     return EXIT_PRECONDITION
+
+
+def add_parser(sub) -> None:
+    """注册 `comfy` 命令组。"""
+    p = sub.add_parser("comfy", help="ComfyUI 模板 / 健康检查 / 模型 / 导入")
+    p_sub = p.add_subparsers(dest="action", required=True)
+    for name in ("list", "templates"):
+        q = p_sub.add_parser(name, help="列出模板、必需占位符、固定参数与依赖模型")
+        q.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+        q.set_defaults(func=cmd_comfy)
+    q = p_sub.add_parser("health", help="连通性 + 模板校验 + 依赖模型")
+    q.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    q.set_defaults(func=cmd_comfy)
+    q = p_sub.add_parser("scan", help="扫描模型目录并写回 models.json")
+    q.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    q.set_defaults(func=cmd_comfy)
+    q = p_sub.add_parser("resolve", help="反查模型下载地址")
+    q.add_argument("--refresh", action="store_true", help="忽略缓存重新解析")
+    q.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    q.set_defaults(func=cmd_comfy)
+    q = p_sub.add_parser("import", help="导入 UI/API 工作流为模板")
+    q.add_argument("--id", required=True, help="模板 ID（写入 <id>.json）")
+    q.add_argument("--kind", required=True, choices=["image", "video"])
+    q.add_argument("--workflow", help="ComfyUI UI 格式工作流 JSON（自动转 API 格式）")
+    q.add_argument("--file", help="ComfyUI API 格式工作流 JSON")
+    q.add_argument("--force", action="store_true", help="覆盖已存在的模板文件")
+    q.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    q.set_defaults(func=cmd_comfy)
+    q = p_sub.add_parser("models", help="模型清单 / 校验 / 下载")
+    q_sub = q.add_subparsers(dest="models_action", required=True)
+    r = q_sub.add_parser("list", help="列出模板依赖模型的就位情况")
+    r.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    r.set_defaults(func=cmd_comfy)
+    r = q_sub.add_parser("verify", help="核对模型是否就位且体积一致")
+    r.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    r.set_defaults(func=cmd_comfy)
+    r = q_sub.add_parser("install", help="下载单个模型文件")
+    r.add_argument("--key", required=True, help="相对 models 目录的下载键")
+    r.add_argument("--yes", action="store_true", help="已确认体积")
+    r.add_argument("--accept-license", action="store_true", dest="accept_license", help="已确认许可限制")
+    r.add_argument("--dry-run", action="store_true", dest="dry_run", help="只输出下载计划")
+    r.add_argument("--mirror", action="append", help="镜像地址（可多次给出，按顺序尝试）")
+    r.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    r.set_defaults(func=cmd_comfy)

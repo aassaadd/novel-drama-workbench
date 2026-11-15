@@ -236,3 +236,32 @@ def cmd_models_import(args, config: AppConfig) -> int:
     print(f"  源 {result['src']} → 目标 {result['target']}")
     print(f"  源目录{'已删除' if result['source_removed'] else '保留（--keep-source）'}")
     return EXIT_OK
+
+
+def add_parser(sub) -> None:
+    """注册 `models` 命令组。"""
+    p = sub.add_parser("models", help="模型仓库（列清单/校验/导入，不下载）")
+    p_sub = p.add_subparsers(dest="action", required=True)
+    q = p_sub.add_parser("list", help="列出清单与就位状态")
+    q.add_argument("--present", action="store_true", help="只看已就位项")
+    q.set_defaults(func=cmd_models_list)
+    q = p_sub.add_parser("verify", help="校验文件完整性；--load 真加载一次")
+    q.add_argument("--key", action="append", help="只验指定目录键，可重复")
+    q.add_argument("--load", action="store_true", help="调用 mlx 真加载（每个约 1~2 分钟）")
+    q.set_defaults(func=cmd_models_verify)
+    q = p_sub.add_parser("install", help="从 hf-mirror 下载模型（先落暂存，校验后 mv）")
+    q.add_argument("--key", required=True, help="目录键，如 cosyvoice3/8bit")
+    q.add_argument("--yes", action="store_true", help="确认体积（超过 15G 或体积未知时必填）")
+    q.add_argument("--accept-license", action="store_true", help="确认非商用/需授权许可")
+    q.add_argument("--dry-run", action="store_true", help="只报体积与许可，不下载")
+    q.add_argument(
+        "--mirror",
+        action="append",
+        help="覆盖默认镜像链，可重复（默认先 https://hf-mirror.com，再 https://huggingface.co）",
+    )
+    q.set_defaults(func=cmd_models_install)
+    q = p_sub.add_parser("import", help="把已有权重目录纳入模型根目录")
+    q.add_argument("--from", dest="src", required=True, help="源目录")
+    q.add_argument("--key", required=True, help="目标目录键，如 cosyvoice3/8bit")
+    q.add_argument("--keep-source", action="store_true", help="跨卷迁移后保留源目录（默认删除）")
+    q.set_defaults(func=cmd_models_import)

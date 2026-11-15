@@ -188,3 +188,26 @@ def cmd_world_image(args, config: AppConfig) -> int:
     state = "已生成" if result.get("created") else "已存在，复用"
     _emit(args, f"世界封面{state}: {result.get('cover_asset')}", result)
     return EXIT_OK
+
+
+def add_parser(sub) -> None:
+    """注册 `world` 命令组。"""
+    p = sub.add_parser("world", help="世界条目（多世界 / 封面图）")
+    p_sub = p.add_subparsers(dest="action", required=True)
+    p_sub.add_parser("list", help="列出世界条目").set_defaults(func=cmd_world_list)
+    q = p_sub.add_parser("generate", help="AI 生成世界条目（默认追加落盘）")
+    q.add_argument("--count", type=int, help="世界条数（1..6）")
+    q.add_argument("--brief", help="补充要求，如「外星世界，双恒星」")
+    q.add_argument("--overwrite", action="store_true", help="用生成结果替换全部世界条目")
+    q.add_argument("--dry-run", action="store_true", help="只预览，不落盘")
+    q.set_defaults(func=cmd_world_generate)
+    q = p_sub.add_parser("apply", help="从 JSON 导入世界条目（带 id 且存在则更新）")
+    q.add_argument("--file", required=True, help="JSON 文件路径，- 表示从 stdin 读取")
+    q.set_defaults(func=cmd_world_apply)
+    q = p_sub.add_parser("remove", help="按 ID 删除世界条目（被章节引用时拒绝）")
+    q.add_argument("--id", required=True)
+    q.set_defaults(func=cmd_world_remove)
+    q = p_sub.add_parser("image", help="生成世界封面并写回 cover_asset")
+    q.add_argument("--id", required=True)
+    q.add_argument("--force", action="store_true", help="强制重绘")
+    q.set_defaults(func=cmd_world_image)

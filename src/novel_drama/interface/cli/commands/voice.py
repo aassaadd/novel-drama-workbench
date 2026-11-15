@@ -572,3 +572,100 @@ def cmd_voice_design(args, config: AppConfig) -> int:
     )
     print(f"已入库: {result['voice']['id']} / 变体 {result['variant_id']}")
     return EXIT_OK
+
+
+def add_parser(sub) -> None:
+    """注册 `voice` 命令组。"""
+    p = sub.add_parser("voice", help="音色库（角色 → 多变体）")
+    p_sub = p.add_subparsers(dest="action", required=True)
+    p_sub.add_parser("list").set_defaults(func=cmd_voice)
+    q = p_sub.add_parser("show")
+    q.add_argument("--voice", required=True)
+    q.set_defaults(func=cmd_voice)
+
+    q = p_sub.add_parser("builtin", help="内置音色：list / install / import")
+    q.add_argument("action", nargs="?", choices=["list", "install", "import"], default="list")
+    q.add_argument("--key", action="append", help="只处理指定内置音色键，可重复")
+    q.add_argument("--force", action="store_true", help="install 时强制重新下载")
+    q.set_defaults(func=cmd_voice_builtin)
+
+    q = p_sub.add_parser("design", help="按人物设定生成音色候选（本地 VoxCPM2）")
+    q.add_argument("--character", required=True, help="人物 ID 或姓名")
+    q.add_argument("--count", type=int, default=0, help="候选条数；0 表示用配置默认值")
+    q.add_argument("--prompt", help="手写英文音色描述；省略则先由 LLM 生成")
+    q.add_argument("--select", type=int, help="生成完成后直接采用第几条候选")
+    q.add_argument("--name", help="入库音色名；默认用人物名")
+    q.add_argument("--gender", choices=["male", "female", "other", "unknown"])
+    q.add_argument("--no-bind", action="store_true", help="入库时不自动绑定到人物")
+    q.set_defaults(func=cmd_voice_design)
+
+    def _add_variant_args(q, *, need_name: bool = False) -> None:
+        """为音色/变体命令挂上素材参数。"""
+        if need_name:
+            q.add_argument("--variant-name", required=True, dest="variant_name", help="变体名称，如「默认」「愤怒」")
+        q.add_argument("--source", choices=["preset", "cloned", "recorded"], default="preset")
+        q.add_argument(
+            "--preset",
+            choices=["Vivian", "Serena", "Uncle_Fu", "Dylan", "Eric", "Ryan", "Aiden", "Ono_Anna", "Sohee"],
+            help="预设音色（source=preset 时必填）",
+        )
+        q.add_argument("--audio", help="参考音频路径（source=cloned/recorded 时必填）")
+        q.add_argument("--duration-ms", type=int, dest="duration_ms", help="参考音频时长；缺省用 ffprobe 探测")
+        q.add_argument("--ref-text", dest="ref_text", default=None, help="参考音频对应文本")
+        q.add_argument("--consent", action="store_true", help="确认已获授权（真人参考音频必填）")
+        q.add_argument("--consent-note", dest="consent_note", default=None, help="授权说明")
+        q.add_argument("--emotion-tag", action="append", dest="emotion_tag", help="适用情绪，可重复；默认 default")
+        q.add_argument("--source-status", choices=["ready", "pending", "unusable"], dest="source_status")
+        q.add_argument("--provider", help="记录 provider 可用性（可选）")
+
+    q = p_sub.add_parser("add")
+    q.add_argument("--name", required=True)
+    q.add_argument("--gender", choices=["male", "female", "other", "unknown"], default="unknown")
+    q.add_argument("--language", default="zh-CN")
+    q.add_argument("--tag", action="append")
+    q.add_argument("--variant-name", dest="variant_name", default="默认")
+    _add_variant_args(q)
+    q.set_defaults(func=cmd_voice)
+
+    q = p_sub.add_parser("variant-add")
+    q.add_argument("--voice", required=True)
+    _add_variant_args(q, need_name=True)
+    q.set_defaults(func=cmd_voice)
+
+    q = p_sub.add_parser("variant-update")
+    q.add_argument("--voice", required=True)
+    q.add_argument("--variant", required=True)
+    q.add_argument("--name", dest="variant_name")
+    q.add_argument("--emotion-tag", action="append", dest="emotion_tag")
+    q.add_argument("--status", dest="source_status", choices=["ready", "pending", "unusable"])
+    q.add_argument(
+        "--preset",
+        choices=["Vivian", "Serena", "Uncle_Fu", "Dylan", "Eric", "Ryan", "Aiden", "Ono_Anna", "Sohee"],
+    )
+    q.add_argument("--provider")
+    q.add_argument("--provider-status", dest="provider_status", choices=["ready", "pending", "unusable"])
+    q.set_defaults(func=cmd_voice)
+
+    q = p_sub.add_parser("variant-remove")
+    q.add_argument("--voice", required=True)
+    q.add_argument("--variant", required=True)
+    q.set_defaults(func=cmd_voice)
+
+    q = p_sub.add_parser("set-default")
+    q.add_argument("--voice", required=True)
+    q.add_argument("--variant", required=True)
+    q.set_defaults(func=cmd_voice)
+
+    q = p_sub.add_parser("bind")
+    q.add_argument("--character", required=True)
+    q.add_argument("--voice", required=True)
+    q.add_argument("--adapter", default=None)
+    q.set_defaults(func=cmd_voice)
+
+    q = p_sub.add_parser("preview")
+    q.add_argument("--voice", required=True)
+    q.add_argument("--variant", required=True)
+    q.add_argument("--text")
+    q.add_argument("--emotion", default="neutral")
+    q.add_argument("--instruct")
+    q.set_defaults(func=cmd_voice)

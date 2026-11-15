@@ -216,3 +216,58 @@ def cmd_setting(args, config: AppConfig) -> int:
         return 0
 
     raise ValueError(f"未知 setting 动作: {action}")
+
+
+def add_parser(sub) -> None:
+    """注册 `setting` 命令组。"""
+    p = sub.add_parser("setting", help="设定库（故事内核/文风/大纲；世界观归世界库）")
+    p_sub = p.add_subparsers(dest="action", required=True)
+    p_sub.add_parser("init", help="生成设定库骨架").set_defaults(func=cmd_setting)
+    q = p_sub.add_parser("show", help="查看设定库")
+    q.add_argument("--section", choices=["premise", "outline", "style", "continuity"])
+    q.set_defaults(func=cmd_setting)
+    q = p_sub.add_parser("validate", help="只校验不写盘")
+    q.set_defaults(func=cmd_setting)
+    q = p_sub.add_parser("set", help="修改标量字段")
+    for flag in (
+        "logline",
+        "theme",
+        "core_conflict",
+        "ending_intent",
+        "target_audience",
+        "target_length",
+        "tone",
+        "pov",
+        "tense",
+        "prose_style",
+        "visual_style",
+    ):
+        q.add_argument("--" + flag.replace("_", "-"), dest=flag)
+    q.set_defaults(func=cmd_setting)
+    q = p_sub.add_parser("import", help="从 JSON 导入（work_id 必须一致）")
+    q.add_argument("--file", required=True)
+    q.set_defaults(func=cmd_setting)
+    q = p_sub.add_parser("export", help="导出为 JSON")
+    q.add_argument("--out")
+    q.set_defaults(func=cmd_setting)
+    q = p_sub.add_parser("generate", help="AI 生成梗概 / 文风（或按区块生成）")
+    q.add_argument("--step", choices=["premise", "style"], help="兼容旧用法：整体生成某个分区")
+    q.add_argument("--section", choices=["premise", "style", "character"], help="按区块生成（character 返回完整条目）")
+    q.add_argument("--brief", help="补充要求，如「都市悬疑，双线叙事」")
+    q.add_argument("--target-id", dest="target_id", help="character 区块的改写目标 ID")
+    q.add_argument("--overwrite", action="store_true", help="用生成值整体替换已有内容（仅 --step 生效）")
+    q.add_argument("--seed", type=int, help="固定随机种子以便复现；缺省不固定，每次采样不同")
+    q.add_argument("--keep-existing", action="store_true", help="只补缺失：保留已有非空字段，不覆盖")
+    q.add_argument("--dry-run", action="store_true", help="只预览，不落盘")
+    q.set_defaults(func=cmd_setting)
+    q = p_sub.add_parser("polish", help="AI 润色单个字段")
+    q.add_argument("--field", required=True, help="如 theme / tone / character.background")
+    q.add_argument("--text", help="待润色文本；缺省读取当前值")
+    q.add_argument("--apply", action="store_true", help="把润色结果写回")
+    q.add_argument("--character", help="character.* 字段所属角色 ID")
+    q.add_argument("--context", help="附加上下文，帮助模型理解")
+    q.set_defaults(func=cmd_setting)
+    q = p_sub.add_parser("apply", help="从 JSON 合并写入指定分区")
+    q.add_argument("--section", required=True, choices=["premise", "style"])
+    q.add_argument("--file", required=True, help="JSON 文件路径，- 表示从 stdin 读取")
+    q.set_defaults(func=cmd_setting)

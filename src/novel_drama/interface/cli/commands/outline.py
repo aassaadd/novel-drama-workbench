@@ -7,6 +7,8 @@ import re
 from novel_drama.application.story.queries import golden_check
 from novel_drama.composition import SettingsStore, WorldStore
 from novel_drama.infrastructure.config import AppConfig
+from novel_drama.interface.cli.commands.continuation import cmd_outline_continue
+from novel_drama.interface.cli.commands.writing import cmd_outline
 
 from ..common import EXIT_FAILED, _emit, _resolve_store
 
@@ -124,3 +126,45 @@ def cmd_outline_bind(args, config: AppConfig) -> int:
         payload,
     )
     return 0
+
+
+def add_parser(sub) -> None:
+    """注册 `outline` 命令组。"""
+    p = sub.add_parser("outline", help="大纲（幕/章/节拍）")
+    p_sub = p.add_subparsers(dest="action", required=True)
+    p_sub.add_parser("show", help="查看大纲").set_defaults(func=cmd_outline)
+    q = p_sub.add_parser("generate", help="生成大纲并写入设定库")
+    q.add_argument("--acts", type=int, default=3)
+    q.add_argument("--chapters-per-act", dest="chapters_per_act", type=int, default=3)
+    q.add_argument("--beats-per-chapter", dest="beats_per_chapter", type=int, default=3)
+    q.add_argument("--words", type=int, default=1200, help="单章目标字数")
+    q.add_argument("--binding", choices=["auto", "none"], default="auto", help="auto=绑定到已有人物（非法引用过滤后回落到 POV）；none=只过滤非法角色引用，不回落、不改世界绑定")
+    q.add_argument("--dry-run", action="store_true")
+    q.set_defaults(func=cmd_outline)
+    q = p_sub.add_parser("apply", help="把大纲落地成章节文件")
+    q.add_argument("--dry-run", action="store_true")
+    q.set_defaults(func=cmd_outline)
+    p_sub.add_parser("check", help="黄金三章检查（不阻断）").set_defaults(func=cmd_outline_check)
+    q = p_sub.add_parser("bind", help="更新章节的世界 / POV 绑定")
+    q.add_argument("--chapter", required=True)
+    q.add_argument("--worlds", help="世界 ID，逗号分隔；传空串表示清空")
+    q.add_argument("--pov", help="POV 角色 ID；传空串表示清空")
+    q.add_argument(
+        "--pov-mode",
+        dest="pov_mode",
+        choices=["first", "second", "third_limited", "third_omniscient"],
+        help="本章视角覆盖；不传则跟随全书写法，传 third_omniscient 可显式使用全知视角",
+    )
+    q.set_defaults(func=cmd_outline_bind)
+    q = p_sub.add_parser("continue", help="在已有大纲之后追加新章（默认预览，--apply 才写设定库）")
+    q.add_argument("--chapters", type=int, help="本次追加章数（默认取配置或 3）；与 --acts 同时给出时以本参数为准")
+    q.add_argument("--acts", type=int, help="本次追加幕数；章数 = 幕数 × 每幕章数")
+    q.add_argument("--chapters-per-act", dest="chapters_per_act", type=int, default=3)
+    q.add_argument("--beats-per-chapter", dest="beats_per_chapter", type=int, default=3)
+    q.add_argument("--words", type=int, default=1200, help="单章目标字数")
+    q.add_argument("--brief", help="补充要求，如「进入第二卷，节奏加快」")
+    q.add_argument("--intent", help="续写需求：接下来要写什么（最高优先级，可留空）")
+    outline_cont_mode = q.add_mutually_exclusive_group()
+    outline_cont_mode.add_argument("--dry-run", action="store_true", help="只预览（默认行为）")
+    outline_cont_mode.add_argument("--apply", action="store_true", help="写入设定库大纲（逐幕落盘）")
+    q.set_defaults(func=cmd_outline_continue)
