@@ -1254,8 +1254,9 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--relationship", action="append", help="`目标ID=备注`，可重复")
     q.add_argument("--relationship-remove", dest="relationship_remove", action="append", help="要移除的关系目标ID，可重复")
     q.set_defaults(func=cmd_character_update)
-    q = p_sub.add_parser("remove", help="按 ID 删除角色（旁白不可删）")
+    q = p_sub.add_parser("remove", help="按 ID 删除角色（旁白不可删；被引用时默认拦截）")
     q.add_argument("--id", required=True)
+    q.add_argument("--force", action="store_true", help="确认删除并清理该角色的全部引用")
     q.set_defaults(func=cmd_character_remove)
 
     p = sub.add_parser("cast", help="全剧音色编排（校验 / 回填 / 槽位改名）")

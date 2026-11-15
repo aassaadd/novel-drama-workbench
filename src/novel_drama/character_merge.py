@@ -14,6 +14,12 @@ from __future__ import annotations
 
 import json
 
+from .application.cast.character_crud import (
+    chapter_references,
+    outline_references,
+    relation_references,
+)
+from .application.cast.sync_cast import load_pending, save_pending
 from .domain.cast.rules.merge import (
     merge_chapter_file as _merge_chapter_file,
 )
@@ -30,7 +36,6 @@ from .domain.cast.rules.naming import alias_key, merge_aliases
 from .models import entities
 from .store import ProjectStore
 from .store.settings_store import SettingsStore
-from .application.cast.sync_cast import load_pending, save_pending
 
 
 def _find(table: dict, character_id: str) -> dict:
@@ -81,7 +86,7 @@ def _pair(store: ProjectStore, source_id: str, target_id: str) -> tuple[dict, di
 
 
 def _outline_refs(bible: dict, source_id: str) -> dict:
-    """统计设定库里的源角色引用。
+    """统计设定库里的源角色引用（口径与 `character_refs` 共用一份实现）。
 
     参数:
         bible: 设定库。
@@ -90,51 +95,26 @@ def _outline_refs(bible: dict, source_id: str) -> dict:
     返回:
         `{beats, pov, arcs}`。
     """
-    beats = 0
-    pov = 0
-    arcs = 0
-    for act in (bible.get("outline") or {}).get("acts") or []:
-        for chapter in act.get("chapters") or []:
-            if chapter.get("pov_character_id") == source_id:
-                pov += 1
-            arcs += sum(1 for row in chapter.get("character_arcs") or [] if row.get("character_id") == source_id)
-            for beat in chapter.get("beats") or []:
-                if source_id in (beat.get("character_ids") or []):
-                    beats += 1
-    return {"beats": beats, "pov": pov, "arcs": arcs}
+    refs = outline_references(bible, source_id)
+    return {"beats": refs["beats"], "pov": refs["pov"], "arcs": refs["arcs"]}
 
 
 def _chapter_refs(store: ProjectStore, source_id: str) -> dict:
-    """统计章节文件里的源角色引用。
+    """统计章节文件里的源角色引用（口径与 `character_refs` 共用一份实现）。
 
     参数:
         store: 工程。
         source_id: 角色 ID。
 
     返回:
-        `{scenes, lines, overrides, poc}`。
+        `{scenes, lines, overrides}`。
     """
-    scenes = 0
-    lines = 0
-    overrides = 0
-    for meta in store.list_chapters():
-        try:
-            chapter = store.load_chapter(meta["id"])
-        except (OSError, ValueError):
-            continue
-        for scene in chapter.get("scenes") or []:
-            if source_id in (scene.get("character_ids") or []):
-                scenes += 1
-            for line in scene.get("lines") or []:
-                if line.get("speaker_id") == source_id:
-                    lines += 1
-        if source_id in (chapter.get("voice_overrides") or {}):
-            overrides += 1
-    return {"scenes": scenes, "lines": lines, "overrides": overrides}
+    refs = chapter_references(store, source_id)
+    return {"scenes": refs["scenes"], "lines": refs["lines"], "overrides": refs["overrides"]}
 
 
 def _relation_refs(table: dict, source_id: str) -> int:
-    """统计其它角色指向源角色的关系条数。
+    """统计其它角色指向源角色的关系条数（口径与 `character_refs` 共用一份实现）。
 
     参数:
         table: 角色表。
@@ -143,16 +123,8 @@ def _relation_refs(table: dict, source_id: str) -> int:
     返回:
         关系条数（关系行与关系备注各算一处）。
     """
-    total = 0
-    for item in table.get("characters") or []:
-        if str(item.get("id")) == source_id:
-            continue
-        state = item.get("state") or {}
-        notes = state.get("relationship_notes") or {}
-        if source_id in notes:
-            total += 1
-        total += sum(1 for row in state.get("relations") or [] if str(row.get("target_id")) == source_id)
-    return total
+    refs = relation_references(table, source_id)
+    return refs["notes"] + refs["relations"]
 
 
 def merge_impact(store: ProjectStore, source_id: str, target_id: str) -> dict:

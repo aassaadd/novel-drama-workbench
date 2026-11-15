@@ -12,6 +12,7 @@ from ...models import entities
 from ...models.enums import AgeRange, SpeechPitch, SpeechTempo, choices_text
 from ...models.ids import now_iso
 from ...store import ProjectStore
+from ...store.settings_store import SettingsStore
 
 #: 允许写入的角色定位（narrator 由系统保留）
 ROLE_CHOICES = ("protagonist", "antagonist", "supporting", "minor")
@@ -379,112 +380,437 @@ def update_character(store: ProjectStore, character_id: str, changes: dict) -> d
     return {"character": target, "changed": changed}
 
 
-def character_refs(store, character_id: str) -> dict:
-    """汇总某个角色被哪些章节/台词行/大纲/关系引用（删除前保护与页面提示用）。
+# ---------------- 引用统计与删除保护 ----------------
 
-    四类引用都算数：台词说话人、场景出场标签、大纲 POV 与节拍选角、其它角色的关系目标。
+#: 引用来源的中文名（同时决定展示顺序）
+REFERENCE_LABELS = {
+    "pov": "大纲视角（POV）",
+    "beats": "大纲节拍选角",
+    "arcs": "大纲角色弧光",
+    "scenes": "章节场景出场",
+    "lines": "台词说话人",
+    "overrides": "章节音色覆盖",
+    "relations": "其它角色的关系",
+}
+
+#: 各来源的计数单位（提示文案用）
+_REFERENCE_UNITS = {"pov": "章", "beats": "个", "arcs": "条", "scenes": "个", "lines": "行", "overrides": "章", "relations": "条"}
+
+
+def _chapter_names(rows: list[dict], key: str) -> str:
+    """把命中某来源的章节渲染成「第N章《标题》」列表文本。
 
     参数:
-        store: 工程读写入口。
+        rows: 合并后的章节明细（含 index/title 与各来源计数）。
+        key: 来源键（pov / beats / arcs / scenes / lines / overrides）。
+
+    返回:
+        中文列表；超过 6 章时省略并给出总数。
+    """
+    names = []
+    for row in rows:
+        if not row.get(key):
+            continue
+        index = row.get("index")
+        title = str(row.get("title") or "").strip()
+        prefix = f"第{index}章" if index is not None else "未编号章"
+        names.append(f"{prefix}《{title}》" if title else prefix)
+    if not names:
+        return ""
+    if len(names) > 6:
+        return "、".join(names[:6]) + f" 等 {len(names)} 章"
+    return "、".join(names)
+
+
+def outline_references(bible: dict, character_id: str) -> dict:
+    """统计大纲（设定库）里对某角色的引用，并给出逐章明细。
+
+    覆盖三类真实引用：章节视角（`pov_character_id`）、节拍选角（`beats[].character_ids`）、
+    角色弧光（`character_arcs[].character_id`）。
+
+    参数:
+        bible: 设定库 dict（未初始化时传空 dict）。
         character_id: 角色 ID。
 
     返回:
-        `{total, lines_total, chapters: [{id, index, title, lines, scenes, pov, beats}],
-        relations: [{id, name, note}], settings_available}`。
+        `{"pov", "beats", "arcs", "chapters": [{id, index, title, pov, beats, arcs}]}`。
     """
-    chapters: list[dict] = []
-    total = 0
-    lines_total = 0
-    for meta in store.list_chapters():
-        chapter = store.load_chapter(meta["id"])
-        rows = [
-            {"line_id": line.get("id"), "text": line.get("text")}
-            for scene in chapter.get("scenes") or []
-            for line in scene.get("lines") or []
-            if line.get("speaker_id") == character_id
-        ]
-        scenes = sum(
-            1
-            for scene in chapter.get("scenes") or []
-            if character_id in (scene.get("character_ids") or [])
-        )
-        if not rows and not scenes:
-            continue
-        total += len(rows) + (1 if scenes else 0)
-        lines_total += len(rows)
-        chapters.append(
-            {
-                "id": meta["id"],
-                "index": meta.get("index"),
-                "title": meta.get("title"),
-                "lines": rows[:50],
-                "scenes": scenes,
-                "pov": False,
-                "beats": 0,
-            }
-        )
-    # 现状对齐（本次重构不顺手改行为）：旧实现的设定库读取写成了 `from ..store...`，
-    # 而 `cli_character` 位于 `novel_drama` 根包，`..` 越界必抛 ImportError 并被
-    # `except Exception` 吞掉，所以删除保护实际只统计台词/场景/关系，不看大纲 POV/节拍。
-    # 迁移到 application 后 `...store` 是正确的，但计入大纲引用会改变“能否删除”的判定，
-    # 需产品确认后单独修（已在阶段汇报中列出复现步骤）。
-    settings_available = False
-
-    relations: list[dict] = []
-    table = store.load_characters()
-    for item in table.get("characters") or []:
-        if item.get("id") == character_id:
-            continue
-        notes = (item.get("state") or {}).get("relationship_notes") or {}
-        relations_rows = (item.get("state") or {}).get("relations") or []
-        note = notes.get(character_id)
-        has_relation = any(str(row.get("target_id") or "") == character_id for row in relations_rows)
-        if note or has_relation:
-            relations.append({"id": item.get("id"), "name": item.get("name"), "note": note or ""})
-    total += len(relations)
-    chapters.sort(key=lambda item: int(item.get("index") or 0))
-    return {
-        "total": total,
-        "lines_total": lines_total,
-        "chapters": chapters,
-        "relations": relations,
-        "settings_available": settings_available,
-    }
+    rows: list[dict] = []
+    totals = {"pov": 0, "beats": 0, "arcs": 0}
+    for act in (bible.get("outline") or {}).get("acts") or []:
+        for chapter in act.get("chapters") or []:
+            pov = 1 if chapter.get("pov_character_id") == character_id else 0
+            beats = sum(1 for beat in chapter.get("beats") or [] if character_id in (beat.get("character_ids") or []))
+            arcs = sum(1 for row in chapter.get("character_arcs") or [] if row.get("character_id") == character_id)
+            if not (pov or beats or arcs):
+                continue
+            totals["pov"] += pov
+            totals["beats"] += beats
+            totals["arcs"] += arcs
+            rows.append(
+                {
+                    "id": chapter.get("id"),
+                    "index": chapter.get("index"),
+                    "title": chapter.get("title"),
+                    "pov": pov,
+                    "beats": beats,
+                    "arcs": arcs,
+                }
+            )
+    return {**totals, "chapters": rows}
 
 
-def remove_character(store: ProjectStore, character_id: str) -> dict:
-    """按 ID 删除角色（旁白不可删除；仍被引用时拒绝并列出位置）。
+def chapter_references(store: ProjectStore, character_id: str) -> dict:
+    """统计章节文件里对某角色的引用，并给出逐章明细。
+
+    覆盖三类真实引用：场景出场（`scene.character_ids`）、台词说话人（`line.speaker_id`）、
+    章节音色覆盖（`chapter.voice_overrides` 的键）。读不出来的章节跳过，不打断整次统计。
 
     参数:
         store: 工程。
         character_id: 角色 ID。
 
     返回:
-        `{"removed": id, "characters": 剩余角色数}`。
+        `{"scenes", "lines", "overrides", "chapters": [...]}`；`lines` 最多保留 50 条样本，
+        `line_count` 是完整条数。
+    """
+    rows: list[dict] = []
+    totals = {"scenes": 0, "lines": 0, "overrides": 0}
+    for meta in store.list_chapters():
+        try:
+            chapter = store.load_chapter(meta["id"])
+        except (OSError, ValueError):
+            continue
+        lines = [
+            {"line_id": line.get("id"), "text": line.get("text")}
+            for scene in chapter.get("scenes") or []
+            for line in scene.get("lines") or []
+            if line.get("speaker_id") == character_id
+        ]
+        scenes = sum(1 for scene in chapter.get("scenes") or [] if character_id in (scene.get("character_ids") or []))
+        overrides = 1 if character_id in (chapter.get("voice_overrides") or {}) else 0
+        if not (lines or scenes or overrides):
+            continue
+        totals["scenes"] += scenes
+        totals["lines"] += len(lines)
+        totals["overrides"] += overrides
+        rows.append(
+            {
+                "id": meta["id"],
+                "index": meta.get("index"),
+                "title": meta.get("title"),
+                "lines": lines[:50],
+                "line_count": len(lines),
+                "scenes": scenes,
+                "overrides": overrides,
+            }
+        )
+    return {**totals, "chapters": rows}
+
+
+def relation_references(table: dict, character_id: str) -> dict:
+    """统计其它角色指向该角色的关系（关系行与关系备注）。
+
+    参数:
+        table: characters.json 内容。
+        character_id: 角色 ID。
+
+    返回:
+        `{"notes": n, "relations": n, "characters": [{id, name, note, relations}]}`；
+        `characters` 是「谁会受影响」的名单。
+    """
+    rows: list[dict] = []
+    notes_total = 0
+    relations_total = 0
+    for item in table.get("characters") or []:
+        if str(item.get("id")) == character_id:
+            continue
+        state = item.get("state") or {}
+        note = (state.get("relationship_notes") or {}).get(character_id)
+        hits = [row for row in state.get("relations") or [] if str(row.get("target_id")) == character_id]
+        if note is None and not hits:
+            continue
+        notes_total += 1 if note is not None else 0
+        relations_total += len(hits)
+        rows.append({"id": item.get("id"), "name": item.get("name"), "note": note or "", "relations": len(hits)})
+    return {"notes": notes_total, "relations": relations_total, "characters": rows}
+
+
+def character_refs(store: ProjectStore, character_id: str) -> dict:
+    """汇总某个角色被哪些地方引用（删除前的影响面清单）。
+
+    统计口径覆盖全部真实引用来源：大纲 POV / 节拍选角 / 角色弧光、章节场景出场 /
+    台词说话人 / 章节音色覆盖、其它角色的关系行与关系备注。
+    删除保护与页面提示都走这一份口径，避免「哪里算引用」出现两套答案。
+
+    参数:
+        store: 工程。
+        character_id: 角色 ID。
+
+    返回:
+        `{total, lines_total, chapters, relations, outline, chapter_refs, sources, settings_available}`；
+        `sources` 每项含 `{key, label, count, where}`，直接用于删除确认框的「多少处 + 来自哪里」。
 
     异常:
-        ValueError: 试图删除旁白，或角色仍被引用。
         PreconditionError: 角色不存在。
+    """
+    table = store.load_characters()
+    if not any(item.get("id") == character_id for item in table.get("characters") or []):
+        raise PreconditionError(f"角色不存在: {character_id}")
+
+    bible = SettingsStore(store.root).load_or_none() or {}
+    outline = outline_references(bible, character_id)
+    chapters = chapter_references(store, character_id)
+    relations = relation_references(table, character_id)
+
+    # 大纲章与章节文件按章节 ID 合并，页面只读一份「每章多少处引用」
+    merged: dict[str, dict] = {}
+    for row in outline["chapters"]:
+        key = str(row.get("id") or f"outline:{row.get('index')}:{row.get('title')}")
+        merged[key] = {
+            "id": row.get("id"),
+            "index": row.get("index"),
+            "title": row.get("title"),
+            "lines": [],
+            "line_count": 0,
+            "scenes": 0,
+            "pov": row["pov"],
+            "beats": row["beats"],
+            "arcs": row["arcs"],
+            "overrides": 0,
+        }
+    for row in chapters["chapters"]:
+        target = merged.setdefault(
+            str(row.get("id")),
+            {
+                "id": row.get("id"),
+                "index": row.get("index"),
+                "title": row.get("title"),
+                "lines": [],
+                "line_count": 0,
+                "scenes": 0,
+                "pov": 0,
+                "beats": 0,
+                "arcs": 0,
+                "overrides": 0,
+            },
+        )
+        target.update(
+            {
+                "title": target.get("title") or row.get("title"),
+                "index": target.get("index") if target.get("index") is not None else row.get("index"),
+                "lines": row["lines"],
+                "line_count": row["line_count"],
+                "scenes": row["scenes"],
+                "overrides": row["overrides"],
+            }
+        )
+    chapter_rows = sorted(merged.values(), key=lambda item: int(item.get("index") or 0))
+
+    # 每个来源给出「多少处 + 来自哪里」，删除确认框直接照这份清单展示
+    sources = [
+        {"key": "pov", "label": REFERENCE_LABELS["pov"], "count": outline["pov"], "where": _chapter_names(chapter_rows, "pov")},
+        {
+            "key": "beats",
+            "label": REFERENCE_LABELS["beats"],
+            "count": outline["beats"],
+            "where": _chapter_names(chapter_rows, "beats"),
+        },
+        {"key": "arcs", "label": REFERENCE_LABELS["arcs"], "count": outline["arcs"], "where": _chapter_names(chapter_rows, "arcs")},
+        {
+            "key": "scenes",
+            "label": REFERENCE_LABELS["scenes"],
+            "count": chapters["scenes"],
+            "where": _chapter_names(chapter_rows, "scenes"),
+        },
+        {
+            "key": "lines",
+            "label": REFERENCE_LABELS["lines"],
+            "count": chapters["lines"],
+            "where": _chapter_names(chapter_rows, "lines"),
+        },
+        {
+            "key": "overrides",
+            "label": REFERENCE_LABELS["overrides"],
+            "count": chapters["overrides"],
+            "where": _chapter_names(chapter_rows, "overrides"),
+        },
+        {
+            "key": "relations",
+            "label": REFERENCE_LABELS["relations"],
+            "count": relations["notes"] + relations["relations"],
+            "where": "、".join(item.get("name") or item.get("id") or "" for item in relations["characters"]),
+        },
+    ]
+    sources = [item for item in sources if item["count"]]
+    total = sum(item["count"] for item in sources)
+    return {
+        "total": total,
+        "lines_total": chapters["lines"],
+        "chapters": chapter_rows,
+        "relations": relations["characters"],
+        "outline": {"pov": outline["pov"], "beats": outline["beats"], "arcs": outline["arcs"]},
+        "chapter_refs": {"scenes": chapters["scenes"], "lines": chapters["lines"], "overrides": chapters["overrides"]},
+        "sources": sources,
+        "settings_available": True,
+    }
+
+
+def _clean_character_references(store: ProjectStore, character_id: str) -> dict:
+    """删除角色前清理全部引用，避免留下悬空 ID（仅供 `force` 删除使用）。
+
+    处理范围与 `character_refs` 的统计口径一致：
+    - 大纲：清空视角、从节拍选角里移除、删除该角色的弧光行；
+    - 章节：从场景出场里移除、把该角色的台词说话人改为「未知角色」、删除章节音色覆盖；
+    - 角色表：删除其它角色指向它的关系行与关系备注。
+
+    参数:
+        store: 工程。
+        character_id: 被删除的角色 ID。
+
+    返回:
+        各来源实际清理数量。
+    """
+    removed = {"pov": 0, "beats": 0, "arcs": 0, "scenes": 0, "lines": 0, "overrides": 0, "relations": 0}
+
+    settings = SettingsStore(store.root)
+    bible = settings.load_or_none()
+    if bible:
+        changed = False
+        for act in (bible.get("outline") or {}).get("acts") or []:
+            for chapter in act.get("chapters") or []:
+                if chapter.get("pov_character_id") == character_id:
+                    chapter["pov_character_id"] = None
+                    removed["pov"] += 1
+                    changed = True
+                beats = chapter.get("beats") or []
+                for beat in beats:
+                    ids = beat.get("character_ids") or []
+                    if character_id in ids:
+                        # 节拍本身（梗概）保留，只把该角色从选角里摘掉
+                        beat["character_ids"] = [item for item in ids if item != character_id]
+                        removed["beats"] += 1
+                        changed = True
+                arcs = chapter.get("character_arcs") or []
+                kept_arcs = [row for row in arcs if row.get("character_id") != character_id]
+                if len(kept_arcs) != len(arcs):
+                    removed["arcs"] += len(arcs) - len(kept_arcs)
+                    if kept_arcs:
+                        chapter["character_arcs"] = kept_arcs
+                    else:
+                        chapter.pop("character_arcs", None)
+                    changed = True
+        if changed:
+            settings.save(bible)
+
+    for meta in store.list_chapters():
+        try:
+            chapter = store.load_chapter(meta["id"])
+        except (OSError, ValueError):
+            continue
+        changed = False
+        for scene in chapter.get("scenes") or []:
+            ids = scene.get("character_ids") or []
+            if character_id in ids:
+                scene["character_ids"] = [item for item in ids if item != character_id]
+                removed["scenes"] += 1
+                changed = True
+            for line in scene.get("lines") or []:
+                if line.get("speaker_id") == character_id:
+                    # 台词本身保留，说话人退化为「未知角色」，界面会提示重新识别
+                    line["speaker_id"] = entities.UNKNOWN_SPEAKER_ID
+                    removed["lines"] += 1
+                    changed = True
+        overrides = chapter.get("voice_overrides") or {}
+        if character_id in overrides:
+            overrides.pop(character_id, None)
+            if overrides:
+                chapter["voice_overrides"] = overrides
+            else:
+                chapter.pop("voice_overrides", None)
+            removed["overrides"] += 1
+            changed = True
+        if changed:
+            store.save_chapter(chapter)
+
+    table = store.load_characters()
+    relations_changed = False
+    for item in table.get("characters") or []:
+        if str(item.get("id")) == character_id:
+            continue
+        state = item.get("state") or {}
+        notes = state.get("relationship_notes") or {}
+        if character_id in notes:
+            notes.pop(character_id, None)
+            removed["relations"] += 1
+            relations_changed = True
+        rows = state.get("relations") or []
+        kept = [row for row in rows if str(row.get("target_id")) != character_id]
+        if len(kept) != len(rows):
+            removed["relations"] += len(rows) - len(kept)
+            state["relations"] = kept or None
+            relations_changed = True
+    if relations_changed:
+        store.save_characters(table)
+    return removed
+
+
+def _reference_summary(refs: dict) -> str:
+    """把引用清单压成一行中文摘要（拦截提示用）。
+
+    参数:
+        refs: `character_refs` 的返回值。
+
+    返回:
+        形如「大纲视角（POV） 2 章、大纲节拍选角 34 个、台词说话人 34 行」的文本。
+    """
+    return "、".join(
+        f"{item['label']} {item['count']} {_REFERENCE_UNITS.get(item['key'], '处')}" for item in refs.get("sources") or []
+    )
+
+
+def remove_character(store: ProjectStore, character_id: str, *, force: bool = False) -> dict:
+    """按 ID 删除角色（旁白不可删除；默认拦截仍被引用的角色）。
+
+    参数:
+        store: 工程。
+        character_id: 角色 ID。
+        force: 用户已明确确认删除时置 True：先清理全部引用，再删除角色。
+
+    返回:
+        `{"removed", "characters", "references", "cleaned"}`。
+
+    异常:
+        ValueError: 试图删除旁白。
+        PreconditionError: 角色不存在，或仍被引用且未确认（消息里带影响面清单）。
     """
     if character_id == entities.NARRATOR_ID:
         raise ValueError("旁白是保留角色，不能删除")
     table = store.load_characters()
-    if not any(item.get("id") == character_id for item in table["characters"]):
+    target = next((item for item in table.get("characters") or [] if item.get("id") == character_id), None)
+    if target is None:
         raise PreconditionError(f"角色不存在: {character_id}")
+
     refs = character_refs(store, character_id)
-    if refs["total"]:
-        chapters = "、".join(str(item.get("title") or item.get("id")) for item in refs["chapters"][:6])
-        parts = []
-        if refs.get("lines_total"):
-            parts.append(f"{refs['lines_total']} 行台词")
-        if refs.get("chapters"):
-            parts.append(f"{len(refs['chapters'])} 章出场/大纲引用")
-        if refs.get("relations"):
-            parts.append(f"{len(refs['relations'])} 个角色的关系指向")
-        raise ValueError(
-            f"角色仍被引用（{'，'.join(parts) or '未知引用'}；章节：{chapters}），"
-            "请先改派台词、调整大纲选角/视角，并清理其它角色的关系后再删除"
+    cleaned = {"pov": 0, "beats": 0, "arcs": 0, "scenes": 0, "lines": 0, "overrides": 0, "relations": 0}
+    if refs["total"] and not force:
+        raise PreconditionError(
+            f"角色「{target.get('name') or character_id}」仍被引用，共 {refs['total']} 处：{_reference_summary(refs)}。"
+            "请先改派台词、调整大纲视角/节拍选角、清理其它角色的关系；"
+            "若确认要删除并同时清理这些引用，请加 --force（界面会二次确认）。"
         )
+    if refs["total"]:
+        cleaned = _clean_character_references(store, character_id)
+        table = store.load_characters()
+    # 删除中间角色会让后面的角色下标整体前移：把旧文档也去掉同一角色，
+    # 历史非法枚举值才会按「仍是同一个人」放行，而不是被误判成本次新写入
+    baseline = json.loads(json.dumps(table))
+    baseline["characters"] = [item for item in baseline["characters"] if item.get("id") != character_id]
     table["characters"] = [item for item in table["characters"] if item.get("id") != character_id]
-    store.save_characters(table)
-    return {"removed": character_id, "characters": len(table["characters"])}
+    store.save_characters(table, baseline=baseline)
+    return {
+        "removed": character_id,
+        "characters": len(table["characters"]),
+        "references": refs["total"],
+        "cleaned": cleaned,
+    }

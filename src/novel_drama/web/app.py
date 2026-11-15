@@ -4538,32 +4538,41 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
 
     @app.get("/api/ui/characters/refs")
     def ui_character_refs(path: str = Query(...), character: str = Query(...)) -> dict:
-        """角色引用位置：哪些章节/台词行仍在使用该角色（删除前提示）。
+        """角色引用位置：谁会受影响、各多少处、来自哪里（删除前提示用）。
 
         参数:
             path: 工程目录。
             character: 角色 ID。
 
         返回:
-            `{total, chapters: [{id, index, title, lines}]}`。
+            `character_refs` 的完整清单：`{total, sources, chapters, relations, outline, chapter_refs}`。
+
+        异常:
+            HTTPException 412: 角色不存在（可能已在别处被删除）。
         """
-        return character_refs(_store(path), character)
+        return use_cases.call(lambda: character_refs(_store(path), character))
 
     @app.post("/api/ui/characters/delete")
     def ui_characters_delete(body: dict) -> dict:
         """按 ID 删除人物（应用层用例 `remove_character`，旁白会被拒绝）。
 
+        默认拦截仍被引用的角色并返回影响面摘要；`force=true` 表示用户已在确认框里
+        明确选择「删除并清理引用」，此时先清理大纲/章节/关系里的引用再删除。
+
         参数:
-            body: `{path, id}`。
+            body: `{path, id, force?}`。
 
         异常:
             HTTPException 400: 缺少 id。
+            HTTPException 412: 角色不存在，或仍被引用且未确认。
         """
         store = _store(body.get("path"))
         character_id = body.get("id") or body.get("character")
         if not character_id:
             raise HTTPException(status_code=400, detail={"code": 2, "message": "缺少 id 参数"})
-        return use_cases.call(lambda: remove_character(store, str(character_id)))
+        return use_cases.call(
+            lambda: remove_character(store, str(character_id), force=bool(body.get("force"))),
+        )
 
     @app.get("/api/ui/characters/merge/impact")
     def ui_character_merge_impact(path: str = Query(...), source: str = Query(...), target: str = Query(...)) -> dict:

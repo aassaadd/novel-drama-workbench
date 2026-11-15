@@ -1036,11 +1036,11 @@ function newCharacter() {
   });
 }
 
-/** 删除角色（二次确认；旁白由后端拒绝） */
+/** 删除角色（先看影响面：谁会受影响、各多少处、来自哪里；有引用必须二次确认） */
 async function deleteCharacter() {
   const item = current();
   if (!item) return;
-  let refs = { total: 0, chapters: [] };
+  let refs = { total: 0, chapters: [], sources: [], relations: [] };
   try {
     refs = await getJSON('/api/ui/characters/refs', { path: state.path, character: item.id });
   } catch {
@@ -1052,43 +1052,77 @@ async function deleteCharacter() {
       .slice(0, 3)
       .map((line) => ({ ...line, chapter: chapter.title || chapter.id }))
   );
+  const sourceRows = (refs.sources || [])
+    .map(
+      (source) => `<div class="imp-row">
+        <span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(source.label)}</span>
+        <span class="badge warn">${Number(source.count)} 处</span>
+      </div>
+      <div class="hint">${esc(source.where || '')}</div>`
+    )
+    .join('');
   const mask = openDialog({
     title: '删除角色',
     wide: blocked,
     body: blocked
-      ? `<div class="dlg-note bad">「${esc(item.name)}」仍被引用（${Number(
-          refs.lines_total || 0
-        )} 行台词 · ${(refs.chapters || []).length} 章出场/大纲 · ${(refs.relations || []).length} 个关系指向），暂不能删除。
-          请先改派台词、调整大纲的视角/节拍选角，并清理其它角色的关系。</div>
-         <div class="impact">
-           ${samples
-             .map(
-               (line) => `<div class="imp-row">
-                 <span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
-                   ${esc(line.chapter)} · ${esc((line.text || '').slice(0, 34))}
-                 </span>
-                 <span class="badge warn">引用</span>
-               </div>`
-             )
-             .join('')}
-         </div>
-         <div class="hint">共 ${(refs.chapters || []).length} 章有引用；这里只列出前 ${samples.length} 行。</div>`
-      : `<div class="dlg-note">「${esc(item.name)}」没有被任何台词引用，可以安全删除。</div>`,
-    foot: `<div class="right"><button class="btn" data-dlg-close>${blocked ? '知道了' : '取消'}</button>
-      ${blocked ? '' : '<button class="btn danger" id="del-chara-ok">确认删除</button>'}</div>`,
+      ? `<div class="dlg-note bad">「${esc(item.name)}」仍被引用，共 ${Number(refs.total)} 处，删除前请先确认影响面。</div>
+         <div class="impact">${sourceRows}</div>
+         ${
+           samples.length
+             ? `<div class="impact">
+                  ${samples
+                    .map(
+                      (line) => `<div class="imp-row">
+                        <span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
+                          ${esc(line.chapter)} · ${esc((line.text || '').slice(0, 34))}
+                        </span>
+                        <span class="badge warn">台词</span>
+                      </div>`
+                    )
+                    .join('')}
+                </div>`
+             : ''
+         }
+         <div class="hint">台词只列出前 ${samples.length} 行；大范围引用建议先改派台词与大纲选角，再回来删除。</div>`
+      : `<div class="dlg-note">「${esc(item.name)}」没有被任何台词、大纲或关系引用，可以安全删除。</div>`,
+    foot: `<div class="right">
+      <button class="btn" data-dlg-close>取消</button>
+      ${
+        blocked
+          ? '<button class="btn danger" id="del-chara-force">仍要删除（清理引用）</button>'
+          : '<button class="btn danger" id="del-chara-ok">确认删除</button>'
+      }</div>`,
   });
-  mask.querySelector('#del-chara-ok')?.addEventListener('click', async (event) => {
-    event.currentTarget.disabled = true;
+  const finish = async (force) => {
     try {
-      await postJSON('/api/ui/characters/delete', { path: state.path, id: item.id });
+      const result = await postJSON('/api/ui/characters/delete', { path: state.path, id: item.id, force });
       closeDialog();
-      toast('角色已删除', 'ok');
+      const cleaned = Object.values((result && result.cleaned) || {}).reduce((sum, value) => sum + Number(value || 0), 0);
+      toast(cleaned ? `角色已删除，并清理 ${cleaned} 处引用` : '角色已删除', 'ok');
       selectedId = '';
       await reloadPreservingView();
     } catch (error) {
-      toast(`删除失败：${error.message}；可先用「查看出场」确认台词与大纲引用`, 'bad', 4200);
-      event.currentTarget.disabled = false;
+      toast(`删除失败：${error.message}`, 'bad', 4200);
     }
+  };
+  mask.querySelector('#del-chara-ok')?.addEventListener('click', async (event) => {
+    event.currentTarget.disabled = true;
+    await finish(false);
+  });
+  mask.querySelector('#del-chara-force')?.addEventListener('click', () => {
+    const confirmMask = openDialog({
+      title: '确认删除并清理引用',
+      body: `<div class="dlg-note bad">删除后不可恢复。将同时清理「${esc(item.name)}」在下列位置的引用：
+        </div>
+        <div class="impact">${sourceRows}</div>
+        <div class="hint">台词会保留，但说话人变为「未知角色」，需要重新识别；大纲视角会被清空。</div>`,
+      foot: `<div class="right"><button class="btn" data-dlg-close>再想想</button>
+        <button class="btn danger" id="del-chara-confirm">确认删除并清理</button></div>`,
+    });
+    confirmMask.querySelector('#del-chara-confirm')?.addEventListener('click', async (event) => {
+      event.currentTarget.disabled = true;
+      await finish(true);
+    });
   });
 }
 

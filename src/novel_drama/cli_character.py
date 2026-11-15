@@ -135,18 +135,22 @@ def cmd_character_update(args, config: AppConfig) -> int:
 
 
 def cmd_character_remove(args, config: AppConfig) -> int:
-    """按 ID 删除角色（旁白不可删除；仍被引用时拒绝并列出位置）。
+    """按 ID 删除角色（旁白不可删除；被引用时默认拦截，`--force` 才清理引用后删除）。
 
     参数:
-        args: 已解析参数（id / json）。
+        args: 已解析参数（id / force / json）。
         config: 本机配置。
 
     返回:
         进程退出码。
     """
     store = _resolve_store(args, config)
-    payload = remove_character(store, args.id)
-    _emit(args, f"已删除角色 {args.id}", payload)
+    payload = remove_character(store, args.id, force=bool(getattr(args, "force", False)))
+    text = f"已删除角色 {args.id}"
+    if payload["cleaned"] and any(payload["cleaned"].values()):
+        detail = "、".join(f"{key} {value}" for key, value in payload["cleaned"].items() if value)
+        text += f"，并清理 {payload['references']} 处引用（{detail}）"
+    _emit(args, text, payload)
     return 0
 
 

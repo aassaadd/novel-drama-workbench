@@ -367,16 +367,19 @@ class ProjectStore:
             return {"schema_version": 1, "characters": [entities.new_narrator()]}
         return self._read_json(self.characters_file)
 
-    def save_characters(self, table: dict) -> None:
+    def save_characters(self, table: dict, baseline: dict | None = None) -> None:
         """保存角色表（先校验枚举与 schema）。
 
         参数:
             table: 角色表文档。
+            baseline: 校验用的旧文档；默认读磁盘。删除列表中间的角色后，后面角色的
+                下标会整体前移，按旧下标比对会把「历史非法枚举值」误判成本次新写入；
+                调用方可在删除后传入「已去掉该角色」的旧文档，让历史值仍按同一角色放行。
 
         异常:
             EnumValueError: 写入了未定义的枚举值（消息含字段名与可选值）。
         """
-        baseline = self._baseline(self.characters_file)
+        baseline = baseline if baseline is not None else self._baseline(self.characters_file)
         check_character_table(table, baseline=baseline)
         validate(table, "character.schema.json", baseline=baseline)
         self._write_json(self.characters_file, table)
