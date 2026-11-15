@@ -9,57 +9,23 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
-
+from ..domain.speech.rules.narrators import effective_switches as _effective_switches
+from ..domain.speech.rules.narrators import narrator_persona as narrator_persona
+from ..domain.speech.rules.narrators import narrator_plan as narrator_plan
+from ..domain.speech.rules.voice_ladder import (
+    profile_source_hash as profile_source_hash,
+)
+from ..domain.speech.rules.voice_ladder import resolve_voice as _domain_resolve_voice
 from ..models.entities import NARRATOR_ID, UNKNOWN_SPEAKER_ID
 from .voice_store import find_voice, pick_variant, variant_ref
 
-#: 允许被章节级覆盖的角色：旁白与龙套
-_OVERRIDABLE_ROLES = {"narrator"}
-
-
-def _sha(text: str) -> str:
-    """计算 sha256 摘要（带 sha256: 前缀）。"""
-    return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
-
-
-def profile_source_hash(character: dict) -> str:
-    """计算音色描述的推导输入哈希（字段一变即判 stale）。
-
-    参数:
-        character: 角色 dict。
-
-    返回:
-        `sha256:...` 字符串。
-    """
-    payload = {
-        "gender": character.get("gender"),
-        "age_range": character.get("age_range"),
-        "personality": character.get("personality") or [],
-        "background": character.get("background") or "",
-        "speech_style": character.get("speech_style") or {},
-        "appearance_prompt": character.get("appearance_prompt") or "",
-    }
-    return _sha(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+# 解析优先级（10 级）与旁白人格展开已下沉到 `domain.speech.rules`；
+# 本模块保留工程侧 IO（读音色库、章节序号、参考音频路径）与页面展示辅助。
 
 
 def cast_config(store) -> dict:
     """读取工程级音色编排配置（缺失时返回空 dict）。"""
     return ((store.settings().get("tts") or {}).get("cast") or {})
-
-
-def _empty(source: str = "missing") -> dict:
-    """构造统一的解析结果（未命中时也保证字段齐全）。"""
-    return {
-        "voice_id": None,
-        "variant_id": None,
-        "ref_audio": None,
-        "ref_text": None,
-        "source": source,
-        "decided_by": {"level": 0, "evidence": None},
-        "warnings": [],
-    }
 
 
 def _entry_from_voice(store, voices: dict, voice_id: str | None, emotion: str | None, variant_id: str | None = None) -> dict | None:
@@ -131,101 +97,6 @@ def _chapter_order(store) -> dict[str, int]:
     except AttributeError:
         pass
     return order
-
-
-def _effective_switches(cast: dict, order: dict[str, int], max_index: int) -> list[dict]:
-    """把切换点展开成带起止序号的区间（end 缺省时延续到下一个切换点之前）。
-
-    参数:
-        cast: `tts.cast` 配置。
-        order: 章节 ID → 序号映射。
-        max_index: 全剧最大章节序号。
-
-    返回:
-        [{start, end, persona_id, reason}]，按 start 升序。
-    """
-    raw = []
-    for switch in cast.get("narrator_switches") or []:
-        start = int(order.get(switch.get("at_chapter_id")) or 0)
-        if not start:
-            continue
-        raw.append(
-            {
-                "start": start,
-                "end": int(order.get(switch.get("end_chapter_id")) or 0) if switch.get("end_chapter_id") else 0,
-                "persona_id": switch.get("persona_id"),
-                "reason": switch.get("reason"),
-                "only": switch.get("scope") == "this_chapter_only",
-            }
-        )
-    raw.sort(key=lambda item: item["start"])
-    for index, item in enumerate(raw):
-        if item["only"]:
-            item["end"] = item["start"]
-        elif not item["end"]:
-            following = raw[index + 1]["start"] if index + 1 < len(raw) else 0
-            item["end"] = (following - 1) if following else max_index
-    return raw
-
-
-def narrator_persona(cast: dict, chapter: dict, order: dict[str, int]) -> dict | None:
-    """按章节位置解析当前生效的旁白人格（含区间结束章节）。
-
-    参数:
-        cast: `tts.cast` 配置。
-        chapter: 当前章节 dict。
-        order: 章节 ID → 序号映射。
-
-    返回:
-        人格 dict；未配置时返回 None。
-    """
-    personas = {item.get("id"): item for item in cast.get("narrators") or [] if item.get("id")}
-    current = int(order.get(chapter.get("id")) or chapter.get("index") or 0)
-    max_index = max(order.values()) if order else current
-    chosen = None
-    for item in _effective_switches(cast, order, max_index):
-        if item["start"] <= current <= item["end"]:
-            chosen = item["persona_id"]
-    if chosen is None:
-        chosen = cast.get("default_narrator_id")
-    return personas.get(chosen) if chosen else None
-
-
-def narrator_plan(cast: dict, chapters: list[dict]) -> list[dict]:
-    """生成「每一章用哪个旁白」的展开表，供页面预览与校验共用。
-
-    参数:
-        cast: `tts.cast` 配置。
-        chapters: 章节列表（需含 id/index/title）。
-
-    返回:
-        [{chapter_id, index, title, persona_id, label, source}]，source=switch|default。
-    """
-    order = {item.get("id"): int(item.get("index") or 0) for item in chapters if item.get("id")}
-    max_index = max(order.values()) if order else 0
-    personas = {item.get("id"): item for item in cast.get("narrators") or [] if item.get("id")}
-    ranges = _effective_switches(cast, order, max_index)
-    plan = []
-    for chapter in sorted(chapters, key=lambda item: int(item.get("index") or 0)):
-        index = int(chapter.get("index") or 0)
-        persona_id = cast.get("default_narrator_id")
-        source = "default"
-        for item in ranges:
-            if item["start"] <= index <= item["end"]:
-                persona_id = item["persona_id"]
-                source = "switch"
-        persona = personas.get(persona_id) or {}
-        plan.append(
-            {
-                "chapter_id": chapter.get("id"),
-                "index": index,
-                "title": chapter.get("title"),
-                "persona_id": persona_id,
-                "label": persona.get("label") or "（未配置旁白人格）",
-                "source": source,
-            }
-        )
-    return plan
 
 
 def normalize_cast(raw: dict) -> dict:
@@ -417,54 +288,22 @@ def validate_cast_config(
     return errors
 
 
-def _chapter_override(store, chapter: dict, character: dict, line: dict, voices: dict) -> dict | None:
-    """解析章节级覆盖；不合法时返回 None 并在 warnings 里留痕。
-
-    参数:
-        store: ProjectStore。
-        chapter: 章节 dict。
-        character: 角色 dict（可能为空）。
-        line: 台词行。
-        voices: 音色库文档。
-
-    返回:
-        命中条目或 None。
-    """
-    overrides = chapter.get("voice_overrides") or {}
-    override = overrides.get(line.get("speaker_id"))
-    if not isinstance(override, dict):
-        return None
-    role = (character or {}).get("role")
-    stock = (character or {}).get("stock") or {}
-    if role not in _OVERRIDABLE_ROLES and not stock:
-        return {"invalid": "章节覆盖只允许旁白或龙套角色"}
-    if not str(override.get("reason") or "").strip():
-        return {"invalid": "章节覆盖必须写 reason"}
-    entry = _entry_from_voice(store, voices, override.get("voice_id"), line.get("emotion"), override.get("variant_id"))
-    if entry is None and override.get("persona_id"):
-        persona = next(
-            (item for item in (cast_config(store).get("narrators") or []) if item.get("id") == override.get("persona_id")),
-            None,
-        )
-        if persona:
-            entry = _entry_from_voice(store, voices, persona.get("voice_id"), line.get("emotion"), override.get("variant_id"))
-    return entry or {"invalid": "章节覆盖指向的音色不存在"}
-
-
 def resolve_cast_voice(store, characters_table: dict, chapter: dict, line: dict, voices: dict | None = None) -> dict:
     """解析一行台词最终应使用的音色（R18 唯一入口）。
 
-    优先级（从高到低）：
+    优先级（从高到低）与判定已下沉到 `domain.speech.rules.voice_ladder.resolve_voice`：
         1. `line.voice.variant_id`
         2. `line.voice.voice_id`
         3. `chapter.voice_overrides[character_id]`（仅旁白/龙套，必须写 reason）
-        4. 旁白人格切换点 / `character.voice_binding`
-        5. `tts.cast.stock_defaults[slot|voice_slot]`
-        6. `tts.cast.minor_fallback_voice_id`
-        7. `tts.cast.narrator_fallback_voice_id`
+        4. 旁白人格切换点
+        5. `character.voice_binding`
+        6. `tts.cast.stock_defaults[slot|voice_slot]`
+        7. `tts.cast.minor_fallback_voice_id` / `narrator_fallback_voice_id`
         8. `tts.cast.unknown_voice_id`（未建过的路人）
         9. `project.tts.default_voice_id`
         10. 未命中：`source=missing`，由调用方报 VOICE_MISSING
+
+    这里只准备工程侧输入：音色库、cast 配置、章节序号与条目解析函数（含参考音频路径）。
 
     参数:
         store: ProjectStore。
@@ -478,120 +317,21 @@ def resolve_cast_voice(store, characters_table: dict, chapter: dict, line: dict,
     """
     voices = voices if voices is not None else store.load_voices()
     cast = cast_config(store)
-    settings = store.settings()
     characters = {item.get("id"): item for item in characters_table.get("characters") or []}
     speaker_id = line.get("speaker_id")
-    character = characters.get(speaker_id)
-    emotion = line.get("emotion")
-    warnings: list[str] = []
-    line_voice = line.get("voice") or {}
-
-    def hit(entry: dict | None, level: int, evidence: str, source: str) -> dict | None:
-        """把命中条目包装成统一返回结构。"""
-        if not entry:
-            return None
-        result = _empty(source)
-        result.update({key: entry.get(key) for key in ("voice_id", "variant_id", "ref_audio", "ref_text")})
-        result["decided_by"] = {"level": level, "evidence": evidence}
-        result["warnings"] = warnings
-        result["issue"] = entry.get("issue")
-        return result
-
-    if cast.get("honor_line_override", True):
-        if line_voice.get("variant_id"):
-            entry = _entry_from_voice(store, voices, line_voice.get("voice_id"), emotion, line_voice.get("variant_id"))
-            if not str(line_voice.get("reason") or "").strip():
-                warnings.append("行级音色覆盖未写 reason")
-            result = hit(entry, 1, "line.voice.variant_id", "line_variant")
-            if result:
-                return result
-        if line_voice.get("voice_id"):
-            entry = _entry_from_voice(store, voices, line_voice.get("voice_id"), emotion, None)
-            if not str(line_voice.get("reason") or "").strip():
-                warnings.append("行级音色覆盖未写 reason")
-            result = hit(entry, 2, "line.voice.voice_id", "line_voice")
-            if result:
-                return result
-
-    override = _chapter_override(store, chapter, character, line, voices)
-    if isinstance(override, dict) and override.get("invalid"):
-        warnings.append(str(override["invalid"]))
-    else:
-        result = hit(override, 3, f"chapter.voice_overrides[{speaker_id}]", "chapter_override")
-        if result:
-            return result
-
-    if speaker_id == NARRATOR_ID:
-        persona = narrator_persona(cast, chapter, _chapter_order(store))
-        if persona and persona.get("voice_id"):
-            entry = _entry_from_voice(store, voices, persona.get("voice_id"), emotion)
-            result = hit(entry, 4, f"tts.cast.narrators[{persona.get('id')}]", "narrator_persona")
-            if result:
-                return result
-
-    binding = (character or {}).get("voice_binding") or {}
-    binding_voice = binding.get("voice_library_id") or binding.get("voice_id")
-    if binding_voice:
-        entry = _entry_from_voice(store, voices, binding_voice, emotion, binding.get("default_variant_id"))
-        result = hit(entry, 5, "character.voice_binding", "character_binding")
-        if result:
-            return result
-
-    stock = (character or {}).get("stock") or {}
-    if stock:
-        defaults = cast.get("stock_defaults") or {}
-        # 职业槽位优先，其次音色池槽位；evidence 记录实际命中的键，避免回落时误导排查
-        for key in (stock.get("slot"), stock.get("voice_slot")):
-            stock_voice = defaults.get(key) if key else None
-            if not stock_voice:
-                continue
-            entry = _entry_from_voice(store, voices, stock_voice, emotion)
-            result = hit(entry, 6, f"tts.cast.stock_defaults[{key}]", "stock_pool")
-            if result:
-                return result
-
-    if (character or {}).get("role") == "minor" and cast.get("minor_fallback_voice_id"):
-        entry = _entry_from_voice(store, voices, cast["minor_fallback_voice_id"], emotion)
-        result = hit(entry, 7, "tts.cast.minor_fallback_voice_id", "minor_fallback")
-        if result:
-            return result
-
-    if speaker_id == NARRATOR_ID:
-        if cast.get("narrator_fallback_voice_id"):
-            entry = _entry_from_voice(store, voices, cast["narrator_fallback_voice_id"], emotion)
-            result = hit(entry, 7, "tts.cast.narrator_fallback_voice_id", "narrator_fallback")
-            if result:
-                return result
-        if cast.get("unknown_voice_id"):
-            entry = _entry_from_voice(store, voices, cast["unknown_voice_id"], emotion)
-            result = hit(entry, 9, "tts.cast.unknown_voice_id", "unknown_fallback")
-            if result:
-                return result
-        default_voice = (settings.get("tts") or {}).get("default_voice_id")
-        if default_voice:
-            entry = _entry_from_voice(store, voices, default_voice, emotion)
-            result = hit(entry, 10, "project.tts.default_voice_id", "project_default")
-            if result:
-                warnings.append("旁白未配置人格与绑定，已回落到工程默认音色")
-                return result
-        return _empty()
-
-    if speaker_id == UNKNOWN_SPEAKER_ID or character is None:
-        if cast.get("unknown_voice_id"):
-            entry = _entry_from_voice(store, voices, cast["unknown_voice_id"], emotion)
-            result = hit(entry, 8, "tts.cast.unknown_voice_id", "unknown_fallback")
-            if result:
-                warnings.append(f"未建过的路人 {speaker_id} 使用通用路人音色，请归入龙套池")
-                return result
-
-    default_voice = (settings.get("tts") or {}).get("default_voice_id")
-    if default_voice:
-        entry = _entry_from_voice(store, voices, default_voice, emotion)
-        result = hit(entry, 9, "project.tts.default_voice_id", "project_default")
-        if result:
-            warnings.append("角色未绑定音色，已回落到工程默认音色")
-            return result
-    return _empty()
+    persona = narrator_persona(cast, chapter, _chapter_order(store)) if speaker_id == NARRATOR_ID else None
+    return _domain_resolve_voice(
+        line,
+        characters.get(speaker_id),
+        chapter,
+        cast,
+        store.settings(),
+        lambda voice_id, emotion, variant_id: _entry_from_voice(store, voices, voice_id, emotion, variant_id),
+        persona=persona,
+        is_narrator=speaker_id == NARRATOR_ID,
+        is_unknown_speaker=speaker_id == UNKNOWN_SPEAKER_ID,
+        honor_line_override=cast.get("honor_line_override", True),
+    )
 
 
 #: 解析层 source → 页面展示的中文来源名（章节覆盖表用）。
