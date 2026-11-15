@@ -1061,6 +1061,9 @@ async function deleteCharacter() {
       <div class="hint">${esc(source.where || '')}</div>`
     )
     .join('');
+  // 可合并的目标角色：旁白不属于合并对象，源角色自身排除
+  const mergeTargets = characters.filter((row) => row.id !== item.id && row.role !== 'narrator');
+  const canMerge = blocked && mergeTargets.length > 0;
   const mask = openDialog({
     title: '删除角色',
     wide: blocked,
@@ -1083,13 +1086,24 @@ async function deleteCharacter() {
                 </div>`
              : ''
          }
-         <div class="hint">台词只列出前 ${samples.length} 行；大范围引用建议先改派台词与大纲选角，再回来删除。</div>`
+         <div class="hint">台词只列出前 ${samples.length} 行；大范围引用建议先改派台词与大纲选角，再回来删除。</div>
+         ${
+           canMerge
+             ? `<div class="dlg-note" style="margin-top:10px">
+                  <b style="color:var(--text)">推荐：合并到已有角色</b>——台词、场景出场、大纲节拍选角、章节视角与关系会原样改挂到目标角色，
+                  不会丢失任何引用；只有确认要停用这个名字时才选「仍然删除」。
+                </div>`
+             : `<div class="dlg-note warn" style="margin-top:10px">
+                  当前没有可合并的其它角色；若要保留这些引用，请先新增一个目标角色再回来合并。
+                </div>`
+         }`
       : `<div class="dlg-note">「${esc(item.name)}」没有被任何台词、大纲或关系引用，可以安全删除。</div>`,
     foot: `<div class="right">
       <button class="btn" data-dlg-close>取消</button>
       ${
         blocked
-          ? '<button class="btn danger" id="del-chara-force">仍要删除（清理引用）</button>'
+          ? `${canMerge ? '<button class="btn primary" id="del-chara-merge">合并到已有角色（推荐）</button>' : ''}
+             <button class="btn danger" id="del-chara-force" title="会清理该角色在台词、大纲、场景与关系中的引用，且不可撤销">仍然删除（清理引用）</button>`
           : '<button class="btn danger" id="del-chara-ok">确认删除</button>'
       }</div>`,
   });
@@ -1109,15 +1123,26 @@ async function deleteCharacter() {
     event.currentTarget.disabled = true;
     await finish(false);
   });
+  // 推荐路径：直接复用现有「合并到已有角色」流程（会再弹选择目标角色与影响面）
+  mask.querySelector('#del-chara-merge')?.addEventListener('click', () => {
+    closeDialog(false);
+    mergeCharacter();
+  });
   mask.querySelector('#del-chara-force')?.addEventListener('click', () => {
     const confirmMask = openDialog({
       title: '确认删除并清理引用',
-      body: `<div class="dlg-note bad">删除后不可恢复。将同时清理「${esc(item.name)}」在下列位置的引用：
-        </div>
+      wide: true,
+      body: `<div class="dlg-note bad">这一步不可撤销：确认后先清理「${esc(item.name)}」的 ${Number(refs.total)} 处引用，再删除角色卡。</div>
         <div class="impact">${sourceRows}</div>
-        <div class="hint">台词会保留，但说话人变为「未知角色」，需要重新识别；大纲视角会被清空。</div>`,
+        <div class="dlg-note">清理后果：大纲章节视角置空；节拍保留梗概、只摘掉该角色选角；场景出场移除；
+          台词保留，但说话人变成「未知角色」，需要重新识别；章节音色覆盖删除；其它角色关系里的该角色一并移除。</div>
+        ${
+          canMerge
+            ? `<div class="dlg-note warn" style="margin-top:8px">如果只是想让名字不再出现，建议返回上一步选择「合并到已有角色」，引用会原样保留。</div>`
+            : ''
+        }`,
       foot: `<div class="right"><button class="btn" data-dlg-close>再想想</button>
-        <button class="btn danger" id="del-chara-confirm">确认删除并清理</button></div>`,
+        <button class="btn danger" id="del-chara-confirm">确认删除并清理 ${Number(refs.total)} 处</button></div>`,
     });
     confirmMask.querySelector('#del-chara-confirm')?.addEventListener('click', async (event) => {
       event.currentTarget.disabled = true;
