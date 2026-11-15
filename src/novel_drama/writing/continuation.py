@@ -22,7 +22,13 @@ from ..store.settings_store import SettingsStore
 from ..text.context import ContextAssembler
 from ..text.dialogue import normalize_dialogue
 from ..text.titles import strip_index_prefix
-from .cast_sync import sync_chapter_cast
+from .budgets import context_budget_tokens
+from .cast_sync import (
+    apply_chapter_cast,
+    cast_prompt_block,
+    load_pending,
+    normalize_cast,
+)
 from .editing import INSTRUCTION_LIMIT, STALE_WARNING, _usage_payload
 from .service import (
     DEFAULT_CHAPTER_WORDS,
@@ -31,7 +37,6 @@ from .service import (
     _continue_instruction,
     _count_words,
     _generate_json,
-    _tool_max_tokens,
     build_chapter_context,
     build_writing_adapter,
     stream_text,
@@ -563,7 +568,7 @@ def continue_chapter(
         chapter, content, remaining_beats, start_beat, seg_words, total_target, max_rounds, intent, instruction
     )
 
-    budget = int(config.get("writing.context_budget_tokens") or 32768)
+    budget = context_budget_tokens(config)
     assembler = ContextAssembler(
         work=context["work"],
         bible=context["bible"],
@@ -582,10 +587,7 @@ def continue_chapter(
     )
     req = assembler.build("chapter", instruction_text, context["speaker_ids"])
     req.metadata = context["metadata"]
-    mt = config.get("writing.multi_turn") or {}
-    round_max_tokens = max(1, int(mt.get("round_max_tokens") or 2048))
-    # 单轮输出按目标总量收口，避免一次生成远超用户选择的字数
-    req.max_tokens = max(1, min(round_max_tokens, max(256, int(total_target * 1.6) + 96)))
+    # 输出侧不设人为上限：max_tokens 由适配器按上下文剩余空间计算
     work_id = str(context["work"].get("id") or "").strip()
     if work_id:
         req.prompt_cache_key = f"{work_id}:{chapter_id}:continue"
@@ -628,8 +630,6 @@ def continue_chapter(
                 req,
                 messages=base_messages
                 + [Message("assistant", added_text), Message("user", _continue_instruction(remaining_words))],
-                # 轮次越往后剩余额度越少，同步收紧单轮上限，避免累计超写
-                max_tokens=max(1, min(req.max_tokens, max(256, int(remaining_words * 1.6) + 96))),
             )
         try:
             result = stream_text(context["adapter"], request, on_delta) if on_delta else context["adapter"].generate(request)
@@ -823,6 +823,7 @@ def _build_outline_act(
                     character_ids=raw_beat.get("character_ids") or [],
                     turning_point=bool(raw_beat.get("turning_point")),
                     target_words=int(raw_beat.get("target_words") or chapter_words // max(1, beats_per_chapter)),
+                    extra_characters=raw_beat.get("extra_characters") or [],
                 )
             )
         act["chapters"].append(outline_chapter)
@@ -856,53 +857,44 @@ def _check_outline_indexes(outline_indexes: list[int], file_indexes: list[int]) 
     return max(list(outline_indexes) + list(file_indexes) + [0]) + 1
 
 
-def _sync_built_act_cast(
+def _apply_built_act_cast(
     store: ProjectStore,
-    config: AppConfig,
-    adapter,
     chapters: list[dict],
+    raw_chapters: list[dict],
     dry_run: bool,
     characters: list[dict],
+    pending: dict,
 ) -> tuple[list[str], list[str], list[dict]]:
-    """给本次续写新生成的章节逐章做角色设定（复用已有卡，缺失就新建）。
+    """把本幕同一次生成里的 per-chapter cast 落到角色卡（不再单独请求模型）。
 
     参数:
         store: 工程。
-        config: 本机配置。
-        adapter: 写作适配器。
-        chapters: `_build_outline_act` 产出的章节（节拍已生成，会被原地写入 character_ids）。
-        dry_run: True 时不写 characters.json，新建角色只留在内存里供后续幕使用。
-        characters: 当前内存角色表（可含旁白，内部按需过滤）。
+        chapters: `_build_outline_act` 产出的章节（会原地写入 character_ids）。
+        raw_chapters: 模型返回的本章原始对象（读 cast）。
+        dry_run: True 时不写 characters.json，新建角色只留在内存里。
+        characters: 当前内存角色表。
+        pending: 待定角色登记（第二次出现才建卡）。
 
     返回:
         `(新建姓名列表, 复用姓名列表, 更新后的角色表)`。
-
-    异常:
-        AdapterError: 某章角色设定失败；调用方应终止本次续写，避免出现没有角色的大纲。
-        ValueError: 章节没有节拍。
     """
     created: list[str] = []
     reused: list[str] = []
-    for chapter in chapters:
-        report = sync_chapter_cast(
+    for offset, chapter in enumerate(chapters):
+        raw = raw_chapters[offset] if offset < len(raw_chapters) else {}
+        report = apply_chapter_cast(
             store,
-            config,
             chapter,
-            adapter=adapter,
+            normalize_cast({"cast": (raw or {}).get("cast")}),
+            characters=characters,
+            pending=pending,
             persist=not dry_run,
             chapter_index=int(chapter.get("index") or 0) or None,
+            chapter_title=chapter.get("title") or "",
         )
         created.extend(report.get("created") or [])
         reused.extend(report.get("reused") or [])
-        if dry_run:
-            known = {str(item.get("id")) for item in characters}
-            for item in report.get("new_characters") or []:
-                if str(item.get("id")) not in known:
-                    characters.append(item)
-        else:
-            characters = [
-                item for item in store.load_characters()["characters"] if item.get("role") != "narrator"
-            ]
+        characters = list(report.get("characters") or characters)
     return created, reused, characters
 
 
@@ -977,6 +969,7 @@ def continue_outline(
         context_lines.append(f"题材：{'、'.join(str(item) for item in genre)}")
     if char_rows:
         context_lines.append("可用人物（id=姓名）：" + "、".join(f"{item['id']}={item.get('name')}" for item in char_rows))
+    context_lines.append(cast_prompt_block(characters))
     # 上一章结尾原文：让新章能接住语气、场景与人物状态
     files = store.list_chapters()
     if files:
@@ -1015,6 +1008,7 @@ def continue_outline(
     error: str | None = None
     cast_created_total = 0
     cast_reused_total = 0
+    pending: dict = {} if dry_run else load_pending(store)
 
     for act_offset in range(new_act_count):
         act_no = len(existing_acts) + act_offset + 1
@@ -1027,8 +1021,7 @@ def continue_outline(
         if brief:
             lines.append(f"补充要求：{brief}")
         request = replace(req, messages=list(req.messages) + [Message("user", "\n".join(lines))])
-        # 单幕输出预算按本幕章数 × 每章节拍数估算，避免沿用默认 2048 导致参数被截断
-        request.max_tokens = _tool_max_tokens(config, "act", per_act * beats_per_chapter)
+        # 输出侧不设人为上限：请求不带 max_tokens，由适配器按上下文剩余空间计算
         request.metadata = dict(req.metadata or {}, act_offset=act_offset)
         try:
             payload = _generate_json(adapter, request, "act")
@@ -1045,13 +1038,14 @@ def continue_outline(
             break
 
         built = _build_outline_act(act, act_no, first_index, count, beats_per_chapter, chapter_words)
-        # 节拍生成后立刻做角色设定：复用已有角色卡，缺失的当场新建并绑定到节拍
+        raw_chapters = [item for item in (act.get("chapters") or []) if isinstance(item, dict)]
+        # 本幕 cast 与节拍同一次调用；这里只做确定性匹配、建卡与绑定
         try:
-            cast_created, cast_reused, characters = _sync_built_act_cast(
-                store, config, adapter, built["chapters"], dry_run, characters
+            cast_created, cast_reused, characters = _apply_built_act_cast(
+                store, built["chapters"], raw_chapters, dry_run, characters, pending
             )
-        except (AdapterError, ValueError) as exc:
-            error = f"第 {act_no} 幕角色设定失败：{exc}"
+        except ValueError as exc:
+            error = f"第 {act_no} 幕角色对齐失败：{exc}"
             break
         cast_created_total += len(cast_created)
         cast_reused_total += len(cast_reused)

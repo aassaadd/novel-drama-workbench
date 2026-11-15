@@ -205,7 +205,6 @@ def build_profile(adapter, character: dict, config=None) -> dict:
         task="freeform",
         system=_SYSTEM_PROMPT,
         messages=[Message(role="user", content=_character_brief(character))],
-        max_tokens=900,
         temperature=resolve_temperature(config, "polish") if config is not None else 0.6,
         stream=False,
         metadata={"purpose": "voice_design_profile"},

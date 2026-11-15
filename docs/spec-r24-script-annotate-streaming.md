@@ -1,5 +1,9 @@
 # spec-r24 导演标注：预算 / 截断 / 批次续跑 / 流式
 
+> 后续口径变更（2026-11-15）：输出侧已取消一切人为预算（含本文第 1 节的按批估算），
+> `max_tokens` 统一取「上下文窗口 − 已用提示词」，`finish_reason=length` 按异常提示。
+> 本文保留当时的设计记录，当前实现以 `docs/spec-r33-generation-budget-settings.md` 为准。
+
 ## 背景
 
 `script suggest` 原先按场景串行分批（默认每批 8 个镜头），每批全量重发整章台词；

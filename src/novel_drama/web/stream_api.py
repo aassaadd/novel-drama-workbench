@@ -39,7 +39,6 @@ from ..writing.service import (
     generate_characters,
     generate_outline,
     generate_worlds,
-    pop_budget_notice,
     suggest_script,
 )
 
@@ -225,6 +224,64 @@ def _chapter_target(store, chapter_id: str) -> dict:
     return {"chapter_id": chapter_id, "chapter_title": title}
 
 
+def _result_notices(result) -> list[str]:
+    """收集生成结果里的提醒文案（finish_reason=length、自动补救等）。
+
+    参数:
+        result: 任务返回值；章节生成放在 `notices`，整幕批量放在 `chapters[].notices`。
+
+    返回:
+        去重后的中文提醒列表；没有则返回空列表。
+    """
+    if not isinstance(result, dict):
+        return []
+    messages: list[str] = []
+    for item in result.get("notices") or []:
+        text = str(item or "").strip()
+        if text:
+            messages.append(text)
+    for chapter in result.get("chapters") or []:
+        if not isinstance(chapter, dict):
+            continue
+        for item in chapter.get("notices") or []:
+            text = str(item or "").strip()
+            if text:
+                messages.append(text)
+    return list(dict.fromkeys(messages))
+
+
+def _emit_notices(notices: list[str], job, events: queue.Queue) -> None:
+    """把提醒同时写进任务通知与 SSE（页面浮层），避免只留在结果面板。
+
+    参数:
+        notices: 提醒文案列表。
+        job: 可选的 `UiJob`。
+        events: SSE 事件队列。
+
+    返回:
+        无。
+    """
+    for message in notices:
+        if job:
+            job.event("notice", {"type": "notice", "message": message})
+        events.put(("notice", {"message": message}))
+
+
+def _finish_message(notices: list[str]) -> str:
+    """任务完成文案：有提醒时带上第一条，避免任务页只剩「生成完成」。
+
+    参数:
+        notices: 提醒文案列表。
+
+    返回:
+        任务页展示的完成文案。
+    """
+    if not notices:
+        return "生成完成"
+    tail = f"（另有 {len(notices) - 1} 条提醒）" if len(notices) > 1 else ""
+    return f"生成完成 · ⚠ {notices[0]}{tail}"
+
+
 def _stream_response(task, job=None) -> StreamingResponse:
     """在后台线程执行生成任务，把增量与最终结果转成 SSE。
 
@@ -254,14 +311,28 @@ def _stream_response(task, job=None) -> StreamingResponse:
             job.start("已提交生成请求")
         try:
             result = task(on_delta)
+            notices = _result_notices(result)
+            _emit_notices(notices, job, events)
             if job:
-                job.finish("生成完成")
+                job.finish(_finish_message(notices))
             events.put(("done", {"result": result}))
-        except _Cancelled:
+        except _Cancelled as exc:
             if job:
                 # 用户主动停止优先记为「用户已停止生成」；断线仍用默认文案
                 job.cancel("用户已停止生成" if job.cancel_requested() else None)
-            events.put(("canceled", {"message": "任务已停止，已接收的内容保留"}))
+            payload = {"message": "任务已停止，已接收的内容保留"}
+            resume = getattr(exc, "resume", None)
+            if isinstance(resume, dict) and resume.get("resumed"):
+                # 章节正文：已完成轮次已落盘为断点，明确告知用户可以接着生成
+                payload = {
+                    "message": (
+                        f"任务已停止：前 {resume.get('reused_rounds')} 轮正文已存为断点，"
+                        "下次生成本章会自动从第 "
+                        f"{resume.get('from_round')} 轮继续"
+                    ),
+                    "resume": resume,
+                }
+            events.put(("canceled", payload))
         except AdapterError as exc:
             if job:
                 job.fail(f"生成失败：{exc.message}", current=_failure_current(exc))
@@ -343,25 +414,33 @@ def _progress_response(task, job=None) -> StreamingResponse:
             job.start("已提交生成请求")
         try:
             result = task(on_progress)
-            notice = pop_budget_notice()
-            if notice:
-                # 输出预算被设置值压低：明确告知用户，而不是静默截断
-                if job:
-                    job.event("notice", {"type": "notice", "message": notice})
-                events.put(("notice", {"message": notice}))
+            notices = _result_notices(result)
+            _emit_notices(notices, job, events)
             if job:
-                job.finish("生成完成")
+                job.finish(_finish_message(notices))
             events.put(("done", {"result": result}))
         except ActBatchCanceled as exc:
             if job:
                 job.cancel("用户已停止生成")
             # 整幕批量：把已完成的章节汇总带回去，页面停止后仍能看到进度与结果
             events.put(("canceled", {"message": "已停止生成，已完成章节已保存", "result": exc.result}))
-        except _Cancelled:
+        except _Cancelled as exc:
             if job:
                 # 用户主动停止优先记为「用户已停止生成」；断线仍用默认文案
                 job.cancel("用户已停止生成" if job.cancel_requested() else None)
-            events.put(("canceled", {"message": "任务已停止，已接收的内容保留"}))
+            payload = {"message": "任务已停止，已接收的内容保留"}
+            resume = getattr(exc, "resume", None)
+            if isinstance(resume, dict) and resume.get("resumed"):
+                # 章节正文：已完成轮次已落盘为断点，明确告知用户可以接着生成
+                payload = {
+                    "message": (
+                        f"任务已停止：前 {resume.get('reused_rounds')} 轮正文已存为断点，"
+                        "下次生成本章会自动从第 "
+                        f"{resume.get('from_round')} 轮继续"
+                    ),
+                    "resume": resume,
+                }
+            events.put(("canceled", payload))
         except AdapterError as exc:
             if job:
                 job.fail(f"生成失败：{exc.message}", current=_failure_current(exc))
@@ -412,7 +491,9 @@ def register_stream_routes(app, config_path: str | None = None) -> None:
         """章节正文生成（流式）：边生成边把增量推给页面。
 
         参数:
-            body: `{path, chapter, regen?, dry_run?, multi_turn?, beats_per_round?, max_rounds?}`。
+            body: `{path, chapter, regen?, dry_run?, multi_turn?, beats_per_round?,
+                   max_rounds?, mode?}`；mode 为 generate / compress / rewrite，
+                   compress 与 rewrite 只能由用户在超纲结果里点击动作后传入。
 
         返回:
             SSE：start → delta* → done(result) / error(message)。
@@ -422,6 +503,10 @@ def register_stream_routes(app, config_path: str | None = None) -> None:
         if not chapter_id:
             raise HTTPException(status_code=400, detail="缺少 chapter 参数（章节 ID）")
         config = load_config(config_path)
+        mode = str(body.get("mode") or "generate").strip().lower()
+        if mode not in ("generate", "compress", "rewrite"):
+            raise HTTPException(status_code=400, detail="mode 只能是 generate、compress 或 rewrite")
+        job_title = {"generate": "生成本章正文", "compress": "按目标字数压缩", "rewrite": "重写本章正文"}[mode]
 
         def task(on_delta):
             """调用 service 生成正文，增量交给 SSE。"""
@@ -435,9 +520,10 @@ def register_stream_routes(app, config_path: str | None = None) -> None:
                 beats_per_round=body.get("beats_per_round"),
                 max_rounds=body.get("max_rounds"),
                 on_delta=on_delta,
+                mode=mode,
             )
 
-        return _stream_response(task, UiJob(store, "chapter", _chapter_target(store, chapter_id), "生成本章正文"))
+        return _stream_response(task, UiJob(store, "chapter", _chapter_target(store, chapter_id), job_title))
 
     @app.post("/api/ui/act/generate/stream")
     def ui_act_generate_stream(body: dict) -> StreamingResponse:
@@ -477,7 +563,7 @@ def register_stream_routes(app, config_path: str | None = None) -> None:
 
         def task(on_progress):
             """逐章生成；增量转成 delta 事件，章间用任务取消标志判断是否停止。"""
-            return generate_act_chapters(
+            result = generate_act_chapters(
                 store,
                 config,
                 act_id=str(act.get("id") or act_id),
@@ -490,6 +576,16 @@ def register_stream_routes(app, config_path: str | None = None) -> None:
                 beats_per_round=body.get("beats_per_round"),
                 max_rounds=body.get("max_rounds"),
             )
+            # 任务队列如实反映结果：零产出记失败，部分失败记部分完成，并把汇总带进进度
+            failed = int(result.get("failed") or 0)
+            succeeded = int(result.get("succeeded") or 0)
+            if failed and not succeeded:
+                job.fail(str(result.get("message") or "整幕生成失败"), current=f"整幕失败：{failed} 章均未生成")
+            elif failed:
+                job.partial(str(result.get("message") or ""))
+            else:
+                job.finish(str(result.get("message") or "生成完成"))
+            return result
 
         return _progress_response(task, job)
 

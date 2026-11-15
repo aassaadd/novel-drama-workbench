@@ -117,7 +117,7 @@ def load_ui_jobs(store: ProjectStore) -> list[dict]:
 
 
 #: 已结束的任务状态（可清理）
-TERMINAL_STATUSES = ("succeeded", "failed", "canceled", "interrupted")
+TERMINAL_STATUSES = ("succeeded", "partial", "failed", "canceled", "interrupted")
 
 
 def update_job(store: ProjectStore, job_id: str, **fields) -> dict | None:
@@ -355,7 +355,7 @@ class UiJob:
         elif kind == "notice":
             message = str(data.get("message") or "").strip()
             if message:
-                # 输出预算被设置值压低等提醒：留在任务进度里，避免只在服务端日志里
+                # 上下文超限 / finish_reason=length 等提醒：留在任务进度里，避免只在服务端日志里
                 self.progress(f"⚠ {message}", force=True, clear_percent=True)
         elif kind == "stage":
             stage = str(data.get("stage") or data.get("message") or "").strip()
@@ -393,6 +393,24 @@ class UiJob:
         self._done = True
         self._retire()
         self.job["status"] = "succeeded"
+        self.job["progress"] = {"percent": 100, "current": message}
+        self.job["timings"]["finished_at"] = now_iso()
+        self._save()
+
+    def partial(self, message: str) -> None:
+        """标记「部分完成」：有产出也有失败时使用，进度固定 100% 并写入汇总。
+
+        参数:
+            message: 汇总文案（例如「成功 3 章 / 跳过 0 章 / 失败 2 章」）。
+        """
+        if not self.job or self._done:
+            return
+        if self.cancel_requested():
+            self.cancel("用户已停止生成")
+            return
+        self._done = True
+        self._retire()
+        self.job["status"] = "partial"
         self.job["progress"] = {"percent": 100, "current": message}
         self.job["timings"]["finished_at"] = now_iso()
         self._save()

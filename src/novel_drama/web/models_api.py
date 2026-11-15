@@ -23,10 +23,15 @@ from fastapi import HTTPException
 
 from ..adapters.comfyui import LocalComfyGateway
 from ..adapters.writing import OmlxWritingAdapter, last_llm_call
-from ..config import DEFAULT_UI_CONFIG_PATH, load_config, save_ui_config
+from ..config import (
+    DEFAULT_UI_CONFIG_PATH,
+    _get_dotted,
+    load_config,
+    save_ui_config,
+)
 from ..media import comfy_media, comfy_models
 from ..tts import model_store
-from ..writing.service import _tool_max_tokens
+from ..writing.budgets import context_status
 
 #: 后台下载任务表：`job_id -> {status, group, key, started_at, finished_at, result, logs}`
 _JOBS: dict[str, dict] = {}
@@ -124,6 +129,23 @@ def _err_message(exc: BaseException) -> str:
     """
     message = getattr(exc, "message", None)
     return str(message or exc)
+
+
+def _config_source(config, dotted: str) -> str:
+    """判定配置项的真实来源，供页面标注默认值的出处。
+
+    参数:
+        config: AppConfig（含 `ui_values` 页面覆盖层与 `base_values` 基础配置）。
+        dotted: 点号分隔的配置键。
+
+    返回:
+        `page` 页面覆盖层 / `file` 基础配置文件 / `builtin` 代码内置默认。
+    """
+    if _get_dotted(config.ui_values or {}, dotted) is not None:
+        return "page"
+    if _get_dotted(config.base_values or {}, dotted) is not None:
+        return "file"
+    return "builtin"
 
 
 def _template_kinds(config) -> dict[str, set[str]]:
@@ -810,7 +832,6 @@ def register_models_routes(app, config_path: str | None = None) -> None:
         "omlx.max_concurrency": ("最大并发", (int, float)),
         "omlx.first_token_timeout_s": ("首字超时（秒）", (int, float)),
         "omlx.context_window": ("上下文窗口（tokens）", int),
-        "omlx.max_tokens": ("最大输出（tokens）", int),
         "omlx.temperature": ("写作温度", float),
         "omlx.temperature_polish": ("润色温度", float),
         "omlx.temperature_audio": ("音效与 BGM 温度", float),
@@ -825,6 +846,7 @@ def register_models_routes(app, config_path: str | None = None) -> None:
         """把当前生效的连接配置整理成页面可编辑的结构（不回显密钥原文）。"""
         comfy = dict(config.get("comfyui", {}) or {})
         llm = dict(config.get("omlx", {}) or {})
+        mt = dict(config.get("writing.multi_turn", {}) or {})
         return {
             "config_path": str(config.path or config_path or ""),
             "ui_config_path": str(config.ui_path or DEFAULT_UI_CONFIG_PATH),
@@ -842,14 +864,31 @@ def register_models_routes(app, config_path: str | None = None) -> None:
                 "connect_timeout_s": llm.get("connect_timeout_s"),
                 "max_concurrency": llm.get("max_concurrency"),
                 "first_token_timeout_s": llm.get("first_token_timeout_s"),
-                # 上下文 / 最大输出由「测试连通」的服务端返回值回填，也可手改后保存
+                # 上下文窗口由「测试连通」的服务端返回值回填，也可手改后保存；
+                # 输出侧不设人为上限，因此不再保存最大输出
                 "context_window": llm.get("context_window"),
-                "max_output_tokens": llm.get("max_tokens"),
                 "temperature": llm.get("temperature", 0.8),
                 "temperature_polish": llm.get("temperature_polish", 0.6),
                 "temperature_audio": llm.get("temperature_audio", 0.2),
                 "thinking_enabled": bool(llm.get("enable_thinking")),
                 "thinking_effort": str(llm.get("reasoning_effort") or "medium"),
+                # 每个默认值的真实来源：设置页改过 / 配置文件写过 / 代码内置默认
+                "sources": {
+                    "temperature": _config_source(config, "omlx.temperature"),
+                    "thinking_enabled": _config_source(config, "omlx.enable_thinking"),
+                    "thinking_effort": _config_source(config, "omlx.reasoning_effort"),
+                },
+            },
+            "generation": {
+                # 多轮分组参数；输出预算已删除，只保留「写多少」的目标结构
+                "beats_per_round": int(mt.get("beats_per_round") or 0),
+                "max_rounds": int(mt.get("max_rounds") or 8),
+                "multi_turn_enabled": bool(mt.get("enabled", True)),
+                "sources": {
+                    "beats_per_round": _config_source(config, "writing.multi_turn.beats_per_round"),
+                    "max_rounds": _config_source(config, "writing.multi_turn.max_rounds"),
+                    "multi_turn_enabled": _config_source(config, "writing.multi_turn.enabled"),
+                },
             },
         }
 
@@ -935,6 +974,24 @@ def register_models_routes(app, config_path: str | None = None) -> None:
         state = _connection_state(load_config(config_path))
         state["saved_to"] = str(target)
         return state
+
+    @app.get("/api/ui/config/generation")
+    def ui_generation_status() -> dict:
+        """读取上下文与输出侧现状（只读；输出预算已不再作为设置项）。"""
+        config = load_config(config_path)
+        return {
+            "context": context_status(config),
+            "output": {
+                "artificial_limit": False,
+                "max_tokens_rule": "上下文窗口 − 已用提示词（不额外留人为余量）",
+                "note": (
+                    "输出侧不设置人为上限：模型自己输出结束符就会停止。"
+                    "finish_reason=length 按异常记录并提示（模型自身输出上限或上游异常）。"
+                    "「要写多少字」由提示词里的目标字数与每轮节拍数决定。"
+                ),
+            },
+            "last_call": last_llm_call(),
+        }
 
     @app.post("/api/ui/comfy/health")
     def ui_comfy_health(body: dict | None = None) -> dict:
@@ -1063,20 +1120,6 @@ def register_models_routes(app, config_path: str | None = None) -> None:
             "message": message,
         }
 
-    def _business_budget(config) -> int:
-        """返回当前业务侧最常用的工具调用预算（用于提示「上限小于估算会截断」）。
-
-        参数:
-            config: 本机配置。
-
-        返回:
-            人物 8 人与整本大纲两种估算中的较大值。
-        """
-        try:
-            return max(_tool_max_tokens(config, "characters", 8), _tool_max_tokens(config, "outline", 27))
-        except Exception:
-            return 16384
-
     @app.post("/api/ui/llm/status")
     def ui_llm_status(body: dict | None = None) -> dict:
         """检测写作 LLM（OpenAI 兼容服务）并返回可用模型与上下限。
@@ -1087,7 +1130,7 @@ def register_models_routes(app, config_path: str | None = None) -> None:
 
         返回:
             `{ok, connected, endpoint, model, model_found, models, context_window,
-            context_source, max_output_tokens, max_output_source, business_budget,
+            context_source, max_output_tokens, max_output_source,
             probes, latency_ms, message}`；上限只来自服务端接口字段（server）或
             未取到（unknown），不读本机文件、不伪造默认值。
         """
@@ -1144,7 +1187,6 @@ def register_models_routes(app, config_path: str | None = None) -> None:
             "context_source": (selected or {}).get("context_source") or "unknown",
             "max_output_tokens": (selected or {}).get("max_output_tokens"),
             "max_output_source": (selected or {}).get("max_output_source") or "unknown",
-            "business_budget": _business_budget(config),
             "probes": probes,
             "latency_ms": latency,
             "message": message,
@@ -1236,7 +1278,6 @@ def register_models_routes(app, config_path: str | None = None) -> None:
             "context_source": limits.get("context_source") or "unknown",
             "max_output_tokens": limits.get("max_output_tokens"),
             "max_output_source": limits.get("max_output_source") or "unknown",
-            "business_budget": _business_budget(config),
             "models": limits.get("models") or [],
             "probes": probes,
             "latency_ms": latency,

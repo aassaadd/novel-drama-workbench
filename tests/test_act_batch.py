@@ -16,10 +16,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from fastapi.testclient import TestClient
+
 from novel_drama.config import load_config
 from novel_drama.models import entities
 from novel_drama.store import ProjectStore
 from novel_drama.store.settings_store import SettingsStore
+from novel_drama.web.app import create_app
 from novel_drama.writing.act_batch import ActBatchCanceled, generate_act_chapters
 from novel_drama.writing.service import apply_outline, generate_outline
 
@@ -152,6 +155,82 @@ class ActBatchTest(unittest.TestCase):
         self.assertEqual(result["total"], 2)
         self.assertTrue((self.store.load_chapter(self.chapters[0]["id"]).get("content") or "").strip())
         self.assertFalse((self.store.load_chapter(self.chapters[1]["id"]).get("content") or "").strip())
+
+    def test_job_status_matches_chapter_results(self):
+        """任务队列：零成功记失败、混合记部分完成、全成功记成功，并写入汇总文案。"""
+        settings = SettingsStore(self.tmp.name)
+        bible = settings.load()
+        bible.setdefault("style", {})["pov"] = "third_limited"
+        for chapter in (bible.get("outline") or {}).get("acts")[0].get("chapters") or []:
+            chapter["pov_character_id"] = None
+        settings.save(bible)
+        client = TestClient(create_app(project_root=str(self.store.root), config_path=str(self._runtime_config())))
+        url = "/api/ui/act/generate/stream"
+        body = {"path": str(self.store.root), "act": str(self.act.get("id") or ""), "act_index": 1, "mode": "fill"}
+
+        def run_once() -> None:
+            """消费一次 SSE，确保后台任务已收尾。"""
+            with client.stream("POST", url, json=body) as response:
+                self.assertEqual(response.status_code, 200)
+                list(response.iter_lines())
+
+        def latest_job() -> dict:
+            """取最新一条整幕任务。"""
+            rows = [item for item in client.get("/api/ui/queue", params={"path": str(self.store.root)}).json()
+                    if item.get("kind") == "act"]
+            rows.sort(key=lambda item: str(item.get("id") or ""))
+            return rows[-1]
+
+        run_once()
+        failed = latest_job()
+        self.assertEqual(failed["status"], "failed")
+        self.assertIsNone(failed["progress"]["percent"])
+        self.assertIn("失败 2 章", str(failed.get("error")))
+
+        client.post(
+            "/api/ui/outline/pov",
+            json={
+                "path": str(self.store.root),
+                "chapter": self.chapters[0]["id"],
+                "pov_character_id": None,
+                "pov_mode": "third_omniscient",
+            },
+        )
+        run_once()
+        partial = latest_job()
+        self.assertEqual(partial["status"], "partial")
+        self.assertEqual(partial["progress"]["current"], "成功 1 章 / 跳过 0 章 / 失败 1 章")
+
+        client.post(
+            "/api/ui/outline/pov",
+            json={
+                "path": str(self.store.root),
+                "chapter": self.chapters[1]["id"],
+                "pov_character_id": None,
+                "pov_mode": "third_omniscient",
+            },
+        )
+        run_once()
+        succeeded = latest_job()
+        self.assertEqual(succeeded["status"], "succeeded")
+        self.assertEqual(succeeded["progress"]["current"], "成功 1 章 / 跳过 1 章 / 失败 0 章")
+
+    def test_pov_block_keeps_code_and_continues(self):
+        """缺视角时逐章记 BINDING_POV_MISSING，错误码回传且不中断整幕。"""
+        store = SettingsStore(self.tmp.name)
+        bible = store.load()
+        bible.setdefault("style", {})["pov"] = "third_limited"
+        for act in (bible.get("outline") or {}).get("acts") or []:
+            for chapter in act.get("chapters") or []:
+                chapter["pov_character_id"] = None
+        store.save(bible)
+
+        result, events = self._run(mode="fill")
+        self.assertEqual(result["succeeded"], 0)
+        self.assertEqual(result["failed"], 2)
+        self.assertTrue(all(row["code"] == "BINDING_POV_MISSING" for row in result["chapters"]))
+        errors = [event for event in events if event.get("type") == "chapter_error"]
+        self.assertEqual([event.get("code") for event in errors], ["BINDING_POV_MISSING"] * 2)
 
 
 if __name__ == "__main__":

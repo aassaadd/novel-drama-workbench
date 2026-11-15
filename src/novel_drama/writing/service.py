@@ -6,16 +6,17 @@
 
 from __future__ import annotations
 
+import copy
 import inspect
 import json
 import logging
 import math
 import re
-import threading
 from dataclasses import replace
 
 from ..adapters.base import AdapterError, ErrorCode, Message, TextGenRequest, TextGenResult
 from ..adapters.offline_writing import OfflineWritingAdapter
+from ..cancel import GenerationCanceled
 from ..config import AppConfig, resolve_temperature
 from ..director.markup import parse_markup
 from ..models import entities
@@ -26,103 +27,32 @@ from ..store.world_store import WorldStore
 from ..text.context import POV_LABELS, ContextAssembler
 from ..text.dialogue import normalize_dialogue
 from ..text.titles import strip_index_prefix
+from . import chapter_checkpoint
+from .budgets import context_budget_tokens
 from .content_guard import check_chapter_content, strict_retry_instruction
+from .recap import (
+    final_round_summary_instruction,
+    save_summary,
+    split_final_output,
+)
 from .worlds import build_art_prompt as _build_art_prompt
 from .worlds import clean_world_entry, worlds_digest
 
 # 默认每章目标字数
 DEFAULT_CHAPTER_WORDS = 1200
 
+#: 超纲阈值（全工程唯一出处，页面文案与此同源）：
+#: > 1.5 倍只在结果里标字数；>= 2 倍才提供「按目标字数压缩」「重写」两个动作。
+OVERSHOOT_NOTICE_RATIO = 1.5
+OVERSHOOT_ACTION_RATIO = 2.0
+#: 页面上展示的动作（id 与 generate_chapter 的 mode 对应）
+OVERSHOOT_ACTIONS = (
+    {"id": "compress", "label": "按目标字数压缩"},
+    {"id": "rewrite", "label": "重写"},
+)
+
 #: 日志：工具调用解析失败时记录原始片段，便于定位模型返回了什么
 logger = logging.getLogger(__name__)
-
-# 工具调用输出预算：schema 普遍较大，且 reasoning_tokens 也计入 max_tokens。
-# 适配器只会保证不低于 4096，这里按「固定附加内容 + 条目数」估算，避免参数被截断。
-_TOOL_BASE_MAX_TOKENS = 4096
-#: 每个条目的平均输出预算（token）：人物卡/世界条目/节拍的信息量不同
-_TOOL_PER_ITEM_TOKENS = {
-    "characters": 1600,
-    "character": 1600,
-    "worlds": 1800,
-    "world": 1200,
-    "outline": 2600,
-    "act": 2200,
-    "outline_acts": 900,
-    "outline_chapters": 700,
-    "outline_beats": 450,
-    "character_sync": 900,
-    "premise": 600,
-    "style": 600,
-}
-#: 固定附加开销（旁白音色、龙套池等与条目数无关的内容）
-_TOOL_EXTRA_TOKENS = {"characters": 2600, "worlds": 1600}
-#: 单次工具调用的业务估算上限
-_TOOL_MAX_TOKENS_CAP = 16384
-
-#: 最近一次「输出预算被设置值压低」的提示（按线程隔离，供 SSE 透给页面）
-_BUDGET_NOTICE = threading.local()
-
-
-def pop_budget_notice() -> str | None:
-    """取出并清空本线程最近一次输出预算提示。
-
-    返回:
-        中文提示；没有则返回 None。
-    """
-    message = getattr(_BUDGET_NOTICE, "message", None)
-    _BUDGET_NOTICE.message = None
-    return message
-
-
-def _set_budget_notice(message: str) -> None:
-    """记录一条输出预算提示（同一线程只保留最新一条）。
-
-    参数:
-        message: 中文提示。
-
-    返回:
-        无。
-    """
-    _BUDGET_NOTICE.message = message
-
-
-def _tool_max_tokens(config, step: str, items: int = 1) -> int:
-    """估算一次工具调用需要的输出预算，并受设置页 `omlx.max_tokens` 约束。
-
-    规则：
-    - 未设置 `omlx.max_tokens`：用业务估算值（上限 16384）；
-    - 已设置：下发 `min(估算, 设置)`，不再把设置值当下限；
-    - 估算超过设置时记录中文提示「该次调用需要 X，已超出设置 Y」，
-      实际仍按设置下发（页面会以 notice 事件提示，可能被截断）。
-
-    参数:
-        config: AppConfig 或 dict，用于读取 `omlx.max_tokens`。
-        step: 工具步骤（characters/worlds/outline/outline_acts/outline_chapters/outline_beats 等）。
-        items: 预估条目数（人物数、世界数、节拍数等），至少按 1 计算。
-
-    返回:
-        实际下发的 max_tokens。
-    """
-    per_item = _TOOL_PER_ITEM_TOKENS.get(step, 800)
-    extra = _TOOL_EXTRA_TOKENS.get(step, 1200)
-    estimate = min(_TOOL_MAX_TOKENS_CAP, _TOOL_BASE_MAX_TOKENS + extra + per_item * max(1, int(items)))
-    configured = 0
-    if config is not None:
-        try:
-            configured = int(config.get("omlx.max_tokens") or 0)
-        except (AttributeError, TypeError, ValueError):
-            configured = 0
-    if configured <= 0:
-        return estimate
-    if estimate > configured:
-        message = (
-            f"该次调用需要 {estimate} tokens，已超出设置 {configured}；"
-            f"本次按 {configured} 下发，输出可能被截断，可在设置页调大「最大输出」"
-        )
-        logger.warning(message)
-        _set_budget_notice(message)
-        return configured
-    return estimate
 
 
 def build_writing_adapter(config: AppConfig, settings: dict | None = None):
@@ -152,7 +82,8 @@ def build_writing_adapter(config: AppConfig, settings: dict | None = None):
     if name == "omlx":
         from ..adapters.writing import OmlxWritingAdapter
 
-        return OmlxWritingAdapter(config.get("omlx") or {})
+        # 思考只有一个全局开关与强度，随 omlx 设置下发
+        return OmlxWritingAdapter(dict(config.get("omlx") or {}))
     raise AdapterError(ErrorCode.INVALID_INPUT, f"未知写作适配器: {name}（可选 offline / omlx）")
 
 
@@ -236,7 +167,6 @@ def generate_outline(
         system="你是长篇小说的结构编辑，按工具参数输出大纲，不要解释。",
         messages=[Message("user", "\n".join(context_parts))],
         stream=True,
-        max_tokens=_tool_max_tokens(config, "outline", acts * chapters_per_act * beats_per_chapter),
         metadata={
             "acts": acts,
             "chapters_per_act": chapters_per_act,
@@ -532,7 +462,7 @@ def _act_validation(
         elif finish_reason == "length":
             reasons.append("输出被截断（finish_reason=length），模型只返回了部分章节")
         else:
-            reasons.append("推断：模型少给章节，可能把多章合并，或输出预算不足")
+            reasons.append("推断：模型少给章节，可能把多章合并，或单次输出空间不足")
     if not flags["beats"]:
         detail = []
         for index, chapter in enumerate(chapters, start=1):
@@ -721,7 +651,7 @@ def build_chapter_context(store: ProjectStore, config: AppConfig, chapter: dict)
     work = store.load_project().get("work") or {}
     characters = store.load_characters()["characters"]
     beats = _chapter_beats(bible, chapter, settings_store)
-    chapter_words = int(sum(int(beat.get("target_words") or 0) for beat in beats) or DEFAULT_CHAPTER_WORDS)
+    chapter_words = int(sum(int(beat.get("target_words") or 0) for beat in beats) or config.get("writing.default_chapter_words") or 1200)
     if chapter_words <= 0:
         chapter_words = DEFAULT_CHAPTER_WORDS
     adapter = build_writing_adapter(config, bible)
@@ -899,11 +829,18 @@ def generate_chapter(
     beats_per_round: int | None = None,
     max_rounds: int | None = None,
     on_delta=None,
+    on_notice=None,
+    mode: str = "generate",
 ) -> dict:
     """生成章节正文并落盘；按本章节拍逐段推进，节拍写完即收尾。
 
     停止条件只看节拍：一轮写一个或一组节拍，写完后推进指针；全部节拍写完就结束。
     字数只作提示与偏差说明，不作为硬性截断依据；`max_rounds` 仅作保险上限。
+
+    `mode` 只用于超纲后的用户主动动作（不会自动触发）：
+    - `generate`：正常生成 / 断点续写；
+    - `compress`：在保留全部节拍要点的前提下把已有正文压缩到目标字数；
+    - `rewrite`：按原参数整章重写（等同 `regen=True`，但结果会带前后字数说明）。
 
     参数:
         store: 工程。
@@ -915,18 +852,41 @@ def generate_chapter(
         beats_per_round: 每轮写几个节拍；None 时按「节拍总数 / max_rounds」自动分配。
         max_rounds: 最大轮数（保险）；None 时取 `writing.multi_turn.max_rounds`（默认 8）。
         on_delta: 流式增量回调 `(text) -> None`；传入时改为流式生成，仅用于页面实时预览。
+        on_notice: 自动补救说明回调 `(text) -> None`；内容校验重试成功时上报，
+            调用方需把说明带进最终结果，不能静默处理。
+        mode: generate / compress / rewrite；compress 与 rewrite 必须由用户点击触发。
 
     返回:
         {"chapter_id", "status", "words", "word_count", "provider", "content",
          "rounds", "beats_total", "beats_done", "beats_remaining", "multi_turn",
-         "stop_reason", "word_deviation", "dialogue_warnings", "summary", "summary_error"}；
+         "stop_reason", "word_deviation", "dialogue_warnings", "summary", "summary_error",
+         "mode", "overshoot_note"}；
         content 在 dry_run 时为全文预览。
 
     异常:
-        ValueError: 已有正文且未指定 regen。
-        AdapterError: 模型返回空正文或调用失败（明确报错，不做降级）。
+        ValueError: 已有正文且未指定 regen；mode 非法或压缩时没有正文。
+        AdapterError: 模型返回空正文、压缩结果未保住全部节拍或调用失败（明确报错，不做降级）。
     """
+    mode = str(mode or "generate").strip().lower()
+    if mode not in ("generate", "compress", "rewrite"):
+        raise ValueError("mode 只能是 generate（正常生成）、compress（压缩）或 rewrite（重写）")
+    if mode == "compress":
+        return compress_chapter(store, config, chapter_id, on_delta=on_delta, on_notice=on_notice)
+
+    notices: list[str] = []
+
+    def notify(text: str) -> None:
+        """收集自动补救说明，并同步透传给调用方（页面/批量调度）。"""
+        notices.append(text)
+        if on_notice:
+            on_notice(text)
+
     chapter = store.load_chapter(chapter_id)
+    before_words = 0
+    if mode == "rewrite":
+        # 用户主动选择「重写」：记录重写前字数，写入结果作为可读说明
+        before_words = int(chapter.get("word_count") or 0) or _count_words(chapter.get("content") or "")
+        regen = True
     if (chapter.get("content") or "").strip() and not regen and not dry_run:
         raise ValueError(f"章节 {chapter_id} 已有正文；确认重写请加 --regen")
 
@@ -942,15 +902,6 @@ def generate_chapter(
     mt = config.get("writing.multi_turn") or {}
     enabled = bool(mt.get("enabled", True))
     rounds_cap = max(1, int(max_rounds or mt.get("max_rounds") or 8))
-    round_max_tokens = max(1, int(mt.get("round_max_tokens") or 2048))
-    # 设置页的「最大输出」是硬上限：每轮预算不超过它
-    configured_tokens = 0
-    try:
-        configured_tokens = int(config.get("omlx.max_tokens") or 0)
-    except (AttributeError, TypeError, ValueError):
-        configured_tokens = 0
-    if configured_tokens > 0:
-        round_max_tokens = min(round_max_tokens, configured_tokens)
     target_words = int(context["metadata"].get("target_words") or chapter_words or 0)
 
     # 每轮节拍数：显式指定优先；否则按节拍总数与保险轮数自动分配
@@ -960,6 +911,59 @@ def generate_chapter(
         per_round = max(1, math.ceil(total_beats / rounds_cap)) if total_beats else 1
     groups = [beats[start : start + per_round] for start in range(0, total_beats, per_round)] or [[]]
     use_multi = (enabled if multi_turn is None else bool(multi_turn)) and len(groups) > 1
+    # 输出侧不设人为上限：请求里的 max_tokens 由适配器按上下文剩余空间计算
+    # 摘要并入末轮不额外抬高输出上限：末轮与普通轮用同一口径，
+    # 服务端需要上限字段时由适配器按上下文剩余可用空间收敛（不做人为截断）。
+    # 摘要并入末轮时，旧全书摘要必须在生成开始时就固定下来：
+    # 断点续写要恢复同一份输入，保证续写结果与一次跑完语义一致。
+    book_summary_before = str(store.load_rolling_summary().get("book_summary") or "").strip()
+    summary_contract = final_round_summary_instruction(book_summary_before)
+
+    # 断点：每写完一轮落盘；取消 / 失败 / 服务重启后自动从这里接上。
+    # 预览（dry_run）不写也不消费断点；显式重新生成（regen）直接作废旧断点。
+    checkpoint_signature = {
+        "base_revision": int(chapter.get("revision") or 1),
+        "chapter_words": int(chapter_words),
+        "total_beats": total_beats,
+        "per_round": per_round,
+        "beats": [
+            {
+                "summary": str(beat.get("summary") or ""),
+                "target_words": int(beat.get("target_words") or 0),
+                "character_ids": [str(cid) for cid in (beat.get("character_ids") or []) if str(cid).strip()],
+            }
+            for beat in beats
+        ],
+    }
+    resume_state = None
+    start_round = 0
+    start_content = ""
+    if dry_run:
+        pass
+    elif regen:
+        chapter_checkpoint.clear(store, chapter_id)
+    elif use_multi:
+        state = chapter_checkpoint.load(store, chapter_id)
+        if state is not None:
+            reason = chapter_checkpoint.mismatch_reason(state, checkpoint_signature)
+            checkpoint_file = str(chapter_checkpoint.checkpoint_path(store, chapter_id))
+            if reason:
+                chapter_checkpoint.clear(store, chapter_id)
+                notify(f"上次的章节生成断点已作废（{reason}），本次从头生成")
+            else:
+                resume_state = state
+                start_round = min(int(state.get("rounds_done") or 0), len(groups))
+                start_content = str(state.get("content") or "")
+                if start_round >= len(groups):
+                    notify(
+                        f"断点续写：检测到本章 {len(groups)} 轮已全部写完，"
+                        f"本次只补落盘与摘要、不再请求模型（断点文件 {checkpoint_file}）"
+                    )
+                else:
+                    notify(
+                        f"断点续写：沿用前 {start_round} 轮已写正文，从第 {start_round + 1} 轮继续"
+                        f"（断点文件 {checkpoint_file}）"
+                    )
 
     summary_text = (entry or {}).get("summary") or chapter.get("outline") or ""
     pov_value = (context.get("pov_mode") or (style.get("pov") or "").strip() or "third_limited").strip()
@@ -1021,6 +1025,8 @@ def generate_chapter(
             f"一次写完全部 {total_beats} 个节拍，写完最后一个节拍即收尾。"
             f"篇幅参考约 {chapter_words} 字，只作提示，不因字数提前结束。"
         )
+        # 单轮模式本身就是「末轮」：同样把本章摘要并入这次请求
+        instruction_lines.append(summary_contract)
     instruction = "\n".join(instruction_lines)
 
     assembler = ContextAssembler(
@@ -1032,7 +1038,7 @@ def generate_chapter(
         outline_chapter=entry or {},
         previous_chapters=context["previous_chapters"],
         current_content=chapter.get("content") or "",
-        budget_tokens=int(config.get("writing.context_budget_tokens") or 32768),
+        budget_tokens=context_budget_tokens(config),
         book_digest=context["book_digest"],
         pov_character_id=context.get("pov_character_id"),
         planned_counts=context.get("planned_counts"),
@@ -1042,28 +1048,97 @@ def generate_chapter(
     # metadata 保持原有字段不变：离线适配器依赖它，且产物需要确定性一致
     req.metadata = context["metadata"]
 
+    summary_payload: dict | None = None
+    summary_parse_error: str | None = None
+    body_requests = 0
+    fallback_requests = 0
+
+    def save_round_checkpoint(state: dict) -> None:
+        """把本轮结束后的草稿与轮次指针落盘（断点续写的唯一数据源）。
+
+        参数:
+            state: `_generate_chapter_rounds` 每轮结束后给出的快照
+                `{content, rounds, beats_done, provider, summary, summary_error}`。
+
+        返回:
+            无。
+        """
+        chapter_checkpoint.save(
+            store,
+            {
+                "chapter_id": chapter_id,
+                "signature": checkpoint_signature,
+                "base_revision": checkpoint_signature["base_revision"],
+                "chapter_words": chapter_words,
+                "total_beats": total_beats,
+                "per_round": per_round,
+                "book_summary_before": book_summary_before,
+                "groups": [
+                    [str(beat.get("id") or position) for position, beat in enumerate(group)]
+                    for group in groups
+                ],
+                "content": state["content"],
+                "rounds_done": state["rounds"],
+                "beats_done": state["beats_done"],
+                "provider": state.get("provider") or "",
+                "status": "running",
+                "summary": state.get("summary"),
+                "summary_error": state.get("summary_error"),
+            },
+        )
+
     if use_multi:
-        # 首轮复用装配结果，仅收紧单轮输出预算；前缀缓存键固定为 工程 id + 章节 id
-        req.max_tokens = round_max_tokens
+        # 首轮复用装配结果；前缀缓存键固定为 工程 id + 章节 id
         work_id = str(context["work"].get("id") or "").strip()
         if work_id:
             req.prompt_cache_key = f"{work_id}:{chapter_id}"
-        outcome = _generate_chapter_rounds(
-            context["adapter"], req, groups, total_beats, chapter_words, rounds_cap, on_delta=on_delta, name_by_id=name_by_id
-        )
+        try:
+            outcome = _generate_chapter_rounds(
+                context["adapter"], req, groups, total_beats, chapter_words, rounds_cap,
+                on_delta=on_delta, name_by_id=name_by_id, on_notice=notify,
+                summary_contract=summary_contract,
+                start_round=start_round,
+                start_content=start_content,
+                start_summary=(resume_state or {}).get("summary"),
+                start_summary_error=(resume_state or {}).get("summary_error"),
+                # 预览不写断点：避免下一次正式生成误把预览当成已完成轮次
+                on_round=None if dry_run else save_round_checkpoint,
+            )
+        except GenerationCanceled as exc:
+            # 取消：已完成轮次保留在断点里，下次生成本章自动接上（预览不参与）
+            if not dry_run:
+                chapter_checkpoint.mark(store, chapter_id, "canceled", "用户已停止生成")
+            state = None if dry_run else chapter_checkpoint.load(store, chapter_id)
+            if state is not None:
+                exc.resume = chapter_checkpoint.resume_info(
+                    state, str(chapter_checkpoint.checkpoint_path(store, chapter_id))
+                )
+            raise
+        except AdapterError as exc:
+            if not dry_run:
+                chapter_checkpoint.mark(store, chapter_id, "failed", exc.message)
+            raise
         content = outcome["content"].strip()
         provider = outcome["provider"]
         rounds = outcome["rounds"]
         beats_done = outcome["beats_done"]
         stop_reason = outcome["stop_reason"]
+        summary_payload = outcome.get("summary")
+        summary_parse_error = outcome.get("summary_error")
+        body_requests = int(outcome.get("requests") or rounds)
     else:
-        result = _generate_validated(context["adapter"], req, on_delta, "章节正文")
-        content = (result.text or "").strip()
+        # 不分轮时整章一次写完：正文 + 本章摘要共用这一次请求，不设置人为输出预算
+        result, content, summary_payload, summary_parse_error, body_requests = _generate_final_round(
+            context["adapter"], req, on_delta, "章节正文", on_notice=notify
+        )
         provider = result.model
         rounds = 1
         beats_done = total_beats
         stop_reason = "single_round"
     if not content:
+        # 正文不可用时断点没有意义：清掉，避免下次续写直接撞上同样的空结果
+        if not dry_run:
+            chapter_checkpoint.clear(store, chapter_id)
         raise AdapterError(ErrorCode.UPSTREAM_ERROR, "写作适配器返回了空正文", retryable=True)
 
     # 引号收口：只改引号字符，疑似漏引号的对白只记提示
@@ -1074,6 +1149,22 @@ def generate_chapter(
     words = _count_words(content)
     word_deviation = _word_deviation(words, target_words)
     beats_remaining = max(0, total_beats - beats_done)
+    resume_payload = (
+        chapter_checkpoint.resume_info(
+            resume_state, str(chapter_checkpoint.checkpoint_path(store, chapter_id))
+        )
+        if resume_state
+        else {"resumed": False}
+    )
+    # 用户点了「重写」才走到这里：把原因与前后字数写进结果，供页面直接展示
+    overshoot_note = ""
+    if mode == "rewrite":
+        before_ratio = round(before_words / target_words, 2) if target_words else None
+        ratio_text = f"{before_ratio} 倍" if before_ratio is not None else "倍率未知"
+        overshoot_note = (
+            f"已按「重写」处理：原 {before_words} 字（目标 {target_words} 字，{ratio_text}，"
+            f"达到 {OVERSHOOT_ACTION_RATIO} 倍动作阈值）→ 重写后 {words} 字"
+        )
 
     if dry_run:
         return {
@@ -1091,14 +1182,21 @@ def generate_chapter(
             "stop_reason": stop_reason,
             "word_deviation": word_deviation,
             "dialogue_warnings": dialogue_warnings,
+            "notices": notices,
+            "mode": mode,
+            "overshoot_note": overshoot_note,
             "summary": None,
             "summary_error": None,
+            "summary_mode": "preview",
+            "resume": resume_payload,
             "revision": chapter.get("revision"),
         }
 
     # 落盘前最后一道校验：确认是小说正文，复述任务/准则清单一律不写盘
     ok, reason = check_chapter_content(content)
     if not ok:
+        # 正文内容本身不合格：重试不会改变结果，断点作废后重新生成
+        chapter_checkpoint.clear(store, chapter_id)
         raise AdapterError(
             ErrorCode.UPSTREAM_ERROR,
             f"章节正文落盘前校验未通过（{reason}）：未写入章节，请重试生成",
@@ -1113,19 +1211,46 @@ def generate_chapter(
     chapter["updated_at"] = now_iso()
     store.save_chapter(chapter)
 
-    # 章成即产出本章摘要，并滚动更新全书摘要；失败明确回报，不静默降级
+    # 摘要：末轮已产出且校验通过就直接落盘；解析失败才回退到单独摘要请求，
+    # 回退原因写给用户看，不静默降级。
     summary_info = None
     summary_error = None
-    try:
-        from .recap import update_rolling_summary
+    summary_mode = "inline"
+    if summary_payload:
+        try:
+            summary_info = save_summary(
+                store,
+                chapter,
+                summary_payload["chapter_summary"],
+                summary_payload["book_summary"],
+                provider=provider,
+            )
+            summary_info["mode"] = "inline"
+        except AdapterError as exc:
+            summary_mode = "failed"
+            logger.warning("末轮摘要落盘失败：%s", exc.message)
+            summary_error = exc.message
+    else:
+        reason_text = summary_parse_error or "末轮没有返回本章摘要"
+        notify(f"本章摘要未能随正文末轮产出（{reason_text}），已回退到单独摘要请求")
+        fallback_requests = 1
+        try:
+            from .recap import update_rolling_summary
 
-        summary_info = update_rolling_summary(store, config, chapter, adapter=context["adapter"])
-    except AdapterError as exc:
-        logger.warning("章节摘要更新失败：%s", exc.message)
-        summary_error = exc.message
-    except Exception as exc:  # noqa: BLE001 - 摘要失败不影响正文，但必须明确告知
-        logger.warning("章节摘要更新失败：%s", exc)
-        summary_error = str(exc)
+            summary_info = update_rolling_summary(store, config, chapter, adapter=context["adapter"])
+            summary_info["mode"] = "fallback"
+            summary_mode = "fallback"
+        except AdapterError as exc:
+            logger.warning("章节摘要更新失败：%s", exc.message)
+            summary_error = exc.message
+            summary_mode = "failed"
+        except Exception as exc:  # noqa: BLE001 - 摘要失败不影响正文，但必须明确告知
+            logger.warning("章节摘要更新失败：%s", exc)
+            summary_error = str(exc)
+            summary_mode = "failed"
+
+    # 正文与摘要都已处理完，断点没有继续保留的意义
+    chapter_checkpoint.clear(store, chapter_id)
 
     return {
         "chapter_id": chapter_id,
@@ -1142,8 +1267,247 @@ def generate_chapter(
         "stop_reason": stop_reason,
         "word_deviation": word_deviation,
         "dialogue_warnings": dialogue_warnings,
+        "notices": notices,
         "summary": summary_info,
         "summary_error": summary_error,
+        "summary_mode": summary_mode,
+        "resume": resume_payload,
+        "mode": mode,
+        "overshoot_note": overshoot_note,
+        "requests": {
+            "body": body_requests,
+            "summary_fallback": fallback_requests,
+            "total": body_requests + fallback_requests,
+        },
+        "revision": chapter["revision"],
+    }
+
+
+def _split_beat_sections(text: str, total_beats: int) -> tuple[str, str | None]:
+    """按「【节拍 N】」切分压缩结果，确认 1..N 全部存在且非空。
+
+    这是「不能靠删节拍压缩」的结构化兜底：段数、顺序与非空都校验，
+    通过后才拼回正文；正文里不保留分段标记。
+
+    参数:
+        text: 压缩模型原始输出。
+        total_beats: 本章节拍总数；0 时不做分段要求。
+
+    返回:
+        `(body, error)`：body 为去掉标记后的正文；error 为中文原因（成功为 None）。
+    """
+    raw = (text or "").strip()
+    if total_beats <= 0:
+        return raw, None
+    matches = list(re.finditer(r"(?m)^\s*【\s*节拍\s*(\d+)\s*】\s*", raw))
+    if not matches:
+        return "", "压缩结果缺少「【节拍 N】」分段标记"
+    sections: dict[int, str] = {}
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(raw)
+        segment = raw[match.end() : end].strip()
+        if segment:
+            sections[int(match.group(1))] = segment
+    missing = [str(number) for number in range(1, total_beats + 1) if number not in sections]
+    if missing:
+        return "", f"压缩结果缺少第 {'、'.join(missing)} 个节拍（不能靠删节拍压缩）"
+    for number in sections:
+        if number > total_beats:
+            return "", f"压缩结果出现多余的【节拍 {number}】（本章共 {total_beats} 个节拍）"
+    return "\n\n".join(sections[number] for number in sorted(sections)), None
+
+
+def _compress_prompt(chapter: dict, content: str, beats: list[dict], target_words: int) -> str:
+    """构造「按目标字数压缩」的提示词：逐节拍分段，保住全部要点。
+
+    参数:
+        chapter: 章节 dict（用于标题）。
+        content: 现有正文。
+        beats: 本章节拍列表。
+        target_words: 目标字数。
+
+    返回:
+        中文提示词。
+    """
+    beat_lines = []
+    for index, beat in enumerate(beats):
+        beat_words = int(beat.get("target_words") or 0)
+        suffix = f"（目标约 {beat_words} 字）" if beat_words else ""
+        beat_lines.append(f"第 {index + 1} 个：{str(beat.get('summary') or '').strip() or '（无摘要）'}{suffix}")
+    return "\n".join(
+        [
+            f"下面是《{chapter.get('title') or ''}》已写好的正文，明显超出目标字数，需要压缩。",
+            f"目标字数：{target_words} 字；当前字数：{_count_words(content)} 字。",
+            "",
+            "本章节拍（必须全部保留，不得删除、合并或跳过；每个节拍的核心事件、人物关系、转折与结果都不能丢）：",
+            *beat_lines,
+            "",
+            "要求：",
+            "1. 按【节拍 1】【节拍 2】…逐段输出压缩后的正文，段数和顺序与上面的节拍一一对应；",
+            "2. 只压缩描写、铺陈、重复表达与冗余过渡，不得删除任何节拍，也不得把两个节拍并成一段；",
+            "3. 不新增情节、不改变人物关系与结局，不输出解释、字数统计或除分段标记外的任何标题；",
+            "4. 尽量压缩到目标字数附近（允许小幅浮动），保持原有人称、时态与叙事口吻。",
+            "",
+            "【原文】",
+            content,
+        ]
+    )
+
+
+def compress_chapter(
+    store: ProjectStore,
+    config: AppConfig,
+    chapter_id: str,
+    on_delta=None,
+    on_notice=None,
+) -> dict:
+    """把已有章节正文按目标字数压缩，逐节拍分段校验，保住全部节拍要点。
+
+    只在用户点击「按目标字数压缩」时调用，不自动触发。压缩结果必须按
+    「【节拍 N】」逐段覆盖 1..N，缺段或多段都拒绝写入并报中文原因；
+    成功后写入新版本（revision +1），保留原摘要不重新生成。
+
+    参数:
+        store: 工程。
+        config: 本机配置。
+        chapter_id: 章节 ID。
+        on_delta: 流式增量回调；传入时改走流式。
+        on_notice: 自动补救说明回调（格式重试成功时上报）。
+
+    返回:
+        与 `generate_chapter` 同形的结果 dict，另含 `before_words`、
+        `overshoot_note`，`mode="compress"`。
+
+    异常:
+        ValueError: 本章还没有正文。
+        AdapterError: 压缩结果为空、缺少节拍或不是小说正文。
+    """
+    chapter = store.load_chapter(chapter_id)
+    content = (chapter.get("content") or "").strip()
+    if not content:
+        raise ValueError(f"章节 {chapter_id} 还没有正文，无法压缩；请先生成正文")
+
+    context = build_chapter_context(store, config, chapter)
+    beats = context["beats"] or []
+    target_words = int(context["metadata"].get("target_words") or context["chapter_words"] or 0)
+    before_words = int(chapter.get("word_count") or 0) or _count_words(content)
+    notices: list[str] = []
+
+    def notify(text: str) -> None:
+        """收集压缩过程的自动补救说明。"""
+        notices.append(text)
+        if on_notice:
+            on_notice(text)
+
+    request = TextGenRequest(
+        task="chapter_compress",
+        system="你是资深小说编辑，只在保留全部节拍要点的前提下压缩正文。只输出压缩后的正文。",
+        messages=[Message("user", _compress_prompt(chapter, content, beats, target_words))],
+        stream=on_delta is not None,
+        temperature=resolve_temperature(config, "writing"),
+        metadata={
+            "chapter_id": chapter_id,
+            "index": chapter.get("index"),
+            "title": chapter.get("title"),
+            "target_words": target_words,
+            "before_words": before_words,
+            "beats": [
+                {"summary": str(beat.get("summary") or ""), "target_words": int(beat.get("target_words") or 0)}
+                for beat in beats
+            ],
+            "content": content,
+        },
+    )
+
+    def splitter(text: str) -> tuple[str, dict | None, str | None]:
+        """按节拍分段拆出正文；缺段时返回中文原因。"""
+        body, error = _split_beat_sections(text, len(beats))
+        return body, None, error
+
+    counter = {"calls": 0}
+    body, cover_error = "", None
+    result = None
+    for attempt in range(2):
+        result, body, _payload, cover_error = _generate_validated(
+            context["adapter"],
+            request,
+            on_delta,
+            "压缩正文",
+            on_notice=notify,
+            counter=counter,
+            extract=splitter,
+        )
+        if not cover_error:
+            break
+        logger.warning("压缩结果未保住全部节拍：%s；追加约束后重试一次", cover_error)
+        if attempt == 0:
+            request = replace(
+                request,
+                messages=list(request.messages)
+                + [
+                    Message(
+                        "user",
+                        f"上一次输出不合格（{cover_error}）。请严格按【节拍 1】…【节拍 {max(1, len(beats))}】"
+                        "逐段输出，每个节拍都要有正文，不要合并或省略。",
+                    )
+                ],
+            )
+    if cover_error:
+        raise AdapterError(
+            ErrorCode.UPSTREAM_ERROR,
+            f"压缩结果未保住全部节拍（{cover_error}）：未写入章节，请重试或改用「重写」",
+            retryable=True,
+        )
+
+    body = (body or "").strip()
+    if not body:
+        raise AdapterError(ErrorCode.UPSTREAM_ERROR, "压缩模型返回了空正文", retryable=True)
+    body, dialogue_warnings = normalize_dialogue(
+        body, [str(item.get("name") or "") for item in context["characters"]]
+    )
+    words = _count_words(body)
+    word_deviation = _word_deviation(words, target_words)
+    before_ratio = round(before_words / target_words, 2) if target_words else None
+    ratio_text = f"{before_ratio} 倍" if before_ratio is not None else "倍率未知"
+    overshoot_note = (
+        f"已按「按目标字数压缩」处理：原 {before_words} 字（目标 {target_words} 字，{ratio_text}，"
+        f"达到 {OVERSHOOT_ACTION_RATIO} 倍动作阈值）→ 压缩后 {words} 字；"
+        f"本章 {len(beats)} 个节拍全部保留"
+    )
+
+    chapter["content"] = body + "\n"
+    chapter["word_count"] = words
+    chapter["status"] = "written"
+    chapter["revision"] = int(chapter.get("revision") or 1) + 1
+    chapter["updated_at"] = now_iso()
+    store.save_chapter(chapter)
+    # 压缩替换了正文：旧的生成断点已失去上下文，直接作废，避免下次续写覆盖压缩结果
+    chapter_checkpoint.clear(store, chapter_id)
+
+    return {
+        "chapter_id": chapter_id,
+        "status": chapter["status"],
+        "words": words,
+        "word_count": words,
+        "provider": result.model if result is not None else "",
+        "content": None,
+        "rounds": 0,
+        "beats_total": len(beats),
+        "beats_done": len(beats),
+        "beats_remaining": 0,
+        "multi_turn": False,
+        "stop_reason": "compressed",
+        "word_deviation": word_deviation,
+        "dialogue_warnings": dialogue_warnings,
+        "notices": notices,
+        "summary": None,
+        "summary_error": None,
+        "summary_mode": None,
+        "resume": {"resumed": False},
+        "mode": "compress",
+        "overshoot_note": overshoot_note,
+        "before_words": before_words,
+        "requests": {"body": int(counter["calls"]), "summary_fallback": 0, "total": int(counter["calls"])},
         "revision": chapter["revision"],
     }
 
@@ -1270,74 +1634,175 @@ def _beats_round_instruction(
 
 
 def _word_deviation(actual: int, target: int) -> dict:
-    """计算实际字数与目标字数的偏差，并生成中文说明。
+    """计算实际字数与目标字数的偏差，按超纲阈值给出中文说明与可选动作。
+
+    口径：生成过程不限制长度，写完后按目标字数判偏差；
+    - ≤ 1.5 倍：只在结果里标实际 / 目标字数，不提供动作；
+    - > 1.5 倍且 < 2 倍：提示超纲，可自行精简，不提供动作；
+    - ≥ 2 倍：视为明显超纲，返回「按目标字数压缩」「重写」两个动作（需用户点击才执行）。
 
     参数:
         actual: 实际字数。
         target: 目标字数（节拍目标之和）。
 
     返回:
-        {"target", "actual", "ratio", "message"}；目标未知时 ratio 为 None。
+        {"target", "actual", "ratio", "level", "notice_ratio", "action_ratio",
+         "message", "actions"}；目标未知时 ratio 为 None、level 为 none。
     """
+    actions = [dict(item) for item in OVERSHOOT_ACTIONS]
+    base = {
+        "target": max(0, int(target or 0)),
+        "actual": max(0, int(actual or 0)),
+        "level": "none",
+        "notice_ratio": OVERSHOOT_NOTICE_RATIO,
+        "action_ratio": OVERSHOOT_ACTION_RATIO,
+        "actions": [],
+    }
     if target <= 0:
-        return {"target": 0, "actual": actual, "ratio": None, "message": ""}
-    ratio = round(actual / target, 2)
-    if ratio < 0.8:
-        message = f"实际 {actual} 字，比目标 {target} 字少 {int(round((1 - ratio) * 100))}%；节拍已写完，可按需续写补足"
-    elif ratio > 1.3:
-        message = f"实际 {actual} 字，比目标 {target} 字多 {int(round((ratio - 1) * 100))}%；节拍已写完，可考虑精简"
+        return {**base, "ratio": None, "message": ""}
+    ratio_value = actual / target
+    ratio = round(ratio_value, 2)
+    if ratio_value < 0.8:
+        message = f"实际 {actual} 字，比目标 {target} 字少 {int(round((1 - ratio_value) * 100))}%；节拍已写完，可按需续写补足"
+    elif ratio_value >= OVERSHOOT_ACTION_RATIO:
+        message = (
+            f"实际 {actual} 字，目标 {target} 字（{ratio} 倍）：明显超纲。"
+            f"当前阈值 {OVERSHOOT_NOTICE_RATIO} 倍仅提示、{OVERSHOOT_ACTION_RATIO} 倍及以上可压缩或重写；"
+            "两个动作都需要你点击后才执行"
+        )
+        base["level"] = "action"
+        base["actions"] = actions
+    elif ratio_value > OVERSHOOT_NOTICE_RATIO:
+        message = (
+            f"实际 {actual} 字，目标 {target} 字（{ratio} 倍）：已超纲，可考虑精简；"
+            f"达到 {OVERSHOOT_ACTION_RATIO} 倍时可选择压缩或重写"
+        )
+        base["level"] = "notice"
     else:
-        message = f"实际 {actual} 字，与目标 {target} 字基本一致"
-    return {"target": target, "actual": actual, "ratio": ratio, "message": message}
+        message = f"实际 {actual} 字，目标 {target} 字（{ratio} 倍）：在 {OVERSHOOT_NOTICE_RATIO} 倍以内"
+    return {**base, "ratio": ratio, "message": message}
 
 
-def _generate_validated(adapter, request: TextGenRequest, on_delta, label: str) -> TextGenResult:
+def _generate_validated(
+    adapter,
+    request: TextGenRequest,
+    on_delta,
+    label: str,
+    on_notice=None,
+    counter: dict | None = None,
+    extract=None,
+    retry_suffix: str = "",
+) -> tuple[TextGenResult, str, dict | None, str | None]:
     """生成正文并做内容校验；命中无效输出时追加严格约束重试一次。
 
     校验口径见 `content_guard.check_chapter_content`：复述任务、罗列写作准则、
     英文思考、列表占比过高等都算无效，绝不允许写进章节正文。
-    重试仍无效时抛出明确错误，由调用方展示，不做静默写入。
+    末轮会把「正文 + 本章摘要 JSON」一起返回，因此通过 `extract` 先拆出正文
+    再做校验，摘要块的解析结果原样返回给调用方决策（成功即内联落盘）。
+    重试仍无效时抛出明确错误，由调用方展示，不做静默写入；重试成功时通过
+    `on_notice` 留下一句可读说明，避免自动补救静默发生。
 
     参数:
         adapter: 写作适配器。
         request: 本轮统一文本请求。
         on_delta: 流式增量回调；为 None 时走一次性生成。
         label: 日志与报错里的轮次说明（如「第 1 轮正文」）。
+        on_notice: 自动补救说明回调 `(text) -> None`；无人接收时只写日志。
+        counter: 请求计数 `{"calls": n}`；每次真正调用模型加 1。
+        extract: 把原始输出拆成 `(body, payload, error)`；None 时正文即原始输出。
+        retry_suffix: 重试时追加在严格约束后的补充要求（如「仍要输出摘要 JSON」）。
 
     返回:
-        TextGenResult；text 为通过校验的正文。
+        `(result, body, payload, error)`：body 为通过校验的正文。
 
     异常:
         AdapterError(UPSTREAM_ERROR): 重试一次后仍不是小说正文。
     """
 
     def call(req: TextGenRequest) -> TextGenResult:
-        """按是否流式执行一次生成。"""
-        return stream_text(adapter, req, on_delta) if on_delta else adapter.generate(req)
-
-    result = call(request)
-    text = (result.text or "").strip()
-    ok, reason = check_chapter_content(text)
-    if ok or not text:
-        # 空正文交给调用方按原有逻辑报错，这里只负责内容形态校验
+        """按是否流式执行一次生成，并把上下文/异常提示转交出去。"""
+        if counter is not None:
+            counter["calls"] = int(counter.get("calls") or 0) + 1
+        result = stream_text(adapter, req, on_delta) if on_delta else adapter.generate(req)
+        # finish_reason=length 按异常处理：输出侧没有人为上限，
+        # 说明触发了模型自身输出上限或上游异常，不能当正常结束
+        if str(getattr(result, "finish_reason", "") or "").lower() == "length":
+            message = (
+                f"{label}以 finish_reason=length 结束（异常）：输出侧未设置人为上限，"
+                "说明触发的是模型自身输出上限或上游异常，结尾可能不完整；本轮内容已保留，请检查后重试"
+            )
+            logger.warning(message)
+            if on_notice:
+                on_notice(message)
         return result
+
+    splitter = extract or (lambda text: (text, None, None))
+    result = call(request)
+    body, payload, parse_error = splitter((result.text or "").strip())
+    body = (body or "").strip()
+    ok, reason = check_chapter_content(body)
+    if ok or not body:
+        # 空正文交给调用方按原有逻辑报错，这里只负责内容形态校验
+        return result, body, payload, parse_error
 
     logger.warning("%s校验未通过：%s；追加严格约束后重试一次", label, reason)
     retry_request = replace(
         request,
-        messages=list(request.messages) + [Message("user", strict_retry_instruction())],
+        messages=list(request.messages)
+        + [Message("user", strict_retry_instruction() + retry_suffix)],
     )
     result = call(retry_request)
-    text = (result.text or "").strip()
-    ok, reason = check_chapter_content(text)
+    body, payload, parse_error = splitter((result.text or "").strip())
+    body = (body or "").strip()
+    ok, reason_after = check_chapter_content(body)
     if not ok:
         raise AdapterError(
             ErrorCode.UPSTREAM_ERROR,
-            f"{label}不是小说正文（{reason}）：已重试 1 次仍无效，内容未写入章节，请重试生成",
+            f"{label}不是小说正文（{reason_after}）：已重试 1 次仍无效，内容未写入章节，请重试生成",
             retryable=True,
-            detail={"reason": reason, "head": text[:300]},
+            detail={"reason": reason_after, "head": body[:300]},
         )
-    return result
+    message = f"{label}内容校验未通过（{reason}），已自动重试 1 次并采用重试结果"
+    logger.info(message)
+    if on_notice:
+        on_notice(message)
+    return result, body, payload, parse_error
+
+
+#: 末轮重试时补一句摘要格式要求，避免模型在严格约束下丢掉摘要块
+_RETRY_SUMMARY_SUFFIX = (
+    "\n重试时仍按本轮要求：正文写完后另起一行输出分隔标记 <<<CHAPTER_SUMMARY_JSON>>>，"
+    "再输出 chapter_summary / book_summary 的 JSON。"
+)
+
+
+def _generate_final_round(adapter, request: TextGenRequest, on_delta, label: str, on_notice=None, counter=None):
+    """正文末轮生成：一次请求同时产出正文与本章摘要，并做结构化拆分。
+
+    参数:
+        adapter: 写作适配器。
+        request: 末轮请求（user 指令里已包含摘要输出约定）。
+        on_delta: 流式增量回调；为 None 时走一次性生成。
+        label: 日志与报错里的轮次说明。
+        on_notice: 自动补救说明回调。
+        counter: 请求计数 `{"calls": n}`。
+
+    返回:
+        `(result, body, payload, error, calls)`；payload 为
+        `{chapter_summary, book_summary}`，解析失败时 error 给出中文原因。
+    """
+    local = counter if counter is not None else {"calls": 0}
+    result, body, payload, error = _generate_validated(
+        adapter,
+        request,
+        on_delta,
+        label,
+        on_notice=on_notice,
+        counter=local,
+        extract=split_final_output,
+        retry_suffix=_RETRY_SUMMARY_SUFFIX,
+    )
+    return result, body, payload, error, int(local["calls"])
 
 
 def _generate_chapter_rounds(
@@ -1349,13 +1814,22 @@ def _generate_chapter_rounds(
     max_rounds: int,
     on_delta=None,
     name_by_id: dict | None = None,
+    on_notice=None,
+    summary_contract: str = "",
+    start_round: int = 0,
+    start_content: str = "",
+    start_summary: dict | None = None,
+    start_summary_error: str | None = None,
+    on_round=None,
 ) -> dict:
     """按节拍分组串行写作，写完整组即推进节拍指针。
 
     前缀（system、首条 user、temperature、stop）全程不变，仅在末尾追加
     「assistant 已生成正文」与一句本轮节拍指令，保证前缀缓存可复用。
     停止只由节拍决定：全部写完为 `beats_done`，轮数用尽为 `max_rounds`。
-    某轮返回空正文视为模型异常，直接抛错（不降级、不静默收尾）。
+    末轮同时产出「正文 + 本章摘要」，摘要解析失败不阻塞正文，交给调用方回退。
+    每轮结束通过 `on_round` 通知调用方落盘断点；续写时从 `start_round` 接着跑，
+    请求前缀与一次跑完完全一致。
 
     参数:
         adapter: 写作适配器（需实现 generate）。
@@ -1366,33 +1840,72 @@ def _generate_chapter_rounds(
         max_rounds: 最大轮数（保险上限）。
         on_delta: 流式增量回调；传入时每轮改为流式生成。
         name_by_id: 角色 ID → 姓名，用于本轮指令写明出场角色。
+        on_notice: 自动补救说明回调；内容校验重试成功时上报一句可读说明。
+        summary_contract: 末轮追加的摘要输出约定；空串表示不产出内联摘要。
+        start_round: 断点续写起点（已完成轮数）。
+        start_content: 断点里已写好的正文。
+        start_summary: 断点里已解析出的本章摘要（可能为空）。
+        start_summary_error: 断点里记录的摘要解析失败原因。
+        on_round: 每轮结束回调，参数为 `{content, rounds, beats_done, provider,
+            summary, summary_error}`。
 
     返回:
-        {"content", "rounds", "beats_done", "stop_reason", "provider"}。
+        {"content", "rounds", "beats_done", "stop_reason", "provider",
+         "summary", "summary_error", "requests"}。
     """
-    content = ""
-    rounds = 0
-    beats_done = 0
+    content = start_content
+    rounds = start_round
+    beats_done = sum(len(item) for item in groups[:start_round])
     provider = ""
     stop_reason = "beats_done"
-    for index, group in enumerate(groups):
+    summary_payload = start_summary
+    summary_error = start_summary_error
+    counter = {"calls": 0}
+    for index in range(start_round, len(groups)):
         if index >= max_rounds:
             stop_reason = "max_rounds"
+            # 轮数是保险上限：真的被它截停时，剩余节拍与原因必须让用户看见
+            remaining = max(0, total_beats - beats_done)
+            if remaining and on_notice:
+                on_notice(
+                    f"已达到最大轮数 {max_rounds}，自动停止：本章还有 {remaining} 个节拍未写，"
+                    "可调大最大轮数或每轮节拍数后重新生成"
+                )
             break
+        group = groups[index]
+        final = index == len(groups) - 1
+        instruction = _beats_round_instruction(groups, index, total_beats, chapter_words, name_by_id)
+        if final and summary_contract:
+            instruction = f"{instruction}\n{summary_contract}"
         if index == 0:
             request = req
         else:
             request = replace(
                 req,
                 messages=list(req.messages)
-                + [
-                    Message("assistant", content),
-                    Message("user", _beats_round_instruction(groups, index, total_beats, chapter_words, name_by_id)),
-                ],
+                + [Message("assistant", content), Message("user", instruction)],
             )
-        result = _generate_validated(adapter, request, on_delta, f"第 {index + 1} 轮正文")
+        if final and summary_contract:
+            result, segment, payload, parse_error, _calls = _generate_final_round(
+                adapter,
+                request,
+                on_delta,
+                f"第 {index + 1} 轮正文",
+                on_notice=on_notice,
+                counter=counter,
+            )
+            summary_payload = payload
+            summary_error = parse_error
+        else:
+            result, segment, _payload, _error = _generate_validated(
+                adapter,
+                request,
+                on_delta,
+                f"第 {index + 1} 轮正文",
+                on_notice=on_notice,
+                counter=counter,
+            )
         provider = result.model or provider
-        segment = (result.text or "").strip()
         rounds = index + 1
         start_beat = sum(len(item) for item in groups[:index])
         end_beat = start_beat + len(group)
@@ -1400,11 +1913,42 @@ def _generate_chapter_rounds(
             raise AdapterError(
                 ErrorCode.UPSTREAM_ERROR,
                 f"第 {rounds} 轮（节拍 {start_beat + 1}–{end_beat}）返回空正文：生成已停止，"
-                "请检查模型服务或调大输出预算后重试",
+                "请检查模型服务后重试（输出侧未设置人为上限）",
                 retryable=True,
             )
+        expected_words = _group_words(group, total_beats, chapter_words)
+        actual_words = _count_words(segment)
+        if expected_words > 0 and actual_words > max(int(expected_words * 1.5), expected_words + 300):
+            message = (
+                f"第 {rounds} 轮输出 {actual_words} 字，明显超出本轮预期 {expected_words} 字"
+                f"（{actual_words / expected_words:.1f} 倍），疑似复述、跑题或模型未自然停止"
+            )
+            logger.warning(message)
+            if on_notice:
+                on_notice(message)
+        before_chars = len(content)
         content = _append_segment(content, segment)
+        added = len(content) - before_chars
+        if index > 0 and len(segment) > 400 and added < len(segment) * 0.6:
+            message = (
+                f"第 {rounds} 轮开头与已写正文高度重复（新增 {added}/{len(segment)} 字，"
+                "已自动去重）；疑似复述，请检查本轮内容"
+            )
+            logger.warning(message)
+            if on_notice:
+                on_notice(message)
         beats_done = end_beat
+        if on_round:
+            on_round(
+                {
+                    "content": content,
+                    "rounds": rounds,
+                    "beats_done": beats_done,
+                    "provider": provider,
+                    "summary": summary_payload,
+                    "summary_error": summary_error,
+                }
+            )
     if rounds == 0:
         raise AdapterError(ErrorCode.UPSTREAM_ERROR, "生成轮数为 0：请检查 max_rounds 配置", retryable=False)
     return {
@@ -1413,36 +1957,10 @@ def _generate_chapter_rounds(
         "beats_done": beats_done,
         "stop_reason": stop_reason,
         "provider": provider,
+        "summary": summary_payload,
+        "summary_error": summary_error,
+        "requests": int(counter["calls"]),
     }
-
-
-#: 标注单批输出预算上限（token）
-_SCRIPT_TOKEN_CAP = 16384
-
-
-def _script_batch_max_tokens(config, scenes: list[dict]) -> int:
-    """按本批场景数、台词行数估算标注输出预算。
-
-    估算口径：固定开销 400 + 每个镜头 320（@shot/visual/anim/bgm 头部）
-    + 每句台词 45（speaker+text+可能的 sfx 位置）；配置 `omlx.max_tokens`
-    作为下限（不超过 16384）。
-
-    参数:
-        config: 本机配置（可为 None）。
-        scenes: 本批场景列表。
-
-    返回:
-        建议的 max_tokens。
-    """
-    line_count = sum(len(scene.get("lines") or []) for scene in scenes)
-    estimate = 400 + len(scenes) * 320 + line_count * 45
-    floor = 0
-    if config is not None:
-        try:
-            floor = int(config.get("omlx.max_tokens") or 0)
-        except (AttributeError, TypeError, ValueError):
-            floor = 0
-    return min(_SCRIPT_TOKEN_CAP, max(estimate, min(_SCRIPT_TOKEN_CAP, floor)))
 
 
 def _script_work_path(store: ProjectStore, chapter_id: str):
@@ -1705,7 +2223,6 @@ def suggest_script(
             system=system_prompt,
             messages=[Message("user", base_prompt + "\n\n" + "\n\n".join(body))],
             stream=True,
-            max_tokens=_script_batch_max_tokens(config, subset),
             metadata={"scenes": subset, "style": bible.get("style") or {}},
         )
         state = {"chars": 0}
@@ -1733,8 +2250,8 @@ def suggest_script(
                 raise AdapterError(
                     ErrorCode.UPSTREAM_ERROR,
                     f"第 {first_no}–{last_no} 个镜头（第 {index}/{rounds} 批）标注输出被截断"
-                    "（finish_reason=length）：本批内容超出输出上限。"
-                    "请调小每批场景数（--scenes-per-round）或提高 omlx.max_tokens 后重试",
+                    "（finish_reason=length）：输出侧没有人为上限，"
+                    "说明触发了模型自身输出上限或上游异常。请调小每批场景数后重试",
                 )
             markup = (result.text or "").strip()
             if not markup:
@@ -2203,6 +2720,11 @@ _OUTLINE_TOOL_SCHEMA = {
                                             },
                                             "turning_point": {"type": "boolean", "description": "是否为本章转折点"},
                                             "target_words": {"type": "integer", "description": "该节拍目标字数"},
+                                            "extra_characters": {
+                                                "type": "array",
+                                                "items": {"type": "string"},
+                                                "description": "只在本章出现、未建卡的龙套姓名（按 minor 处理，不进入角色表）",
+                                            },
                                         },
                                         "required": ["summary"],
                                     },
@@ -2220,12 +2742,53 @@ _OUTLINE_TOOL_SCHEMA = {
 }
 
 
+#: 本章出场角色（与节拍同一次调用产出，不再单独发角色请求）
+_CAST_ITEM_SCHEMA = {
+    "type": "object",
+    "required": ["name", "beats"],
+    "properties": {
+        "existing_id": {"type": "string", "description": "复用现有角色时填其 ID；新建角色留空"},
+        "name": {"type": "string", "description": "角色姓名"},
+        "aliases": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "本章出现的称呼/别名",
+        },
+        "role": {"type": "string", "enum": ["protagonist", "antagonist", "supporting", "minor"]},
+        "gender": {"type": "string", "enum": ["male", "female", "other", "unknown"]},
+        "age_range": {"type": "string"},
+        "personality": {"type": "array", "items": {"type": "string"}},
+        "background": {"type": "string", "description": "新建角色必须给，已有角色可留空"},
+        "speech_style": {
+            "type": "object",
+            "properties": {
+                "tempo": {"type": "string"},
+                "pitch": {"type": "string"},
+                "accent": {"type": "string"},
+                "catchphrases": {"type": "array", "items": {"type": "string"}},
+            },
+        },
+        "beats": {
+            "type": "array",
+            "items": {"type": "integer"},
+            "description": "该角色出场的节拍序号（从 1 开始），这是绑定依据",
+        },
+    },
+}
+
 #: 单幕参数 schema：复用大纲结构里的 act 对象，外面再包一层 act 键，
-#: 让 `emit_act` 一轮只产出一幕（title/summary/chapters[title/summary/beats]）。
+#: 让 `emit_act` 一轮只产出一幕（title/summary/chapters[title/summary/beats/cast]）。
 _ACT_TOOL_SCHEMA = {
     "type": "object",
-    "properties": {"act": _OUTLINE_TOOL_SCHEMA["properties"]["acts"]["items"]},
+    "properties": {
+        "act": copy.deepcopy(_OUTLINE_TOOL_SCHEMA["properties"]["acts"]["items"]),
+    },
     "required": ["act"],
+}
+_ACT_TOOL_SCHEMA["properties"]["act"]["properties"]["chapters"]["items"]["properties"]["cast"] = {
+    "type": "array",
+    "description": "本章出场角色；与节拍同一次调用产出，每项必须给 beats 绑定依据",
+    "items": _CAST_ITEM_SCHEMA,
 }
 
 
@@ -2278,6 +2841,11 @@ _HIER_BEATS_TOOL_SCHEMA = {
     "type": "object",
     "properties": {
         "beats": {"type": "array", "description": "本章全部节拍，按顺序排列", "items": _BEAT_ITEM_SCHEMA},
+        "cast": {
+            "type": "array",
+            "description": "本章出场角色；与节拍同一次调用产出，每项必须给 beats 绑定依据",
+            "items": _CAST_ITEM_SCHEMA,
+        },
         "character_arcs": {
             "type": "array",
             "description": "本章主要角色弧线：角色在本章从什么状态走到什么状态（可选，最多 3 条）",
@@ -2847,7 +3415,6 @@ def generate_worlds(
         messages=[Message("user", prompt)],
         stream=True,
         temperature=resolve_temperature(config, "writing"),
-        max_tokens=_tool_max_tokens(config, "worlds", wanted or 6),
         metadata={
             "step": "worlds",
             "work": {"title": work.get("title"), "author": work.get("author"), "genre": work.get("genre") or []},
@@ -2883,7 +3450,6 @@ def generate_worlds(
             if names:
                 lines.append("已生成世界（不要重复名称）：" + "、".join(names))
             batch_req = replace(req, messages=list(req.messages) + [Message("user", "\n".join(lines))])
-            batch_req.max_tokens = _tool_max_tokens(config, "worlds", take)
             batch_req.metadata = dict(req.metadata or {}, count=take)
             batch_payload = _generate_json(
                 adapter,
@@ -3030,7 +3596,6 @@ def generate_settings(store: ProjectStore, config: AppConfig, step: str, overwri
         messages=[Message("user", prompt)],
         stream=True,
         temperature=resolve_temperature(config, "writing"),
-        max_tokens=_tool_max_tokens(config, step, 1),
         metadata=metadata,
     )
     payload = _generate_json(adapter, req, step)
@@ -3116,8 +3681,6 @@ def generate_characters(
         messages=[Message("user", prompt)],
         stream=True,
         temperature=resolve_temperature(config, "writing"),
-        # 未指定数量时按一屏 8 个角色的规模预留；人物卡含背景/外貌/关系/音色，单条开销明显高于普通字段
-        max_tokens=_tool_max_tokens(config, "characters", min(total, batch) if total else max(batch, 8)),
         metadata={
             "work": {"title": work.get("title"), "author": work.get("author"), "genre": work.get("genre") or []},
             "premise": bible.get("premise") or {},
@@ -3148,7 +3711,6 @@ def generate_characters(
             if names:
                 lines.append("已生成人物（不要重复姓名）：" + "、".join(names))
             batch_req = replace(req, messages=list(req.messages) + [Message("user", "\n".join(lines))])
-            batch_req.max_tokens = _tool_max_tokens(config, "characters", take)
             batch_req.metadata = dict(req.metadata or {}, count=take)
             batch_payload = _generate_json(
                 adapter,
@@ -3627,7 +4189,6 @@ def generate_section(
         messages=[Message("user", prompt)],
         stream=True,
         temperature=resolve_temperature(config, "writing"),
-        max_tokens=_tool_max_tokens(config, "character", 1),
         metadata={
             "mode": "single",
             "work": work_payload,
@@ -3744,7 +4305,8 @@ def bind_outline_context(bible: dict, worlds: list[dict], characters: list[dict]
         {"chapters": 绑定章节数, "beats": 绑定节拍数, "worlds": 可用世界数}。
     """
     cast = [item for item in characters or [] if item.get("id") and item.get("role") != "narrator" and item.get("id") != entities.NARRATOR_ID]
-    cast_ids = {item["id"] for item in cast}
+    # 节拍可以用旁白兜底：旁白是保留实体，允许出现在 character_ids 里
+    cast_ids = {item["id"] for item in cast} | {entities.NARRATOR_ID}
     protagonist = next((item for item in cast if item.get("role") == "protagonist"), cast[0] if cast else None)
     order = ([protagonist] + [item for item in cast if item is not protagonist]) if protagonist else []
     world_ids = [item["id"] for item in worlds or [] if item.get("id")]
@@ -3769,8 +4331,9 @@ def bind_outline_context(bible: dict, worlds: list[dict], characters: list[dict]
             chapters_bound += 1
             for beat in chapter.get("beats") or []:
                 valid = [cid for cid in (beat.get("character_ids") or []) if cid in cast_ids]
-                if not valid and pov:
-                    valid = [pov]
+                if not valid:
+                    # 节拍没有点名任何角色时回退旁白，不再硬绑主角
+                    valid = [entities.NARRATOR_ID]
                 beat["character_ids"] = valid
                 beats_bound += 1
             index += 1
@@ -3798,6 +4361,8 @@ def sanitize_outline_character_ids(bible: dict, characters: list[dict]) -> dict:
         for item in characters or []
         if item.get("id") and item.get("role") != "narrator" and item.get("id") != entities.NARRATOR_ID
     }
+    # 旁白是保留实体，节拍里的旁白兜底不算非法引用
+    cast_ids.add(entities.NARRATOR_ID)
     chapters = 0
     kept = 0
     dropped = 0

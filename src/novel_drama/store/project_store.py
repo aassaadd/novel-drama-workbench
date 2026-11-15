@@ -10,9 +10,14 @@ from pathlib import Path
 
 from ..models import entities
 from ..models.ids import now_iso
-from .schema_validator import validate
+from .schema_validator import SchemaValidationError, validate
 
 WORKSPACE_INDEX = Path.home() / ".ndw" / "workspaces.json"
+
+#: 已删除的工程级设置键（不做旧工程兼容）：读工程时直接报可读错误，不静默忽略
+_REMOVED_SETTING_KEYS = {
+    "omlx.max_tokens": "输出侧已取消 max_tokens 设置，请求输出由上下文剩余空间决定",
+}
 
 # 工程内固定目录
 _SUBDIRS = (
@@ -92,6 +97,29 @@ _DEFAULT_SETTINGS = {
     },
     "gpu": {"lock_path": "/Volumes/other/gpu.lock", "max_concurrent": 1},
 }
+
+
+def _reject_removed_settings(project: dict) -> None:
+    """检查工程是否仍带已删除的设置键，命中时给出可读中文错误。
+
+    参数:
+        project: project.json 内容。
+
+    返回:
+        无。
+
+    异常:
+        SchemaValidationError: 出现已删除的设置键。
+    """
+    settings = project.get("settings") or {}
+    for dotted, reason in _REMOVED_SETTING_KEYS.items():
+        section, key = dotted.split(".", 1)
+        block = settings.get(section)
+        if isinstance(block, dict) and key in block:
+            raise SchemaValidationError(
+                f"旧工程包含已删除的设置项 settings/{dotted.replace('.', '/')}"
+                f"（{reason}）；请从 project.json 删除该键后重新打开"
+            )
 
 
 class ProjectStore:
@@ -245,8 +273,10 @@ class ProjectStore:
         return project
 
     def load_project(self) -> dict:
-        """读取 project.json。"""
-        return self._read_json(self.project_file)
+        """读取 project.json；旧工程里的已删除设置键直接报可读错误。"""
+        project = self._read_json(self.project_file)
+        _reject_removed_settings(project)
+        return project
 
     def save_project(self, project: dict) -> None:
         """保存 project.json（先校验）。

@@ -14,6 +14,8 @@ let env = { readiness: null, models: null, comfy: null, llm: null, error: '' };
 let envTimer = null;
 /** 连接配置（ComfyUI / 写作模型）与配置文件位置 */
 let connection = null;
+/** 上下文与输出侧现状（/api/ui/config/generation 返回的结构，只读） */
+let generation = null;
 /** 模型分组（顺序即展示顺序） */
 const MODEL_GROUPS = [
   ['audio', '配音 / 音乐权重'],
@@ -461,6 +463,7 @@ function openManualModel(group, key) {
 const SECTIONS = [
   ['env', '本机环境与模型', '本机环境、模型列表与下载'],
   ['conn', '连接配置', 'ComfyUI 与写作模型连接'],
+  ['budget', '上下文与输出', '上下文上限、最近提示词占用与输出无人工上限说明'],
   ['prefs', '快捷键与界面偏好', '快捷键、字号与显示偏好'],
 ];
 
@@ -661,11 +664,7 @@ function connectionHTML() {
             <div class="field"><label>上下文窗口（tokens）</label>
               <input class="input" id="conn-llm-context" type="number" min="1" step="1"
                 value="${esc(llm.context_window ?? '')}" placeholder="例如 262144"
-                title="模型可用的上下文上限；测试连通后按服务端返回值回填，保存后用于请求预算校验" /></div>
-            <div class="field"><label>最大输出（tokens）</label>
-              <input class="input" id="conn-llm-max-output" type="number" min="1" step="1"
-                value="${esc(llm.max_output_tokens ?? '')}" placeholder="例如 32768"
-                title="单次生成的最大输出预算；保存后作为写作 / 标注请求的 max_tokens" /></div>
+                title="模型可用的上下文上限；测试连通后按服务端返回值回填。输入装配与请求 max_tokens 都按它计算" /></div>
           </div>
           <div class="conn-grid">
             <div class="field"><label>思考</label>
@@ -717,6 +716,70 @@ function connectionHTML() {
     </div>`;
 }
 
+/**
+ * 上下文与输出（只读）：说明输入上限与「输出无人工上限」的现状。
+ */
+function generationHTML() {
+  return `
+    <div class="card" style="margin-top:14px">
+      <div class="card-head"><span class="ct">上下文与输出（只读）</span></div>
+      <div class="card-body">
+        <div class="hint">输出侧不设置人为上限：模型自己输出结束符就会停止。请求里的 max_tokens
+          使用「上下文窗口 − 已用提示词」的剩余空间，不额外留人为余量；
+          「要写多少字」由提示词里的目标字数与每轮节拍数决定。</div>
+        <div id="gen-body">${generationBodyHTML()}</div>
+        <div class="conn-result" id="gen-result"></div>
+      </div>
+    </div>`;
+}
+
+/** 渲染上下文与最近一次请求的现状（无任何可保存的输出预算项） */
+function generationBodyHTML() {
+  if (!generation) return '<div class="empty" style="padding:12px"><span>正在读取上下文状态…</span></div>';
+  const context = generation.context || {};
+  const output = generation.output || {};
+  const last = generation.last_call || {};
+  const rows = [
+    ['上下文窗口', context.window ? `${context.window} tokens` : '未检测到'],
+    ['输入装配上限', `${context.budget} tokens${context.fallback ? '（未知窗口时的兜底）' : '（等于模型上下文窗口）'}`],
+    ['最近一次提示词', last.prompt_tokens != null
+      ? `${last.prompt_tokens} tokens${last.context_limit ? `（占窗口 ${Math.round((last.prompt_tokens / last.context_limit) * 100)}%）` : ''}`
+      : '尚无请求'],
+    ['最近一次请求 max_tokens', last.max_tokens != null
+      ? `${last.max_tokens} tokens（上下文剩余空间）`
+      : (last.at ? '未传（未检测到上下文窗口，由模型自身决定）' : '尚无请求')],
+    ['输出人工上限', '无'],
+    ['最近一次结束原因', last.finish_reason || (last.at ? '自然结束/未知' : '尚无请求')],
+  ];
+  return `
+    <div class="conn-block" style="margin-top:12px">
+      <h4>现状</h4>
+      <div class="conn-grid">${rows.map(([label, value]) => `
+        <div class="field"><label>${esc(label)}</label>
+          <div class="hint" style="font-size:14px">${esc(value)}</div></div>`).join('')}</div>
+    </div>
+    <div class="hint" style="margin-top:10px">${esc(context.note || '')}</div>
+    <div class="hint">${esc(output.note || '')}</div>`;
+}
+
+/** 读取上下文/输出状态（只读，无保存动作） */
+async function loadGeneration() {
+  try {
+    generation = await getJSON('/api/ui/config/generation');
+  } catch (error) {
+    generation = null;
+    toast(`上下文状态读取失败：${error.message}`, 'bad', 4000);
+  }
+  applyGenerationView();
+}
+
+/** 局部刷新上下文与输出卡片 */
+function applyGenerationView() {
+  const body = document.getElementById('gen-body');
+  if (!body) return;
+  body.innerHTML = generationBodyHTML();
+}
+
 /** 主区：只有全局设置，按分区各给一个锚点，左侧导航按 id 滚动 */
 function mainHTML() {
   return `
@@ -731,10 +794,11 @@ function mainHTML() {
       <section class="set-section" data-section="global">
         ${sectionHead(
           '全局设置（本机）',
-          '模型与算力、连接配置、环境自检与模型下载、快捷键、界面偏好'
+          '模型与算力、连接配置、上下文与输出、环境自检与模型下载、快捷键、界面偏好'
         )}
         <div id="env" class="set-block">${environmentHTML()}</div>
         <div id="conn" class="set-block">${connectionHTML()}</div>
+        <div id="budget" class="set-block">${generationHTML()}</div>
         <div id="prefs" class="set-block">${shortcutsHTML()}${prefsHTML()}</div>
       </section>
     </div>`;
@@ -1021,7 +1085,6 @@ function llmForm() {
     max_concurrency: document.getElementById('conn-llm-concurrency')?.value || '',
     first_token_timeout_s: document.getElementById('conn-llm-first-token')?.value || '',
     context_window: document.getElementById('conn-llm-context')?.value || '',
-    max_tokens: document.getElementById('conn-llm-max-output')?.value || '',
     temperature: document.getElementById('conn-llm-temp-writing')?.value || '',
     temperature_polish: document.getElementById('conn-llm-temp-polish')?.value || '',
     temperature_audio: document.getElementById('conn-llm-temp-audio')?.value || '',
@@ -1092,26 +1155,19 @@ async function testLlm(button) {
       listMsg.className = 'hint conn-list-msg';
       listMsg.textContent = `已读取 ${names.length} 个可用模型`;
     }
-    // 把服务端返回的上下文 / 最大输出反显成可编辑字段，用户可直接改完保存
+    // 只反显服务端返回的上下文窗口；输出侧不设人为上限，不再回填最大输出
     const contextValue = Number(result.context_window);
-    const outputValue = Number(result.max_output_tokens);
     const contextInput = document.getElementById('conn-llm-context');
-    const outputInput = document.getElementById('conn-llm-max-output');
     if (contextInput && Number.isFinite(contextValue) && contextValue > 0) {
       contextInput.value = String(contextValue);
     }
-    if (outputInput && Number.isFinite(outputValue) && outputValue > 0) {
-      outputInput.value = String(outputValue);
-    }
     const limitsMsg = document.getElementById('conn-llm-limits-msg');
     if (limitsMsg) {
-      const hasLimits = (Number.isFinite(contextValue) && contextValue > 0) || (Number.isFinite(outputValue) && outputValue > 0);
+      const hasLimits = Number.isFinite(contextValue) && contextValue > 0;
       limitsMsg.className = 'hint conn-list-msg';
       limitsMsg.textContent = hasLimits
-        ? `服务端字段：上下文 ${contextValue > 0 ? contextValue : '未知'} / 最大输出 ${
-            outputValue > 0 ? outputValue : '未知'
-          } tokens，已回填到上方字段，可直接修改后保存。`
-        : '服务端未返回上下文 / 最大输出字段，可在上方直接手填后保存。';
+        ? `服务端字段：上下文 ${contextValue} tokens，已回填到上方；输出侧不设人为上限。`
+        : '服务端未返回上下文窗口字段，可在上方直接手填后保存；输出侧不设人为上限。';
     }
   } catch (error) {
     setConnResult('conn-llm-result', false, error.message || '写作模型连接失败');
@@ -1242,6 +1298,7 @@ export async function renderSettings(root, target = {}) {
     bound = true;
   }
   await loadConnection();
+  await loadGeneration();
   root.innerHTML = `
     ${topbar({
       left: `<button class="btn icon" data-act="back" title="回工程列表">${icon('back')}</button>

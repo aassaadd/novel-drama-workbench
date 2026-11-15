@@ -17,7 +17,7 @@ from ..config import AppConfig, resolve_temperature
 from ..models.ids import now_iso
 from ..store import ProjectStore
 from ..store.settings_store import SettingsStore
-from .service import _tool_max_tokens, build_writing_adapter, chapter_binding
+from .service import build_writing_adapter, chapter_binding
 
 #: 提案中允许写回的角色状态字段
 UPDATE_FIELDS = ("situation", "knowledge_add", "relations")
@@ -200,7 +200,6 @@ def propose_character_updates(
         messages=[Message("user", prompt)],
         stream=False,
         temperature=resolve_temperature(config, "writing"),
-        max_tokens=_tool_max_tokens(config, "character_updates", max(1, len(focus))),
         metadata={
             "chapter_id": chapter_id,
             "characters": state_brief,

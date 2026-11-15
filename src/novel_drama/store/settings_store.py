@@ -190,7 +190,8 @@ class SettingsStore:
         return {"id": chapter_id, "index": index, "title": title, "summary": summary, "beats": []}
 
     @staticmethod
-    def new_beat(summary: str, character_ids: list[str] | None = None, turning_point: bool = False, target_words: int = 0) -> dict:
+    def new_beat(summary: str, character_ids: list[str] | None = None, turning_point: bool = False, target_words: int = 0,
+                 extra_characters: list[str] | None = None) -> dict:
         """构造节拍。
 
         参数:
@@ -198,17 +199,21 @@ class SettingsStore:
             character_ids: 涉及角色 ID。
             turning_point: 是否关键转折。
             target_words: 该节拍目标字数。
+            extra_characters: 只在本章出现、未建卡的龙套姓名（minor）。
 
         返回:
             节拍 dict。
         """
-        return {
+        beat = {
             "id": new_id("bea"),
             "summary": summary,
             "character_ids": character_ids or [],
             "turning_point": turning_point,
             "target_words": target_words,
         }
+        if extra_characters:
+            beat["extra_characters"] = list(dict.fromkeys(str(item) for item in extra_characters if str(item)))
+        return beat
 
     def find_outline_chapter(self, bible: dict, chapter_id: str) -> dict | None:
         """在大纲中按章节 ID 查找条目。

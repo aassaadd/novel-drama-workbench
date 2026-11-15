@@ -210,6 +210,30 @@ _NON_NAME_WORDS = {
 # 单场景候选上限：候选过多会显著增加误命中
 _MAX_CANDIDATES = 10
 
+# 弱代称：语义宽泛的称呼或非人代词（「女人」「纸人」「它」）。
+# 这类词天然歧义大：只在场景内唯一指向某个候选角色、且该角色在场景里有强称呼时采信，
+# 置信度压到低档；同时不参与候选集计分，避免「它」把角色带进每个场景。
+_WEAK_ALIASES = {
+    "女人",
+    "男人",
+    "老人",
+    "姑娘",
+    "少女",
+    "少年",
+    "孩子",
+    "青年",
+    "纸人",
+    "那人",
+    "这人",
+    "来人",
+    "对方",
+    "家伙",
+    "它",
+}
+
+# 弱代称里只能靠说话动词采信的代词（「它拿起来」不一定是傩王）
+_WEAK_PRONOUN_ALIASES = {"它"}
+
 # cue 置信度
 _CONF_NAME = 0.9
 _CONF_PRONOUN = 0.6
@@ -217,6 +241,9 @@ _CONF_ACTION = 0.55
 _CONF_PARAGRAPH = 0.7
 _CONF_ROTATION = 0.45
 _CONF_AMBIGUOUS = 0.3
+_CONF_WEAK_NAME = 0.4
+_CONF_WEAK_ACTION = 0.35
+_CONF_WEAK_PROPAGATION = 0.45
 
 
 def split_scenes(content: str, max_chars: int = 1200) -> list[dict]:
@@ -364,31 +391,65 @@ def _paragraph_of(bounds: list[tuple[int, int]], position: int) -> int:
     return max(0, len(bounds) - 1)
 
 
+def _alias_words(character: dict, include_weak: bool = True) -> list[str]:
+    """取角色的名字与别名，可选是否包含弱代称。
+
+    参数:
+        character: 角色 dict。
+        include_weak: 为 False 时剔除「女人」「纸人」「它」这类宽泛代称。
+
+    返回:
+        非空称呼列表。
+    """
+    names = [character.get("name") or ""] + list(character.get("aliases") or [])
+    return [name for name in names if name and (include_weak or name not in _WEAK_ALIASES)]
+
+
 def _alias_index(characters: list[dict]) -> list[tuple[str, str]]:
     """构建「称呼 → 角色 ID」索引，按名称长度降序以优先匹配长名。
+
+    弱代称不进这个索引：它们只在 `_weak_alias_map` 里按场景唯一性单独放行。
 
     参数:
         characters: 角色表。
 
     返回:
-        [(称呼, 角色 ID)]，排除旁白。
+        [(称呼, 角色 ID)]，排除旁白与弱代称。
     """
     pairs: list[tuple[str, str]] = []
     for character in characters:
         if character.get("role") == "narrator" or character.get("id") == NARRATOR_ID:
             continue
-        names = [character.get("name") or ""] + list(character.get("aliases") or [])
-        for name in names:
-            if name:
-                pairs.append((name, character["id"]))
+        for name in _alias_words(character, include_weak=False):
+            pairs.append((name, character["id"]))
     return sorted(pairs, key=lambda item: len(item[0]), reverse=True)
+
+
+def _weak_alias_map(candidates: list[dict]) -> dict[str, str]:
+    """找出本场景可采信的弱代称（唯一指向一个候选角色）。
+
+    候选集本身只按强称呼统计，因此能进入这里，说明该角色在场景里另有明确出场；
+    若同一个代称同时属于多个候选角色，说明指代不唯一，直接放弃。
+
+    参数:
+        candidates: 本场景候选角色。
+
+    返回:
+        {代称: 角色 ID}，只含唯一映射。
+    """
+    owners: dict[str, set[str]] = {}
+    for character in candidates:
+        for name in _alias_words(character):
+            if name in _WEAK_ALIASES:
+                owners.setdefault(name, set()).add(character["id"])
+    return {name: next(iter(ids)) for name, ids in owners.items() if len(ids) == 1}
 
 
 def _scene_candidates(characters: list[dict], scene_text: str) -> list[dict]:
     """挑出本场景实际出场的角色（候选集）。
 
     角色卡里没在本场景出现过的角色不参与归属，避免全角色表带来的误命中；
-    按别名出现频次排序，最多保留 10 个。
+    按别名出现频次排序，最多保留 10 个。弱代称不计分，避免「它」把角色带进每个场景。
 
     参数:
         characters: 完整角色表。
@@ -402,10 +463,8 @@ def _scene_candidates(characters: list[dict], scene_text: str) -> list[dict]:
         if character.get("role") == "narrator" or character.get("id") == NARRATOR_ID:
             continue
         score = 0
-        names = [character.get("name") or ""] + list(character.get("aliases") or [])
-        for name in names:
-            if name:
-                score += scene_text.count(name) * max(1, len(name))
+        for name in _alias_words(character, include_weak=False):
+            score += scene_text.count(name) * max(1, len(name))
         if score:
             scored.append((score, character))
     scored.sort(key=lambda item: item[0], reverse=True)
@@ -464,37 +523,41 @@ def _search_verb(text: str, aliases: list[tuple[str, str]]) -> re.Match | None:
     return None
 
 
-def _name_cues(segment: str, aliases: list[tuple[str, str]]) -> list[tuple[int, int, str]]:
+def _name_cues(
+    segment: str, aliases: list[tuple[str, str]], weak_aliases: list[tuple[str, str]] = ()
+) -> list[tuple[int, int, str, bool]]:
     """找出片段里所有「称呼 + 说话动词」的候选。
 
     参数:
         segment: 引号前或引号后的叙述片段。
-        aliases: 称呼索引。
+        aliases: 强称呼索引。
+        weak_aliases: 本场景允许采信的弱代称索引。
 
     返回:
-        [(动词结束位置, 称呼起始位置, 角色 ID)]，位置相对片段。
+        [(动词结束位置, 称呼起始位置, 角色 ID, 是否弱代称)]，位置相对片段。
     """
-    found: list[tuple[int, int, str]] = []
-    for name, character_id in aliases:
-        start = segment.find(name)
-        while start >= 0:
-            end = start + len(name)
-            # 「对 / 跟 / 向 + 名字」是听话人，不是说话人
-            if start and segment[start - 1] in _ADDRESSEE_PREFIX:
+    found: list[tuple[int, int, str, bool]] = []
+    for group, is_weak in ((aliases, False), (weak_aliases, True)):
+        for name, character_id in group:
+            start = segment.find(name)
+            while start >= 0:
+                end = start + len(name)
+                # 「对 / 跟 / 向 + 名字」是听话人，不是说话人
+                if start and segment[start - 1] in _ADDRESSEE_PREFIX:
+                    start = segment.find(name, end)
+                    continue
+                tail = segment[end : end + 18]
+                if tail.startswith("的声音"):
+                    found.append((end + 3, start, character_id, is_weak))
+                else:
+                    match = _search_verb(tail, aliases)
+                    if match:
+                        gap = tail[: match.start()]
+                        # 中间不能有句末标点；夹带别的称呼时，只有「A 对 B 说」这种介词结构才算 A
+                        if not re.search(r"[。！？\n]", gap):
+                            if not _contains_alias(gap, aliases) or (gap and gap[0] in _ADDRESSEE_PREFIX):
+                                found.append((end + match.end(), start, character_id, is_weak))
                 start = segment.find(name, end)
-                continue
-            tail = segment[end : end + 18]
-            if tail.startswith("的声音"):
-                found.append((end + 3, start, character_id))
-            else:
-                match = _search_verb(tail, aliases)
-                if match:
-                    gap = tail[: match.start()]
-                    # 中间不能有句末标点；夹带别的称呼时，只有「A 对 B 说」这种介词结构才算 A
-                    if not re.search(r"[。！？\n]", gap):
-                        if not _contains_alias(gap, aliases) or (gap and gap[0] in _ADDRESSEE_PREFIX):
-                            found.append((end + match.end(), start, character_id))
-            start = segment.find(name, end)
     return found
 
 
@@ -605,23 +668,44 @@ def _last_clause(segment: str) -> str:
     return parts[-1].lstrip(" \t、") if parts else ""
 
 
-def _action_alias(segment: str, aliases: list[tuple[str, str]]) -> tuple[str, int] | None:
+def _action_alias(
+    segment: str,
+    aliases: list[tuple[str, str]],
+    weak_aliases: list[tuple[str, str]] = (),
+    side: str = "post",
+) -> tuple[str, int, bool] | None:
     """识别紧贴引号「称呼 + 动作」的提示。
+
+    强称呼沿用宽松窗口；弱代称必须紧贴引号（引号后开头或引号前最后分句），
+    且「它」这类代词只允许通过说话动词采信，避免「它拿起来」被当成傩王。
 
     参数:
         segment: 引号前或引号后紧邻的片段。
-        aliases: 称呼索引。
+        aliases: 强称呼索引。
+        weak_aliases: 本场景允许采信的弱代称索引。
+        side: "pre" 表示引号前，其他值按引号后处理。
 
     返回:
-        (角色 ID, 距离)；未命中返回 None。
+        (角色 ID, 距离, 是否弱代称)；未命中返回 None。
     """
     text = segment.lstrip(" \t，。；：、")
     for name, character_id in aliases:
         position = text.find(name)
         while position >= 0:
             if _has_action(text[position + len(name) : position + len(name) + 12]):
-                return character_id, 0
+                return character_id, 0, False
             position = text.find(name, position + len(name))
+    for name, character_id in weak_aliases:
+        if name in _WEAK_PRONOUN_ALIASES:
+            continue
+        if side == "pre":
+            scope = _last_clause(segment)
+        else:
+            scope = text
+        if not scope.startswith(name):
+            continue
+        if _has_action(scope[len(name) : len(name) + 8]):
+            return character_id, 0, True
     return None
 
 
@@ -671,19 +755,43 @@ def _resolve_pronoun(pronoun: str, candidates: list[dict], paragraph: str, last_
         return last_speaker, _CONF_PRONOUN - 0.05
     # 多候选：选本段被提及次数最多的角色，置信度降到低档
     def mention_count(character: dict) -> int:
-        """统计角色本段被提及次数。"""
-        names = [character.get("name") or ""] + list(character.get("aliases") or [])
-        return sum(paragraph.count(name) for name in names if name)
+        """统计角色本段被提及次数（弱代称不计，避免「它」抬高非人角色）。"""
+        return sum(paragraph.count(name) for name in _alias_words(character, include_weak=False))
 
     ranked = sorted(gendered, key=mention_count, reverse=True)
     return ranked[0]["id"], _CONF_AMBIGUOUS
+
+
+def _weak_nickname_cue_seen(paragraph: str, weak_aliases: list[tuple[str, str]]) -> bool:
+    """判断本段是否有「代称 + 说话/动作」的明确线索。
+
+    只认紧贴动词或动作的写法（「女人站起身」「纸人说」），普通叙述里的
+    「纸人肚子里」「跟纸人一样」不算，避免误抑制代词解析。
+
+    参数:
+        paragraph: 当前段落正文。
+        weak_aliases: 本场景允许采信的弱代称索引。
+
+    返回:
+        存在代称线索返回 True。
+    """
+    for name, _character_id in weak_aliases:
+        if name in _WEAK_PRONOUN_ALIASES:
+            continue
+        position = paragraph.find(name)
+        while position >= 0:
+            tail = paragraph[position + len(name) : position + len(name) + 12]
+            if _search_verb(tail, []) or _has_action(tail):
+                return True
+            position = paragraph.find(name, position + len(name))
+    return False
 
 
 def _prefer_cue(current: _Cue | None, candidate: _Cue) -> _Cue:
     """在两条线索中择优：距离近优先，同距离按类型优先级。"""
     if current is None:
         return candidate
-    rank = {"name": 3, "pronoun": 2, "action": 1}
+    rank = {"name": 3, "nickname": 2, "pronoun": 2, "action": 1}
     if candidate.distance < current.distance:
         return candidate
     if candidate.distance == current.distance and rank.get(candidate.kind, 0) > rank.get(current.kind, 0):
@@ -692,7 +800,13 @@ def _prefer_cue(current: _Cue | None, candidate: _Cue) -> _Cue:
 
 
 def _cue_for_span(
-    pre: str, post: str, aliases: list[tuple[str, str]], candidates: list[dict], paragraph: str, last_speaker: str | None
+    pre: str,
+    post: str,
+    aliases: list[tuple[str, str]],
+    weak_aliases: list[tuple[str, str]],
+    candidates: list[dict],
+    paragraph: str,
+    last_speaker: str | None,
 ) -> tuple[_Cue | None, bool]:
     """为单个引语片段找说话人 cue。
 
@@ -702,7 +816,8 @@ def _cue_for_span(
     参数:
         pre: 引号前的叙述片段（本段内、距引号 30 字内）。
         post: 引号后的叙述片段（本段内、距引号 30 字内）。
-        aliases: 本场景称呼索引。
+        aliases: 本场景强称呼索引。
+        weak_aliases: 本场景允许采信的弱代称索引（置信度压到低档）。
         candidates: 本场景候选角色。
         paragraph: 当前段落正文。
         last_speaker: 上一位说话人。
@@ -713,14 +828,32 @@ def _cue_for_span(
     best: _Cue | None = None
     name_hits: list[tuple[int, str]] = []
 
-    for end, start, character_id in _name_cues(pre, aliases):
+    for end, start, character_id, is_weak in _name_cues(pre, aliases, weak_aliases):
         distance = len(pre) - end
-        name_hits.append((distance, character_id))
-        best = _prefer_cue(best, _Cue(character_id, _CONF_NAME, "name", distance))
-    for end, start, character_id in _name_cues(post, aliases):
+        if not is_weak:
+            name_hits.append((distance, character_id))
+        best = _prefer_cue(
+            best,
+            _Cue(
+                character_id,
+                _CONF_WEAK_NAME if is_weak else _CONF_NAME,
+                "nickname" if is_weak else "name",
+                distance,
+            ),
+        )
+    for end, start, character_id, is_weak in _name_cues(post, aliases, weak_aliases):
         distance = start
-        name_hits.append((distance, character_id))
-        best = _prefer_cue(best, _Cue(character_id, _CONF_NAME, "name", distance))
+        if not is_weak:
+            name_hits.append((distance, character_id))
+        best = _prefer_cue(
+            best,
+            _Cue(
+                character_id,
+                _CONF_WEAK_NAME if is_weak else _CONF_NAME,
+                "nickname" if is_weak else "name",
+                distance,
+            ),
+        )
 
     pre_pronouns = _pronoun_cues(pre, aliases)
     post_pronouns = _pronoun_cues(post, aliases)
@@ -739,11 +872,21 @@ def _cue_for_span(
 
     # 角色卡外的龙套贴在引号两侧时，不再用动作/代词猜卡内角色
     offscreen = _offscreen_prefix(post) or _offscreen_suffix(pre)
+    # 本段出现「女人站起身」「纸人说」这类明确代称线索时，不再用泛化的「她 + 动作」抢走归属；
+    # 「它」本身是代词，不参与这个抑制，避免叙述里大量「它」拖累她/他的解析
+    weak_seen = _weak_nickname_cue_seen(paragraph, weak_aliases)
     if best is None and not offscreen and not pronoun_seen:
-        action = _action_alias(pre, aliases) or _action_alias(post[:14], aliases)
+        action = _action_alias(pre, aliases, weak_aliases, "pre") or _action_alias(
+            post[:14], aliases, weak_aliases, "post"
+        )
         if action:
-            best = _Cue(action[0], _CONF_ACTION, "action", action[1])
-        else:
+            best = _Cue(
+                action[0],
+                _CONF_WEAK_ACTION if action[2] else _CONF_ACTION,
+                "nickname" if action[2] else "action",
+                action[1],
+            )
+        elif not weak_seen:
             pronoun = _action_pronoun(post) or _action_pronoun(_last_sentence(pre))
             if pronoun:
                 resolved = _resolve_pronoun(pronoun, candidates, paragraph, last_speaker)
@@ -878,6 +1021,7 @@ def _attribute_scene(scene_text: str, characters: list[dict]) -> tuple[list[_Spa
     bounds = _paragraph_bounds(scene_text)
     candidates = _scene_candidates(characters, scene_text)
     aliases = _alias_index(candidates)
+    weak_aliases = list(_weak_alias_map(candidates).items())
     candidate_ids = [character["id"] for character in candidates]
 
     for span in spans:
@@ -914,7 +1058,9 @@ def _attribute_scene(scene_text: str, characters: list[dict]) -> tuple[list[_Spa
             pre = scene_text[max(prev_end, span.start - 30) : span.start]
             post = scene_text[span.end : min(next_start, span.end + 30)]
             segments.append((pre, post))
-            cue, offscreen = _cue_for_span(pre, post, aliases, candidates, paragraph, state["last"])
+            cue, offscreen = _cue_for_span(
+                pre, post, aliases, weak_aliases, candidates, paragraph, state["last"]
+            )
             blocked = blocked or offscreen
             local.append(cue)
 
@@ -934,19 +1080,23 @@ def _attribute_scene(scene_text: str, characters: list[dict]) -> tuple[list[_Spa
             and _is_bare_dialogue(paragraph, para_spans, para_start)
             and not _scan_quotes(previous_para)
         ):
-            tail_cue = _previous_tail_cue(previous_para, aliases, candidates, state["last"])
+            tail_cue = _previous_tail_cue(previous_para, aliases, weak_aliases, candidates, state["last"])
             if tail_cue is not None:
                 local[first_dialogue] = tail_cue
                 if tail_cue.kind == "offscreen":
                     blocked = True
 
-        # 段内只有一个确定说话人时，把同段其余无标记引语归给同一人
-        definite = {cue.speaker_id for cue in local if cue and cue.speaker_id != UNKNOWN_SPEAKER_ID}
+        # 段内只有一个确定说话人时，把同段其余无标记引语归给同一人；
+        # 如果这个说话人仅由弱代称推出，传播置信度也压到低档，方便人工复核
+        definite_cues = [cue for cue in local if cue and cue.speaker_id != UNKNOWN_SPEAKER_ID]
+        definite = {cue.speaker_id for cue in definite_cues}
         if not blocked and len(definite) == 1:
             speaker_id = next(iter(definite))
+            weak_only = all(cue.kind == "nickname" for cue in definite_cues)
+            confidence = _CONF_WEAK_PROPAGATION if weak_only else _CONF_PARAGRAPH
             for offset, cue in enumerate(local):
                 if cue is None and offset not in emphasis:
-                    local[offset] = _Cue(speaker_id, _CONF_PARAGRAPH, "paragraph", 0)
+                    local[offset] = _Cue(speaker_id, confidence, "paragraph", 0)
 
         # 轮次先验只用在「几乎只有对白」的段落，避免把叙述里的强调引语算成台词
         if not blocked and _is_bare_dialogue(paragraph, para_spans, para_start):
@@ -969,7 +1119,11 @@ def _attribute_scene(scene_text: str, characters: list[dict]) -> tuple[list[_Spa
 
 
 def _previous_tail_cue(
-    previous: str, aliases: list[tuple[str, str]], candidates: list[dict], last_speaker: str | None
+    previous: str,
+    aliases: list[tuple[str, str]],
+    weak_aliases: list[tuple[str, str]],
+    candidates: list[dict],
+    last_speaker: str | None,
 ) -> _Cue | None:
     """从上一段结尾的叙述里找「引出下一句对白」的线索。
 
@@ -978,7 +1132,8 @@ def _previous_tail_cue(
 
     参数:
         previous: 上一段正文。
-        aliases: 本场景称呼索引。
+        aliases: 本场景强称呼索引。
+        weak_aliases: 本场景允许采信的弱代称索引。
         candidates: 本场景候选角色。
         last_speaker: 上一位说话人。
 
@@ -990,9 +1145,14 @@ def _previous_tail_cue(
         return None
     tail = text[-24:]
     best: _Cue | None = None
-    for end, _start, character_id in _name_cues(tail, aliases):
+    for end, _start, character_id, is_weak in _name_cues(tail, aliases, weak_aliases):
         if len(tail) - end <= 3:
-            best = _Cue(character_id, 0.6, "name", 0)
+            best = _Cue(
+                character_id,
+                _CONF_WEAK_NAME if is_weak else 0.6,
+                "nickname" if is_weak else "name",
+                0,
+            )
     if best is None:
         for end, _start, pronoun in _pronoun_cues(tail, aliases):
             if len(tail) - end <= 3:
@@ -1010,7 +1170,7 @@ def _previous_tail_cue(
     sentence = re.split(r"[。！？\n]", text)[-1]
     first: tuple[int, str] | None = None
     for character in candidates:
-        names = [character.get("name") or ""] + list(character.get("aliases") or [])
+        names = _alias_words(character, include_weak=False)
         positions = [sentence.find(name) for name in names if name and name in sentence]
         if not positions:
             continue

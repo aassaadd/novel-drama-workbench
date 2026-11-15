@@ -17,7 +17,7 @@ from ..config import AppConfig, resolve_temperature
 from ..models.ids import now_iso
 from ..store import ProjectStore
 from ..store.settings_store import SettingsStore
-from .service import _tool_max_tokens, build_writing_adapter, chapter_binding
+from .service import build_writing_adapter, chapter_binding
 
 #: 问题类型（与页面展示的中文标签对应）
 ISSUE_KINDS = ("speech", "knowledge", "relation", "unplanned", "pov", "other")
@@ -221,7 +221,6 @@ def check_chapter_consistency(
         messages=[Message("user", prompt)],
         stream=False,
         temperature=resolve_temperature(config, "writing"),
-        max_tokens=_tool_max_tokens(config, "consistency", max(1, len(focus))),
         metadata={
             "chapter_id": chapter_id,
             "characters": brief,

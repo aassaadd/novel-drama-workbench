@@ -153,8 +153,28 @@ def cmd_chapter_generate(args, config: AppConfig) -> int:
     )
     if deviation:
         text += f"\n字数偏差：{deviation}"
+    resume = result.get("resume") or {}
+    if resume.get("resumed"):
+        text += (
+            f"\n断点续写：沿用前 {resume.get('reused_rounds')} 轮已写正文，"
+            f"从第 {resume.get('from_round')} 轮继续（断点文件 {resume.get('checkpoint')}）"
+        )
+    summary_mode = result.get("summary_mode") or ""
+    if summary_mode == "inline":
+        text += "\n本章摘要：随正文末轮一并生成（未额外发起摘要请求）"
+    elif summary_mode == "fallback":
+        text += "\n本章摘要：末轮未产出可解析摘要，已回退到单独摘要请求"
+    for note in result.get("notices") or []:
+        text += f"\n自动处理：{note}"
     if result.get("summary_error"):
         text += f"\n摘要更新失败：{result['summary_error']}"
+    requests = result.get("requests") or {}
+    if requests:
+        text += (
+            f"\n本次请求：正文 {requests.get('body')} 次"
+            f" + 摘要回退 {requests.get('summary_fallback')} 次"
+            f" = {requests.get('total')} 次"
+        )
     if args.dry_run and result.get("content"):
         preview = result["content"][:400]
         text += f"\n--- 预览（前 400 字）---\n{preview}"

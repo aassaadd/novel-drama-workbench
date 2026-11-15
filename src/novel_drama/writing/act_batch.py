@@ -100,6 +100,20 @@ def _error_message(exc: Exception) -> str:
     return str(exc) or exc.__class__.__name__
 
 
+def _error_code(exc: Exception) -> str:
+    """取错误的机器可读码，供页面聚合与跳转处理。
+
+    参数:
+        exc: 捕获到的异常。
+
+    返回:
+        `detail.code`（如 BINDING_POV_MISSING）优先，其次统一错误码；非适配器错误返回空串。
+    """
+    if not isinstance(exc, AdapterError):
+        return ""
+    return str((exc.detail or {}).get("code") or exc.code.value or "")
+
+
 def _emit(on_event, kind: str, **payload) -> None:
     """上报一条进度事件（未传回调时忽略）。
 
@@ -261,8 +275,10 @@ def generate_act_chapters(
             "chapter_id": chapter_id,
             "title": title,
             "status": "",
+            "code": "",
             "words": 0,
             "message": "",
+            "notices": [],
         }
 
         # 任务队列进度：按章推进，文字沿用「第 x/y 幕 · 已完成 k/n 章」
@@ -291,7 +307,11 @@ def generate_act_chapters(
         try:
             chapter = store.load_chapter(chapter_id)
         except FileNotFoundError:
-            row.update(status="failed", message="章节尚未落成正文文件：先在大纲里点「落地成章节」")
+            row.update(
+                status="failed",
+                code="CHAPTER_NOT_LANDED",
+                message="章节尚未落成正文文件：先在大纲里点「落地成章节」",
+            )
             result["failed"] += 1
             result["chapters"].append(row)
             _emit(
@@ -301,6 +321,7 @@ def generate_act_chapters(
                 total=total,
                 chapter_id=chapter_id,
                 title=title,
+                code=row["code"],
                 message=row["message"],
             )
             _chapter_progress(on_event, act_info, result, position, total, title, "失败")
@@ -335,6 +356,23 @@ def generate_act_chapters(
                 max_rounds=max_rounds,
                 on_delta=on_delta,
             )
+        except AdapterError as exc:
+            # 保留错误码（如 BINDING_POV_MISSING），页面据此聚合原因并给出处理入口
+            row.update(status="failed", code=_error_code(exc), message=exc.message)
+            result["failed"] += 1
+            result["chapters"].append(row)
+            _emit(
+                on_event,
+                "chapter_error",
+                index=position,
+                total=total,
+                chapter_id=chapter_id,
+                title=title,
+                code=row["code"],
+                message=row["message"],
+            )
+            _chapter_progress(on_event, act_info, result, position, total, title, "失败")
+            continue
         except Exception as exc:  # noqa: BLE001 - 单章失败不能中断整幕，原因逐章记录
             row.update(status="failed", message=_error_message(exc))
             result["failed"] += 1
@@ -346,6 +384,7 @@ def generate_act_chapters(
                 total=total,
                 chapter_id=chapter_id,
                 title=title,
+                code=row["code"],
                 message=row["message"],
             )
             _chapter_progress(on_event, act_info, result, position, total, title, "失败")
@@ -358,6 +397,7 @@ def generate_act_chapters(
             rounds=int(generated.get("rounds") or 1),
             beats_done=int(generated.get("beats_done") or 0),
             beats_total=int(generated.get("beats_total") or 0),
+            notices=list(generated.get("notices") or []),
         )
         result["succeeded"] += 1
         result["chapters"].append(row)
@@ -373,6 +413,7 @@ def generate_act_chapters(
             beats_done=row["beats_done"],
             beats_total=row["beats_total"],
             summary_error=row["message"],
+            notices=row["notices"],
             percent=round(position / total * 100),
         )
         _chapter_progress(on_event, act_info, result, position, total, title, "完成")

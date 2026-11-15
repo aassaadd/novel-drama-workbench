@@ -85,7 +85,6 @@
         "request_timeout_s": { "type": "integer", "minimum": 1 },
         "connect_timeout_s": { "type": "integer", "minimum": 1 },
         "max_retries": { "type": "integer", "minimum": 0, "maximum": 10 },
-        "max_tokens": { "type": "integer", "minimum": 1 },
         "enable_thinking": { "type": "boolean", "description": "chat_template_kwargs.enable_thinking" },
         "unload": { "$ref": "#/$defs/unload" },
         "stop": { "type": "array", "items": { "type": "string" }, "maxItems": 8 },

@@ -395,7 +395,6 @@ CONFIG_EDITABLE = tuple(
     "omlx.model",
     "omlx.api_key",
     "omlx.temperature",
-    "omlx.max_tokens",
     "omlx.first_token_timeout_s",
     "omlx.stream_idle_timeout_s",
     "omlx.total_timeout_s",
@@ -421,7 +420,6 @@ CONFIG_FIELD_SPEC.update(
         "omlx.model": ("str", None, None, None),
         "omlx.api_key": ("password", None, None, None),
         "omlx.temperature": ("float", None, 0, 2),
-        "omlx.max_tokens": ("int", None, 1, None),
         "omlx.first_token_timeout_s": ("int", None, 1, None),
         "omlx.stream_idle_timeout_s": ("int", None, 1, None),
         "omlx.total_timeout_s": ("int", None, 1, None),
@@ -774,7 +772,6 @@ def _config_payload(cfg) -> dict:
             "has_api_key": bool(api_key),
             "api_key_hint": f"已配置（{len(api_key)} 位）" if api_key else "未配置",
             "temperature": omlx.get("temperature"),
-            "max_tokens": omlx.get("max_tokens"),
             "first_token_timeout_s": omlx.get("first_token_timeout_s"),
             "stream_idle_timeout_s": omlx.get("stream_idle_timeout_s"),
             "total_timeout_s": omlx.get("total_timeout_s"),
@@ -4339,6 +4336,70 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         if not character_id:
             raise HTTPException(status_code=400, detail={"code": 2, "message": "缺少 id 参数"})
         return _respond(_cli("--project", path, "--json", "character", "remove", "--id", str(character_id)))
+
+    @app.get("/api/ui/characters/merge/impact")
+    def ui_character_merge_impact(path: str = Query(...), source: str = Query(...), target: str = Query(...)) -> dict:
+        """预览「合并到已有角色」会改动多少处引用（只读，供二次确认）。
+
+        参数:
+            path: 工程目录。
+            source: 要合并掉的角色 ID。
+            target: 合并到的角色 ID。
+
+        返回:
+            `{source, target, outline: {beats, pov, arcs}, chapters: {scenes, lines, overrides},
+            relations, total}`。
+
+        异常:
+            HTTPException 400: 参数不合法或角色不存在。
+        """
+        from ..character_merge import merge_impact
+
+        try:
+            return merge_impact(_store(path), source, target)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"code": 2, "message": str(exc)})
+
+    @app.post("/api/ui/characters/merge")
+    def ui_characters_merge(body: dict) -> dict:
+        """把新建角色合并到已有角色，并迁移大纲绑定、节拍选角与台词行。
+
+        参数:
+            body: `{path, source, target}`。
+
+        返回:
+            `{merged, source, target, impact, settings_revision}`。
+
+        异常:
+            HTTPException 400: 参数不合法、角色不存在或试图合并旁白。
+        """
+        from ..character_merge import merge_characters
+
+        source = str(body.get("source") or "").strip()
+        target = str(body.get("target") or "").strip()
+        try:
+            return merge_characters(_store(body.get("path")), source, target)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"code": 2, "message": str(exc)})
+
+    @app.get("/api/ui/characters/new-this-chapter")
+    def ui_characters_created(path: str = Query(...), chapter: int | None = None) -> dict:
+        """查看「本章新建」角色（大纲生成时按章登记）。
+
+        参数:
+            path: 工程目录。
+            chapter: 只取该章序号；为空时按章倒序返回全部章节。
+
+        返回:
+            `{chapters: [{index, title, items: [{id, name, created_at}]}]}`。
+        """
+        from ..writing.cast_sync import created_in_chapter, list_created_chapters
+
+        store = _store(path)
+        if chapter is not None:
+            rows = [{"index": int(chapter), "title": "", "items": created_in_chapter(store, int(chapter))}]
+            return {"chapters": [row for row in rows if row["items"]]}
+        return {"chapters": list_created_chapters(store)}
 
     @app.get("/api/ui/characters/stats")
     def ui_character_stats(path: str = Query(...)) -> dict:

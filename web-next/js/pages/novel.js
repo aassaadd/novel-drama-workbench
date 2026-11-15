@@ -202,12 +202,6 @@ function outlineProgressText(data, totals = {}) {
       current: chaptersTotal ? `全书共 ${chaptersTotal} 章` : '',
     };
   }
-  if (phase === 'cast') {
-    return {
-      stage: `第 ${actIndex}/${actsTotal} 幕 · 第 ${chapterIndex} 章 · 角色设定（复用已有卡，缺失就新建）`,
-      current: data.chapter || data.name ? `《${data.chapter || data.name}》` : '',
-    };
-  }
   if (phase === 'beats') {
     return {
       stage: `第 ${actIndex}/${actsTotal} 幕 · 第 ${chapterIndex}/${chaptersTotal} 章 · 第 ${Math.max(
@@ -1047,20 +1041,27 @@ function worldEntryHTML() {
 }
 
 /**
- * 幕详情：幕标题 / 幕摘要可就地编辑并保存。
- * 章与节拍仍在各自的章详情里改，这里只展示本幕章节规模，便于对照。
+ * 幕详情头部的统计文案（整幕生成后只更新这段文本，不整页重绘）。
+ * @param {object} act 幕对象
+ * @param {number} index 幕下标（从 0 开始）
+ * @returns {string} 纯文本
  */
-function actHTML() {
-  const hit = findOutlineAct(ui.sel.id);
-  if (!hit) {
-    return `<div class="empty" style="margin:auto">${icon('list', 22)}<b>先在左侧选一幕</b>
-      <span>点幕标题可查看并修改幕标题与幕摘要</span></div>`;
-  }
-  const { act, index } = hit;
+function actMetaText(act, index) {
   const chapters = act.chapters || [];
   const beats = chapters.reduce((sum, chapter) => sum + (chapter.beats?.length || 0), 0);
   const landed = chapters.filter((chapter) => landedChapter(chapter.id)).length;
-  const rows = chapters
+  return `第 ${index + 1} 幕 · ${chapters.length} 章 · ${beats} 个节拍 · 已落章 ${landed}${
+    act.origin ? ` · ${originLabel(act.origin)}` : ''
+  }`;
+}
+
+/**
+ * 幕内章节清单行（整幕生成后可局部替换）。
+ * @param {object[]} chapters 章节列表
+ * @returns {string} HTML
+ */
+function actChapterRowsHTML(chapters) {
+  return (chapters || [])
     .map(
       (chapter) => `
         <div class="summary-line">
@@ -1074,13 +1075,26 @@ function actHTML() {
         </div>`
     )
     .join('');
+}
+
+/**
+ * 幕详情：幕标题 / 幕摘要可就地编辑并保存。
+ * 章与节拍仍在各自的章详情里改，这里只展示本幕章节规模，便于对照。
+ */
+function actHTML() {
+  const hit = findOutlineAct(ui.sel.id);
+  if (!hit) {
+    return `<div class="empty" style="margin:auto">${icon('list', 22)}<b>先在左侧选一幕</b>
+      <span>点幕标题可查看并修改幕标题与幕摘要</span></div>`;
+  }
+  const { act, index } = hit;
+  const chapters = act.chapters || [];
+  const rows = actChapterRowsHTML(chapters);
   return `
     <div class="ed-head">
       <div style="min-width:0">
         <div class="et">${esc(act.title || '未命名幕')}</div>
-        <div class="em">第 ${index + 1} 幕 · ${chapters.length} 章 · ${beats} 个节拍 · 已落章 ${landed}${
-          act.origin ? ` · ${esc(originLabel(act.origin))}` : ''
-        }</div>
+        <div class="em" id="novel-act-meta">${esc(actMetaText(act, index))}</div>
       </div>
       <div class="right">
         <button class="btn sm primary" data-act="novel-act-save">保存</button>
@@ -1101,7 +1115,7 @@ function actHTML() {
         <div class="card-head"><span class="ct">本幕章节（${chapters.length}）</span>
           <div class="right hint">章与节拍在各自的章详情里编辑</div>
         </div>
-        <div class="card-body" style="display:grid;gap:6px">
+        <div class="card-body" id="novel-act-chapters" style="display:grid;gap:6px">
           ${rows || '<div class="hint">这一幕还没有章节</div>'}
         </div>
       </div>
@@ -1729,84 +1743,6 @@ async function savePov(value) {
   } catch (error) {
     toast(`保存视角失败：${error.message}`, 'bad', 3600);
   }
-}
-
-/**
- * 生成前的绑定闸门：POV 缺失时弹窗给两个出口，不允许静默套默认值。
- * @param {string} chapterId 章节 ID
- * @returns {Promise<boolean>} true 表示可以继续生成
- */
-async function ensureBinding(chapterId) {
-  try {
-    const binding = await getJSON('/api/ui/chapters/binding', { path: cache.path, chapter: chapterId });
-    cache.binding = binding;
-    cache.bindingChapter = chapterId;
-    if (!(binding.blocking || []).some((item) => item.code === 'BINDING_POV_MISSING')) return true;
-    cache.cast = cache.cast.length
-      ? cache.cast
-      : ((await getJSON('/api/ui/characters', { path: cache.path }))?.characters || []).filter(
-          (item) => item.role !== 'narrator'
-        );
-    // 生成参数弹窗先关掉，避免两层弹窗叠在一起；设定后让作者重新点生成
-    closeDialog();
-    openPovDialog(chapterId);
-    return false;
-  } catch (error) {
-    toast(`生成前检查角色绑定失败：${error.message}`, 'bad', 3600);
-    return false;
-  }
-}
-
-/**
- * POV 缺失弹窗：指定某一角色，或显式使用全知视角。
- * @param {string} chapterId 章节 ID
- */
-function openPovDialog(chapterId) {
-  const cast = (cache.cast || []).filter((item) => item.role !== 'narrator');
-  openDialog({
-    title: '本章还没有视角人物',
-    body: `
-      <div class="banner warn" style="margin-bottom:8px">${icon(
-        'warn',
-        13
-      )} 生成正文必须明确视角：要么指定一个视角人物，要么显式使用全知视角。系统不会自动套默认值。</div>
-      <div class="field"><label>指定视角人物</label>
-        <select class="select" id="pov-gate-select">${castOptions(cast, '', { empty: '请选择角色' })}</select>
-        <div class="hint">该角色会写进提示词，只写他能感知到的内容。</div>
-      </div>
-      <div class="hint">如果本章确实要写多人内心，可显式选择全知视角；这是有意的叙事选择。</div>`,
-    foot: `<div class="right">
-      <button class="btn" data-dlg-close>取消</button>
-      <button class="btn" data-pov-omniscient>使用全知视角</button>
-      <button class="btn primary" data-pov-confirm>指定并继续</button>
-    </div>`,
-    onMount: (mask) => {
-      mask.querySelector('[data-pov-omniscient]').addEventListener('click', async () => {
-        await postJSON('/api/ui/outline/pov', {
-          path: cache.path,
-          chapter: chapterId,
-          pov_character_id: null,
-          pov_mode: 'third_omniscient',
-        });
-        closeDialog();
-        cache.bindingChapter = '';
-        toast('已设为全知视角，请再次点击生成', 'ok');
-      });
-      mask.querySelector('[data-pov-confirm]').addEventListener('click', async () => {
-        const value = mask.querySelector('#pov-gate-select').value;
-        if (!value) return toast('请先选择一个角色，或改用全知视角', 'warn');
-        await postJSON('/api/ui/outline/pov', {
-          path: cache.path,
-          chapter: chapterId,
-          pov_character_id: value,
-          pov_mode: null,
-        });
-        closeDialog();
-        cache.bindingChapter = '';
-        toast('视角人物已保存，请再次点击生成', 'ok');
-      });
-    },
-  });
 }
 
 /**
@@ -3521,34 +3457,196 @@ async function saveBody() {
   toast(`正文已保存（${Number(result?.word_count || 0)} 字）`, 'ok');
 }
 
-/** 正文生成：确认参数后走 SSE 流，完成后刷新 */
-function openGenerateDialog(hasBody) {
+/** 视角模式中文名（与后端 POV_LABELS 对齐） */
+const POV_MODE_LABELS = {
+  third_limited: '第三人称限知',
+  third_omniscient: '全知视角',
+  first_person: '第一人称',
+  second_person: '第二人称',
+};
+
+/** 正文生成默认参数缓存（一次会话内复用） */
+let generationDefaultsCache = null;
+
+/**
+ * 默认值来源的中文说明：设置页 / 配置文件 / 代码内置默认。
+ * @param {'page'|'file'|'builtin'} source 来源标记
+ * @param {string} key 配置键（file 来源时展示）
+ * @returns {string} 说明文本
+ */
+function defaultSourceLabel(source, key) {
+  if (source === 'page') return '来自设置页';
+  if (source === 'file') return `来自配置文件 ${key}`;
+  return '内置默认（设置页未改过）';
+}
+
+/**
+ * 读取正文生成的系统默认参数：温度 / 思考开关 / 多轮上限等。
+ * 页面必须把默认值与来源一起展示，不允许静默生效。
+ * @returns {Promise<object>} 默认参数（失败时给出内置兜底并标记 fallback）
+ */
+async function loadGenerationDefaults() {
+  if (generationDefaultsCache) return generationDefaultsCache;
+  try {
+    const cfg = await getJSON('/api/ui/config/connection');
+    const llm = cfg?.llm || {};
+    const gen = cfg?.generation || {};
+    const src = gen.sources || {};
+    const llmSrc = llm.sources || {};
+    generationDefaultsCache = {
+      temperature: Number(llm.temperature ?? 0.8),
+      temperatureSource: llmSrc.temperature || 'builtin',
+      thinking: Boolean(llm.thinking_enabled),
+      thinkingSource: llmSrc.thinking_enabled || 'builtin',
+      effort: String(llm.thinking_effort || 'medium'),
+      effortSource: llmSrc.thinking_effort || 'builtin',
+      maxRounds: Number(gen.max_rounds || 8),
+      maxRoundsSource: src.max_rounds || 'builtin',
+      multiTurn: gen.multi_turn_enabled !== false,
+      multiTurnSource: src.multi_turn_enabled || 'builtin',
+      beatsPerRound: Number(gen.beats_per_round || 0),
+      beatsSource: src.beats_per_round || 'builtin',
+      fallback: false,
+    };
+  } catch (error) {
+    // 读不到配置时按后端同款内置默认展示，并明确标注「内置默认」，不假装来自设置页
+    generationDefaultsCache = {
+      temperature: 0.8,
+      temperatureSource: 'builtin',
+      thinking: false,
+      thinkingSource: 'builtin',
+      effort: 'medium',
+      effortSource: 'builtin',
+      maxRounds: 8,
+      maxRoundsSource: 'builtin',
+      multiTurn: true,
+      multiTurnSource: 'builtin',
+      beatsPerRound: 0,
+      beatsSource: 'builtin',
+      fallback: true,
+    };
+  }
+  return generationDefaultsCache;
+}
+
+/**
+ * 生成弹窗里的「系统默认参数」只读区块。
+ * @param {object} defaults loadGenerationDefaults 的返回
+ * @returns {string} HTML
+ */
+function generationDefaultsHTML(defaults) {
+  const badge = '<span class="badge">默认值</span>';
+  const head = defaults.fallback
+    ? '<div class="hint" style="margin-top:10px"><b>系统默认参数</b>：读取设置失败，下列为内置默认值。</div>'
+    : '<div class="hint" style="margin-top:10px"><b>系统默认参数</b>：未手填时按下列值生效，来源已标注。</div>';
+  return `
+    ${head}
+    <div class="summary-line"><span>温度</span><span class="right">${defaults.temperature} ${badge} · ${defaultSourceLabel(
+      defaults.temperatureSource,
+      'omlx.temperature'
+    )}</span></div>
+    <div class="summary-line"><span>思考开关</span><span class="right">${
+      defaults.thinking ? `开启（强度 ${esc(defaults.effort)}）` : '关闭'
+    } ${badge} · ${defaultSourceLabel(defaults.thinkingSource, 'omlx.enable_thinking')}</span></div>
+    <div class="summary-line"><span>输出上限</span><span class="right hint">无人工上限
+      · 请求 max_tokens 取上下文剩余空间，模型自己输出结束符停止</span></div>`;
+}
+
+/**
+ * 判断当前是否由设定库默认提供「全知视角」。
+ * @returns {boolean} true 表示 style.pov 为全知
+ */
+function globalOmniscient() {
+  return String(cache.setting?.style?.pov || '').trim() === 'third_omniscient';
+}
+
+/**
+ * 由绑定接口结果生成单章视角说明（含来源）。
+ * @param {object|null} binding /api/ui/chapters/binding 返回
+ * @param {object} chapter 大纲章节（用于识别本章显式设置）
+ * @returns {{ok: boolean, text: string}} 视角状态
+ */
+function povStatusOf(binding, chapter) {
+  const mode = String(binding?.pov_mode || chapter?.pov_mode || cache.setting?.style?.pov || 'third_limited');
+  if (binding?.pov?.name) {
+    return { ok: true, text: `本章视角：${binding.pov.name}（${POV_MODE_LABELS[mode] || mode}）` };
+  }
+  if (mode === 'third_omniscient') {
+    const explicit = Boolean(chapter?.pov_mode);
+    return { ok: true, text: `本章视角：全知（${explicit ? '本章指定' : '来自设定库默认'}）` };
+  }
+  return { ok: false, text: '本章视角：未设置（生成前需指定角色或选择全知）' };
+}
+
+/**
+ * 正文生成：确认参数后走 SSE 流，完成后刷新。
+ * @param {boolean} hasBody 本章是否已有正文
+ * @param {{mode?: string, beatsPerRound?: number, maxRounds?: number, multiTurn?: boolean}} [prefill]
+ *   从视角弹窗返回时用于还原已手填的参数，避免重新填一遍
+ */
+async function openGenerateDialog(hasBody, prefill = {}) {
   const hit = findOutlineChapter(ui.sel.id);
   if (!hit) return;
   const modeKey = 'chapter.generate';
+  const defaults = await loadGenerationDefaults();
+  const beatsValue = prefill.beatsPerRound ?? defaults.beatsPerRound;
+  const roundsValue = prefill.maxRounds ?? defaults.maxRounds;
+  const multiValue = prefill.multiTurn ?? defaults.multiTurn;
+  let binding = null;
+  try {
+    binding = await getJSON('/api/ui/chapters/binding', { path: cache.path, chapter: hit.chapter.id });
+  } catch (error) {
+    binding = null;
+  }
+  const pov = povStatusOf(binding, hit.chapter);
   openDialog({
     title: hasBody ? '重新生成本章正文' : 'AI 生成本章正文',
     body: `
-      ${modeSwitchHTML(modeKey, { fallback: hasBody ? 'regen' : 'fill' })}
+      ${modeSwitchHTML(modeKey, { fallback: prefill.mode || (hasBody ? 'regen' : 'fill') })}
       ${hasBody ? '<div class="banner warn" style="margin-bottom:8px">选「重新生成」会覆盖当前正文；覆盖前会自动存档旧版本，可在「版本记录」里查看并一键恢复。选「只补缺失」则保留现有正文不调用模型。</div>' : ''}
+      <button type="button" class="pov-status-line ${pov.ok ? '' : 'warn'}" data-gen-pov
+        title="点击设置本章视角（与其他生成入口共用同一弹窗）">
+        <span data-pov-text>${esc(pov.text)}</span>${icon('edit', 12)}</button>
       <div class="hint" style="margin-bottom:8px">按本章节拍逐轮写作：写完一组节拍即推进，全部节拍写完就收尾；篇幅只作参考。</div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
-        <div class="field"><label>每轮节拍数</label><input class="input" id="gen-beats" type="number" min="0" step="1" value="0" />
-          <div class="hint">0 = 按节拍总数自动分配</div></div>
-        <div class="field"><label>最大轮数（保险）</label><input class="input" id="gen-rounds" type="number" min="1" max="20" value="8" /></div>
+        <div class="field"><label>每轮节拍数</label><input class="input" id="gen-beats" type="number" min="0" step="1" value="${beatsValue}" />
+          <div class="hint">默认值 ${defaults.beatsPerRound} · 0 = 自动分配 · ${defaultSourceLabel(
+            defaults.beatsSource,
+            'writing.multi_turn.beats_per_round'
+          )}</div></div>
+        <div class="field"><label>最大轮数（保险）</label><input class="input" id="gen-rounds" type="number" min="1" max="20" value="${roundsValue}" />
+          <div class="hint">默认值 ${defaults.maxRounds} · ${defaultSourceLabel(
+            defaults.maxRoundsSource,
+            'writing.multi_turn.max_rounds'
+          )}</div></div>
       </div>
       <label class="hint" style="display:flex;gap:6px;align-items:center;margin-top:4px">
-        <input type="checkbox" id="gen-multi" checked /> 按节拍分轮（更稳，耗时更长）
-      </label>`,
+        <input type="checkbox" id="gen-multi" ${multiValue ? 'checked' : ''} /> 按节拍分轮（更稳，耗时更长）
+        <span class="badge">默认值 ${defaults.multiTurn ? '开启' : '关闭'}</span>
+        <span>${defaultSourceLabel(defaults.multiTurnSource, 'writing.multi_turn.enabled')}</span>
+      </label>
+      ${generationDefaultsHTML(defaults)}`,
     foot: `<div class="right"><button class="btn" data-dlg-close>取消</button>
       <button class="btn primary" data-gen-run>${icon('spark', 12)} 开始生成</button></div>`,
     onMount: (mask) => {
+      const runBtn = mask.querySelector('[data-gen-run]');
       const modeOf = bindModeSwitch(mask, modeKey, {
         fallback: hasBody ? 'regen' : 'fill',
-        action: mask.querySelector('[data-gen-run]'),
+        action: runBtn,
         labels: { fill: '生成缺失正文', regen: '重新生成并覆盖' },
       });
-      mask.querySelector('[data-gen-run]').addEventListener('click', async () => {
+      // 点击视角状态行：打开与整幕共用的 POV 弹窗；保存后带着已填参数回到生成弹窗
+      mask.querySelector('[data-gen-pov]').addEventListener('click', () => {
+        const prefill = {
+          mode: modeOf(),
+          beatsPerRound: Number(mask.querySelector('#gen-beats').value) || 0,
+          maxRounds: Number(mask.querySelector('#gen-rounds').value) || null,
+          multiTurn: mask.querySelector('#gen-multi').checked,
+        };
+        openPovSetupDialog([hit.chapter], () => openGenerateDialog(hasBody, prefill), { actionLabel: '保存' });
+      });
+      runBtn.addEventListener('click', async () => {
+        if (runBtn.disabled) return;
         const mode = modeOf();
         const body = {
           path: cache.path,
@@ -3558,11 +3656,25 @@ function openGenerateDialog(hasBody) {
           beats_per_round: Number(mask.querySelector('#gen-beats').value) || null,
           max_rounds: Number(mask.querySelector('#gen-rounds').value) || null,
         };
-        // 生成前必须确认角色绑定：缺 POV 时弹窗要求指定角色或显式全知
-        const ready = await ensureBinding(hit.chapter.id);
-        if (!ready) return;
-        closeDialog();
-        runGenerate(body, hasBody);
+        runBtn.disabled = true;
+        runBtn.textContent = '正在检查视角…';
+        try {
+          // 生成前必须确认视角绑定；缺 POV 时用共用的多章弹窗，保存后自动续跑
+          const latest = await getJSON('/api/ui/chapters/binding', { path: cache.path, chapter: hit.chapter.id });
+          const missing = (latest.blocking || []).some((item) => item.code === 'BINDING_POV_MISSING');
+          closeDialog();
+          if (missing) {
+            openPovSetupDialog([hit.chapter], () =>
+              runGenerate(body, hasBody, { resumeNote: '视角设置完成后已自动继续生成本章' })
+            );
+            return;
+          }
+          runGenerate(body, hasBody);
+        } catch (error) {
+          runBtn.disabled = false;
+          runBtn.textContent = '开始生成';
+          toast(`视角预检失败：${error.message}`, 'bad', 3600);
+        }
       });
     },
   });
@@ -3572,10 +3684,13 @@ function openGenerateDialog(hasBody) {
  * 执行正文生成（SSE）；进度走统一浮层，完成后可刷新正文。
  * @param {object} body 生成参数
  * @param {boolean} [hadBody] 打开弹窗时本章是否已有正文
+ * @param {{resumeNote?: string, mode?: 'generate'|'compress'|'rewrite', note?: string}} [options]
+ *   mode 由「超纲后用户点击动作」传入；note 说明本次动作的来源（如压缩/重写原因）
  */
-async function runGenerate(body, hadBody = false) {
-  // 只补缺失且已有正文：不调用模型，避免报「已有正文」或误覆盖
-  if (!body.regen && hadBody) {
+async function runGenerate(body, hadBody = false, options = {}) {
+  const mode = options.mode || 'generate';
+  // 只补缺失且已有正文：不调用模型，避免报「已有正文」或误覆盖（压缩/重写是用户主动动作，不走这里）
+  if (mode === 'generate' && !body.regen && hadBody) {
     const landed = landedChapter(body.chapter);
     const panel = openProgress({
       title: '检查本章正文…',
@@ -3599,18 +3714,34 @@ async function runGenerate(body, hadBody = false) {
     });
     return;
   }
+  const panelTitle =
+    mode === 'compress'
+      ? '正在按目标字数压缩本章…'
+      : mode === 'rewrite'
+        ? '正在重写本章正文…'
+        : body.regen
+          ? '正在重新生成本章正文…'
+          : '正在生成本章正文…';
+  const panelHint =
+    mode === 'compress'
+      ? '保留全部节拍要点，只压缩描写与铺陈'
+      : mode === 'rewrite'
+        ? '按原目标字数整章重写'
+        : `${body.beats_per_round ? `每轮 ${Number(body.beats_per_round)} 个节拍` : '每轮节拍数自动分配'} · 最多 ${Number(
+            body.max_rounds || 8
+          )} 轮${body.regen ? ' · 覆盖现有正文' : ''}`;
   const panel = openProgress({
-    title: body.regen ? '正在重新生成本章正文…' : '正在生成本章正文…',
-    hint: `${body.beats_per_round ? `每轮 ${Number(body.beats_per_round)} 个节拍` : '每轮节拍数自动分配'} · 最多 ${Number(
-      body.max_rounds || 8
-    )} 轮${body.regen ? ' · 覆盖现有正文' : ''}`,
+    title: panelTitle,
+    hint: panelHint,
     stage: '已提交生成请求，等待模型返回…',
     stream: true,
   });
   panel.update({ percent: null });
+  if (options.resumeNote) panel.note(`自动续跑：${options.resumeNote}`);
+  if (options.note) panel.note(options.note);
   let settled = false;
   try {
-    await streamJSON('/api/ui/chapter/generate/stream', body, (event, data) => {
+    await streamJSON('/api/ui/chapter/generate/stream', { ...body, mode }, (event, data) => {
       if (event === 'start') {
         panel.update({ stage: '模型正在写作…', percent: null });
       } else if (event === 'delta') {
@@ -3620,17 +3751,67 @@ async function runGenerate(body, hadBody = false) {
         const result = data?.result || {};
         const words = Number(result.word_count || result.words || 0);
         const beats = `${Number(result.beats_done || 0)}/${Number(result.beats_total || 0)}`;
-        const deviation = result.word_deviation?.message || '';
+        const deviationData = result.word_deviation || {};
+        const deviation = deviationData.message || '';
+        const overshootNote = result.overshoot_note || '';
         const summaryError = result.summary_error ? `摘要未更新：${result.summary_error}` : '';
+        const notices = Array.isArray(result.notices) ? result.notices : [];
+        const resume = result.resume || {};
+        const resumeLine = resume.resumed
+          ? `断点续写：沿用前 ${Number(resume.reused_rounds || 0)} 轮已写正文，从第 ${Number(resume.from_round || 0)} 轮继续`
+          : '';
+        const summaryLine =
+          result.summary_mode === 'inline'
+            ? '本章摘要：随正文末轮一并生成（未额外发起摘要请求）'
+            : result.summary_mode === 'fallback'
+              ? '本章摘要：末轮未产出可解析摘要，已回退到单独摘要请求'
+              : '';
+        // 超纲动作：只有用户点击才执行；阈值文案直接来自后端，避免前后端口径不一致
+        const overshootLimit = Number(deviationData.notice_ratio || 1.5);
+        const overshootAction = Number(deviationData.action_ratio || 2);
+        const overshootButtons =
+          deviationData.level === 'action'
+            ? (deviationData.actions || []).map((action) => ({
+                label: action.label || (action.id === 'compress' ? '按目标字数压缩' : '重写'),
+                primary: action.id === 'compress',
+                onClick: (close) => {
+                  close();
+                  runGenerate({ ...body, regen: true, mode: action.id }, true, {
+                    note: `按你的选择执行「${action.label}」：原 ${words} 字，目标 ${Number(
+                      deviationData.target || 0
+                    )} 字（${overshootAction} 倍动作阈值）`,
+                  });
+                },
+              }))
+            : [];
+        if (resumeLine) panel.note(resumeLine);
+        if (overshootNote) panel.note(overshootNote);
+        notices.forEach((text) => panel.note(`自动处理：${text}`));
+        const modeLabel =
+          result.mode === 'compress' ? '压缩完成' : result.mode === 'rewrite' ? '重写完成' : '正文生成完成';
         panel.finish({
-          message: `正文生成完成：${words} 字 · 节拍 ${beats}${result.status ? ` · ${result.status}` : ''}`,
-          detail: [deviation, summaryError, '结果已写入本章正文，可点「刷新正文」查看；如需回退可在「版本记录」恢复旧版本。']
+          message: `${modeLabel}：${words} 字 · 节拍 ${beats}${result.status ? ` · ${result.status}` : ''}`,
+          detail: [
+            options.resumeNote ? `自动续跑：${options.resumeNote}` : '',
+            options.note || '',
+            resumeLine,
+            summaryLine,
+            ...notices.map((text) => `自动处理：${text}`),
+            overshootNote,
+            deviation,
+            deviationData.level === 'action'
+              ? `超纲处理：当前阈值 ${overshootLimit} 倍只提示，${overshootAction} 倍及以上可选择「按目标字数压缩」或「重写」；两个动作都需要你点击后才执行`
+              : '',
+            summaryError,
+            '结果已写入本章正文，可点「刷新正文」查看；如需回退可在「版本记录」恢复旧版本。',
+          ]
             .filter(Boolean)
             .join('；'),
           actions: [
+            ...overshootButtons,
             {
               label: '刷新正文',
-              primary: true,
+              primary: overshootButtons.length === 0,
               onClick: async () => {
                 await reloadAfterBodyChange(body.chapter);
                 toast('正文已刷新', 'ok');
@@ -3640,35 +3821,289 @@ async function runGenerate(body, hadBody = false) {
         });
       } else if (event === 'canceled') {
         settled = true;
-        panel.fail({ message: '已停止生成', detail: '任务已在任务队列中取消，已接收的内容不会写入正文。' });
+        // 后端会在取消时说明断点情况（已完成轮次已保存），有文案就原样展示
+        panel.fail({
+          message: '已停止生成',
+          detail: data?.message || '任务已在任务队列中取消，已接收的内容不会写入正文。',
+        });
       } else if (event === 'error') {
         settled = true;
         if (data?.code === 'BINDING_POV_MISSING') {
-          // 后端兜底阻断：同样给出两个出口，不静默重试
+          // 后端兜底阻断：同样用共用弹窗，保存后自动重试生成
           panel.fail({
             message: data?.message || '本章还没有指定视角人物',
-            detail: '请先选择视角人物或显式使用全知视角，再重新生成。',
+            detail: '请先选择视角人物或显式使用全知视角；保存后会自动重试生成。',
           });
-          openPovDialog(body.chapter);
+          openPovSetupDialog([findOutlineChapter(body.chapter)?.chapter || { id: body.chapter, title: '' }], () =>
+            runGenerate(body, hadBody, { resumeNote: '视角设置完成后已自动重试生成' })
+          );
           return;
         }
-        panel.fail({ message: data?.message || '生成失败', retry: () => runGenerate(body) });
+        panel.fail({ message: data?.message || '生成失败', retry: () => runGenerate(body, hadBody, options) });
       }
     });
-    if (!settled) panel.fail({ message: '连接已中断，没有收到生成结果', retry: () => runGenerate(body) });
+    if (!settled) {
+      panel.fail({ message: '连接已中断，没有收到生成结果', retry: () => runGenerate(body, hadBody, options) });
+    }
   } catch (error) {
-    if (!settled) panel.fail({ message: `生成失败：${error.message}`, retry: () => runGenerate(body) });
+    if (!settled) panel.fail({ message: `生成失败：${error.message}`, retry: () => runGenerate(body, hadBody, options) });
   }
 }
 
 /**
+ * 把整幕失败章节按「错误码 + 文案」聚合，同一原因只保留一条。
+ * @param {Array<{index?: number, title?: string, code?: string, message?: string}>} rows 失败章节
+ * @returns {Array<{code: string, message: string, indexes: number[], titles: string[]}>} 聚合结果（按章数降序）
+ */
+function groupActFailures(rows) {
+  const map = new Map();
+  (rows || []).forEach((row) => {
+    const code = String(row.code || '');
+    const message = String(row.message || '未知原因');
+    const key = `${code}|${message}`;
+    if (!map.has(key)) map.set(key, { code, message, indexes: [], titles: [] });
+    const group = map.get(key);
+    group.indexes.push(Number(row.index || 0));
+    group.titles.push(String(row.title || ''));
+  });
+  return [...map.values()].sort((a, b) => b.indexes.length - a.indexes.length);
+}
+
+/**
+ * 把聚合后的失败原因拼成一行可读文案（保留错误码便于排查）。
+ * @param {Array<{code: string, message: string, indexes: number[]}>} groups 聚合结果
+ * @returns {string} 中文说明
+ */
+function actFailureDetail(groups) {
+  if (!groups.length) return '已完成的章节已写入正文，旧正文自动存档，可在「版本记录」里回退。';
+  return groups
+    .map((group) => {
+      const indexes = group.indexes.slice(0, 8).join('、');
+      const tail = group.indexes.length > 8 ? ' 等' : '';
+      const code = group.code ? `（${group.code}）` : '';
+      return `${group.indexes.length} 章（第 ${indexes}${tail} 章）：${group.message}${code}`;
+    })
+    .join('；');
+}
+
+/**
+ * 批量检查幕内各章是否缺视角人物（只查 POV 阻断，不动其它绑定）。
+ * @param {object[]} chapters 章节列表
+ * @returns {Promise<object[]>} 缺视角的章节
+ */
+async function findChaptersMissingPov(chapters) {
+  const missing = [];
+  for (const chapter of chapters || []) {
+    try {
+      const binding = await getJSON('/api/ui/chapters/binding', { path: cache.path, chapter: chapter.id });
+      if ((binding.blocking || []).some((item) => item.code === 'BINDING_POV_MISSING')) missing.push(chapter);
+    } catch (error) {
+      // 单章绑定检查失败不阻断整幕：真正生成时后端仍会给出明确原因
+    }
+  }
+  return missing;
+}
+
+/**
+ * 取某章当前的视角取值（用于弹窗预选与「只保存改动」判断）。
+ * 显式角色 > 本章显式全知 > 设定库默认全知。
+ * @param {object} chapter 大纲章节
+ * @returns {string} 角色 ID、`__omniscient__` 或空串（未设置且默认非全知）
+ */
+function chapterPovValue(chapter) {
+  if (chapter?.pov_character_id) return String(chapter.pov_character_id);
+  if (String(chapter?.pov_mode || '') === 'third_omniscient') return '__omniscient__';
+  return globalOmniscient() ? '__omniscient__' : '';
+}
+
+/**
+ * 视角设置弹窗：单章与整幕共用（单章时列表只有一行）。
+ * 逐章指定角色或一键全知；保存后回写本地章节对象，并按需自动继续生成。
+ * Esc 关闭、Tab 正常遍历、打开即聚焦第一个下拉。
+ * @param {object[]} chapters 需要设置视角的章节（单章传一个元素）
+ * @param {() => void} [onDone] 保存成功后的回调（通常是自动继续生成）
+ * @param {{actionLabel?: string}} [options] 主按钮文案（如「保存」不继续生成）
+ * @returns {Promise<void>} 无
+ */
+async function openPovSetupDialog(chapters, onDone, options = {}) {
+  const rows = (chapters || []).filter(Boolean);
+  if (!rows.length) return;
+  if (!(cache.cast || []).length) {
+    try {
+      const resp = await getJSON('/api/ui/characters', { path: cache.path });
+      cache.cast = (resp?.characters || []).filter((item) => item.role !== 'narrator');
+    } catch (error) {
+      toast(`读取角色表失败：${error.message}`, 'bad', 3600);
+      return;
+    }
+  }
+  const cast = (cache.cast || []).filter((item) => item.role !== 'narrator');
+  const single = rows.length === 1;
+  const original = new Map(rows.map((chapter) => [String(chapter.id), chapterPovValue(chapter)]));
+  // 全局默认是唯一的「隐式生效」来源，必须在弹窗里写清是谁决定的
+  const defaultLine = globalOmniscient()
+    ? `<div class="summary-line"><span>设定库默认视角</span><span class="right">全知 · 未单独设置的章节按此生成</span></div>`
+    : '';
+  const rowHTML = rows
+    .map((chapter, offset) => {
+      const current = original.get(String(chapter.id)) || '';
+      return `
+      <div class="field">
+        <label>${single ? '本章' : `第 ${Number(chapter.index || offset + 1)} 章`}《${esc(
+          chapter.title || '未命名章节'
+        )}》</label>
+        <select class="select" data-pov-pick="${esc(chapter.id)}">
+          ${castOptions(cast, current, { empty: '请选择角色（或选全知）' })}
+          <option value="__omniscient__" ${current === '__omniscient__' ? 'selected' : ''}>全知视角（不绑定单一角色）</option>
+        </select>
+      </div>`;
+    })
+    .join('');
+  const actionLabel = options.actionLabel || (single ? '保存并生成' : '保存并开始生成');
+  openDialog({
+    title: single ? '设置本章视角' : `设置本幕视角 · ${rows.length} 章`,
+    body: `
+      <div class="banner warn" style="margin-bottom:8px">${icon(
+        'warn',
+        13
+      )} 生成正文必须明确视角：指定一个视角人物，或显式使用全知视角。系统不会自己挑角色。</div>
+      ${defaultLine}
+      <div class="hint" data-pov-status role="status" aria-live="polite" style="margin:8px 0">
+        只想改其中几章也可以：未改动的章节不会重复提交。
+      </div>
+      <div style="display:grid;gap:8px;max-height:46vh;overflow:auto">${rowHTML}</div>`,
+    foot: `<div class="right">
+      <button class="btn" data-dlg-close>取消</button>
+      ${single ? '' : '<button class="btn" data-pov-all>全部使用全知视角</button>'}
+      <button class="btn primary" data-pov-save>${esc(actionLabel)}</button>
+    </div>`,
+    onMount: (mask) => {
+      const picks = [...mask.querySelectorAll('[data-pov-pick]')];
+      const status = mask.querySelector('[data-pov-status]');
+      const saveBtn = mask.querySelector('[data-pov-save]');
+      const allBtn = mask.querySelector('[data-pov-all]');
+      // 打开即聚焦第一个可操作项；Esc 与 Tab 循环由全局弹窗监听处理
+      picks[0]?.focus();
+      const setBusy = (busy) => {
+        saveBtn.disabled = busy;
+        if (allBtn) allBtn.disabled = busy;
+        picks.forEach((node) => {
+          node.disabled = busy;
+        });
+      };
+      /**
+       * 保存视角；只提交发生变化的章节，避免把「沿用默认」变成「显式指定」。
+       * @param {boolean} allOmniscient true 表示把全部行设为全知视角
+       */
+      const save = async (allOmniscient) => {
+        if (saveBtn.disabled) return;
+        if (allOmniscient) picks.forEach((node) => {
+          node.value = '__omniscient__';
+        });
+        const empty = picks.find((node) => !node.value);
+        if (empty) {
+          toast('还有章节没有选择视角，请补全或改用全知视角', 'warn');
+          empty.focus();
+          return;
+        }
+        const jobs = picks
+          .filter((node) => node.value !== original.get(String(node.dataset.povPick)))
+          .map((node) => ({
+            chapter: node.dataset.povPick,
+            body:
+              node.value === '__omniscient__'
+                ? { pov_character_id: null, pov_mode: 'third_omniscient' }
+                : { pov_character_id: node.value, pov_mode: null },
+          }));
+        setBusy(true);
+        if (allOmniscient && allBtn) allBtn.textContent = '正在设置全知…';
+        saveBtn.textContent = `正在保存 0/${jobs.length}…`;
+        try {
+          for (let i = 0; i < jobs.length; i += 1) {
+            status.textContent = `正在保存第 ${i + 1}/${jobs.length} 章视角…`;
+            await postJSON('/api/ui/outline/pov', {
+              path: cache.path,
+              chapter: jobs[i].chapter,
+              ...jobs[i].body,
+            });
+            saveBtn.textContent = `正在保存 ${i + 1}/${jobs.length}…`;
+            // 回写本地大纲章，后续视角状态行不用再请求也能显示正确来源
+            const target = rows.find((chapter) => String(chapter.id) === String(jobs[i].chapter));
+            if (target) {
+              target.pov_character_id = jobs[i].body.pov_character_id;
+              target.pov_mode = jobs[i].body.pov_mode;
+            }
+          }
+          cache.bindingChapter = '';
+          status.textContent = jobs.length ? `视角已保存（${jobs.length} 章），继续生成…` : '视角没有变化，继续生成…';
+          saveBtn.textContent = '已保存';
+          toast(jobs.length ? `已设置 ${jobs.length} 章视角` : '视角没有变化', 'ok', 2200);
+          // 留一帧让完成反馈可见；若用户已用 Esc/遮罩关闭，就只保留结果不自动执行
+          window.setTimeout(() => {
+            if (document.body.contains(mask)) {
+              closeDialog();
+              onDone?.();
+            } else if (onDone) {
+              // 用户在保存途中按 Esc 关闭：已保存但不再自动生成，明确说明而不是让他再点一次
+              toast('视角已保存，本次自动生成已取消', 'ok', 2600);
+            }
+          }, 260);
+        } catch (error) {
+          setBusy(false);
+          saveBtn.textContent = actionLabel;
+          if (allBtn) allBtn.textContent = '全部使用全知视角';
+          status.textContent = `保存失败：${error.message}`;
+          toast(`保存视角失败：${error.message}`, 'bad', 3600);
+        }
+      };
+      saveBtn.addEventListener('click', () => save(false));
+      allBtn?.addEventListener('click', () => save(true));
+    },
+  });
+}
+
+/**
+ * 整幕生成没有逐章参数输入，轮次相关默认值必须只读展示并标注来源。
+ * @param {object} defaults loadGenerationDefaults 的返回
+ * @returns {string} HTML
+ */
+function generationRoundsHTML(defaults) {
+  const badge = '<span class="badge">默认值</span>';
+  return `
+    <div class="summary-line"><span>每轮节拍数</span><span class="right">${
+      defaults.beatsPerRound ? `${defaults.beatsPerRound} 个` : '自动分配'
+    } ${badge} · ${defaultSourceLabel(defaults.beatsSource, 'writing.multi_turn.beats_per_round')}</span></div>
+    <div class="summary-line"><span>最大轮数（保险）</span><span class="right">${defaults.maxRounds} ${badge} · ${defaultSourceLabel(
+    defaults.maxRoundsSource,
+    'writing.multi_turn.max_rounds'
+  )}</span></div>`;
+}
+
+/**
+ * 整幕视角只读状态文案（含全局默认来源）。
+ * @param {number} missing 缺视角章数
+ * @param {number} total 本幕章数
+ * @returns {{ok: boolean, text: string}} 状态
+ */
+function actPovStatusOf(missing, total) {
+  if (missing > 0) return { ok: false, text: `本幕视角：${missing}/${total} 章未设置（点击设置）` };
+  if (globalOmniscient()) {
+    return { ok: true, text: `本幕视角：${total} 章均可用（未单独设置的章按设定库默认全知）` };
+  }
+  return { ok: true, text: `本幕视角：${total} 章均已设置（点击调整）` };
+}
+
+/**
  * 整幕正文生成：确认模式后按章节顺序一次跑完本幕所有章。
+ * 启动前先做视角预检，缺失时集中设置，不再逐章各报一遍。
  * @param {object} act 幕对象
  * @param {number} actIndex 幕序号（从 1 开始）
+ * @returns {Promise<void>} 无
  */
-function openActGenerateDialog(act, actIndex) {
+async function openActGenerateDialog(act, actIndex) {
   const chapters = act.chapters || [];
   if (!chapters.length) return toast('这一幕还没有章节，先补齐大纲', 'warn');
+  const defaults = await loadGenerationDefaults();
   const landed = chapters.filter((chapter) => landedChapter(chapter.id));
   const hasBody = chapters.filter((chapter) => Number(landedChapter(chapter.id)?.word_count || 0) > 0);
   const modeKey = 'act.generate';
@@ -3677,6 +4112,9 @@ function openActGenerateDialog(act, actIndex) {
     title: `生成整幕正文 · 第 ${actIndex} 幕《${act.title || '未命名幕'}》`,
     body: `
       ${modeSwitchHTML(modeKey, { fallback })}
+      <button type="button" class="pov-status-line" data-ag-pov
+        title="点击设置本幕视角（与单章生成共用同一弹窗）">
+        <span data-pov-text>本幕视角：正在检查各章视角…</span>${icon('edit', 12)}</button>
       <div class="summary-line"><span>本幕章节</span><span class="right mono">${chapters.length} 章</span></div>
       <div class="summary-line"><span>已落成章节</span><span class="right mono">${landed.length} / ${chapters.length} 章</span></div>
       <div class="summary-line"><span>已有正文</span><span class="right mono">${hasBody.length} / ${chapters.length} 章</span></div>
@@ -3687,19 +4125,55 @@ function openActGenerateDialog(act, actIndex) {
             } 章还没落成章节文件，生成时会记为失败；可先回大纲点左上角「落地成章节」。</div>`
           : ''
       }
-      <div class="hint" style="margin-top:8px">按章节顺序逐章生成，复用单章链路（按节拍推进、滚动摘要、版本历史）；单章失败不中断整幕；「只补缺失」会跳过已有正文并计入结果。</div>`,
+      <div class="hint" style="margin-top:8px">按章节顺序逐章生成，复用单章链路（按节拍推进、滚动摘要、版本历史）；单章失败不中断整幕；「只补缺失」会跳过已有正文并计入结果。启动前会先检查本幕视角设置。</div>
+      <div class="hint" style="margin-top:10px"><b>整幕生成使用的默认参数</b>：本弹窗没有逐章输入框，下列值直接生效，来源已标注。</div>
+      ${generationRoundsHTML(defaults)}
+      ${generationDefaultsHTML(defaults)}`,
     foot: `<div class="right"><button class="btn" data-dlg-close>取消</button>
       <button class="btn primary" data-ag-run>${icon('spark', 12)} 开始生成整幕</button></div>`,
     onMount: (mask) => {
+      const runBtn = mask.querySelector('[data-ag-run]');
+      const povLine = mask.querySelector('[data-ag-pov]');
+      const povText = mask.querySelector('[data-ag-pov] [data-pov-text]');
       const modeOf = bindModeSwitch(mask, modeKey, {
         fallback,
-        action: mask.querySelector('[data-ag-run]'),
+        action: runBtn,
         labels: { fill: '只补缺失并开始', regen: '重新生成并开始' },
       });
-      mask.querySelector('[data-ag-run]').addEventListener('click', () => {
+      // 打开即异步检查本幕视角，检查完成前按钮可用但点击会再次预检
+      void findChaptersMissingPov(chapters)
+        .then((missing) => {
+          const state = actPovStatusOf(missing.length, chapters.length);
+          if (povText) povText.textContent = state.text;
+          povLine?.classList.toggle('warn', !state.ok);
+        })
+        .catch(() => {
+          if (povText) povText.textContent = '本幕视角：检查失败，点击打开设置';
+          povLine?.classList.add('warn');
+        });
+      // 状态行可点击：打开共用视角弹窗；保存后重新打开本弹窗（原参数弹窗已被替换）
+      povLine?.addEventListener('click', () => {
+        openPovSetupDialog(chapters, () => openActGenerateDialog(act, actIndex), { actionLabel: '保存' });
+      });
+      runBtn.addEventListener('click', async () => {
+        if (runBtn.disabled) return;
         const mode = modeOf();
-        closeDialog();
-        runActGenerate(act, actIndex, mode);
+        runBtn.disabled = true;
+        runBtn.textContent = '正在检查视角…';
+        try {
+          const missing = await findChaptersMissingPov(chapters);
+          closeDialog();
+          if (missing.length) {
+            // 有缺失先集中设置，保存后自动接着启动，不在生成阶段逐章报错
+            openPovSetupDialog(missing, () => runActGenerate(act, actIndex, mode));
+            return;
+          }
+          runActGenerate(act, actIndex, mode);
+        } catch (error) {
+          runBtn.disabled = false;
+          runBtn.textContent = '开始生成整幕';
+          toast(`视角预检失败：${error.message}`, 'bad', 3600);
+        }
       });
     },
   });
@@ -3710,11 +4184,15 @@ function openActGenerateDialog(act, actIndex) {
  * @param {object} act 幕对象
  * @param {number} actIndex 幕序号（从 1 开始）
  * @param {'fill'|'regen'} mode 只补缺失 / 重新生成已有正文
+ * @param {{resumeNote?: string}} [options] 自动补救说明（如视角设置后自动续跑）
  */
-async function runActGenerate(act, actIndex, mode) {
+async function runActGenerate(act, actIndex, mode, options = {}) {
   const total = (act.chapters || []).length;
   const counters = { succeeded: 0, skipped: 0, failed: 0 };
   const failures = [];
+  const succeededIds = [];
+  /** 自动补救说明（校验重试等），必须出现在最终结果里 */
+  const autoNotes = new Set();
   let settled = false;
   let jobId = '';
   const aborter = new AbortController();
@@ -3739,6 +4217,7 @@ async function runActGenerate(act, actIndex, mode) {
     },
   });
   panel.update({ percent: 0 });
+  if (options.resumeNote) panel.note(`自动续跑：${options.resumeNote}`);
 
   /** 本地兜底：停止后即使没收到 canceled 事件，也给出明确结果 */
   function finishStopped() {
@@ -3746,19 +4225,53 @@ async function runActGenerate(act, actIndex, mode) {
     settled = true;
     panel.fail({
       message: '已停止生成',
-      detail: `已完成章节已保存。本次已处理：成功 ${counters.succeeded} 章 / 跳过 ${counters.skipped} 章 / 失败 ${counters.failed} 章`,
+      detail: [
+        `已完成章节已保存。本次已处理：成功 ${counters.succeeded} 章 / 跳过 ${counters.skipped} 章 / 失败 ${counters.failed} 章`,
+        options.resumeNote ? `自动续跑：${options.resumeNote}` : '',
+        autoNotes.size ? `自动处理：${[...autoNotes].join('；')}` : '',
+      ]
+        .filter(Boolean)
+        .join('；'),
     });
   }
 
-  /** 生成结束后刷新章节目录与当前正文 */
-  async function refreshAfterAct() {
+  /**
+   * 生成结束后局部刷新：只更新左侧目录、当前幕统计与当前正文卡，不整页重绘。
+   * @param {string[]} changedIds 正文有变化的章节 ID
+   * @param {boolean} silent 自动刷新时不弹提示
+   */
+  async function refreshAfterAct(changedIds = [], silent = false) {
     try {
       cache.chapters = await getJSON('/api/ui/chapters', { path: cache.path });
-      if (ui.sel.kind === 'chapter') await loadBody(ui.sel.id);
-      paint();
-      toast('章节目录与正文已刷新', 'ok', 1600);
+      const ctx = document.querySelector('#novel-root .ctx');
+      const listScroll = document.querySelector('#novel-root .chap-list')?.scrollTop || 0;
+      // 局部替换会重建按钮节点：先记下当前焦点按钮的动作键，替换后按同位置还原
+      const active = document.activeElement;
+      const focusKey = ctx?.contains(active) ? String(active?.dataset?.act || '') : '';
+      const focusIndex = focusKey
+        ? [...ctx.querySelectorAll(`[data-act="${focusKey}"]`)].indexOf(active)
+        : -1;
+      if (ctx) ctx.outerHTML = ctxHTML();
+      const list = document.querySelector('#novel-root .chap-list');
+      if (list) list.scrollTop = listScroll;
+      if (focusKey && focusIndex >= 0) {
+        const target = document.querySelectorAll(`#novel-root .ctx [data-act="${focusKey}"]`)[focusIndex];
+        target?.focus?.({ preventScroll: true });
+      }
+      const inAct = new Set((act.chapters || []).map((chapter) => String(chapter.id || '')));
+      const current = findOutlineAct(ui.sel.id);
+      if (ui.sel.kind === 'act' && current && current.act === act) {
+        const meta = document.getElementById('novel-act-meta');
+        const rows = document.getElementById('novel-act-chapters');
+        if (meta) meta.textContent = actMetaText(current.act, current.index);
+        if (rows) rows.innerHTML = actChapterRowsHTML(current.act.chapters || []);
+      }
+      if (ui.sel.kind === 'chapter' && inAct.has(String(ui.sel.id)) && changedIds.includes(ui.sel.id)) {
+        await loadBody(ui.sel.id);
+      }
+      if (!silent) toast('已更新本幕章节状态', 'ok', 1600);
     } catch (error) {
-      toast(`刷新失败：${error.message}`, 'bad', 3600);
+      if (!silent) toast(`刷新失败：${error.message}`, 'bad', 3600);
     }
   }
 
@@ -3789,9 +4302,12 @@ async function runActGenerate(act, actIndex, mode) {
           panel.append(data?.text || '');
         } else if (event === 'chapter_skip') {
           counters.skipped += 1;
-          panel.note(`第 ${Number(data?.index || 0)}/${Number(data?.total || total)} 章《${data?.title || ''}》已有正文，已跳过`);
+          panel.note(
+            `第 ${Number(data?.index || 0)}/${Number(data?.total || total)} 章《${data?.title || ''}》已有正文，已跳过`
+          );
         } else if (event === 'chapter_done') {
           counters.succeeded += 1;
+          if (data?.chapter_id) succeededIds.push(data.chapter_id);
           const count = Number(data?.total || total);
           const index = Number(data?.index || 0);
           panel.update({
@@ -3799,24 +4315,74 @@ async function runActGenerate(act, actIndex, mode) {
             percent: Math.round((index / Math.max(1, count)) * 100),
             current: '',
           });
+          (data?.notices || []).forEach((text) => {
+            const line = `第 ${index} 章《${data?.title || ''}》：${text}`;
+            autoNotes.add(line);
+            panel.note(`自动处理：${line}`);
+          });
         } else if (event === 'chapter_error') {
           counters.failed += 1;
-          failures.push(`第 ${Number(data?.index || 0)} 章《${data?.title || ''}》：${data?.message || '未知原因'}`);
+          failures.push({
+            index: Number(data?.index || 0),
+            title: data?.title || '',
+            code: data?.code || '',
+            message: data?.message || '未知原因',
+          });
         } else if (event === 'done') {
           settled = true;
           const result = data?.result || {};
           const failedRows = (result.chapters || []).filter((row) => row.status === 'failed');
+          const groups = groupActFailures(failedRows.length ? failedRows : failures);
+          const povChapters = failedRows
+            .filter((row) => row.code === 'BINDING_POV_MISSING')
+            .map(
+              (row) =>
+                (act.chapters || []).find((chapter) => String(chapter.id) === String(row.chapter_id)) ||
+                (row.chapter_id ? { id: row.chapter_id, index: row.index, title: row.title } : null)
+            )
+            .filter(Boolean);
+          const actions = [];
+          if (povChapters.length) {
+            // 点击真正打开可编辑的视角弹窗，保存后自动重跑整幕
+            actions.push({
+              label: `去设置视角（${povChapters.length} 章）`,
+              primary: true,
+              onClick: (closePanel) => {
+                closePanel?.();
+                // 已成功的章已有正文，补完视角后按「只补缺失」续跑，避免重复生成
+                openPovSetupDialog(povChapters, () =>
+                  runActGenerate(act, actIndex, 'fill', { resumeNote: '补齐视角后按「只补缺失」自动续跑' })
+                );
+              },
+            });
+          }
+          actions.push({
+            label: '刷新目录与正文',
+            primary: !povChapters.length,
+            onClick: () => refreshAfterAct(succeededIds),
+          });
+          // 自动补救必须留在结果里：优先用结果行的 notices，缺失时回退到流式阶段收集的说明
+          const resultNotes = [];
+          (result.chapters || []).forEach((row) => {
+            (row.notices || []).forEach((text) => {
+              resultNotes.push(`第 ${Number(row.index || 0)} 章《${row.title || ''}》：${text}`);
+            });
+          });
+          autoNotes.forEach((text) => {
+            if (!resultNotes.includes(text)) resultNotes.push(text);
+          });
+          const detailParts = [];
+          if (options.resumeNote) detailParts.push(`自动续跑：${options.resumeNote}`);
+          if (resultNotes.length) detailParts.push(`自动处理：${resultNotes.join('；')}`);
+          detailParts.push(actFailureDetail(groups));
           panel.finish({
             message: `整幕生成完成：成功 ${Number(result.succeeded || 0)} 章 / 跳过 ${Number(
               result.skipped || 0
             )} 章 / 失败 ${Number(result.failed || 0)} 章`,
-            detail: failedRows.length
-              ? `失败章节：${failedRows
-                  .map((row) => `第 ${row.index} 章《${row.title || ''}》${row.message || '未知原因'}`)
-                  .join('；')}`
-              : '已完成的章节已写入正文，旧正文自动存档，可在「版本记录」里回退。',
-            actions: [{ label: '刷新目录与正文', primary: true, onClick: refreshAfterAct }],
+            detail: detailParts.filter(Boolean).join('；'),
+            actions,
           });
+          if (succeededIds.length) void refreshAfterAct(succeededIds, true);
         } else if (event === 'canceled') {
           settled = true;
           const result = data?.result || {};
@@ -3827,14 +4393,37 @@ async function runActGenerate(act, actIndex, mode) {
             : `成功 ${counters.succeeded} 章 / 跳过 ${counters.skipped} 章 / 失败 ${counters.failed} 章`;
           panel.fail({
             message: '已停止生成',
-            detail: `已完成章节已保存。本次已处理：${stats}`,
+            detail: [
+              `已完成章节已保存。本次已处理：${stats}`,
+              options.resumeNote ? `自动续跑：${options.resumeNote}` : '',
+              autoNotes.size ? `自动处理：${[...autoNotes].join('；')}` : '',
+            ]
+              .filter(Boolean)
+              .join('；'),
           });
+          if (succeededIds.length) void refreshAfterAct(succeededIds, true);
         } else if (event === 'error') {
           settled = true;
-          const detail = failures.length ? `已处理：${failures.join('；')}` : '';
+          const groups = groupActFailures(failures);
           panel.fail({
             message: data?.message || '整幕生成失败',
-            detail,
+            detail: groups.length ? actFailureDetail(groups) : '',
+            // 配置类阻断给可点击入口：直接打开共用视角弹窗，保存后按「只补缺失」续跑
+            actions:
+              data?.code === 'BINDING_POV_MISSING'
+                ? [
+                    {
+                      label: '去设置本幕视角',
+                      primary: true,
+                      onClick: (closePanel) => {
+                        closePanel?.();
+                        openPovSetupDialog(act.chapters || [], () =>
+                          runActGenerate(act, actIndex, 'fill', { resumeNote: '补齐视角后按「只补缺失」自动续跑' })
+                        );
+                      },
+                    },
+                  ]
+                : [],
             retry: () => runActGenerate(act, actIndex, mode),
           });
         }

@@ -251,5 +251,51 @@ class UnresolvedSpeakerTest(unittest.TestCase):
         self.assertEqual([row["text"] for row in rows], ["台词。"])
 
 
+WEAK_CHARS = [
+    {"id": "chr_1", "name": "林九斤", "aliases": ["九斤"], "role": "lead", "gender": "female"},
+    {"id": "chr_2", "name": "苏梅", "aliases": ["苏姐", "女人"], "role": "support", "gender": "female"},
+    {"id": "chr_3", "name": "傩王", "aliases": ["它"], "role": "boss", "gender": "unknown"},
+    {"id": "chr_4", "name": "纸奶奶", "aliases": ["老板娘", "纸人"], "role": "boss", "gender": "female"},
+]
+
+
+class WeakAliasTest(unittest.TestCase):
+    """弱代称（女人 / 纸人 / 它）：场景唯一且有支持线索时才采信，置信度低。"""
+
+    def test_nickname_in_narration(self) -> None:
+        lines = dialogue_lines("苏梅站在门口。“别怕，”女人说，“我们是刚出来的。”", WEAK_CHARS)
+        self.assertEqual([line["speaker_id"] for line in lines], ["chr_2", "chr_2"])
+        self.assertTrue(all(line["confidence"] <= 0.5 for line in lines))
+
+    def test_nickname_with_action_in_narration(self) -> None:
+        lines = dialogue_lines(
+            "苏梅也来了。\n“傩面村。”女人站起身，拍了拍裙子上的灰。“我们四个进去的，就剩我和他。”",
+            WEAK_CHARS,
+        )
+        self.assertEqual([line["speaker_id"] for line in lines], ["chr_2", "chr_2"])
+
+    def test_nickname_without_scene_support_stays_unknown(self) -> None:
+        lines = dialogue_lines("“别怕，”女人说，“我们是刚出来的。”", WEAK_CHARS)
+        self.assertTrue(all(line["speaker_id"] == UNKNOWN_SPEAKER_ID for line in lines))
+
+    def test_ambiguous_nickname_stays_unknown(self) -> None:
+        characters = WEAK_CHARS + [{"id": "chr_5", "name": "李姐", "aliases": ["女人"], "gender": "female"}]
+        lines = dialogue_lines("苏梅和李姐都到了。女人说：“走吧。”", characters)
+        self.assertEqual([line["speaker_id"] for line in lines], [UNKNOWN_SPEAKER_ID])
+
+    def test_it_requires_speech_verb(self) -> None:
+        lines = dialogue_lines("傩王没有动。\n“不，”它说，“不开脸。”", WEAK_CHARS)
+        self.assertEqual([line["speaker_id"] for line in lines], ["chr_3", "chr_3"])
+        self.assertTrue(all(line["confidence"] <= 0.5 for line in lines))
+
+    def test_it_action_only_is_not_attributed(self) -> None:
+        lines = dialogue_lines("傩王在场。\n它拿起了铜钱。“换脸。”", WEAK_CHARS)
+        self.assertEqual([line["speaker_id"] for line in lines], [UNKNOWN_SPEAKER_ID])
+
+    def test_zhiren_with_speech_verb(self) -> None:
+        lines = dialogue_lines("纸奶奶站在柜台后。\n“欢迎来到纸扎世界。”纸人说。“我是这里的主人。”", WEAK_CHARS)
+        self.assertEqual([line["speaker_id"] for line in lines], ["chr_4", "chr_4"])
+
+
 if __name__ == "__main__":
     unittest.main()

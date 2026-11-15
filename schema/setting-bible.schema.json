@@ -123,6 +123,11 @@
         "id": { "type": "string", "pattern": "^bea_[0-9A-Za-z]{6,32}$" },
         "summary": { "type": "string", "maxLength": 1000 },
         "character_ids": { "type": "array", "items": { "type": "string", "pattern": "^chr_[0-9A-Za-z]{6,32}$" } },
+        "extra_characters": {
+          "type": "array",
+          "items": { "type": "string", "maxLength": 60 },
+          "description": "只在本章出现、未建卡的龙套姓名（按 minor 处理，不进入角色表）"
+        },
         "turning_point": { "type": "boolean", "description": "是否关键转折，供配图/视频优先级使用" },
         "target_words": { "type": "integer", "minimum": 0, "maximum": 20000 }
       }

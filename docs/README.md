@@ -39,6 +39,8 @@
 | [spec-r30-script-warning-noise.md](spec-r30-script-warning-noise.md) | 导演标注告警降噪：说话人归一化、越界夹紧、告警分级与合并 | 已实现；桩验证 + 真实工程重跑 45→0 条告警 |
 | [spec-r31-anchor-orphan-fix.md](spec-r31-anchor-orphan-fix.md) | 标注锚点误判 orphan（游标漂移 / 标点差异）修复 | 已实现；真实工程副本 orphan 148→0 |
 | [spec-r32-warning-locator.md](spec-r32-warning-locator.md) | 标注/配音告警点击定位：台词行 / 镜头 / 告警区三级跳转与降级说明 | 已实现；真实浏览器验证三类目标与降级 |
+| [spec-r33-generation-budget-settings.md](spec-r33-generation-budget-settings.md) | 上下文上限与输出口径：输出侧取消人为预算，请求 `max_tokens` 取「上下文窗口 − 已用提示词」；设置页只读、思考只留全局开关 | 已实现；离线用例通过，未做真机 LLM 实测 |
+| [spec-r34-chapter-resume-inline-recap.md](spec-r34-chapter-resume-inline-recap.md) | 章内断点续写（每轮落盘、取消/失败/重启可续）+ 摘要并入正文末轮（解析失败才回退）+ 超纲压缩/重写（用户点击才执行，压缩不得删节拍） | 已实现；离线用例 9 项通过，未做真机实测 |
 
 ## 调研（只作依据，不改生产代码）
 
@@ -46,6 +48,7 @@
 | --- | --- | --- |
 | [r20-jianying-draft-compat-review.md](r20-jianying-draft-compat-review.md) | 剪映草稿 10.8/11.x 字段兼容性核对：字段对照、风险等级、最可能问题 | 核对完成；两处确定性修复已应用，剪映侧未实测 |
 | [research-sfx-local-commercial-options.md](research-sfx-local-commercial-options.md) | 本地可商用音效（SFX）方案调研：候选模型许可/体积/条件生成/ComfyUI 支持、与本项目匹配度、推荐与备选路线 | 已随实测更新：11 项待查逐条标注，ComfyUI 模板路线已停用，改本项目 provider |
+| [research-character-card-industry.md](research-character-card-industry.md) | 同类产品角色卡产出与维护调研（写作 / 网文 / 有声）：建卡时机、粒度与成本、去重、绑定、回写、遗漏兜底；与本项目逐条对照并给出成本与去重改进建议 | 调研完成（2026-11-15），只作依据，未改生产代码 |
 
 ## 梳理（只读整理，不改生产代码）
 

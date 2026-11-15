@@ -169,6 +169,20 @@ export function toast(message, kind = 'info', timeout = 3200) {
 }
 
 let activeDialog = null;
+/** 打开弹窗前的焦点，关闭后还原 */
+let dialogReturnFocus = null;
+
+/**
+ * 取弹窗内可 Tab 到的元素（按 DOM 顺序，过滤不可见/禁用）。
+ * @param {HTMLElement} mask 弹窗根节点
+ * @returns {HTMLElement[]} 可聚焦元素
+ */
+function dialogFocusables(mask) {
+  return [...mask.querySelectorAll(
+    'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]),' +
+      ' textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+  )].filter((el) => el.offsetParent !== null || el === document.activeElement);
+}
 
 /**
  * 打开弹窗。
@@ -181,11 +195,12 @@ let activeDialog = null;
  * @returns {HTMLElement} 弹窗根节点
  */
 export function openDialog({ title, body, foot = '', wide = false, onMount }) {
-  closeDialog();
+  closeDialog(false);
+  dialogReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   const mask = document.createElement('div');
   mask.className = 'dlg-mask';
   mask.innerHTML = `
-    <div class="dlg ${wide ? 'wide' : ''}" role="dialog" aria-modal="true">
+    <div class="dlg ${wide ? 'wide' : ''}" role="dialog" aria-modal="true" tabindex="-1">
       <div class="dlg-head">
         <span class="dt">${esc(title)}</span>
         <div class="right"><button class="btn icon sm" data-dlg-close title="关闭">${icon('x')}</button></div>
@@ -199,18 +214,58 @@ export function openDialog({ title, body, foot = '', wide = false, onMount }) {
   mask.addEventListener('click', (event) => {
     if (event.target.closest('[data-dlg-close]')) closeDialog();
   });
+  // Tab 循环留在弹窗内，避免焦点跑到背后的页面
+  mask.addEventListener('keydown', (event) => {
+    if (event.key !== 'Tab') return;
+    const items = dialogFocusables(mask);
+    if (!items.length) {
+      event.preventDefault();
+      mask.querySelector('.dlg')?.focus();
+      return;
+    }
+    const first = items[0];
+    const last = items[items.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  });
   document.body.appendChild(mask);
   activeDialog = mask;
   onMount?.(mask);
+  // 焦点落在第一个可操作项：优先正文控件，其次底部按钮（先取消后确认），最后关闭按钮。
+  // 注意要分段查询：一次性 querySelector 会按文档顺序命中头部的关闭按钮。
+  const bodyControl = mask.querySelector(
+    '.dlg-body input:not([disabled]), .dlg-body select:not([disabled]), .dlg-body textarea:not([disabled])'
+  );
+  const footButton =
+    mask.querySelector('.dlg-foot .btn:not([disabled]):not(.primary):not(.danger)') ||
+    mask.querySelector('.dlg-foot .btn:not([disabled])');
+  const headButton = mask.querySelector('.dlg-head button:not([disabled])');
+  window.setTimeout(() => {
+    if (activeDialog !== mask) return;
+    const target = bodyControl || footButton || headButton || mask.querySelector('.dlg');
+    target?.focus?.({ preventScroll: true });
+  }, 0);
   return mask;
 }
 
-/** 关闭当前弹窗 */
-export function closeDialog() {
+/**
+ * 关闭当前弹窗。
+ * @param {boolean} [restoreFocus] 是否把焦点还原到打开前的元素（默认还原）
+ */
+export function closeDialog(restoreFocus = true) {
   if (activeDialog) {
     activeDialog.remove();
     activeDialog = null;
   }
+  if (restoreFocus && dialogReturnFocus?.isConnected) {
+    dialogReturnFocus.focus({ preventScroll: true });
+  }
+  dialogReturnFocus = null;
 }
 
 // Esc 统一关弹窗，业务层不用各自监听

@@ -154,6 +154,8 @@ class OfflineWritingAdapter:
             text = self._outline(meta)
         elif task == "chapter":
             text = self._chapter(meta, req)
+        elif task == "chapter_compress":
+            text = self._chapter_compress(meta)
         elif task == "summarize":
             text = self._summarize(meta)
         elif task == "recap":
@@ -176,7 +178,7 @@ class OfflineWritingAdapter:
             text = self._freeform(req)
         else:
             raise ValueError(
-                f"离线写作不支持的 task={task!r}（可选 outline/chapter/summarize/recap/character_updates/consistency/script/image_prompt/setting/character/polish/freeform）"
+                f"离线写作不支持的 task={task!r}（可选 outline/chapter/chapter_compress/summarize/recap/character_updates/consistency/script/image_prompt/setting/character/polish/freeform）"
             )
         return TextGenResult(
             text=text,
@@ -272,7 +274,11 @@ class OfflineWritingAdapter:
             act = acts[act_offset] if 0 <= act_offset < len(acts) else {}
             chapters = act.get("chapters") or []
             chapter = chapters[chapter_offset] if 0 <= chapter_offset < len(chapters) else {}
-            return {"beats": chapter.get("beats") or []}
+            return {
+                "beats": chapter.get("beats") or [],
+                "cast": chapter.get("cast") or [],
+                "character_arcs": chapter.get("character_arcs") or [],
+            }
         return payload
 
     def stream(self, req: TextGenRequest) -> Iterator[TextGenChunk]:
@@ -360,8 +366,10 @@ class OfflineWritingAdapter:
                 chapter_no += 1
                 title = CHAPTER_TITLES[(chapter_no - 1) % len(CHAPTER_TITLES)]
                 beats = []
+                focus_names: list[str] = []
                 for beat_index in range(beats_n):
                     focus = names[(chapter_no + beat_index) % len(names)]
+                    focus_names.append(focus)
                     beats.append(
                         {
                             "summary": f"{focus}在第 {chapter_no} 章的第 {beat_index + 1} 个转折里推进主线：{logline[:24]}",
@@ -376,6 +384,18 @@ class OfflineWritingAdapter:
                         "title": title,
                         "summary": f"{names[chapter_no % len(names)]}面对新的线索，冲突升级到不可回避的地步。",
                         "beats": beats,
+                        "cast": [
+                            {
+                                "name": focus,
+                                "beats": [
+                                    position
+                                    for position, item in enumerate(focus_names, start=1)
+                                    if item == focus
+                                ],
+                                "role": "protagonist" if position == 0 and focus == names[0] else "supporting",
+                            }
+                            for position, focus in enumerate(dict.fromkeys(focus_names))
+                        ],
                         "character_arcs": (
                             [
                                 {
@@ -468,6 +488,28 @@ class OfflineWritingAdapter:
         if self._count_words(content) > target_total * 1.2:
             content = self._truncate(content, int(target_total * 1.15))
         return content
+
+    def _chapter_compress(self, meta: dict) -> str:
+        """离线压缩：按节拍逐段输出摘要句，保证分段完整且篇幅明显变短。
+
+        供离线用例验证「压缩必须保住全部节拍」的解析与诊断为用，不追求文采。
+
+        参数:
+            meta: 请求元数据（含 beats / content / target_words）。
+
+        返回:
+            带「【节拍 N】」标记的压缩正文。
+        """
+        beats = meta.get("beats") or []
+        content = str(meta.get("content") or "")
+        if not beats:
+            target = int(meta.get("target_words") or 0) or max(60, self._count_words(content) // 2)
+            return self._truncate(content, target) or "压缩后的正文。"
+        lines = []
+        for index, beat in enumerate(beats):
+            summary = str(beat.get("summary") or "").strip() or "情节继续推进"
+            lines.append(f"【节拍 {index + 1}】{summary}。")
+        return "\n\n".join(lines)
 
     @staticmethod
     def _last_user_content(req: TextGenRequest) -> str:

@@ -263,7 +263,7 @@ export function openProgress({ title, hint = '', stage = '准备中…', stream 
         }
         return;
       }
-      // 输出预算被设置值压低：黄色提示，不再静默按更小的 max_tokens 截断
+      // 运行中的异常提示（finish_reason=length / 超出预期字数 / 疑似复述）：黄色提示，不静默处理
       if (event === 'notice') {
         const message = String(data?.message || '');
         if (message) {
@@ -320,8 +320,9 @@ export function openProgress({ title, hint = '', stage = '准备中…', stream 
     },
 
     /**
-     * 失败结束：给出中文原因，可选「重试」。
-     * @param {{message: string, detail?: string, current?: string, retry?: Function}} result
+     * 失败结束：给出中文原因，可选「重试」与可跳转的处理入口。
+     * @param {{message: string, detail?: string, current?: string, retry?: Function,
+     *   actions?: Array<{label: string, primary?: boolean, onClick: Function}>}} result
      */
     fail(result = {}) {
       settle('failed');
@@ -338,6 +339,14 @@ export function openProgress({ title, hint = '', stage = '准备中…', stream 
         result.detail ? `<div class="prog-detail hint">${esc(result.detail)}</div>` : ''
       }`;
       el.actions.innerHTML = '';
+      for (const action of result.actions || []) {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = `btn sm${action.primary ? ' primary' : ''}`;
+        button.textContent = action.label;
+        button.addEventListener('click', () => action.onClick(close));
+        el.actions.appendChild(button);
+      }
       if (result.retry) {
         const retry = document.createElement('button');
         retry.type = 'button';

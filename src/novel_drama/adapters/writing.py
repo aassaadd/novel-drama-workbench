@@ -34,15 +34,28 @@ _LAST_CALL: dict = {}
 _LAST_CALL_LOCK = threading.Lock()
 
 
+#: 最近一次请求的上下文/提示词/输出空间统计（进程级）
+_LAST_BUDGET: dict = {}
+
+
 def last_llm_call() -> dict:
-    """返回最近一次写作 LLM HTTP 调用摘要。
+    """返回最近一次写作 LLM HTTP 调用摘要（含上下文与提示词占用）。
 
     返回:
-        `{at, url, status, elapsed_ms, ok, finish_reason, tool_calls, snippet, error}`；
-        尚未调用时为空 dict。
+        `{at, url, status, elapsed_ms, ok, finish_reason, tool_calls, snippet, error,
+        context_limit, prompt_tokens, max_tokens, task}`；尚未调用时为空 dict。
     """
     with _LAST_CALL_LOCK:
-        return dict(_LAST_CALL)
+        result = dict(_LAST_CALL)
+        result.update(_LAST_BUDGET)
+        return result
+
+
+def _record_budget_stats(**fields) -> None:
+    """覆盖写入最近一次请求的上下文/提示词/输出空间统计（进程内）。"""
+    with _LAST_CALL_LOCK:
+        _LAST_BUDGET.clear()
+        _LAST_BUDGET.update(fields)
 
 
 def _record_llm_call(**fields) -> None:
@@ -74,12 +87,6 @@ CONNECT_TIMEOUT_S = 5.0
 FIRST_TOKEN_TIMEOUT_S = 60.0
 #: 流式空闲超时（秒）：两个内容分片之间的最长间隔
 STREAM_IDLE_TIMEOUT_S = 60.0
-# 工具调用时的最小输出预算；thinking 模型的 reasoning_tokens 也计入 max_tokens，给少了参数会被截断
-TOOL_MIN_MAX_TOKENS = 4096
-#: 用户既未填写 max_tokens、也没有检测值时的协议层兜底：
-#: OpenAI 兼容接口必须给一个正整数，这里只保证请求合法，不代表推荐值或模型上限；
-#: 设置页会优先用「检测连接」返回的最大输出并落盘。
-PROTOCOL_DEFAULT_MAX_TOKENS = 2048
 # 检测到的上下文上限缓存：`(endpoint, model) -> tokens`，供请求体预算校验复用，避免每次请求再发 HTTP
 _LIMIT_CACHE: dict[tuple[str, str], int] = {}
 #: 各 OpenAI 兼容实现可能使用的候选字段名（上下文 / 最大输出）
@@ -213,6 +220,8 @@ class OmlxWritingAdapter:
         self.enable_thinking = self.settings.get("enable_thinking")
         # 思考强度：low / medium / high；仅在开启思考时随请求下发
         self.reasoning_effort = str(self.settings.get("reasoning_effort") or "").strip().lower()
+        #: 最近一次请求的上下文/提示词/输出空间统计（供设置页与日志展示）
+        self._budget_stats: dict = {}
         self.unload_settings = dict(self.settings.get("unload") or {})
 
     @property
@@ -959,21 +968,6 @@ class OmlxWritingAdapter:
         values = [int(value) for value in (cached, configured) if isinstance(value, (int, float)) and int(value) > 0]
         return min(values) if values else None
 
-    def _output_limit(self) -> int | None:
-        """返回服务端探测到的模型最大输出（用于避免下发超过模型能力的预算）。
-
-        返回:
-            tokens；没有探测值时为 None。
-        """
-        for key in ("max_output_tokens", "max_completion_tokens"):
-            try:
-                value = int(self.settings.get(key) or 0)
-            except (TypeError, ValueError, AttributeError):
-                value = 0
-            if value > 0:
-                return value
-        return None
-
     @staticmethod
     def _estimate_prompt_tokens(messages: list[dict]) -> int:
         """粗略估算 prompt 的 token 数（中文按 1 字≈1 token 保守计）。
@@ -987,32 +981,58 @@ class OmlxWritingAdapter:
         chars = sum(len(str(item.get("content") or "")) for item in messages)
         return chars + 256
 
-    def _fit_output_budget(self, messages: list[dict], max_tokens: int) -> int:
-        """按上下文上限约束输出预算：超限时自动下调，完全放不下时报中文错误。
+    def _available_output_tokens(self, messages: list[dict]) -> int | None:
+        """返回本次请求可用的输出空间：上下文窗口 − 已用提示词，不设人为余量。
+
+        上下文窗口未知时返回 None（请求体不带 max_tokens，由模型自身上限决定）。
+        提示词已经占满或超过窗口时抛出中文错误，避免静默截断。
 
         参数:
             messages: 已拼好的 OpenAI messages 列表。
-            max_tokens: 请求期望的输出预算。
 
         返回:
-            调整后的 max_tokens。
+            可用的 max_tokens；未知上下文窗口时为 None。
 
         异常:
-            AdapterError(INVALID_INPUT): prompt 已占满上下文，无法再留出输出空间。
+            AdapterError(INVALID_INPUT): 提示词已占满上下文窗口。
         """
         limit = self._context_limit()
-        if not limit:
-            return max_tokens
         prompt_tokens = self._estimate_prompt_tokens(messages)
+        if not limit:
+            self._budget_stats = {"context_limit": None, "prompt_tokens": prompt_tokens, "max_tokens": None}
+            return None
         available = limit - prompt_tokens
-        if available < 256:
+        if available < 1:
             raise AdapterError(
                 ErrorCode.INVALID_INPUT,
-                f"输入约 {prompt_tokens} tokens，超过模型上下文上限 {limit} tokens："
-                "请缩短输入或减少单次生成数量后重试",
+                f"输入约 {prompt_tokens} tokens，已占满模型上下文窗口 {limit} tokens："
+                "请缩短输入或减少单次生成数量后重试（输出侧未设置人为上限）",
                 detail={"prompt_tokens": prompt_tokens, "context_limit": limit},
             )
-        return min(max_tokens, available)
+        self._budget_stats = {
+            "context_limit": limit,
+            "prompt_tokens": prompt_tokens,
+            "max_tokens": available,
+        }
+        return available
+
+    def _thinking_for(self, req: TextGenRequest) -> tuple[bool | None, str]:
+        """解析一次请求的思考开关与强度（调用点显式值 > 全局开关）。
+
+        参数:
+            req: 统一文本请求。
+
+        返回:
+            `(enabled, effort)`；enabled 为 None 表示配置未设置、请求里不带该字段。
+        """
+        meta = req.metadata or {}
+        enabled = self.enable_thinking
+        if meta.get("enable_thinking") is not None:
+            enabled = bool(meta.get("enable_thinking"))
+        effort = str(meta.get("reasoning_effort") or "").strip().lower()
+        if not effort:
+            effort = self.reasoning_effort
+        return enabled, effort
 
     def _build_payload(self, req: TextGenRequest, stream: bool) -> dict:
         """把统一请求映射为 OpenAI 兼容请求体。
@@ -1029,26 +1049,33 @@ class OmlxWritingAdapter:
             messages.append({"role": "system", "content": req.system})
         for msg in req.messages:
             messages.append({"role": msg.role, "content": msg.content})
-        max_tokens = self._fit_output_budget(
-            messages,
-            int(req.max_tokens or self.settings.get("max_tokens") or PROTOCOL_DEFAULT_MAX_TOKENS),
-        )
+        # 输出侧不设人为上限：有上下文窗口时传「窗口 − 已用提示词」的剩余空间，
+        # 不额外留余量；窗口未知时不传 max_tokens，由模型自身决定何时停止。
+        available = self._available_output_tokens(messages)
         payload = {
             "model": self.model,
             "messages": messages,
-            "max_tokens": max_tokens,
             "temperature": float(req.temperature if req.temperature is not None else self.settings.get("temperature", 0.8)),
             "stream": stream,
         }
+        if available is not None:
+            payload["max_tokens"] = available
+        _record_budget_stats(
+            at=time.strftime("%Y-%m-%dT%H:%M:%S"),
+            task=str(req.task or ""),
+            model=self.model,
+            **self._budget_stats,
+        )
         stop = req.stop or list(self.settings.get("stop") or [])
         if stop:
             payload["stop"] = stop
-        # omlx 支持通过 chat_template_kwargs 关闭思考，降低延迟与 token 消耗
-        if self.enable_thinking is not None:
-            payload["chat_template_kwargs"] = {"enable_thinking": bool(self.enable_thinking)}
+        # 思考只有全局开关与强度；调用点可用 metadata 显式覆盖
+        enabled, effort = self._thinking_for(req)
+        if enabled is not None:
+            payload["chat_template_kwargs"] = {"enable_thinking": bool(enabled)}
         # 开启思考时把强度一并传给服务端（OpenAI 兼容的 reasoning_effort）
-        if bool(self.enable_thinking) and self.reasoning_effort in _THINKING_EFFORTS:
-            payload["reasoning_effort"] = self.reasoning_effort
+        if bool(enabled) and effort in _THINKING_EFFORTS:
+            payload["reasoning_effort"] = effort
         # 多轮续写前缀稳定时显式请求前缀缓存；服务不支持该字段会忽略
         if req.prompt_cache_key and bool(self.settings.get("cache_prompt", True)):
             payload["cache_prompt"] = True
@@ -1215,22 +1242,12 @@ class OmlxWritingAdapter:
         payload = self._build_payload(req, stream=bool(req.stream))
         payload["tools"] = [tool]
         payload["tool_choice"] = {"type": "function", "function": {"name": name}}
-        # thinking 模型的 reasoning_tokens 同样占用 max_tokens，预算太小会把参数截断；
-        # 结构化输出是否思考沿用全局开关，调用方可用 metadata.enable_thinking 显式覆盖
-        thinking = (req.metadata or {}).get("enable_thinking")
-        enabled = bool(self.enable_thinking) if thinking is None else bool(thinking)
-        payload.setdefault("chat_template_kwargs", {})["enable_thinking"] = enabled
-        if enabled and self.reasoning_effort in _THINKING_EFFORTS:
-            payload["reasoning_effort"] = self.reasoning_effort
-        budget = int(payload.get("max_tokens") or 0)
-        # 只有调用方没显式给预算时才用工具下限兜底；设置页的显式上限要原样下发
-        if req.max_tokens is None:
-            budget = max(budget, TOOL_MIN_MAX_TOKENS)
-        limit = self._output_limit()
-        if limit and budget > limit:
-            logger.warning("工具调用预算 %s 超过模型最大输出 %s，已按模型上限下发", budget, limit)
-            budget = limit
-        payload["max_tokens"] = budget
+        # 思考只有全局开关与强度；结构化输出不再叠加任何人为预算
+        enabled, effort = self._thinking_for(req)
+        if enabled is not None:
+            payload.setdefault("chat_template_kwargs", {})["enable_thinking"] = bool(enabled)
+        if bool(enabled) and effort in _THINKING_EFFORTS:
+            payload["reasoning_effort"] = effort
 
         started = time.monotonic()
         url = f"{str(self.endpoint).rstrip('/')}/v1/chat/completions"

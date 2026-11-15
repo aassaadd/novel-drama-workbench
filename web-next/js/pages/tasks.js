@@ -38,6 +38,7 @@ const STATUS_LABEL = {
   queued: '排队',
   running: '运行中',
   succeeded: '成功',
+  partial: '部分完成',
   failed: '失败',
   canceled: '已取消',
   interrupted: '已中断',
@@ -108,6 +109,7 @@ const lastRegion = {};
 /** 状态徽标语义色 */
 function badgeClass(name) {
   if (name === 'succeeded' || name === 'ready') return 'ok';
+  if (name === 'partial') return 'warn';
   if (name === 'failed') return 'bad';
   if (name === 'running') return 'run';
   if (name === 'queued' || name === 'pending' || name === 'interrupted' || name === 'canceled') return 'mute';
@@ -301,6 +303,7 @@ function queueHTML() {
     all: '任务队列是空的：大纲、正文、世界、角色、标注、素材、配音等任务开始后会出现在这里。',
     active: '没有排队或运行中的任务。',
     failed: '没有失败的任务。',
+    partial: '没有部分完成的任务。',
     succeeded: '还没有成功的任务记录。',
   }[queueFilter];
 
@@ -329,7 +332,7 @@ function queueHTML() {
     return info.current || '—';
   };
   const terminalCount = queue.filter((item) =>
-    ['succeeded', 'failed', 'canceled', 'interrupted'].includes(item.status)
+    ['succeeded', 'partial', 'failed', 'canceled', 'interrupted'].includes(item.status)
   ).length;
   return `
     <div class="card" style="margin:14px 18px 0">
@@ -339,6 +342,7 @@ function queueHTML() {
             ['all', '全部'],
             ['active', '进行中'],
             ['failed', '失败'],
+            ['partial', '部分完成'],
             ['succeeded', '成功'],
           ]
             .map(

@@ -24,14 +24,19 @@ from ..store import ProjectStore
 from ..store.settings_store import SettingsStore
 from ..store.world_store import WorldStore
 from ..text.titles import strip_index_prefix
-from .cast_sync import sync_chapter_cast
+from .cast_sync import (
+    apply_chapter_cast,
+    cast_prompt_block,
+    load_pending,
+    normalize_cast,
+    summarize_cast,
+)
 from .service import (
     _act_validation,
     _characters_payload,
     _generate_json,
     _progress,
     _tolerance,
-    _tool_max_tokens,
     _validation_report,
     bind_outline_context,
     build_writing_adapter,
@@ -463,6 +468,9 @@ def _normalize_beats(payload: dict, expected: int, chapter_words: int, beats_per
             {
                 "summary": _text(item.get("summary"), 240) or f"第{index}个节拍",
                 "character_ids": ids,
+                "extra_characters": [
+                    _text(name, 60) for name in (item.get("extra_characters") or []) if _text(name, 60)
+                ],
                 "turning_point": bool(item.get("turning_point")),
                 "target_words": words,
             }
@@ -470,91 +478,46 @@ def _normalize_beats(payload: dict, expected: int, chapter_words: int, beats_per
     return rows
 
 
-def _sync_chapter_cast(
+def _apply_chapter_cast(
     store: ProjectStore,
-    config: AppConfig,
-    adapter,
     chapter: dict,
+    payload: dict,
     chapter_pos: int,
+    characters: list[dict],
+    pending: dict,
     dry_run: bool,
     on_progress,
-    act_pos: int,
-    act_total: int,
 ) -> dict:
-    """给单章做角色设定：复用已有角色卡，缺失的当场新建并绑定到节拍。
+    """把本次节拍调用里的 cast 落到角色卡与节拍绑定（不再单独请求模型）。
 
     参数:
         store: 工程。
-        config: 本机配置。
-        adapter: 写作适配器。
-        chapter: 大纲章节（节拍已生成，会被原地写入 character_ids 与 cast_synced）。
+        chapter: 大纲章节（节拍已生成，会被原地写入 character_ids）。
+        payload: `emit_beats` 的同一次返回（含 beats 与 cast）。
         chapter_pos: 全文章序号。
-        dry_run: True 时只预览，不写 characters.json。
+        characters: 当前内存角色表（不含旁白）。
+        pending: 待定角色登记（第二次出现才建卡）。
+        dry_run: True 时只预览，不写角色卡与登记。
         on_progress: 进度回调。
-        act_pos: 幕序号。
-        act_total: 幕总数。
 
     返回:
-        `{created, reused, cast, beat_ids}`（见 `sync_chapter_cast`）。
-
-    异常:
-        AdapterError: 本章角色设定失败（由调用方决定是否记为该章失败）。
+        `apply_chapter_cast()` 的返回值。
     """
-    title = chapter.get("title") or f"第{chapter_pos}章"
-    _progress(
-        on_progress,
-        {
-            "type": "batch",
-            "unit": "cast",
-            "phase": "cast",
-            "index": chapter_pos,
-            "total": chapter_pos,
-            "name": title,
-            "act_index": act_pos,
-            "act_total": act_total,
-            "chapter_index": chapter_pos,
-            "chapter": title,
-            "message": f"第 {chapter_pos} 章《{title}》角色设定",
-        },
-    )
-    report = sync_chapter_cast(
+    report = apply_chapter_cast(
         store,
-        config,
         chapter,
-        adapter=adapter,
+        normalize_cast(payload),
+        characters=characters,
+        pending=pending,
         persist=not dry_run,
         chapter_index=chapter_pos,
+        chapter_title=chapter.get("title") or "",
     )
-    created = list(report.get("created") or [])
-    reused = list(report.get("reused") or [])
-    summary = (
-        f"第 {chapter_pos} 章《{title}》角色设定完成：新建 {len(created)}，复用 {len(reused)}"
-        + (f"（新建：{'、'.join(created)}）" if created else "")
-    )
+    title = chapter.get("title") or f"第{chapter_pos}章"
+    summary = f"第 {chapter_pos} 章《{title}》角色对齐：{summarize_cast(report)}"
     logger.info(summary)
     _progress(on_progress, {"type": "notice", "message": summary})
     return report
-
-
-def _merge_cast_characters(store: ProjectStore, report: dict, dry_run: bool, characters: list[dict]) -> list[dict]:
-    """把角色设定结果合进本次生成使用的内存角色表。
-
-    参数:
-        store: 工程。
-        report: `sync_chapter_cast` 的返回值。
-        dry_run: True 表示新建角色没有落盘，需要直接合并内存对象。
-        characters: 当前内存角色表（不含旁白）。
-
-    返回:
-        合并后的角色表。
-    """
-    if dry_run:
-        known = {str(item.get("id")) for item in characters}
-        for item in report.get("new_characters") or []:
-            if str(item.get("id")) not in known:
-                characters.append(item)
-        return characters
-    return [item for item in store.load_characters()["characters"] if item.get("role") != "narrator"]
 
 
 def _bind_outline_characters(store: ProjectStore, bible: dict, characters: list[dict]) -> dict:
@@ -639,7 +602,6 @@ def generate_hierarchical_outline(
             system="你是长篇小说的结构编辑，只按工具参数输出幕结构，不要解释。",
             messages=[Message("user", prompt)],
             stream=True,
-            max_tokens=_tool_max_tokens(config, "outline_acts", max(1, int(acts))),
             metadata={
                 "acts": max(1, int(acts)),
                 "chapters_per_act": max(1, int(chapters_per_act)),
@@ -773,7 +735,6 @@ def generate_hierarchical_outline(
             system="你是长篇小说的结构编辑，只按工具参数输出本幕章节列表，不要解释。",
             messages=[Message("user", "\n".join(lines))],
             stream=True,
-            max_tokens=_tool_max_tokens(config, "outline_chapters", expected),
             metadata={
                 "acts": act_total,
                 "chapters_per_act": expected,
@@ -875,44 +836,16 @@ def generate_hierarchical_outline(
     chars_done = 0
     cast_created_total = 0
     cast_reused_total = 0
+    # 待定角色：第一次出现只登记，第二次出现（跨章）才建卡
+    pending: dict = {} if dry_run else load_pending(store)
     total_units = max(1, act_total + chapter_total + beats_total)
     _progress(on_progress, {"type": "stage", "stage": "beats", "total": chapter_total, "beats_total": beats_total})
     for act_pos, act in enumerate(work["acts"], start=1):
         for chapter in act.get("chapters") or []:
             chapter_pos += 1
             if chapter.get("beats") and len(chapter["beats"]) == beats_expected:
-                # 续跑：节拍已齐但可能还没做角色设定，补做一次
-                if not chapter.get("cast_synced"):
-                    try:
-                        report = _sync_chapter_cast(
-                            store, config, adapter, chapter, chapter_pos, dry_run, on_progress, act_pos, act_total
-                        )
-                    except AdapterError as exc:
-                        if (exc.detail or {}).get("gate"):
-                            raise
-                        chapter["status"] = "failed"
-                        chapter["error"] = _error_text(exc)
-                        failures.append(
-                            _failure(
-                                "chapter",
-                                chapter["error"],
-                                act_pos,
-                                act.get("title") or f"第{act_pos}幕",
-                                chapter_pos,
-                                chapter.get("title") or f"第{chapter_pos}章",
-                            )
-                        )
-                    else:
-                        cast_created_total += len(report.get("created") or [])
-                        cast_reused_total += len(report.get("reused") or [])
-                        chapter["cast_synced"] = True
-                        chapter["cast_created"] = list(report.get("created") or [])
-                        chapter["cast_reused"] = list(report.get("reused") or [])
-                        chapter["status"] = "done"
-                        chapter["error"] = None
-                        characters = _merge_cast_characters(store, report, dry_run, characters)
-                        char_rows = _characters_payload(characters)
-                        chars_done += 1
+                # 续跑：节拍已齐即视为该章完成；角色对齐与节拍在同一次调用里，
+                # 不再单独补一次角色请求（不留第二套路径）
                 beats_done += len(chapter["beats"])
                 continue
             chapter_title = chapter.get("title") or f"第{chapter_pos}章"
@@ -947,6 +880,7 @@ def generate_hierarchical_outline(
                 f"第 {act_pos} 幕《{act.get('title') or ''}》：{act.get('summary') or ''}",
                 f"第 {chapter_pos} 章《{chapter_title}》：{chapter.get('summary') or ''}",
                 f"请一次补齐本章的 {max(1, int(beats_per_chapter))} 个节拍：只写节拍，不要重复章节标题。",
+                cast_prompt_block(characters),
             ]
             if siblings:
                 lines.append("本幕其他章节（用于前后衔接）：" + siblings)
@@ -955,7 +889,6 @@ def generate_hierarchical_outline(
                 system="你是长篇小说的结构编辑，只按工具参数输出本章全部节拍，不要解释。",
                 messages=[Message("user", "\n".join(lines))],
                 stream=True,
-                max_tokens=_tool_max_tokens(config, "outline_beats", beats_per_chapter),
                 metadata={
                     "acts": act_total,
                     "chapters_per_act": len(act["chapters"]),
@@ -1062,20 +995,21 @@ def generate_hierarchical_outline(
                         },
                     )
                 chapter["beats"] = beats
-                chapter["character_arcs"] = _normalize_character_arcs(
-                    payload, {str(item.get("id")) for item in char_rows if item.get("id")}
-                )
-                # 节拍完成后立刻对齐角色卡：复用已有、补建缺失，并绑定到每个节拍
-                cast_report = _sync_chapter_cast(
-                    store, config, adapter, chapter, chapter_pos, dry_run, on_progress, act_pos, act_total
+                # 节拍与本章 cast 是同一次调用；这里只做确定性的匹配、建卡与绑定
+                cast_report = _apply_chapter_cast(
+                    store, chapter, payload, chapter_pos, characters, pending, dry_run, on_progress
                 )
                 cast_created_total += len(cast_report.get("created") or [])
                 cast_reused_total += len(cast_report.get("reused") or [])
                 chapter["cast_synced"] = True
                 chapter["cast_created"] = list(cast_report.get("created") or [])
                 chapter["cast_reused"] = list(cast_report.get("reused") or [])
-                characters = _merge_cast_characters(store, cast_report, dry_run, characters)
+                chapter["cast_extras"] = list(cast_report.get("extras") or [])
+                characters = list(cast_report.get("characters") or characters)
                 char_rows = _characters_payload(characters)
+                chapter["character_arcs"] = _normalize_character_arcs(
+                    payload, {str(item.get("id")) for item in characters if item.get("id")}
+                )
                 chars_done += 1
                 chapter["status"] = "done"
                 chapter["error"] = None
@@ -1117,6 +1051,7 @@ def generate_hierarchical_outline(
                         character_ids=beat.get("character_ids") or [],
                         turning_point=bool(beat.get("turning_point")),
                         target_words=int(beat.get("target_words") or chapter_words // max(1, beats_per_chapter)),
+                        extra_characters=beat.get("extra_characters") or [],
                     )
                 )
             outline_chapter["character_arcs"] = [

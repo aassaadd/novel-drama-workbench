@@ -50,12 +50,22 @@ _FALLBACK = {
         # 分组温度：写作（大纲/正文/角色/世界）、润色（润色/音色描述）、音效与 BGM
         "temperature_polish": 0.6,
         "temperature_audio": 0.2,
-        "max_tokens": None,
         "stop": [],
         "enable_thinking": False,
         # 思考强度：low / medium / high；仅在 enable_thinking 打开时随请求下发
         "reasoning_effort": "medium",
         "unload": {"enabled": True, "path": "/v1/models/{model_id}/unload", "policy": "after_text_task"},
+    },
+    # 写作目标结构：只决定「写多少字」，不再包含输出预算 / 阶段思考设置
+    "writing": {
+        "multi_turn": {
+            "enabled": True,
+            "beats_per_round": 0,
+            "max_rounds": 8,
+            "cache_prompt": True,
+        },
+        "default_chapter_words": 1200,
+        "default_beats_per_chapter": 4,
     },
     "comfyui": {
         "base_url": "http://127.0.0.1:8188",
@@ -170,6 +180,8 @@ class AppConfig:
     warnings: list[str] = field(default_factory=list)
     # 页面覆盖层（config/config.ui.yaml）：只记录被页面改过的键，用于前端标「来源」
     ui_values: dict = field(default_factory=dict)
+    # 基础配置（config/config.yaml）原文：用于区分「基础配置」与「代码默认」
+    base_values: dict = field(default_factory=dict)
     ui_path: Path | None = None
 
     def get(self, dotted: str, default=None):
@@ -324,6 +336,7 @@ def load_config(path: str | Path | None = None, ui_path: str | Path | None = Non
         project_root=Path(project_root).expanduser() if project_root else None,
         warnings=warnings,
         ui_values=ui_values,
+        base_values=raw if isinstance(raw, dict) else {},
         ui_path=(Path(ui_path).expanduser() if ui_path else DEFAULT_UI_CONFIG_PATH),
     )
 

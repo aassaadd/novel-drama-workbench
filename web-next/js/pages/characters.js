@@ -91,6 +91,8 @@ let saveTimer = null;
 let audio = null;
 /** 章节音色覆盖缓存：`{character, data}`，避免每次重画都逐章请求 */
 let overrideCache = { character: '', data: null };
+/** 大纲生成时按章登记的新建角色：`[{index, title, items:[{id,name,created_at}]}]` */
+let createdChapters = [];
 
 /** 更新顶栏保存态（参考：输入后显示「待保存」，落盘后「已自动保存」） */
 function setSaveState(kind, text) {
@@ -168,12 +170,17 @@ function listHTML() {
   } else {
     body = `<div class="empty"><b>没有匹配的角色</b><span>换个关键词或清空筛选</span></div>`;
   }
+  const createdCount = createdChapters.reduce((total, row) => total + (row.items || []).length, 0);
   return `
     <section class="ctx" aria-label="角色列表">
       <div class="ctx-head">
         <span class="ct">角色</span>
         <span class="badge mute">${characters.length} 人</span>
         <div class="right">
+          <button class="btn sm" data-act="new-this-chapter" ${createdCount ? '' : 'disabled'}
+            title="${createdCount ? '查看大纲生成时每章新建的角色，点名字可直接切换' : '这次大纲生成没有按章新建角色'}">
+            本章新建${createdCount ? ` ${createdCount}` : ''}
+          </button>
           <button class="btn icon sm" data-act="new-character" title="新增角色">${icon('plus')}</button>
         </div>
       </div>
@@ -557,6 +564,12 @@ function profileHTML() {
         </button>
         ${
           locked
+            ? ''
+            : `<button class="btn" data-act="merge-character"
+                 title="把这张卡并到已有角色上；台词、场景、大纲节拍与关系会一起迁移">合并到已有角色…</button>`
+        }
+        ${
+          locked
             ? `<span class="hint">${esc(lockHint)}</span>`
             : `<button class="btn danger" data-act="delete-character"
                  title="删除后不可恢复；被台词引用时会先提示">${icon('x')} 删除角色</button>`
@@ -656,13 +669,14 @@ function profileHTML() {
 
 /** 读取全部数据 */
 async function loadAll(path) {
-  const [info, chapters, charaPayload, castPayload, checkPayload, statsPayload] = await Promise.all([
+  const [info, chapters, charaPayload, castPayload, checkPayload, statsPayload, createdPayload] = await Promise.all([
     getJSON('/api/project/info', { path }),
     getJSON('/api/ui/chapters', { path }),
     getJSON('/api/ui/characters', { path }),
     getJSON('/api/ui/cast', { path }).catch(() => null),
     getJSON('/api/ui/cast/check', { path }).catch(() => null),
     getJSON('/api/ui/characters/stats', { path }).catch(() => null),
+    getJSON('/api/ui/characters/new-this-chapter', { path }).catch(() => null),
   ]);
   state.info = info;
   state.chapters = chapters || [];
@@ -673,6 +687,7 @@ async function loadAll(path) {
   voices = castPayload?.voices || [];
   check = checkPayload;
   stats = statsPayload?.characters || {};
+  createdChapters = (createdPayload?.chapters || []).filter((row) => (row.items || []).length);
   overrideCache = { character: '', data: null };
   if (!characters.some((item) => item.id === selectedId)) selectedId = characters[0]?.id || '';
 }
@@ -763,6 +778,7 @@ function newCharacter() {
     const name = mask.querySelector('#nc-name').value.trim();
     if (!name) return toast('请填写姓名', 'warn');
     event.currentTarget.disabled = true;
+    event.currentTarget.textContent = '创建中…';
     try {
       await postJSON('/api/ui/characters', {
         path: state.path,
@@ -770,11 +786,11 @@ function newCharacter() {
       });
       closeDialog();
       toast('角色已创建', 'ok');
-      await loadAll(state.path);
-      repaint();
+      await reloadPreservingView();
     } catch (error) {
-      toast(error.message, 'bad');
+      toast(`创建失败：${error.message}；可检查姓名是否与已有角色重复`, 'bad', 4200);
       event.currentTarget.disabled = false;
+      event.currentTarget.textContent = '创建';
     }
   });
 }
@@ -827,12 +843,205 @@ async function deleteCharacter() {
       closeDialog();
       toast('角色已删除', 'ok');
       selectedId = '';
-      await loadAll(state.path);
-      repaint();
+      await reloadPreservingView();
     } catch (error) {
-      toast(error.message, 'bad');
+      toast(`删除失败：${error.message}；可先用「查看出场」确认台词与大纲引用`, 'bad', 4200);
       event.currentTarget.disabled = false;
     }
+  });
+}
+
+/**
+ * 重新读取并局部重画，保留列表/主区滚动位置与当前输入焦点。
+ * 用于合并、删除等必须刷新数据的操作，避免整页重绘把用户位置打回顶部。
+ */
+async function reloadPreservingView() {
+  const scrolled = ['#chara-main', '.chap-list']
+    .map((selector) => document.querySelector(selector))
+    .filter(Boolean)
+    .map((node) => ({ node, top: node.scrollTop }));
+  const active = document.activeElement;
+  const focusId = active?.id || '';
+  const start = typeof active?.selectionStart === 'number' ? active.selectionStart : null;
+  const end = typeof active?.selectionEnd === 'number' ? active.selectionEnd : null;
+  await loadAll(state.path);
+  repaint();
+  scrolled.forEach(({ node, top }) => {
+    if (node.isConnected) node.scrollTop = top;
+  });
+  if (focusId) {
+    const node = document.getElementById(focusId);
+    if (node) {
+      node.focus({ preventScroll: true });
+      if (start != null && typeof node.setSelectionRange === 'function') node.setSelectionRange(start, end);
+    }
+  }
+  return { focusId };
+}
+
+/**
+ * 合并到已有角色：先统计影响面，二次确认后迁移引用并删除源角色。
+ * 影响面包含大纲节拍选角、章节视角、场景出场、台词行、关系与音色覆盖。
+ */
+function mergeCharacter() {
+  const item = current();
+  if (!item) return;
+  const targets = characters.filter((row) => row.id !== item.id && row.role !== 'narrator');
+  if (!targets.length) return toast('没有可合并的其它角色，请先新增一个目标角色', 'warn');
+  const options = targets
+    .map((row) => `<option value="${esc(row.id)}">${esc(row.name)} · ${esc(ROLE_LABEL[row.role] || row.role || '')}</option>`)
+    .join('');
+  const mask = openDialog({
+    title: `合并「${item.name}」到已有角色`,
+    wide: true,
+    body: `
+      <div class="dlg-note warn">合并不可撤销：台词、场景出场、大纲节拍选角、章节视角、关系与音色覆盖都会迁移到目标角色，随后源角色被删除（姓名会变成目标角色的别名）。</div>
+      <div class="field"><label>合并到</label>
+        <select class="select" id="mg-target" title="选择要保留的角色卡">
+          <option value="">请选择目标角色</option>
+          ${options}
+        </select>
+      </div>
+      <div id="mg-impact" class="hint">选择目标角色后显示影响面。</div>
+      <div id="mg-error"></div>`,
+    foot: `<div class="right"><button class="btn" data-dlg-close>取消</button>
+      <button class="btn danger" id="mg-ok" disabled title="先选择目标角色并查看影响面">确认合并</button></div>`,
+  });
+  const targetSelect = mask.querySelector('#mg-target');
+  const okButton = mask.querySelector('#mg-ok');
+  const impactBox = mask.querySelector('#mg-impact');
+  const errorBox = mask.querySelector('#mg-error');
+  let impact = null;
+
+  /** 把影响面渲染成可读明细 */
+  const renderImpact = (data) => {
+    const outline = data.outline || {};
+    const chapters = data.chapters || {};
+    const rows = [
+      ['大纲节拍选角', Number(outline.beats || 0)],
+      ['章节视角', Number(outline.pov || 0)],
+      ['角色弧线', Number(outline.arcs || 0)],
+      ['场景出场', Number(chapters.scenes || 0)],
+      ['台词行', Number(chapters.lines || 0)],
+      ['章节音色覆盖', Number(chapters.overrides || 0)],
+      ['其它角色的关系', Number(data.relations || 0)],
+    ];
+    impactBox.innerHTML = `
+      <div class="summary-line" style="margin-bottom:6px">
+        <span>共 <b>${Number(data.total || 0)}</b> 处引用会改到「${esc(data.target?.name || '')}」名下</span>
+        <span class="right badge ${Number(data.total || 0) ? 'warn' : 'ok'}">${Number(data.total || 0) ? '需迁移' : '无引用'}</span>
+      </div>
+      ${rows
+        .map(
+          ([label, count]) => `<div class="summary-line">
+            <span style="min-width:0;font-size:12px;color:var(--text-3)">${esc(label)}</span>
+            <span class="right mono" style="color:${count ? 'var(--text)' : 'var(--text-4)'}">${count}</span>
+          </div>`
+        )
+        .join('')}`;
+  };
+
+  targetSelect.addEventListener('change', async () => {
+    const target = targetSelect.value;
+    impact = null;
+    okButton.disabled = true;
+    okButton.textContent = '确认合并';
+    errorBox.innerHTML = '';
+    if (!target) {
+      impactBox.textContent = '选择目标角色后显示影响面。';
+      return;
+    }
+    impactBox.textContent = '正在统计引用…';
+    try {
+      const data = await getJSON('/api/ui/characters/merge/impact', {
+        path: state.path,
+        source: item.id,
+        target,
+      });
+      if (!targetSelect.isConnected || targetSelect.value !== target) return;
+      impact = data;
+      renderImpact(data);
+      okButton.disabled = false;
+      okButton.title = '确认后立即迁移引用并删除源角色';
+    } catch (error) {
+      impactBox.textContent = '';
+      errorBox.innerHTML = `<div class="dlg-note bad">读取影响面失败：${esc(error.message)}
+        <br>可关闭弹窗后重试；若持续失败，先到画本与大纲核对这个角色的引用是否正常。</div>`;
+    }
+  });
+
+  okButton.addEventListener('click', async () => {
+    const target = targetSelect.value;
+    if (!target || !impact) return;
+    okButton.disabled = true;
+    targetSelect.disabled = true;
+    okButton.textContent = '合并中…';
+    errorBox.innerHTML = '';
+    try {
+      const data = await postJSON('/api/ui/characters/merge', {
+        path: state.path,
+        source: item.id,
+        target,
+      });
+      closeDialog(false);
+      selectedId = data.target?.id || target;
+      const total = Number(data.impact?.total || 0);
+      toast(`已把「${data.source?.name || item.name}」合并到「${data.target?.name || ''}」，迁移 ${total} 处引用`, 'ok', 4200);
+      await reloadPreservingView();
+      document.getElementById('ch-name')?.focus({ preventScroll: true });
+    } catch (error) {
+      errorBox.innerHTML = `<div class="dlg-note bad">合并失败：${esc(error.message)}
+        <br>本次没有完成迁移。可关闭弹窗，打开该角色核对台词与大纲后再试；
+        若引用被锁定，请先到「一致性」检查是否有非法绑定。</div>`;
+      okButton.textContent = '确认合并';
+      okButton.disabled = false;
+      targetSelect.disabled = false;
+    }
+  });
+}
+
+/**
+ * 本章新建：按章列出大纲生成时新建的角色（一次性龙套不在其中）。
+ * 点角色名直接切到该角色，不重画整页。
+ */
+function openCreatedThisChapter() {
+  const rows = createdChapters || [];
+  if (!rows.length) return toast('这次大纲生成没有按章新建角色', 'info');
+  const mask = openDialog({
+    title: '本章新建角色',
+    wide: true,
+    body: `
+      <div class="hint">大纲生成时按「第二次出现才建卡」登记的新角色；一次性的龙套不在这里。点名字可直接切换。</div>
+      ${rows
+        .map(
+          (row) => `<div style="border-top:1px solid var(--line);padding:8px 0">
+            <div class="summary-line" style="margin-bottom:6px">
+              <span style="min-width:0;font-size:12px;color:var(--text-2)">第 ${Number(row.index || 0)} 章 · ${esc(
+                row.title || '未命名章节'
+              )}</span>
+              <span class="right badge mute">${(row.items || []).length} 个</span>
+            </div>
+            <div style="display:flex;flex-wrap:wrap;gap:6px">
+              ${(row.items || [])
+                .map(
+                  (entry) => `<button class="btn sm" data-pick-created="${esc(entry.id)}"
+                    title="切换到 ${esc(entry.name)} 的角色档案">${esc(entry.name)}</button>`
+                )
+                .join('')}
+            </div>
+          </div>`
+        )
+        .join('')}`,
+    foot: `<div class="right"><button class="btn" data-dlg-close>关闭</button></div>`,
+  });
+  mask.querySelectorAll('[data-pick-created]').forEach((button) => {
+    button.addEventListener('click', () => {
+      flushSave();
+      stopAudio();
+      selectedId = button.dataset.pickCreated;
+      closeDialog(false);
+      repaint();
+    });
   });
 }
 
@@ -1677,6 +1886,8 @@ async function onRootClick(event) {
   if (act === 'autofill') return void openAutofill();
   if (act === 'char-image') return openCharacterImage(button.dataset.kind || '');
   if (act === 'delete-character') return deleteCharacter();
+  if (act === 'merge-character') return mergeCharacter();
+  if (act === 'new-this-chapter') return openCreatedThisChapter();
   if (act === 'view-appearances') return viewAppearances();
   if (act === 'relation-add') return addRelationRow();
   if (act === 'relation-del') return deleteRelationRow(Number(el.dataset.index));

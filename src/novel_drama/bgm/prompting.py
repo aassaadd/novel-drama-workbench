@@ -229,7 +229,6 @@ def _llm_settings(config, timeout_s: float | None = None) -> dict | None:
         timeout_s if timeout_s is not None else (config.get("bgm.prompt.llm_timeout_s") or DEFAULT_LLM_TIMEOUT_S)
     )
     settings["temperature"] = resolve_temperature(config, "audio")
-    settings["max_tokens"] = 200
     settings["enable_thinking"] = False
     return settings
 
@@ -255,7 +254,6 @@ def _llm_rewrite(prompt: str, settings: dict) -> str:
         task="bgm_prompt",
         system=LLM_SYSTEM,
         messages=[Message(role="user", content=f"中文配乐描述：{prompt}")],
-        max_tokens=200,
         temperature=float(settings.get("temperature") or 0.2),
         stream=False,
     )

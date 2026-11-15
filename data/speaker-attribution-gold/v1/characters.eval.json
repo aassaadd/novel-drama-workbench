@@ -70,7 +70,7 @@
     {
       "id": "chr_sumei01",
       "name": "苏梅",
-      "aliases": ["苏姐"],
+      "aliases": ["苏姐", "女人"],
       "role": "supporting",
       "gender": "female",
       "age_range": "40 岁上下",
@@ -114,7 +114,7 @@
     {
       "id": "chr_zhinainai",
       "name": "纸奶奶",
-      "aliases": ["老板娘"],
+      "aliases": ["老板娘", "纸人"],
       "role": "antagonist",
       "gender": "female",
       "age_range": "老年",
@@ -136,7 +136,7 @@
     {
       "id": "chr_nuowang",
       "name": "傩王",
-      "aliases": [],
+      "aliases": ["它"],
       "role": "antagonist",
       "gender": "unknown",
       "age_range": null,

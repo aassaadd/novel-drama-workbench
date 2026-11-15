@@ -1,103 +1,381 @@
-"""大纲阶段的角色设定：每章节拍生成后立即对齐角色卡。
+"""大纲阶段的角色对齐：随「本章节拍」一次生成，不再单独发角色请求。
 
-目的：让「这一章该有谁」在正文之前就定下来，避免人物漏建卡。
-做法：
-1. 把本章标题、摘要、逐条节拍与现有角色卡交给模型；
-2. 已有同名/同别名角色一律复用（只补别名），没有的才新建角色卡；
-3. 返回的每个节拍都绑定到具体角色 ID；节拍为空时用本章视角人物兜底；
-4. 新建卡立即写入 characters.json，后续章节与正文生成都能直接用上。
+主线只有一条：`emit_beats` / `emit_act` 在返回节拍的同时返回本章 `cast`，
+由 `apply_chapter_cast()` 做纯确定性的落地：
 
-正文生成后的状态回流与一致性检查只是补充，不在这里做。
+1. 姓名、别名规范化后先与现有角色卡比对，命中就复用并补别名；
+2. 「她」「它」「女人」「男人」「对方」这类叙述代称一律不建卡；
+3. 现有卡里没有的候选，第二次出现（跨章）才建卡；一次性的龙套按 minor 处理，
+   只记在节拍的 `extra_characters` 里，不进入角色表；
+4. 节拍没有点名任何角色时回退旁白（`chr_narrator`），不再硬绑主角；
+5. 新建卡登记到 `.ndw/cast_created.json`，供界面「本章新建」查看。
+
+正文生成后的状态回流与一致性检查仍只是补充，不在这里做。
 """
 
 from __future__ import annotations
 
 import json
 import re
+import unicodedata
 
-from ..adapters.base import AdapterError, ErrorCode, Message, TextGenRequest
-from ..adapters.offline_writing import OfflineWritingAdapter
-from ..config import AppConfig
 from ..models import entities
+from ..models.ids import now_iso
 from ..store import ProjectStore
-from .service import (
-    _clean_speech_style,
-    _generate_json,
-    _tool_max_tokens,
-)
+from .service import _clean_speech_style
 
 #: 允许的角色定位（与 character.schema.json 对齐）
 ROLES = ("protagonist", "antagonist", "supporting", "minor")
 #: 允许的性别取值
 GENDERS = ("male", "female", "other", "unknown")
 
-#: 角色设定工具：模型只输出本章 cast 与节拍归属
-CAST_SYNC_TOOL = {
-    "type": "function",
-    "function": {
-        "name": "emit_chapter_cast",
-        "description": "输出本章出场角色与每个节拍的角色归属",
-        "parameters": {
-            "type": "object",
-            "required": ["cast"],
-            "properties": {
-                "cast": {
-                    "type": "array",
-                    "description": "本章全部出场角色；已有角色必须带 existing_id 复用，不得重复建卡",
-                    "items": {
-                        "type": "object",
-                        "required": ["name"],
-                        "properties": {
-                            "existing_id": {
-                                "type": "string",
-                                "description": "复用现有角色时填其 ID；新建角色留空",
-                            },
-                            "name": {"type": "string", "description": "角色姓名"},
-                            "aliases": {
-                                "type": "array",
-                                "items": {"type": "string"},
-                                "description": "本章出现的称呼/别名",
-                            },
-                            "role": {"type": "string", "enum": list(ROLES)},
-                            "gender": {"type": "string", "enum": list(GENDERS)},
-                            "age_range": {"type": "string"},
-                            "personality": {"type": "array", "items": {"type": "string"}},
-                            "background": {"type": "string", "description": "新建角色必须给，已有角色可留空"},
-                            "speech_style": {
-                                "type": "object",
-                                "properties": {
-                                    "tempo": {"type": "string"},
-                                    "pitch": {"type": "string"},
-                                    "accent": {"type": "string"},
-                                    "catchphrases": {"type": "array", "items": {"type": "string"}},
-                                },
-                            },
-                            "beats": {
-                                "type": "array",
-                                "items": {"type": "integer"},
-                                "description": "该角色出场的节拍序号（从 1 开始）",
-                            },
-                        },
-                    },
-                }
-            },
-        },
-    },
+#: 待定角色登记（第二次出现才建卡）
+PENDING_VERSION = "cast_pending/1"
+#: 新建角色登记（界面「本章新建」）
+CREATED_VERSION = "cast_created/1"
+
+#: 叙述代称：一律不建卡
+DESCRIPTOR_WORDS = {
+    "他",
+    "她",
+    "它",
+    "他们",
+    "她们",
+    "它们",
+    "我",
+    "我们",
+    "你",
+    "你们",
+    "您",
+    "大家",
+    "众人",
+    "有人",
+    "某人",
+    "对方",
+    "旁人",
+    "那人",
+    "这人",
+    "此人",
+    "女人",
+    "男人",
+    "女孩",
+    "男孩",
+    "女子",
+    "男子",
+    "妇人",
+    "少女",
+    "少年",
+    "老人",
+    "老者",
+    "孩子",
+    "小孩",
+    "陌生人",
+    "声音",
 }
+
+#: 归一化用的空白
+_SPACE_RE = re.compile(r"\s+")
 
 
 def _clean_text(value, limit: int) -> str:
-    """把任意值转成去空白字符串并截断。"""
+    """把任意值转成去空白字符串并截断。
+
+    参数:
+        value: 任意值。
+        limit: 最大长度。
+
+    返回:
+        去空白后的字符串。
+    """
     return str(value or "").strip()[:limit]
 
 
 def _norm(name: str) -> str:
-    """姓名归一化：去空白，英文统一小写，用于匹配复用。"""
-    return re.sub(r"\s+", "", str(name or "")).casefold()
+    """姓名归一化：全半角统一、去空白、英文小写，用于确定性匹配。
+
+    参数:
+        name: 姓名或别名。
+
+    返回:
+        归一化后的字符串（空串表示无效）。
+    """
+    text = unicodedata.normalize("NFKC", str(name or ""))
+    return _SPACE_RE.sub("", text).casefold()
+
+
+def is_descriptor(name: str) -> bool:
+    """判断是否是叙述代称（代词 / 「女人」「男人」「对方」这类泛称）。
+
+    参数:
+        name: 候选姓名。
+
+    返回:
+        True 表示不应建卡。
+    """
+    key = _norm(name)
+    if not key:
+        return True
+    if key in DESCRIPTOR_WORDS:
+        return True
+    # 「他」「她」「它」+ 们，或「一个男人」这类带量词的泛称
+    return bool(re.fullmatch(r"(他们|她们|它们|你|我|他|她|它)", key))
+
+
+def _registry_path(store: ProjectStore, name: str):
+    """返回角色登记文件路径。
+
+    参数:
+        store: 工程。
+        name: 文件名（不含扩展名）。
+
+    返回:
+        `.ndw/<name>.json` 的 Path。
+    """
+    return store.root / ".ndw" / f"{name}.json"
+
+
+def _load_registry(store: ProjectStore, name: str, version: str) -> dict:
+    """读取登记文件；不存在或损坏时返回空骨架。
+
+    参数:
+        store: 工程。
+        name: 文件名。
+        version: 版本号。
+
+    返回:
+        登记 dict。
+    """
+    path = _registry_path(store, name)
+    if not path.exists():
+        return {"version": version, "chapters": {}, "pending": {}}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {"version": version, "chapters": {}, "pending": {}}
+    if not isinstance(data, dict):
+        return {"version": version, "chapters": {}, "pending": {}}
+    data.setdefault("version", version)
+    data.setdefault("chapters", {})
+    data.setdefault("pending", {})
+    return data
+
+
+def _save_registry(store: ProjectStore, name: str, data: dict) -> None:
+    """原子写入登记文件。
+
+    参数:
+        store: 工程。
+        name: 文件名。
+        data: 登记内容。
+
+    返回:
+        无。
+    """
+    path = _registry_path(store, name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    tmp.replace(path)
+
+
+def load_pending(store: ProjectStore) -> dict:
+    """读取「第二次出现才建卡」的待定登记。
+
+    参数:
+        store: 工程。
+
+    返回:
+        `{归一化姓名: {name, chapter, chapter_title, aliases}}`。
+    """
+    return dict(_load_registry(store, "cast_pending", PENDING_VERSION).get("pending") or {})
+
+
+def save_pending(store: ProjectStore, pending: dict) -> None:
+    """写入待定登记（只保留仍待定的候选）。
+
+    参数:
+        store: 工程。
+        pending: 待定登记 dict。
+
+    返回:
+        无。
+    """
+    _save_registry(
+        store,
+        "cast_pending",
+        {"version": PENDING_VERSION, "chapters": {}, "pending": pending},
+    )
+
+
+def created_in_chapter(store: ProjectStore, chapter_index: int) -> list[dict]:
+    """读取某章新建的角色（界面「本章新建」）。
+
+    参数:
+        store: 工程。
+        chapter_index: 全文章序号。
+
+    返回:
+        `[{id, name, created_at}]`；没有记录时返回空列表。
+    """
+    data = _load_registry(store, "cast_created", CREATED_VERSION)
+    row = (data.get("chapters") or {}).get(str(int(chapter_index or 0))) or {}
+    return list(row.get("items") or [])
+
+
+def list_created_chapters(store: ProjectStore) -> list[dict]:
+    """列出所有有「本章新建」记录的章节，按章序号倒序。
+
+    参数:
+        store: 工程。
+
+    返回:
+        `[{index, title, items}]`。
+    """
+    data = _load_registry(store, "cast_created", CREATED_VERSION)
+    rows: list[dict] = []
+    for key, row in (data.get("chapters") or {}).items():
+        try:
+            index = int(key)
+        except (TypeError, ValueError):
+            continue
+        rows.append(
+            {
+                "index": index,
+                "title": (row or {}).get("title") or "",
+                "items": list((row or {}).get("items") or []),
+            }
+        )
+    rows.sort(key=lambda item: item["index"], reverse=True)
+    return rows
+
+
+def _record_created(store: ProjectStore, index: int, title: str, items: list[dict]) -> None:
+    """把本章新建的角色记进新建登记。
+
+    参数:
+        store: 工程。
+        index: 全文章序号。
+        title: 章节标题。
+        items: 新建角色 `[{id, name, created_at}]`。
+
+    返回:
+        无。
+    """
+    if not items:
+        return
+    data = _load_registry(store, "cast_created", CREATED_VERSION)
+    key = str(int(index or 0))
+    row = (data["chapters"].get(key) or {})
+    existing = list(row.get("items") or [])
+    known = {str(item.get("id")) for item in existing}
+    for item in items:
+        if str(item.get("id")) not in known:
+            existing.append(item)
+    data["chapters"][key] = {"title": title, "items": existing}
+    _save_registry(store, "cast_created", data)
+
+
+def cast_brief(characters: list[dict], limit: int = 200) -> list[dict]:
+    """给模型看的现有角色摘要（只保留复用判断需要的字段）。
+
+    参数:
+        characters: 角色表（可含旁白，内部过滤）。
+        limit: 最多列出多少个角色。
+
+    返回:
+        `[{id, name, aliases, role}]`。
+    """
+    rows = [
+        {
+            "id": item.get("id"),
+            "name": item.get("name"),
+            "aliases": (item.get("aliases") or [])[:6],
+            "role": item.get("role"),
+        }
+        for item in characters
+        if item.get("id") and item.get("role") != "narrator"
+    ]
+    return rows[: max(1, int(limit))]
+
+
+def cast_prompt_block(characters: list[dict]) -> str:
+    """拼节拍生成用的角色对齐规则（与 cast 字段一起交给同一次调用）。
+
+    参数:
+        characters: 现有角色表（可含旁白）。
+
+    返回:
+        中文提示块。
+    """
+    brief = cast_brief(characters)
+    lines = [
+        "同时输出本章 cast（出场角色）与每个角色对应的节拍序号：",
+        "1) 先用姓名或别名与现有角色表比对，命中的填 existing_id 复用，只补本章新出现的别名，不得重复建卡；",
+        "2) 「她」「它」「女人」「男人」「对方」这类叙述代称不要写进 cast，也不要建卡；",
+        "3) 只出现一次的路人不要写进 cast（按 minor 处理），写在对应节拍的 extra_characters 里即可；",
+        "4) cast 每项必须给 beats（该角色在本章出场的节拍序号，从 1 开始），没有节拍依据的角色不要列；",
+        "5) 新建角色给 role/gender/age_range/personality/background/speech_style；复用角色不用重复给设定；",
+        "6) 每个节拍至少要有一个角色；确实没人物的节拍留空，系统会回退旁白。",
+        f"现有角色表：{json.dumps(brief, ensure_ascii=False)}",
+    ]
+    return "\n".join(lines)
+
+
+def normalize_cast(payload: dict) -> list[dict]:
+    """清洗模型返回的 cast 行（只保留可落地字段，不做业务判断）。
+
+    参数:
+        payload: `emit_beats` / `emit_act` 的返回值。
+
+    返回:
+        cast 行列表；格式不对时返回空列表。
+    """
+    raw = payload.get("cast") if isinstance(payload, dict) else None
+    if not isinstance(raw, list):
+        return []
+    rows: list[dict] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        name = _clean_text(item.get("name"), 40)
+        if not name:
+            continue
+        beats: list[int] = []
+        for value in item.get("beats") or []:
+            try:
+                number = int(value)
+            except (TypeError, ValueError):
+                continue
+            if number > 0 and number not in beats:
+                beats.append(number)
+        rows.append(
+            {
+                "existing_id": _clean_text(item.get("existing_id"), 40),
+                "name": name,
+                "aliases": [_clean_text(alias, 40) for alias in (item.get("aliases") or []) if _clean_text(alias, 40)],
+                "role": _clean_text(item.get("role"), 20),
+                "gender": _clean_text(item.get("gender"), 10),
+                "age_range": _clean_text(item.get("age_range"), 20),
+                "personality": [_clean_text(word, 40) for word in (item.get("personality") or []) if _clean_text(word, 40)][:6],
+                "background": _clean_text(item.get("background"), 1000),
+                "speech_style": item.get("speech_style") if isinstance(item.get("speech_style"), dict) else {},
+                "beats": beats,
+            }
+        )
+    return rows
 
 
 def _clean_list(value, limit: int, max_items: int = 6) -> list[str]:
-    """清洗字符串列表：去空、去重、截断。"""
+    """清洗字符串列表：去空、去重、截断。
+
+    参数:
+        value: 原始列表。
+        limit: 单项最大长度。
+        max_items: 最多保留多少项。
+
+    返回:
+        清洗后的列表。
+    """
     rows: list[str] = []
     for item in value or []:
         text = _clean_text(item, limit)
@@ -108,315 +386,297 @@ def _clean_list(value, limit: int, max_items: int = 6) -> list[str]:
     return rows
 
 
-def _cast_brief(characters: list[dict]) -> list[dict]:
-    """给模型看的现有角色摘要（只保留复用判断需要的字段）。"""
-    return [
-        {
-            "id": item.get("id"),
-            "name": item.get("name"),
-            "aliases": item.get("aliases") or [],
-            "role": item.get("role"),
-            "personality": (item.get("personality") or [])[:3],
-            "background": _clean_text(item.get("background"), 120),
-        }
-        for item in characters
-        if item.get("id") and item.get("role") != "narrator"
-    ]
-
-
-def _chapter_text(chapter: dict) -> str:
-    """拼出本章标题、摘要与节拍，供匹配姓名使用。"""
-    beats = [str(beat.get("summary") or "") for beat in chapter.get("beats") or []]
-    return "\n".join([str(chapter.get("title") or ""), str(chapter.get("summary") or ""), *beats])
-
-
-def _match_existing(row: dict, by_id: dict, by_name: dict) -> dict | None:
-    """按 existing_id / 姓名 / 别名匹配现有角色。"""
-    existing_id = _clean_text(row.get("existing_id"), 40)
-    if existing_id and existing_id in by_id:
-        return by_id[existing_id]
-    keys = [row.get("name"), *(row.get("aliases") or [])]
-    for key in keys:
-        hit = by_name.get(_norm(key))
-        if hit is not None:
-            return hit
-    return None
-
-
 def _new_character(row: dict) -> dict:
-    """按模型返回的字段创建角色卡（只写写作与配音都用得上的字段）。"""
-    name = _clean_text(row.get("name"), 40)
-    role = _clean_text(row.get("role"), 20)
-    if role not in ROLES:
-        role = "supporting"
-    gender = _clean_text(row.get("gender"), 10)
-    character = entities.new_character(name, role=role)
+    """按 cast 行创建角色卡（只写写作与配音都用得上的字段）。
+
+    参数:
+        row: 清洗后的 cast 行。
+
+    返回:
+        角色 dict。
+    """
+    role = row.get("role") if row.get("role") in ROLES else "supporting"
+    character = entities.new_character(row["name"], role=role)
     character["aliases"] = _clean_list(row.get("aliases"), 40, 6)
+    gender = row.get("gender")
     character["gender"] = gender if gender in GENDERS else "unknown"
-    character["age_range"] = _clean_text(row.get("age_range"), 20) or None
+    character["age_range"] = row.get("age_range") or None
     character["personality"] = _clean_list(row.get("personality"), 40, 6)
-    character["background"] = _clean_text(row.get("background"), 1000)
+    character["background"] = row.get("background") or f"大纲第 {row.get('_chapter') or '?'} 章创建"
     speech = _clean_speech_style(row.get("speech_style"))
     if speech:
         character["speech_style"] = speech
     return character
 
 
-def _match_name_from_text(text: str, known: list[str]) -> list[str]:
-    """离线规则：从文本里找出已知姓名，用于测试替身。"""
-    return [name for name in known if name and name in text]
-
-
-#: 离线规则里不应当作人名的常见词
-_OFFLINE_STOP_NAMES = {"他们", "她们", "我们", "你们", "自己", "众人", "有人", "两人", "三人", "后者", "前者"}
-
-
-def _offline_names_in(text: str) -> list[str]:
-    """离线规则：从节拍摘要里提取“某某在/说/把”这类人名。"""
-    rows: list[str] = []
-    for match in re.finditer(r"(?:^|[，。；：、\s“”])([\u4e00-\u9fa5]{2,3})(?=在|说|把|从|站|走|推|看)", text):
-        name = match.group(1)
-        if name in _OFFLINE_STOP_NAMES or name in rows:
-            continue
-        rows.append(name)
-    return rows
-
-
-def _payload_for_offline(chapter: dict, characters: list[dict]) -> str:
-    """离线适配器使用：按文本里出现过的姓名返回 cast。
-
-    仅在显式配置 offline 时使用；真实模型走工具调用。
-    """
-    beats = chapter.get("beats") or []
-    known = [str(item.get("name") or "") for item in characters if item.get("name")] or ["主人公"]
-    texts = [str(beat.get("summary") or "") for beat in beats]
-    cast: dict[str, dict] = {}
-    used_any = False
-    for position, text in enumerate(texts, start=1):
-        hits = list(dict.fromkeys([*_match_name_from_text(text, known), *_offline_names_in(text)]))
-        if not hits:
-            continue
-        used_any = True
-        for name in hits:
-            row = cast.setdefault(name, {"name": name, "beats": []})
-            if position not in row["beats"]:
-                row["beats"].append(position)
-    if not used_any:
-        # 节拍里没有点名任何角色：用第一个角色兜住全部节拍，避免空绑定
-        row = cast.setdefault(known[0], {"name": known[0], "beats": []})
-        row["beats"] = list(range(1, len(texts) + 1))
-    existing_by_name = {_norm(item.get("name")): item for item in characters if item.get("name")}
-    rows = []
-    for name, item in cast.items():
-        hit = existing_by_name.get(_norm(name))
-        rows.append(
-            {
-                "existing_id": hit.get("id") if hit else "",
-                "name": name,
-                "aliases": [],
-                "role": "protagonist" if not hit and len(rows) == 0 else "supporting",
-                "beats": item["beats"],
-            }
-        )
-    return json.dumps({"cast": rows}, ensure_ascii=False)
-
-
-def sync_chapter_cast(
-    store: ProjectStore,
-    config: AppConfig,
-    chapter: dict,
-    adapter=None,
-    persist: bool = True,
-    chapter_index: int | None = None,
-) -> dict:
-    """把本章出场角色与现有角色卡对齐，并绑定到每个节拍。
+def _index_characters(characters: list[dict]) -> tuple[dict[str, dict], dict[str, dict]]:
+    """建立角色索引：ID → 角色、归一化姓名/别名 → 角色。
 
     参数:
-        store: 工程。
-        config: 本机配置。
-        chapter: 大纲章节（需含 title/summary/beats；会被原地写入 character_ids）。
-        adapter: 写作适配器；None 时按配置装配。
-        persist: False 时只预览，不写 characters.json（新建角色只留在内存）。
-        chapter_index: 章序号，用于提示与新建卡备注；None 时读 chapter.index。
+        characters: 角色表（不含旁白）。
 
     返回:
-        `{created, reused, cast, new_characters, beat_ids}`；created/reused 都是姓名列表。
-
-    异常:
-        AdapterError: 模型没有返回任何角色，或角色设定结果无法解析。
-        ValueError: 本章没有任何角色可绑定。
+        `(by_id, by_name)`。
     """
-    if adapter is None:
-        from .service import build_writing_adapter
-
-        adapter = build_writing_adapter(config)
-    index = chapter_index if chapter_index is not None else chapter.get("index")
-    table = store.load_characters()
-    characters = [item for item in table["characters"] if item.get("role") != "narrator"]
-    by_id = {str(item.get("id")): item for item in characters if item.get("id")}
+    by_id: dict[str, dict] = {}
     by_name: dict[str, dict] = {}
     for item in characters:
+        character_id = str(item.get("id") or "")
+        if not character_id:
+            continue
+        by_id[character_id] = item
         for key in [item.get("name"), *(item.get("aliases") or [])]:
             norm = _norm(key)
             if norm:
                 by_name.setdefault(norm, item)
+    return by_id, by_name
+
+
+def _match_existing(row: dict, by_id: dict[str, dict], by_name: dict[str, dict]) -> dict | None:
+    """按 existing_id / 姓名 / 别名匹配现有角色卡。
+
+    参数:
+        row: cast 行。
+        by_id: ID 索引。
+        by_name: 归一化姓名索引。
+
+    返回:
+        命中的角色 dict；没有命中返回 None。
+    """
+    existing_id = row.get("existing_id") or ""
+    if existing_id and existing_id in by_id:
+        return by_id[existing_id]
+    for key in [row.get("name"), *(row.get("aliases") or [])]:
+        hit = by_name.get(_norm(key))
+        if hit is not None:
+            return hit
+    return None
+
+
+def _add_alias(character: dict, aliases: list[str]) -> None:
+    """把本章别名补进角色卡（跳过与正式名/已有别名重复的项）。
+
+    参数:
+        character: 角色 dict（就地修改）。
+        aliases: 候选别名。
+
+    返回:
+        无。
+    """
+    merged = list(character.get("aliases") or [])
+    known = {_norm(item) for item in [character.get("name"), *merged] if _norm(item)}
+    for alias in aliases:
+        norm = _norm(alias)
+        if norm and norm not in known:
+            merged.append(alias)
+            known.add(norm)
+    if merged:
+        character["aliases"] = merged
+
+
+def apply_chapter_cast(
+    store: ProjectStore,
+    chapter: dict,
+    rows: list[dict],
+    *,
+    characters: list[dict] | None = None,
+    pending: dict | None = None,
+    persist: bool = True,
+    chapter_index: int | None = None,
+    chapter_title: str = "",
+) -> dict:
+    """把一次生成里的本章 cast 落到角色卡与节拍绑定上（纯确定性，不调模型）。
+
+    参数:
+        store: 工程。
+        chapter: 大纲章节（含 beats；会被原地写入 character_ids 与 extra_characters）。
+        rows: `normalize_cast()` 的输出。
+        characters: 本次生成使用的内存角色表（不含旁白）；None 时从工程读取。
+        pending: 待定登记；None 时按 persist 读取/忽略。
+        persist: False 时只预览，不写角色卡与登记文件。
+        chapter_index: 全文章序号；None 时读 chapter.index。
+        chapter_title: 章节标题（登记用）；None 时读 chapter.title。
+
+    返回:
+        `{created, reused, extras, cast, new_characters, narrator_beats, characters, pending}`；
+        created/reused/extras 都是姓名列表。
+    """
+    index = int(chapter_index if chapter_index is not None else chapter.get("index") or 0)
+    title = chapter_title or str(chapter.get("title") or "")
     beats = chapter.get("beats") or []
     if not beats:
-        raise ValueError(f"第 {index} 章没有节拍：角色设定必须在节拍生成之后执行")
+        raise ValueError(f"第 {index} 章没有节拍：角色对齐必须与节拍在同一次生成里完成")
 
-    existing_brief = _cast_brief(characters)
-    beat_lines = [
-        f"{position}. {str(beat.get('summary') or '').strip()}"
-        for position, beat in enumerate(beats, start=1)
-    ]
-    prompt = (
-        f"第 {index} 章《{chapter.get('title') or '未命名'}》\n"
-        f"本章摘要：{chapter.get('summary') or '（无）'}\n"
-        f"本章节拍：\n" + "\n".join(beat_lines) + "\n\n"
-        f"现有角色卡：{json.dumps(existing_brief, ensure_ascii=False)}\n\n"
-        "任务：把本章真正出场的人物整理成角色表，并标出每个节拍谁出场。\n"
-        "规则：\n"
-        "1) 现有角色卡里已有同一个人（同名或同别名）必须填 existing_id 复用，只补别名，不得重复建卡；\n"
-        "2) 现有卡里没有、但本章节拍明确出现的人物，新建角色卡，给出 role/gender/age_range/personality/background/speech_style；\n"
-        "3) 每个节拍至少要有一个角色，不能留空；不要把只在别章出现的人塞进本章；\n"
-        "4) 不要给同一角色编造多个名字；别名只填本章真实出现的称呼。\n"
-        "角色设定粒度：\n"
-        "1) 新建角色必须给 role（protagonist/antagonist/supporting/minor）、gender、age_range、"
-        "personality（2-4 个词）、background（一句话）与 speech_style"
-        "（tempo 语速、pitch 音高、accent 口音、catchphrases 1-3 句口头禅）；不同角色的语速、用词和口头禅要能区分；\n"
-        "2) 复用现有角色时只补本章新出现的别名与节拍归属，不要改已有设定。"
-    )
-    req = TextGenRequest(
-        task="character_sync",
-        system="你是小说角色统筹，只按工具参数输出本章角色表与节拍归属，不要解释。",
-        messages=[Message("user", prompt)],
-        stream=False,
-        max_tokens=_tool_max_tokens(config, "character_sync", max(1, len(beats))),
-        metadata={
-            "chapter": {
-                "title": chapter.get("title"),
-                "summary": chapter.get("summary"),
-                "beats": [{"summary": beat.get("summary")} for beat in beats],
-            },
-            "characters": [
-                {"id": item.get("id"), "name": item.get("name"), "aliases": item.get("aliases") or []}
-                for item in characters
-            ],
-        },
-    )
-    if isinstance(adapter, OfflineWritingAdapter):
-        # 离线适配器不支持 character_sync 任务，直接用确定性规则给出本章 cast
-        payload = {"cast": json.loads(_payload_for_offline(chapter, characters))["cast"]}
+    if characters is None:
+        characters = [
+            item for item in store.load_characters()["characters"] if item.get("role") != "narrator"
+        ]
     else:
-        payload = _generate_json(adapter, req, "character_sync", tool=CAST_SYNC_TOOL)
-    rows = payload.get("cast") if isinstance(payload, dict) else None
-    if not isinstance(rows, list) or not rows:
-        raise AdapterError(
-            ErrorCode.UPSTREAM_ERROR,
-            f"第 {index} 章的角色设定阶段没有返回任何角色；请重试本章大纲",
-            retryable=True,
-            detail={"stage": "cast", "chapter_index": index},
-        )
+        characters = list(characters)
+    if pending is None:
+        pending = load_pending(store) if persist else {}
 
+    by_id, by_name = _index_characters(characters)
     created: list[str] = []
     reused: list[str] = []
+    extras: list[str] = []
+    extra_rows: list[dict] = []
+    new_characters: list[dict] = []
     cast: list[dict] = []
     seen_ids: set[str] = set()
-    owned_new: list[dict] = []
+    total = len(beats)
 
-    def beat_numbers(row: dict) -> list[int]:
-        """把模型给的节拍序号清洗成 1..N 的整数。"""
-        numbers: list[int] = []
-        for raw in row.get("beats") or []:
-            try:
-                value = int(raw)
-            except (TypeError, ValueError):
-                continue
-            if 1 <= value <= len(beats) and value not in numbers:
-                numbers.append(value)
-        return numbers
-
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        name = _clean_text(row.get("name"), 40)
+    for row in rows or []:
+        name = row.get("name") or ""
         if not name:
             continue
+        if _norm(name) == _norm("旁白"):
+            # 旁白是保留实体，只作为兜底，不补别名也不建卡
+            continue
         existing = _match_existing(row, by_id, by_name)
+        if existing is None and is_descriptor(name):
+            extras.append(name)
+            extra_rows.append({"name": name, "beats": list(row.get("beats") or [])})
+            continue
         if existing is not None:
             character = existing
-            merged = list(character.get("aliases") or [])
-            for alias in _clean_list(row.get("aliases"), 40, 8):
-                if _norm(alias) not in {_norm(item) for item in [character.get("name"), *merged]} and alias not in merged:
-                    merged.append(alias)
-            if merged:
-                character["aliases"] = merged
+            _add_alias(character, row.get("aliases") or [])
             if character.get("name") not in reused:
                 reused.append(character.get("name"))
+            pending.pop(_norm(character.get("name")), None)
         else:
-            character = _new_character(row)
-            owned_new.append(character)
+            key = _norm(name)
+            first = pending.get(key)
+            if not first or int(first.get("chapter") or 0) == index:
+                # 第一次出现（或仍在同一章）：只登记待定，本章按龙套处理
+                if not first:
+                    pending[key] = {
+                        "name": name,
+                        "chapter": index,
+                        "chapter_title": title,
+                        "aliases": list(row.get("aliases") or []),
+                    }
+                extras.append(name)
+                extra_rows.append({"name": name, "beats": list(row.get("beats") or [])})
+                continue
+            # 第二次出现（跨章）：建卡
+            record = dict(row)
+            record["_chapter"] = index
+            aliases = list(dict.fromkeys([*(first.get("aliases") or []), *(row.get("aliases") or [])]))
+            record["aliases"] = aliases
+            character = _new_character(record)
+            characters.append(character)
+            new_characters.append(character)
             created.append(character["name"])
-            by_id[character["id"]] = character
-            for key in [character.get("name"), *(character.get("aliases") or [])]:
-                norm = _norm(key)
+            by_id[str(character["id"])] = character
+            for alias_key in [character.get("name"), *aliases]:
+                norm = _norm(alias_key)
                 if norm:
                     by_name.setdefault(norm, character)
-        character_id = str(character.get("id"))
+            pending.pop(key, None)
+
+        character_id = str(character.get("id") or "")
         if not character_id or character_id in seen_ids:
             continue
         seen_ids.add(character_id)
+        numbers = [number for number in row.get("beats") or [] if 1 <= int(number) <= total]
         cast.append(
             {
                 "id": character_id,
                 "name": character.get("name"),
                 "role": character.get("role"),
-                "beats": beat_numbers(row),
+                "beats": numbers,
             }
         )
 
-    if not cast:
-        raise AdapterError(
-            ErrorCode.UPSTREAM_ERROR,
-            f"第 {index} 章的角色设定结果无法解析出任何角色；请重试本章大纲",
-            retryable=True,
-            detail={"stage": "cast", "chapter_index": index},
-        )
-
-    # 先把节拍里已有的引用过滤到本章角色表，再叠加本次角色归属
+    # 节拍绑定：只保留本章有效角色，未点名的节拍回退旁白
     valid_ids = {item["id"] for item in cast}
+    narrator_beats = 0
     for beat in beats:
-        beat["character_ids"] = [
-            str(cid) for cid in (beat.get("character_ids") or []) if str(cid) in valid_ids
+        ids = [
+            str(cid)
+            for cid in (beat.get("character_ids") or [])
+            if str(cid) in valid_ids or str(cid) == entities.NARRATOR_ID
         ]
+        if str(entities.NARRATOR_ID) in ids:
+            # 模型直接写了旁白 ID 时同样保留，但排到有效角色之后
+            ids = [cid for cid in ids if cid != entities.NARRATOR_ID]
+        beat["character_ids"] = ids
     for item in cast:
-        for position in item["beats"] or range(1, len(beats) + 1):
+        for position in item["beats"]:
             ids = beats[position - 1].setdefault("character_ids", [])
-            if item["id"] not in ids:
+            if item["id"] not in ids and entities.NARRATOR_ID not in ids:
                 ids.append(item["id"])
-
-    # 视角人物优先兜底；否则用主角，再否则用第一个角色
-    lead_id = None
-    pov_id = chapter.get("pov_character_id")
-    if pov_id in valid_ids:
-        lead_id = pov_id
-    if lead_id is None:
-        lead_id = next(
-            (item["id"] for item in cast if item.get("role") == "protagonist"),
-            cast[0]["id"],
-        )
     for beat in beats:
         if not beat.get("character_ids"):
-            beat["character_ids"] = [lead_id]
+            beat["character_ids"] = [entities.NARRATOR_ID]
+            narrator_beats += 1
+
+    # 未建卡的龙套：按 minor 处理，只记在对应节拍上，不进角色表
+    for row in extra_rows:
+        positions = [number for number in row.get("beats") or [] if 1 <= int(number) <= total]
+        if not positions:
+            positions = [pos for pos, beat in enumerate(beats, start=1) if row["name"] in str(beat.get("summary") or "")]
+        for position in positions:
+            beat = beats[position - 1]
+            names = [str(item) for item in (beat.get("extra_characters") or [])]
+            if row["name"] not in names:
+                names.append(row["name"])
+            beat["extra_characters"] = names
 
     if persist:
-        if owned_new:
-            table["characters"].extend(owned_new)
-        store.save_characters(table)
+        _persist(store, characters, pending)
+        _record_created(
+            store,
+            index,
+            title,
+            [
+                {"id": item["id"], "name": item.get("name"), "created_at": now_iso()}
+                for item in new_characters
+            ],
+        )
     return {
         "created": created,
         "reused": reused,
+        "extras": extras,
         "cast": cast,
-        "new_characters": owned_new,
-        "beat_ids": [list(beat.get("character_ids") or []) for beat in beats],
+        "new_characters": new_characters,
+        "narrator_beats": narrator_beats,
+        "characters": characters,
+        "pending": pending,
     }
+
+
+def _persist(store: ProjectStore, characters: list[dict], pending: dict) -> None:
+    """把内存角色表与待定登记写回工程（保留旁白条目）。
+
+    参数:
+        store: 工程。
+        characters: 内存角色表（不含旁白）。
+        pending: 待定登记。
+
+    返回:
+        无。
+    """
+    table = store.load_characters()
+    keep = [item for item in table.get("characters") or [] if item.get("role") == "narrator"]
+    table["characters"] = [*keep, *characters]
+    store.save_characters(table)
+    save_pending(store, pending)
+
+
+def summarize_cast(report: dict) -> str:
+    """把一次角色对齐结果压成一行中文摘要（进度提示用）。
+
+    参数:
+        report: `apply_chapter_cast()` 的返回值。
+
+    返回:
+        中文摘要。
+    """
+    parts = [f"新建 {len(report.get('created') or [])}", f"复用 {len(report.get('reused') or [])}"]
+    if report.get("extras"):
+        parts.append(f"龙套 {len(report['extras'])}")
+    if report.get("narrator_beats"):
+        parts.append(f"旁白兜底 {report['narrator_beats']} 拍")
+    return "，".join(parts)

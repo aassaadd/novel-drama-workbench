@@ -28,7 +28,6 @@ from .service import (
     _generate_json,
     _progress,
     _project_context,
-    _tool_max_tokens,
     build_writing_adapter,
 )
 
@@ -205,7 +204,6 @@ def plan_characters(
         messages=[Message("user", prompt)],
         stream=True,
         temperature=resolve_temperature(config, "writing"),
-        max_tokens=_tool_max_tokens(config, "character_plan", wanted),
         metadata={
             "work": {"title": work.get("title"), "author": work.get("author"), "genre": work.get("genre") or []},
             "premise": bible.get("premise") or {},
@@ -388,7 +386,6 @@ def generate_from_plan(
             messages=[Message("user", prompt)],
             stream=True,
             temperature=resolve_temperature(config, "writing"),
-            max_tokens=_tool_max_tokens(config, "character", 1),
             metadata={
                 "work": {"title": work.get("title"), "author": work.get("author"), "genre": work.get("genre") or []},
                 "count": 1,
@@ -584,7 +581,6 @@ def fill_character_descriptions(
             messages=[Message("user", prompt)],
             stream=True,
             temperature=resolve_temperature(config, "writing"),
-            max_tokens=_tool_max_tokens(config, "character", 1),
             metadata={
                 "mode": "single",
                 "work": {"title": work.get("title"), "author": work.get("author"), "genre": work.get("genre") or []},

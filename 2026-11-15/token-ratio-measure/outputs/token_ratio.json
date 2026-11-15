@@ -1,0 +1,1243 @@
+{
+  "generated_at": "2026-11-15 15:00:38",
+  "project": "/Volumes/other/ndw_runs/tt1",
+  "tokenizer": "/Users/zhaohaochen/.omlx/models/zviratko/Qwen3.8-27B-TURBO-Fable-Cold-Fusion-735-882-Heretic-Uncensored-NM-DAU-oQ4e-mtp/tokenizer.json",
+  "runtime": {
+    "model": "Qwen3.8-27B-TURBO-Fable-Cold-Fusion-735-882-Heretic-Uncensored-NM-DAU-oQ4e-mtp",
+    "endpoint": "http://127.0.0.1:9000",
+    "enable_thinking": true,
+    "reasoning_effort": "low"
+  },
+  "chapters": {
+    "overall": {
+      "chapters": 10,
+      "chars": 66264,
+      "han": 50231,
+      "han_ratio": 0.758,
+      "word_count": 61965,
+      "tokens": 44522,
+      "tokens_per_char": 0.6719,
+      "tokens_per_word": 0.7185
+    },
+    "per_chapter": [
+      {
+        "index": 1,
+        "title": "红盖头",
+        "chars": 10318,
+        "han": 7842,
+        "han_ratio": 0.76,
+        "word_count": 9639,
+        "tokens": 6702,
+        "tokens_per_char": 0.6495,
+        "tokens_per_word": 0.6953,
+        "paragraphs": 340,
+        "avg_paragraph_chars": 30.3,
+        "dialogue_char_ratio": 0.4164
+      },
+      {
+        "index": 2,
+        "title": "纸人迎亲",
+        "chars": 5334,
+        "han": 4069,
+        "han_ratio": 0.7628,
+        "word_count": 5005,
+        "tokens": 3687,
+        "tokens_per_char": 0.6912,
+        "tokens_per_word": 0.7367,
+        "paragraphs": 165,
+        "avg_paragraph_chars": 32.3,
+        "dialogue_char_ratio": 0.4269
+      },
+      {
+        "index": 3,
+        "title": "喜轿规矩",
+        "chars": 9273,
+        "han": 7154,
+        "han_ratio": 0.7715,
+        "word_count": 8706,
+        "tokens": 6250,
+        "tokens_per_char": 0.674,
+        "tokens_per_word": 0.7179,
+        "paragraphs": 284,
+        "avg_paragraph_chars": 32.7,
+        "dialogue_char_ratio": 0.3932
+      },
+      {
+        "index": 4,
+        "title": "拜堂",
+        "chars": 6390,
+        "han": 4751,
+        "han_ratio": 0.7435,
+        "word_count": 5911,
+        "tokens": 4437,
+        "tokens_per_char": 0.6944,
+        "tokens_per_word": 0.7506,
+        "paragraphs": 240,
+        "avg_paragraph_chars": 26.6,
+        "dialogue_char_ratio": 0.3825
+      },
+      {
+        "index": 5,
+        "title": "掀盖头",
+        "chars": 5456,
+        "han": 4090,
+        "han_ratio": 0.7496,
+        "word_count": 5011,
+        "tokens": 3749,
+        "tokens_per_char": 0.6871,
+        "tokens_per_word": 0.7482,
+        "paragraphs": 223,
+        "avg_paragraph_chars": 24.5,
+        "dialogue_char_ratio": 0.2326
+      },
+      {
+        "index": 6,
+        "title": "纸人铺子",
+        "chars": 8474,
+        "han": 6150,
+        "han_ratio": 0.7257,
+        "word_count": 7911,
+        "tokens": 5827,
+        "tokens_per_char": 0.6876,
+        "tokens_per_word": 0.7366,
+        "paragraphs": 281,
+        "avg_paragraph_chars": 30.2,
+        "dialogue_char_ratio": 0.5866
+      },
+      {
+        "index": 7,
+        "title": "纸火焚魂",
+        "chars": 2202,
+        "han": 1740,
+        "han_ratio": 0.7902,
+        "word_count": 2075,
+        "tokens": 1548,
+        "tokens_per_char": 0.703,
+        "tokens_per_word": 0.746,
+        "paragraphs": 64,
+        "avg_paragraph_chars": 34.4,
+        "dialogue_char_ratio": 0.3093
+      },
+      {
+        "index": 8,
+        "title": "丝线暗连",
+        "chars": 6905,
+        "han": 5234,
+        "han_ratio": 0.758,
+        "word_count": 6522,
+        "tokens": 4536,
+        "tokens_per_char": 0.6569,
+        "tokens_per_word": 0.6955,
+        "paragraphs": 192,
+        "avg_paragraph_chars": 36.0,
+        "dialogue_char_ratio": 0.6805
+      },
+      {
+        "index": 9,
+        "title": "傩面开脸",
+        "chars": 5514,
+        "han": 4292,
+        "han_ratio": 0.7784,
+        "word_count": 5209,
+        "tokens": 3578,
+        "tokens_per_char": 0.6489,
+        "tokens_per_word": 0.6869,
+        "paragraphs": 153,
+        "avg_paragraph_chars": 36.0,
+        "dialogue_char_ratio": 0.3464
+      },
+      {
+        "index": 10,
+        "title": "血祭傩神",
+        "chars": 6398,
+        "han": 4909,
+        "han_ratio": 0.7673,
+        "word_count": 5976,
+        "tokens": 4208,
+        "tokens_per_char": 0.6577,
+        "tokens_per_word": 0.7041,
+        "paragraphs": 211,
+        "avg_paragraph_chars": 30.3,
+        "dialogue_char_ratio": 0.3562
+      }
+    ],
+    "tokens_per_word_distribution": {
+      "n": 10,
+      "mean": 0.7218,
+      "p50": 0.7272,
+      "p05": 0.6907,
+      "p95": 0.7495,
+      "min": 0.6869,
+      "max": 0.7506
+    },
+    "categories": {
+      "narrative": {
+        "paragraphs": 1066,
+        "chars": 33348,
+        "han": 28875,
+        "han_ratio": 0.8659,
+        "tokens": 23260,
+        "tokens_per_char": 0.6975,
+        "tokens_per_word": 0.6975,
+        "per_paragraph": {
+          "n": 1066,
+          "mean": 0.7107,
+          "p50": 0.7037,
+          "p05": 0.5696,
+          "p95": 0.875,
+          "min": 0.4286,
+          "max": 1.5
+        }
+      },
+      "dialogue": {
+        "paragraphs": 1084,
+        "chars": 28468,
+        "han": 21242,
+        "han_ratio": 0.7462,
+        "tokens": 18709,
+        "tokens_per_char": 0.6572,
+        "tokens_per_word": 0.6572,
+        "per_paragraph": {
+          "n": 1084,
+          "mean": 0.6744,
+          "p50": 0.6667,
+          "p05": 0.5395,
+          "p95": 0.8182,
+          "min": 0.375,
+          "max": 1.0
+        }
+      },
+      "ascii": {
+        "paragraphs": 9,
+        "chars": 295,
+        "han": 204,
+        "han_ratio": 0.6915,
+        "tokens": 194,
+        "tokens_per_char": 0.6576,
+        "tokens_per_word": 0.6599,
+        "per_paragraph": {
+          "n": 9,
+          "mean": 0.6881,
+          "p50": 0.68,
+          "p05": 0.6046,
+          "p95": 0.7758,
+          "min": 0.5893,
+          "max": 0.7778
+        }
+      }
+    },
+    "punctuation": {
+      "raw_chars": 66264,
+      "raw_tokens": 44522,
+      "raw_tokens_per_char": 0.6719,
+      "stripped_chars": 50256,
+      "stripped_tokens": 32635,
+      "stripped_tokens_per_char": 0.6494,
+      "extra_tokens": 11887,
+      "extra_token_share": 0.267
+    },
+    "dialogue_heavy": [
+      {
+        "index": 8,
+        "title": "丝线暗连",
+        "dialogue_char_ratio": 0.6805,
+        "tokens_per_char": 0.6569
+      },
+      {
+        "index": 6,
+        "title": "纸人铺子",
+        "dialogue_char_ratio": 0.5866,
+        "tokens_per_char": 0.6876
+      },
+      {
+        "index": 2,
+        "title": "纸人迎亲",
+        "dialogue_char_ratio": 0.4269,
+        "tokens_per_char": 0.6912
+      },
+      {
+        "index": 1,
+        "title": "红盖头",
+        "dialogue_char_ratio": 0.4164,
+        "tokens_per_char": 0.6495
+      },
+      {
+        "index": 3,
+        "title": "喜轿规矩",
+        "dialogue_char_ratio": 0.3932,
+        "tokens_per_char": 0.674
+      },
+      {
+        "index": 4,
+        "title": "拜堂",
+        "dialogue_char_ratio": 0.3825,
+        "tokens_per_char": 0.6944
+      },
+      {
+        "index": 10,
+        "title": "血祭傩神",
+        "dialogue_char_ratio": 0.3562,
+        "tokens_per_char": 0.6577
+      },
+      {
+        "index": 9,
+        "title": "傩面开脸",
+        "dialogue_char_ratio": 0.3464,
+        "tokens_per_char": 0.6489
+      },
+      {
+        "index": 7,
+        "title": "纸火焚魂",
+        "dialogue_char_ratio": 0.3093,
+        "tokens_per_char": 0.703
+      },
+      {
+        "index": 5,
+        "title": "掀盖头",
+        "dialogue_char_ratio": 0.2326,
+        "tokens_per_char": 0.6871
+      }
+    ]
+  },
+  "prompts": {
+    "stages": {
+      "premise": {
+        "samples": 3,
+        "thinking_share": 1.0,
+        "tools_share": 1.0,
+        "system_chars_p50": 41.0,
+        "system_tokens_p50": 25.0,
+        "user_chars_p50": 137.0,
+        "user_tokens_p50": 56.0,
+        "user_ratio": {
+          "n": 3,
+          "mean": 0.5023,
+          "p50": 0.4088,
+          "p05": 0.4067,
+          "p95": 0.6634,
+          "min": 0.4065,
+          "max": 0.6917
+        },
+        "system_ratio": {
+          "n": 3,
+          "mean": 0.6098,
+          "p50": 0.6098,
+          "p05": 0.6098,
+          "p95": 0.6098,
+          "min": 0.6098,
+          "max": 0.6098
+        },
+        "prompt_ratio": {
+          "n": 3,
+          "mean": 0.3999,
+          "p50": 0.3458,
+          "p05": 0.3454,
+          "p95": 0.4922,
+          "min": 0.3453,
+          "max": 0.5084
+        }
+      },
+      "worlds": {
+        "samples": 4,
+        "thinking_share": 1.0,
+        "tools_share": 1.0,
+        "system_chars_p50": 44.0,
+        "system_tokens_p50": 26.0,
+        "user_chars_p50": 1671.5,
+        "user_tokens_p50": 1117.5,
+        "user_ratio": {
+          "n": 4,
+          "mean": 0.6689,
+          "p50": 0.6748,
+          "p05": 0.6443,
+          "p95": 0.6851,
+          "min": 0.6407,
+          "max": 0.6851
+        },
+        "system_ratio": {
+          "n": 4,
+          "mean": 0.5909,
+          "p50": 0.5909,
+          "p05": 0.5909,
+          "p95": 0.5909,
+          "min": 0.5909,
+          "max": 0.5909
+        },
+        "prompt_ratio": {
+          "n": 4,
+          "mean": 0.4867,
+          "p50": 0.4868,
+          "p05": 0.4647,
+          "p95": 0.5086,
+          "min": 0.4647,
+          "max": 0.5086
+        }
+      },
+      "outline": {
+        "samples": 49,
+        "thinking_share": 0.551,
+        "tools_share": 1.0,
+        "system_chars_p50": 27.0,
+        "system_tokens_p50": 15.0,
+        "user_chars_p50": 187.0,
+        "user_tokens_p50": 136.0,
+        "user_ratio": {
+          "n": 49,
+          "mean": 0.7216,
+          "p50": 0.7167,
+          "p05": 0.6359,
+          "p95": 0.8024,
+          "min": 0.5398,
+          "max": 0.8047
+        },
+        "system_ratio": {
+          "n": 49,
+          "mean": 0.5603,
+          "p50": 0.5556,
+          "p05": 0.5556,
+          "p95": 0.5862,
+          "min": 0.5556,
+          "max": 0.5862
+        },
+        "prompt_ratio": {
+          "n": 49,
+          "mean": 0.4242,
+          "p50": 0.4117,
+          "p05": 0.3667,
+          "p95": 0.4953,
+          "min": 0.3612,
+          "max": 0.5262
+        }
+      },
+      "outline_chapters": {
+        "samples": 34,
+        "thinking_share": 0.5294,
+        "tools_share": 1.0,
+        "system_chars_p50": 32.0,
+        "system_tokens_p50": 19.0,
+        "user_chars_p50": 400.0,
+        "user_tokens_p50": 326.5,
+        "user_ratio": {
+          "n": 34,
+          "mean": 0.7578,
+          "p50": 0.7493,
+          "p05": 0.6762,
+          "p95": 0.8262,
+          "min": 0.6719,
+          "max": 0.84
+        },
+        "system_ratio": {
+          "n": 34,
+          "mean": 0.5938,
+          "p50": 0.5938,
+          "p05": 0.5938,
+          "p95": 0.5938,
+          "min": 0.5938,
+          "max": 0.5938
+        },
+        "prompt_ratio": {
+          "n": 34,
+          "mean": 0.4139,
+          "p50": 0.4036,
+          "p05": 0.3781,
+          "p95": 0.4668,
+          "min": 0.3656,
+          "max": 0.4785
+        }
+      },
+      "beats": {
+        "samples": 78,
+        "thinking_share": 0.5,
+        "tools_share": 1.0,
+        "system_chars_p50": 32.0,
+        "system_tokens_p50": 18.0,
+        "user_chars_p50": 574.5,
+        "user_tokens_p50": 455.0,
+        "user_ratio": {
+          "n": 78,
+          "mean": 0.7543,
+          "p50": 0.7621,
+          "p05": 0.6706,
+          "p95": 0.8307,
+          "min": 0.6706,
+          "max": 0.8533
+        },
+        "system_ratio": {
+          "n": 78,
+          "mean": 0.5625,
+          "p50": 0.5625,
+          "p05": 0.5625,
+          "p95": 0.5625,
+          "min": 0.5625,
+          "max": 0.5625
+        },
+        "prompt_ratio": {
+          "n": 78,
+          "mean": 0.4267,
+          "p50": 0.443,
+          "p05": 0.3903,
+          "p95": 0.4655,
+          "min": 0.3903,
+          "max": 0.4767
+        }
+      },
+      "chapter": {
+        "samples": 93,
+        "thinking_share": 1.0,
+        "tools_share": 0.0,
+        "system_chars_p50": 3276.0,
+        "system_tokens_p50": 2099.0,
+        "user_chars_p50": 4013.0,
+        "user_tokens_p50": 2788.0,
+        "user_ratio": {
+          "n": 93,
+          "mean": 0.7009,
+          "p50": 0.7018,
+          "p05": 0.6759,
+          "p95": 0.7244,
+          "min": 0.6711,
+          "max": 0.7257
+        },
+        "system_ratio": {
+          "n": 93,
+          "mean": 0.6409,
+          "p50": 0.6407,
+          "p05": 0.6406,
+          "p95": 0.6417,
+          "min": 0.6406,
+          "max": 0.6417
+        },
+        "prompt_ratio": {
+          "n": 93,
+          "mean": 0.6571,
+          "p50": 0.6627,
+          "p05": 0.6236,
+          "p95": 0.6794,
+          "min": 0.4757,
+          "max": 0.6861
+        }
+      },
+      "recap": {
+        "samples": 19,
+        "thinking_share": 1.0,
+        "tools_share": 0.0,
+        "system_chars_p50": 42.0,
+        "system_tokens_p50": 22.0,
+        "user_chars_p50": 7826.0,
+        "user_tokens_p50": 5171.0,
+        "user_ratio": {
+          "n": 19,
+          "mean": 0.6583,
+          "p50": 0.685,
+          "p05": 0.5232,
+          "p95": 0.7068,
+          "min": 0.3918,
+          "max": 0.7197
+        },
+        "system_ratio": {
+          "n": 19,
+          "mean": 0.5238,
+          "p50": 0.5238,
+          "p05": 0.5238,
+          "p95": 0.5238,
+          "min": 0.5238,
+          "max": 0.5238
+        },
+        "prompt_ratio": {
+          "n": 19,
+          "mean": 0.6425,
+          "p50": 0.6661,
+          "p05": 0.5147,
+          "p95": 0.6903,
+          "min": 0.3887,
+          "max": 0.7013
+        }
+      },
+      "characters": {
+        "samples": 7,
+        "thinking_share": 1.0,
+        "tools_share": 0.0,
+        "system_chars_p50": 79.0,
+        "system_tokens_p50": 44.0,
+        "user_chars_p50": 2656.0,
+        "user_tokens_p50": 1614.0,
+        "user_ratio": {
+          "n": 7,
+          "mean": 0.623,
+          "p50": 0.6077,
+          "p05": 0.6068,
+          "p95": 0.6843,
+          "min": 0.6068,
+          "max": 0.7171
+        },
+        "system_ratio": {
+          "n": 7,
+          "mean": 0.557,
+          "p50": 0.557,
+          "p05": 0.557,
+          "p95": 0.557,
+          "min": 0.557,
+          "max": 0.557
+        },
+        "prompt_ratio": {
+          "n": 7,
+          "mean": 0.5921,
+          "p50": 0.5738,
+          "p05": 0.5727,
+          "p95": 0.6649,
+          "min": 0.5727,
+          "max": 0.7039
+        }
+      },
+      "character_updates": {
+        "samples": 2,
+        "thinking_share": 1.0,
+        "tools_share": 0.0,
+        "system_chars_p50": 31.0,
+        "system_tokens_p50": 18.0,
+        "user_chars_p50": 3382.0,
+        "user_tokens_p50": 2305.0,
+        "user_ratio": {
+          "n": 2,
+          "mean": 0.6815,
+          "p50": 0.6815,
+          "p05": 0.6815,
+          "p95": 0.6815,
+          "min": 0.6815,
+          "max": 0.6815
+        },
+        "system_ratio": {
+          "n": 2,
+          "mean": 0.5806,
+          "p50": 0.5806,
+          "p05": 0.5806,
+          "p95": 0.5806,
+          "min": 0.5806,
+          "max": 0.5806
+        },
+        "prompt_ratio": {
+          "n": 2,
+          "mean": 0.6496,
+          "p50": 0.6496,
+          "p05": 0.6496,
+          "p95": 0.6496,
+          "min": 0.6496,
+          "max": 0.6496
+        }
+      },
+      "consistency": {
+        "samples": 1,
+        "thinking_share": 1.0,
+        "tools_share": 0.0,
+        "system_chars_p50": 29.0,
+        "system_tokens_p50": 16.0,
+        "user_chars_p50": 6410.0,
+        "user_tokens_p50": 4465.0,
+        "user_ratio": {
+          "n": 1,
+          "mean": 0.6966,
+          "p50": 0.6966,
+          "p05": 0.6966,
+          "p95": 0.6966,
+          "min": 0.6966,
+          "max": 0.6966
+        },
+        "system_ratio": {
+          "n": 1,
+          "mean": 0.5517,
+          "p50": 0.5517,
+          "p05": 0.5517,
+          "p95": 0.5517,
+          "min": 0.5517,
+          "max": 0.5517
+        },
+        "prompt_ratio": {
+          "n": 1,
+          "mean": 0.6785,
+          "p50": 0.6785,
+          "p05": 0.6785,
+          "p95": 0.6785,
+          "min": 0.6785,
+          "max": 0.6785
+        }
+      }
+    },
+    "verification": {
+      "samples": 42,
+      "exact_matches": 42,
+      "mean_abs_delta": 0.0,
+      "max_abs_delta": 0,
+      "details": [
+        {
+          "stage": "recap",
+          "offline": 8448,
+          "server": 8448,
+          "delta": 0,
+          "system_chars": 42,
+          "user_chars": 12667
+        },
+        {
+          "stage": "recap",
+          "offline": 5234,
+          "server": 5234,
+          "delta": 0,
+          "system_chars": 42,
+          "user_chars": 13198
+        },
+        {
+          "stage": "recap",
+          "offline": 3760,
+          "server": 3760,
+          "delta": 0,
+          "system_chars": 42,
+          "user_chars": 5319
+        },
+        {
+          "stage": "recap",
+          "offline": 4727,
+          "server": 4727,
+          "delta": 0,
+          "system_chars": 42,
+          "user_chars": 8672
+        },
+        {
+          "stage": "recap",
+          "offline": 6360,
+          "server": 6360,
+          "delta": 0,
+          "system_chars": 42,
+          "user_chars": 9797
+        },
+        {
+          "stage": "chapter",
+          "offline": 4159,
+          "server": 4159,
+          "delta": 0,
+          "system_chars": 3276,
+          "user_chars": 2992
+        },
+        {
+          "stage": "chapter",
+          "offline": 5550,
+          "server": 5550,
+          "delta": 0,
+          "system_chars": 3276,
+          "user_chars": 3199
+        },
+        {
+          "stage": "chapter",
+          "offline": 6792,
+          "server": 6792,
+          "delta": 0,
+          "system_chars": 3276,
+          "user_chars": 3212
+        },
+        {
+          "stage": "chapter",
+          "offline": 7267,
+          "server": 7267,
+          "delta": 0,
+          "system_chars": 3276,
+          "user_chars": 3186
+        },
+        {
+          "stage": "recap",
+          "offline": 5309,
+          "server": 5309,
+          "delta": 0,
+          "system_chars": 42,
+          "user_chars": 7437
+        },
+        {
+          "stage": "chapter",
+          "offline": 4393,
+          "server": 4393,
+          "delta": 0,
+          "system_chars": 3276,
+          "user_chars": 3177
+        },
+        {
+          "stage": "chapter",
+          "offline": 5126,
+          "server": 5126,
+          "delta": 0,
+          "system_chars": 3276,
+          "user_chars": 3363
+        },
+        {
+          "stage": "chapter",
+          "offline": 5610,
+          "server": 5610,
+          "delta": 0,
+          "system_chars": 3276,
+          "user_chars": 3354
+        },
+        {
+          "stage": "chapter",
+          "offline": 6332,
+          "server": 6332,
+          "delta": 0,
+          "system_chars": 3276,
+          "user_chars": 3381
+        },
+        {
+          "stage": "recap",
+          "offline": 3550,
+          "server": 3550,
+          "delta": 0,
+          "system_chars": 42,
+          "user_chars": 4990
+        },
+        {
+          "stage": "chapter",
+          "offline": 4618,
+          "server": 4618,
+          "delta": 0,
+          "system_chars": 3276,
+          "user_chars": 3429
+        },
+        {
+          "stage": "chapter",
+          "offline": 5557,
+          "server": 5557,
+          "delta": 0,
+          "system_chars": 3276,
+          "user_chars": 3630
+        },
+        {
+          "stage": "chapter",
+          "offline": 6413,
+          "server": 6413,
+          "delta": 0,
+          "system_chars": 3276,
+          "user_chars": 3635
+        },
+        {
+          "stage": "chapter",
+          "offline": 6850,
+          "server": 6850,
+          "delta": 0,
+          "system_chars": 3276,
+          "user_chars": 3623
+        },
+        {
+          "stage": "recap",
+          "offline": 3757,
+          "server": 3757,
+          "delta": 0,
+          "system_chars": 42,
+          "user_chars": 5348
+        },
+        {
+          "stage": "chapter",
+          "offline": 5163,
+          "server": 5163,
+          "delta": 0,
+          "system_chars": 3276,
+          "user_chars": 4362
+        },
+        {
+          "stage": "chapter",
+          "offline": 6286,
+          "server": 6286,
+          "delta": 0,
+          "system_chars": 3276,
+          "user_chars": 4575
+        },
+        {
+          "stage": "chapter",
+          "offline": 7110,
+          "server": 7110,
+          "delta": 0,
+          "system_chars": 3276,
+          "user_chars": 4590
+        },
+        {
+          "stage": "chapter",
+          "offline": 8228,
+          "server": 8228,
+          "delta": 0,
+          "system_chars": 3276,
+          "user_chars": 4579
+        },
+        {
+          "stage": "recap",
+          "offline": 4940,
+          "server": 4940,
+          "delta": 0,
+          "system_chars": 42,
+          "user_chars": 6776
+        },
+        {
+          "stage": "chapter",
+          "offline": 5021,
+          "server": 5021,
+          "delta": 0,
+          "system_chars": 3276,
+          "user_chars": 4158
+        },
+        {
+          "stage": "chapter",
+          "offline": 5889,
+          "server": 5889,
+          "delta": 0,
+          "system_chars": 3276,
+          "user_chars": 4334
+        },
+        {
+          "stage": "chapter",
+          "offline": 6427,
+          "server": 6427,
+          "delta": 0,
+          "system_chars": 3276,
+          "user_chars": 4342
+        },
+        {
+          "stage": "chapter",
+          "offline": 7449,
+          "server": 7449,
+          "delta": 0,
+          "system_chars": 3276,
+          "user_chars": 4376
+        },
+        {
+          "stage": "recap",
+          "offline": 3519,
+          "server": 3519,
+          "delta": 0,
+          "system_chars": 42,
+          "user_chars": 5041
+        },
+        {
+          "stage": "recap",
+          "offline": 2388,
+          "server": 2388,
+          "delta": 0,
+          "system_chars": 42,
+          "user_chars": 3317
+        },
+        {
+          "stage": "recap",
+          "offline": 4411,
+          "server": 4411,
+          "delta": 0,
+          "system_chars": 42,
+          "user_chars": 6646
+        },
+        {
+          "stage": "recap",
+          "offline": 5259,
+          "server": 5259,
+          "delta": 0,
+          "system_chars": 42,
+          "user_chars": 7826
+        },
+        {
+          "stage": "recap",
+          "offline": 6854,
+          "server": 6854,
+          "delta": 0,
+          "system_chars": 42,
+          "user_chars": 9914
+        },
+        {
+          "stage": "recap",
+          "offline": 5506,
+          "server": 5506,
+          "delta": 0,
+          "system_chars": 42,
+          "user_chars": 8250
+        },
+        {
+          "stage": "character_updates",
+          "offline": 2364,
+          "server": 2364,
+          "delta": 0,
+          "system_chars": 31,
+          "user_chars": 3382
+        },
+        {
+          "stage": "character_updates",
+          "offline": 2364,
+          "server": 2364,
+          "delta": 0,
+          "system_chars": 31,
+          "user_chars": 3382
+        },
+        {
+          "stage": "consistency",
+          "offline": 4522,
+          "server": 4522,
+          "delta": 0,
+          "system_chars": 29,
+          "user_chars": 6410
+        },
+        {
+          "stage": "recap",
+          "offline": 7720,
+          "server": 7720,
+          "delta": 0,
+          "system_chars": 42,
+          "user_chars": 11732
+        },
+        {
+          "stage": "recap",
+          "offline": 4659,
+          "server": 4659,
+          "delta": 0,
+          "system_chars": 42,
+          "user_chars": 6677
+        },
+        {
+          "stage": "recap",
+          "offline": 7465,
+          "server": 7465,
+          "delta": 0,
+          "system_chars": 42,
+          "user_chars": 10920
+        },
+        {
+          "stage": "recap",
+          "offline": 5532,
+          "server": 5532,
+          "delta": 0,
+          "system_chars": 42,
+          "user_chars": 7874
+        }
+      ]
+    },
+    "output": {
+      "text_ratio": {
+        "n": 38,
+        "mean": 0.6891,
+        "p50": 0.6958,
+        "p05": 0.6275,
+        "p95": 0.7429,
+        "min": 0.4381,
+        "max": 0.7652
+      },
+      "reasoning_ratio": {
+        "n": 38,
+        "mean": 0.6361,
+        "p50": 0.7001,
+        "p05": 0.3024,
+        "p95": 0.7565,
+        "min": 0.2211,
+        "max": 0.7674
+      },
+      "reasoning_tokens": {
+        "n": 17,
+        "mean": 1429.7647,
+        "p50": 1048.0,
+        "p05": 372.6,
+        "p95": 3299.2,
+        "min": 319,
+        "max": 6096
+      },
+      "reasoning_by_stage": {
+        "recap": {
+          "n": 14,
+          "mean": 1120.9286,
+          "p50": 1004.5,
+          "p05": 362.55,
+          "p95": 1950.0,
+          "min": 319,
+          "max": 2600
+        },
+        "character_updates": {
+          "n": 2,
+          "mean": 1258.5,
+          "p50": 1258.5,
+          "p05": 1016.85,
+          "p95": 1500.15,
+          "min": 990,
+          "max": 1527
+        }
+      },
+      "finish_reason": {
+        "tool_calls": 143,
+        "stop": 103,
+        "length": 33
+      },
+      "truncated_share": 0.1183,
+      "content_truncation_share": 0.2426,
+      "truncation_by_stage": {
+        "premise": {
+          "samples": 3,
+          "length": 0,
+          "length_share": 0.0,
+          "finish_reason": {
+            "tool_calls": 3
+          }
+        },
+        "worlds": {
+          "samples": 4,
+          "length": 0,
+          "length_share": 0.0,
+          "finish_reason": {
+            "tool_calls": 4
+          }
+        },
+        "outline": {
+          "samples": 42,
+          "length": 1,
+          "length_share": 0.0238,
+          "finish_reason": {
+            "tool_calls": 25,
+            "stop": 16,
+            "length": 1
+          }
+        },
+        "outline_chapters": {
+          "samples": 34,
+          "length": 0,
+          "length_share": 0.0,
+          "finish_reason": {
+            "tool_calls": 34
+          }
+        },
+        "beats": {
+          "samples": 77,
+          "length": 0,
+          "length_share": 0.0,
+          "finish_reason": {
+            "tool_calls": 77
+          }
+        },
+        "chapter": {
+          "samples": 90,
+          "length": 23,
+          "length_share": 0.2556,
+          "finish_reason": {
+            "stop": 67,
+            "length": 23
+          }
+        },
+        "recap": {
+          "samples": 19,
+          "length": 8,
+          "length_share": 0.4211,
+          "finish_reason": {
+            "stop": 11,
+            "length": 8
+          }
+        },
+        "characters": {
+          "samples": 7,
+          "length": 0,
+          "length_share": 0.0,
+          "finish_reason": {
+            "stop": 7
+          }
+        },
+        "character_updates": {
+          "samples": 2,
+          "length": 0,
+          "length_share": 0.0,
+          "finish_reason": {
+            "stop": 2
+          }
+        },
+        "consistency": {
+          "samples": 1,
+          "length": 1,
+          "length_share": 1.0,
+          "finish_reason": {
+            "length": 1
+          }
+        }
+      }
+    },
+    "outliers": {
+      "lowest": [
+        {
+          "stage": "recap",
+          "ratio": 0.3918,
+          "chars": 13198,
+          "han_ratio": 0.2297,
+          "head": "【已更新的全书摘要】 林九斤，三十八岁悍妇，与程序员丈夫周也组成搭档，专"
+        },
+        {
+          "stage": "premise",
+          "ratio": 0.4065,
+          "chars": 123,
+          "han_ratio": 0.2927,
+          "head": "作品：日志验证工程  任务：为《日志验证工程》生成故事梗概，字段：log"
+        },
+        {
+          "stage": "premise",
+          "ratio": 0.4088,
+          "chars": 137,
+          "han_ratio": 0.3504,
+          "head": "作品：日志验证工程  任务：为《日志验证工程》生成故事梗概，字段：log"
+        }
+      ],
+      "highest": [
+        {
+          "stage": "beats",
+          "ratio": 0.8533,
+          "chars": 409,
+          "han_ratio": 0.5208,
+          "head": "作品：《绑定入口验证》 一句话故事：纸扎匠之子在雾港替亡者扎屋时，发现每"
+        },
+        {
+          "stage": "outline_chapters",
+          "ratio": 0.84,
+          "chars": 400,
+          "han_ratio": 0.495,
+          "head": "作品：《绑定入口验证》 一句话故事：纸扎匠之子在雾港替亡者扎屋时，发现每"
+        },
+        {
+          "stage": "beats",
+          "ratio": 0.8267,
+          "chars": 300,
+          "han_ratio": 0.55,
+          "head": "作品：《绑定入口验证》 一句话故事：纸扎匠之子在雾港替亡者扎屋时，发现每"
+        }
+      ]
+    }
+  },
+  "server_check": {
+    "samples": [
+      {
+        "name": "narrative",
+        "chars": 600,
+        "offline": 424,
+        "server": 424,
+        "equal": true
+      },
+      {
+        "name": "dialogue",
+        "chars": 600,
+        "offline": 426,
+        "server": 426,
+        "equal": true
+      },
+      {
+        "name": "mixed_ascii",
+        "chars": 50,
+        "offline": 37,
+        "server": 37,
+        "equal": true
+      }
+    ],
+    "all_equal": true
+  },
+  "conclusion": {
+    "prose_tokens_per_word": 0.7185,
+    "prose_p95": 0.7495,
+    "output_p95": 0.7429,
+    "prompt_p95_max": 0.6903,
+    "recommended_tokens_per_word": 0.86,
+    "safety_margin": 0.15,
+    "thinking_overhead_tokens_p50": 1048.0,
+    "thinking_overhead_tokens_p95": 3299.2,
+    "statements": [
+      "正文实测 0.7185 token/字（P95 0.7495），「1 字 1 token」对纯文字偏保守。",
+      "真实输出正文 0.6958 token/字（P95 0.7429）。",
+      "提示词各阶段整段 P95 最大 0.6903 token/字符（含工具 schema 时更高）。",
+      "开启思考时 reasoning_tokens 中位数 1048、P95 3299，固定 1024 预留偏低。",
+      "文本生成里 finish_reason=length 占 24.3%（不含工具调用的 tool_calls 正常收尾）。"
+    ]
+  }
+}

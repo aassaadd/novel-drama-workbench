@@ -15,6 +15,7 @@ from ..config import AppConfig
 from ..models.ids import new_id, now_iso
 from ..store import ProjectStore
 from ..text.context import EXCERPT_CHARS, ContextAssembler
+from .budgets import context_budget_tokens
 from .service import build_chapter_context
 
 #: 已有下游产物时给用户的提示：正文变了，场景与台词需要重新切分
@@ -281,7 +282,7 @@ def edit_chapter(
 
     selection = _resolve_range(char_range, content)
     context = build_chapter_context(store, config, chapter)
-    configured_budget = int(config.get("writing.context_budget_tokens") or 32768)
+    configured_budget = context_budget_tokens(config)
 
     mt = config.get("writing.multi_turn") or {}
     try:

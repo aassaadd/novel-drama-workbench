@@ -284,7 +284,6 @@ def _llm_settings(config, timeout_s: float | None = None) -> dict | None:
     )
     # 改写是短任务：低温度 + 关思考，避免几十秒的推理
     settings["temperature"] = resolve_temperature(config, "audio")
-    settings["max_tokens"] = 220
     settings["enable_thinking"] = False
     return settings
 
@@ -311,7 +310,6 @@ def _llm_rewrite(prompt: str, duration_s: float, settings: dict) -> str:
         task="sfx_prompt",
         system=LLM_SYSTEM,
         messages=[Message(role="user", content=f"中文描述：{prompt}\n目标时长：{duration_s:g} 秒")],
-        max_tokens=220,
         temperature=float(settings.get("temperature") or 0.2),
         stream=False,
     )
