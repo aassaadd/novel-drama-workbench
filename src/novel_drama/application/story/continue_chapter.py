@@ -6,7 +6,8 @@ import json
 from dataclasses import replace
 
 from ...adapters.errors import AdapterError
-from ...adapters.llm.contracts import Message
+from ...adapters.llm.contracts import Message, TextGenResult
+from ...adapters.observability import set_llm_call_reason
 from ...adapters.persistence import ProjectStore
 from ...application.story.edit_chapter import (
     INSTRUCTION_LIMIT,
@@ -22,6 +23,11 @@ from ...text.dialogue import normalize_dialogue
 from .chapter_context import build_chapter_context, stream_text
 from .chapter_limits import DEFAULT_CHAPTER_WORDS
 from .chapter_text import _append_segment, _continue_instruction, _count_words
+from .degeneration import (
+    DegenerationDetected,
+    DegenerationGuard,
+)
+from .degeneration import retry_instruction as degeneration_retry_instruction
 
 #: 正文每轮目标字数（默认）
 DEFAULT_SEGMENT_WORDS = 800
@@ -602,8 +608,55 @@ def continue_chapter(
                 messages=base_messages
                 + [Message("assistant", added_text), Message("user", _continue_instruction(remaining_words))],
             )
+        # 续写是多轮追加：重复一旦落盘就会污染整章，所以每轮都独立做退化检测
+        guard = DegenerationGuard(remaining_words)
+
+        def _round_call(call_request, call_guard) -> TextGenResult:
+            """调用一次模型并做退化检测，流式与非流式走同一套判定。
+
+            参数:
+                call_request: 本轮请求。
+                call_guard: 本轮退化检测器。
+
+            返回:
+                TextGenResult。
+
+            异常:
+                DegenerationDetected: 命中重复退化。
+            """
+            if on_delta:
+                return stream_text(context["adapter"], call_request, on_delta, guard=call_guard)
+            result = context["adapter"].generate(call_request)
+            reason = call_guard.feed(result.text or "") or call_guard.check_all()
+            if reason:
+                raise call_guard.exception(len(result.text or ""))
+            return result
+
         try:
-            result = stream_text(context["adapter"], request, on_delta) if on_delta else context["adapter"].generate(request)
+            result = _round_call(request, guard)
+        except DegenerationDetected as exc:
+            # 先保留循环起点之前的部分，再带硬约束重写一次；仍重复则整轮丢弃不落盘
+            kept = guard.text[: exc.keep_index].strip()
+            warnings.append(f"第 {index} 轮检测到重复输出（{exc.reason}），已截到循环起点前并重写一次")
+            set_llm_call_reason("degeneration", "continue_chapter: 退化后重写本轮")
+            try:
+                retried = _round_call(
+                    replace(
+                        request,
+                        messages=list(request.messages) + [Message("user", degeneration_retry_instruction(exc.reason))],
+                    ),
+                    DegenerationGuard(remaining_words),
+                )
+            except DegenerationDetected as again:
+                error_note = f"第 {index} 轮重复输出两次（{again.reason}）；已丢弃本轮内容，未写入正文"
+                record["status"] = "failed"
+                break
+            except Exception as exc:  # 与其他轮的异常口径保持一致
+                error_note = f"第 {index} 轮续写失败：模型调用异常（{exc}）"
+                record["status"] = "failed"
+                break
+            body_retry = (retried.text or "").strip()
+            result = replace(retried, text=(kept + "\n\n" + body_retry).strip() if kept else body_retry)
         except AdapterError as exc:
             error_note = f"第 {index} 轮续写失败：{exc}"
             record["status"] = "failed"

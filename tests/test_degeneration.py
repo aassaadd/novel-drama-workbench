@@ -43,6 +43,9 @@ from novel_drama.application.story.degeneration import (
 from novel_drama.application.story.generate_chapter import (
     generate_chapter as generate_chapter,
 )
+from novel_drama.application.story.continue_chapter import (
+    continue_chapter as continue_chapter,
+)
 from novel_drama.application.story.recap import ROUND_SUMMARY_MARK
 from novel_drama.domain.production.rules.watchdog import (
     apply_context_limit,
@@ -318,3 +321,80 @@ def test_watchdog_hit_keeps_content() -> None:
         assert f"第{index}次生成" in text
     assert any("看门狗上限" in item for item in notices)
     assert any("未丢弃正文" in item for item in notices)
+
+
+class ContinueLoopAdapter(RecordingAdapter):
+    """续写任务先输出对白循环，收到退化重写指令后输出正常正文。"""
+
+    def generate(self, request: TextGenRequest) -> TextGenResult:
+        """按最后一条用户消息判断是本轮还是重写。"""
+        result = super().generate(request)
+        if request.task != "chapter":
+            return result
+        users = [message.content for message in request.messages if message.role == "user"]
+        if "重复退化" in (users[-1] if users else ""):
+            return replace(
+                result,
+                text=(
+                    "续写，檐下的水一滴一滴落进铁桶，声音在空院子里显得很响。"
+                    "她把湿透的鞋放在门槛外，回头看了一眼屋里那盏还亮着的灯。"
+                    "桌上的茶已经凉了，杯壁上留着一圈浅浅的茶印，谁都没有先去动它。"
+                    "风从巷口灌进来，把晾在绳上的衣服吹得贴住墙，又慢慢松开。"
+                ),
+            )
+        return replace(result, text=LOOP_TEXT)
+
+
+class ContinueAlwaysLoopAdapter(RecordingAdapter):
+    """续写任务每一轮都输出对白循环。"""
+
+    def generate(self, request: TextGenRequest) -> TextGenResult:
+        """始终返回重复对白。"""
+        super().generate(request)
+        return TextGenResult(text=LOOP_TEXT, finish_reason="stop", model="fake")
+
+
+def _chapter_with_content(store, chapter) -> dict:
+    """给章节写入一段正常起点正文，续写才有上文。
+
+    参数:
+        store: 工程。
+        chapter: 章节记录。
+
+    返回:
+        保存后的章节。
+    """
+    chapter["content"] = "他把窗推开一条缝，湿冷的风挤进来，桌上的纸角被掀起又落下。\n"
+    chapter["word_count"] = 30
+    store.save_chapter(chapter)
+    return chapter
+
+
+def test_continue_chapter_stops_repetition(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """续写路径命中重复后截断重写一次，重复内容不落盘。"""
+    store, config, chapter = _project(tmp_path)
+    _chapter_with_content(store, chapter)
+    adapter = ContinueLoopAdapter(_offline())
+    _patch_adapter(monkeypatch, adapter)
+
+    result = continue_chapter(store, config, chapter["id"], words=300, dry_run=False)
+
+    saved = store.load_chapter(chapter["id"])
+    assert "我没有！" not in saved["content"]
+    assert "檐下的水" in saved["content"]
+    assert any("重复输出" in item for item in result["warnings"])
+
+
+def test_continue_chapter_discards_double_repetition(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """续写两次都重复时报错，且正文保持不变。"""
+    store, config, chapter = _project(tmp_path)
+    _chapter_with_content(store, chapter)
+    _patch_adapter(monkeypatch, ContinueAlwaysLoopAdapter(_offline()))
+    before = store.load_chapter(chapter["id"])
+
+    result = continue_chapter(store, config, chapter["id"], words=300, dry_run=False)
+
+    assert "重复输出两次" in str(result.get("error") or "")
+    after = store.load_chapter(chapter["id"])
+    assert after["content"] == before["content"]
+    assert after["revision"] == before["revision"]
