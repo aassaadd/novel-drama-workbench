@@ -231,6 +231,17 @@ function findOutlineChapter(id) {
   return outlineChapters().find((row) => row.chapter.id === id) || null;
 }
 
+/**
+ * 按幕键找大纲幕：键优先用幕 ID，老数据缺失 ID 时用位置键 `#序号`。
+ * @param {string} key 幕键
+ * @returns {{act: object, index: number}|null} 幕条目与数组位置（0 基）
+ */
+function findOutlineAct(key) {
+  const acts = cache.outline?.acts || [];
+  const index = acts.findIndex((act, position) => actKey(act, position) === String(key || ''));
+  return index < 0 ? null : { act: acts[index], index };
+}
+
 /** 章节是否已落成正文文件 */
 function landedChapter(id) {
   return cache.chapters.find((item) => item.id === id) || null;
@@ -442,6 +453,10 @@ function selectionTitle() {
     const meta = CATEGORY_META[ui.sel.category] || {};
     const item = (activeWorld()?.[meta.field] || []).find((row) => row.id === ui.sel.id);
     return `${activeWorld()?.name || '世界'} · ${meta.label || '条目'}${item ? ` · ${entryName(ui.sel.category, item)}` : ''}`;
+  }
+  if (ui.sel.kind === 'act') {
+    const hit = findOutlineAct(ui.sel.id);
+    return hit ? `第 ${hit.index + 1} 幕 · ${hit.act.title || '未命名幕'}` : '分层大纲';
   }
   const hit = findOutlineChapter(ui.sel.id);
   return hit ? `${hit.chapter.index ? `第 ${hit.chapter.index} 章 · ` : ''}${hit.chapter.title || '未命名'}` : '分层大纲';
@@ -686,12 +701,15 @@ function ctxHTML() {
       const chapters = act.chapters || [];
       return `
       <div class="novel-act">
-        <div class="novel-act-head toggle ${open ? 'open' : ''}" data-act="novel-toggle-act"
+        <div class="novel-act-head toggle ${open ? 'open' : ''}${
+          ui.sel.kind === 'act' && ui.sel.id === actKey(act, actIndex) ? ' on' : ''
+        }" data-act="novel-toggle-act"
           data-key="${esc(actKey(act, actIndex))}"
           title="${esc(act.summary || '')}；点击${open ? '折叠' : '展开'}本章列表">
           <span class="novel-caret" aria-hidden="true">▸</span>
           <span class="mono novel-act-index">第 ${Number(act.index || actIndex + 1)} 幕</span>
-          <span class="novel-act-title" title="${esc(act.title || '')}">${esc(act.title || '未命名幕')}</span>
+          <button class="novel-act-title" data-act="novel-sel-act" data-key="${esc(actKey(act, actIndex))}"
+            title="打开该幕：查看并修改幕标题与幕摘要">${esc(act.title || '未命名幕')}</button>
           ${originBadge(act.origin)}
           <button class="btn icon sm" data-act="novel-act-generate" data-id="${esc(act.id || '')}"
             data-index="${Number(act.index || actIndex + 1)}" data-pos="${actIndex + 1}"
@@ -1025,6 +1043,68 @@ function worldEntryHTML() {
           ${chapterBox}
         </div>
       </div></div>
+    </div>`;
+}
+
+/**
+ * 幕详情：幕标题 / 幕摘要可就地编辑并保存。
+ * 章与节拍仍在各自的章详情里改，这里只展示本幕章节规模，便于对照。
+ */
+function actHTML() {
+  const hit = findOutlineAct(ui.sel.id);
+  if (!hit) {
+    return `<div class="empty" style="margin:auto">${icon('list', 22)}<b>先在左侧选一幕</b>
+      <span>点幕标题可查看并修改幕标题与幕摘要</span></div>`;
+  }
+  const { act, index } = hit;
+  const chapters = act.chapters || [];
+  const beats = chapters.reduce((sum, chapter) => sum + (chapter.beats?.length || 0), 0);
+  const landed = chapters.filter((chapter) => landedChapter(chapter.id)).length;
+  const rows = chapters
+    .map(
+      (chapter) => `
+        <div class="summary-line">
+          <span class="mono">${Number(chapter.index || 0)}</span>
+          <span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(
+            chapter.title || '未命名章节'
+          )}</span>
+          <span class="right hint">${(chapter.beats || []).length} 个节拍${
+            landedChapter(chapter.id) ? ' · 已落章' : ''
+          }</span>
+        </div>`
+    )
+    .join('');
+  return `
+    <div class="ed-head">
+      <div style="min-width:0">
+        <div class="et">${esc(act.title || '未命名幕')}</div>
+        <div class="em">第 ${index + 1} 幕 · ${chapters.length} 章 · ${beats} 个节拍 · 已落章 ${landed}${
+          act.origin ? ` · ${esc(originLabel(act.origin))}` : ''
+        }</div>
+      </div>
+      <div class="right">
+        <button class="btn sm primary" data-act="novel-act-save">保存</button>
+        <button class="btn sm" data-act="novel-act-generate" data-id="${esc(act.id || '')}"
+          data-index="${index + 1}" data-pos="${index + 1}"
+          title="生成整幕正文：按章节顺序一次跑完，可选只补缺失或重新生成已有正文">${icon('spark', 12)} 生成本幕正文</button>
+      </div>
+    </div>
+    <div class="vw-body" style="padding:16px;overflow:auto;display:grid;gap:12px">
+      <div class="card"><div class="card-body" style="display:grid;gap:10px">
+        <div class="field"><label>幕标题</label><input class="input" id="na-title" value="${esc(act.title || '')}" /></div>
+        <div class="field"><label>幕摘要（梗概）</label>
+          <textarea class="textarea" id="na-summary" rows="6">${esc(act.summary || '')}</textarea>
+          <div class="hint" style="margin-top:2px">这一幕的主线、冲突升级与收束；生成章节与正文时作为上下文使用。</div>
+        </div>
+      </div></div>
+      <div class="card">
+        <div class="card-head"><span class="ct">本幕章节（${chapters.length}）</span>
+          <div class="right hint">章与节拍在各自的章详情里编辑</div>
+        </div>
+        <div class="card-body" style="display:grid;gap:6px">
+          ${rows || '<div class="hint">这一幕还没有章节</div>'}
+        </div>
+      </div>
     </div>`;
 }
 
@@ -2007,6 +2087,10 @@ function mainHTML() {
     if (boot.state.worlds !== 'ok') return bootBlockHTML('worlds', '世界');
     return ui.sel.kind === 'worldEntry' ? worldEntryHTML() : worldOverviewHTML();
   }
+  if (ui.sel.kind === 'act') {
+    if (boot.state.outline !== 'ok') return bootBlockHTML('outline', '分层大纲');
+    return actHTML();
+  }
   if (ui.sel.kind === 'chapter') {
     if (boot.state.outline !== 'ok') return bootBlockHTML('outline', '分层大纲');
     return chapterHTML();
@@ -2351,6 +2435,31 @@ async function saveSetting(section) {
   cache.setting = await getJSON('/api/ui/setting', { path: cache.path });
   toast('设定已保存', 'ok');
   // 保存成功后不重绘页面：保住输入焦点与滚动位置（失败时也不会走到这里）
+}
+
+/** 保存幕：幕标题 / 幕摘要（就地更新左侧行与面包屑，不整页重绘） */
+async function saveOutlineAct() {
+  const hit = findOutlineAct(ui.sel.id);
+  if (!hit) return;
+  const title = document.getElementById('na-title')?.value.trim() || '';
+  const summary = document.getElementById('na-summary')?.value.trim() || '';
+  if (title === (hit.act.title || '') && summary === (hit.act.summary || '')) {
+    return toast('没有需要保存的改动', 'info', 1400);
+  }
+  await run('保存幕', () =>
+    postJSON('/api/ui/outline/text', { path: cache.path, act: hit.act.id, title, summary })
+  );
+  cache.outline = await getJSON('/api/ui/outline', { path: cache.path });
+  toast('幕已保存', 'ok');
+  // 只替换标题相关节点：保住输入焦点与滚动位置
+  const head = document.querySelector('#novel-main .ed-head .et');
+  if (head) head.textContent = title || '未命名幕';
+  const row = document.querySelector(
+    `[data-act="novel-sel-act"][data-key="${esc(actKey(hit.act, hit.index))}"]`
+  );
+  if (row) row.textContent = title || '未命名幕';
+  const crumbs = document.getElementById('novel-crumb');
+  if (crumbs) crumbs.innerHTML = crumbHTML();
 }
 
 /** 保存大纲章：标题 / 概要 / 各节拍摘要与转折标记（节拍序号从 1 开始，与后端一致） */
@@ -4092,6 +4201,9 @@ function paint() {
   if (boot.state.outline === 'ok' && ui.sel.kind === 'chapter' && !findOutlineChapter(ui.sel.id)) {
     ui.sel = { kind: 'setting', id: '' };
   }
+  if (boot.state.outline === 'ok' && ui.sel.kind === 'act' && !findOutlineAct(ui.sel.id)) {
+    ui.sel = { kind: 'setting', id: '' };
+  }
   if (boot.state.worlds === 'ok') {
     if (!findWorld(ui.worldId)) ui.worldId = cache.worlds[0]?.id || '';
     if (ui.sel.kind === 'worldOverview' && !ui.draftWorld && !findWorld(ui.sel.id)) {
@@ -4385,6 +4497,20 @@ async function onClick(event) {
     return openActGenerateDialog(hit, index || position || 1);
   }
   if (act === 'novel-entry-new') return newEntry(el.dataset.category);
+  if (act === 'novel-sel-act') {
+    const key = el.dataset.key || '';
+    const hit = findOutlineAct(key);
+    if (!hit) return toast('找不到这一幕，先刷新大纲', 'warn');
+    // 打开幕详情时顺带展开该幕，右看详情、左看章节
+    materializeCollapse();
+    collapse.acts.delete(actKey(hit.act, hit.index));
+    saveCollapse();
+    ui.sel = { kind: 'act', id: key };
+    ui.draftWorld = false;
+    ui.draftEntry = false;
+    return paint();
+  }
+  if (act === 'novel-act-save') return saveOutlineAct();
   if (act === 'novel-sel-chapter') {
     ui.sel = { kind: 'chapter', id: el.dataset.id };
     ui.draftWorld = false;

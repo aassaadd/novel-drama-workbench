@@ -1088,6 +1088,10 @@ table.files .mono { font-size: 11px; color: var(--text-4); }
 .novel-act-head .mono { color: var(--accent); }
 .novel-act-index { flex: 0 0 auto; color: var(--accent); }
 .novel-act-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-3); }
+/* 幕标题是进入幕详情的入口：保留文字观感，悬停提示可点 */
+button.novel-act-title { background: none; border: 0; padding: 0; font: inherit; text-align: left; cursor: pointer; }
+button.novel-act-title:hover { color: var(--text); text-decoration: underline; }
+.novel-act-head.on .novel-act-title { color: var(--text); }
 .chap-row.novel-chapter { padding-left: 22px; font-size: 12px; }
 
 /* 小说左列：行用 button 实现，统一抹掉按钮默认底色 / 边框，并保持行高与悬停态 */
