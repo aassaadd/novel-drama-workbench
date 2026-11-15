@@ -16,6 +16,7 @@ from ...orchestration.pipeline import split_scene_lines
 from ...orchestration.resplit import analyze_line_split
 from ...tts import line_state
 from .line_query import find_line
+from .lines_source import chapter_view, save_lines
 
 #: 正文与切分数据对不上时的统一提示：宁可拒绝写盘，也不静默改到错误位置
 CONTENT_MISMATCH = "正文已变更，请先重新切分"
@@ -120,7 +121,7 @@ def set_lines(
     异常:
         FileNotFoundError: 章节不存在。
     """
-    chapter = store.load_chapter(chapter_id)
+    chapter = chapter_view(store, store.load_chapter(chapter_id))
     updated: list[str] = []
     not_found: list[dict] = []
     last_line: dict | None = None
@@ -152,7 +153,7 @@ def set_lines(
     if not updated and not not_found:
         return {"text": "没有字段变化", "payload": {"changed": False}}
     if updated:
-        store.save_chapter(chapter)
+        save_lines(store, chapter)
 
     if batch:
         text = f"已批量更新 {len(updated)} 行"
@@ -195,7 +196,7 @@ def edit_line_text(store: ProjectStore, chapter_id: str, line_id: str, text: str
         ValueError: 文本为空/含换行/超长，或正文与切分结果已不一致。
         KeyError: 台词行不存在。
     """
-    chapter = store.load_chapter(chapter_id)
+    chapter = chapter_view(store, store.load_chapter(chapter_id))
     _, line, _ = store.find_line(chapter, line_id)
 
     new_text = str(text or "").strip()
@@ -239,7 +240,7 @@ def edit_line_text(store: ProjectStore, chapter_id: str, line_id: str, text: str
     chapter["content"] = updated
     chapter["word_count"] = count_words(updated)
     bump_revision(chapter)
-    store.save_chapter(chapter)
+    save_lines(store, chapter)
     return {
         "text": f"已更新 {line['id']}（revision={line['revision']}），正文已同步",
         "payload": {
@@ -362,7 +363,7 @@ def merge_lines(store: ProjectStore, chapter_id: str, line_ids: list[str]) -> di
     异常:
         ValueError: 行不足两行、跨场景、不相邻或正文对不上。
     """
-    chapter = store.load_chapter(chapter_id)
+    chapter = chapter_view(store, store.load_chapter(chapter_id))
     if len(line_ids) < 2:
         raise ValueError("至少选择两行才能合并")
     scene, group = _ordered_group(store, chapter, line_ids)
@@ -370,7 +371,7 @@ def merge_lines(store: ProjectStore, chapter_id: str, line_ids: list[str]) -> di
     lost = _lost_audio(group)
     merged = _merge_group(scene, group, chapter.get("content") or "", anchors)
     bump_revision(chapter)
-    store.save_chapter(chapter)
+    save_lines(store, chapter)
     payload = {
         "changed": True,
         "merged": {
@@ -478,7 +479,7 @@ def merge_narrations(
     返回:
         `{"text": 终端文案, "payload": 结构化结果}`。
     """
-    chapter = store.load_chapter(chapter_id)
+    chapter = chapter_view(store, store.load_chapter(chapter_id))
     groups = plan_narration_groups(chapter, scene_ids=scene_ids, max_chars=max_chars)
     preview = _narration_preview(groups, chapter)
     before = sum(len(group) for _, group in groups)
@@ -506,7 +507,7 @@ def merge_narrations(
         lost += _lost_audio(group)
         _merge_group(scene, group, content, anchors)
     bump_revision(chapter)
-    store.save_chapter(chapter)
+    save_lines(store, chapter)
     text = f"已合并 {before} 段相邻旁白为 {len(groups)} 段"
     if lost:
         text += f"；{lost} 条已有配音失去引用（文件仍在磁盘）"
@@ -537,7 +538,7 @@ def revert_line_params(store: ProjectStore, chapter_id: str, line_id: str, confi
         `{"text": 终端文案, "payload": 结构化结果, "snapshot_available": 是否有快照}`；
         没有快照时 `snapshot_available=False`，调用方按「拒绝执行」处理。
     """
-    chapter = store.load_chapter(chapter_id)
+    chapter = chapter_view(store, store.load_chapter(chapter_id))
     _, line = find_line(store, chapter, line_id)
     snapshot = line_state.snapshot_for_line(store.root, line)
     if snapshot is None:
@@ -582,7 +583,7 @@ def split_line_at(store: ProjectStore, chapter_id: str, line_id: str, offset: in
     异常:
         ValueError: 行不存在、位置不在台词中间、正文对不上。
     """
-    chapter = store.load_chapter(chapter_id)
+    chapter = chapter_view(store, store.load_chapter(chapter_id))
     scene, line = find_line(store, chapter, line_id)
     text = str(line.get("text") or "")
     offset = int(offset)
@@ -620,7 +621,7 @@ def split_line_at(store: ProjectStore, chapter_id: str, line_id: str, offset: in
         item["scene_id"] = scene.get("id")
     scene["lines"] = lines
     bump_revision(chapter)
-    store.save_chapter(chapter)
+    save_lines(store, chapter)
     return {
         "text": f"已在第 {offset} 字处拆分 {line['id']} → {line['id']} + {second['id']}",
         "payload": {
@@ -655,7 +656,7 @@ def split_lines(
     返回:
         `{"text": 终端文案, "payload": 结构化结果}`。
     """
-    chapter = store.load_chapter(chapter_id)
+    chapter = chapter_view(store, store.load_chapter(chapter_id))
     characters = store.load_characters()["characters"]
     result = split_scene_lines(
         store,
@@ -690,7 +691,7 @@ def line_split_impact(
     返回:
         `{"text": 终端文案, "payload": 影响清单}`。
     """
-    chapter = store.load_chapter(chapter_id)
+    chapter = chapter_view(store, store.load_chapter(chapter_id))
     characters = store.load_characters()["characters"]
     report = analyze_line_split(store, chapter, characters, scene_ids=scene_ids, keep_manual=keep_manual)
     return {"text": report["text"], "payload": report}

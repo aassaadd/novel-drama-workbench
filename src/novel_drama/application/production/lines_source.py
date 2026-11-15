@@ -6,8 +6,9 @@
 - 旧工程没有 `scripts/` 时，`script_from_scenes` 在内存里引导出台本，行 ID 不变；
 - `scenes_from_script` 是派生产出：深拷贝旧场景后只覆盖内容字段，未知字段与生产态不丢。
 
-本模块目前只提供只读换算与读入口，不接任何写路径；写点切换（只写台本、scenes 派生）
-在步骤 3 落地。开关 `NDW_LINES_SOURCE=scenes|script` 用于逐步切换与差异对照，默认 `scenes`。
+本模块提供只读换算与读入口，以及步骤 3 的唯一内容写点 `save_lines`（只写台本、
+场景由台本派生）。开关 `NDW_LINES_SOURCE=scenes|script` 用于逐步切换与差异对照，
+默认 `scenes`，步骤 3 末尾切到 `script`。
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ import os
 from ...adapters.persistence import ProjectStore
 from ...domain.production.line_fields import CONTENT_LINE_FIELDS, SCENE_DESCRIPTIVE_FIELDS
 from ...models import entities
+from ...models.ids import now_iso
 
 #: 空章节内容的占位哈希输入（保证 `content_hash` 始终是合法 sha256）
 _EMPTY_TIME = "1970-01-01T00:00:00Z"
@@ -109,26 +111,7 @@ def script_from_scenes(chapter: dict) -> dict:
     timestamp = str(chapter.get("created_at") or chapter.get("updated_at") or _EMPTY_TIME)
     content = str(chapter.get("content") or "")
     scenes = sorted(chapter.get("scenes") or [], key=lambda item: item.get("index") or 0)
-    shots = []
-    for scene in scenes:
-        shot_index = int(scene.get("index") or 0) + 1
-        anchor_text = str(scene.get("source_text") or scene.get("title") or "")
-        shot = {
-            "id": _stable_id("sht", f"{chapter_id}:{shot_index}"),
-            "index": shot_index,
-            "scene_label": str(scene.get("title") or f"场景 {shot_index}"),
-            "location": scene.get("location"),
-            "time_of_day": scene.get("time_of_day") or "unknown",
-            "mood": scene.get("mood"),
-            "goal": scene.get("goal"),
-            "anchor": _anchor_for(anchor_text, f"{chapter_id}:{shot_index}"),
-            "status": "ready" if scene.get("lines") else "draft",
-            "lines": [_line_from_scene_line(line) for line in scene.get("lines") or []],
-            "revision": int(scene.get("revision") or 1),
-        }
-        if scene.get("bgm"):
-            shot["bgm"] = copy.deepcopy(scene["bgm"])
-        shots.append(shot)
+    shots = [_shot_for_scene(chapter, scene) for scene in scenes]
     return {
         "schema_version": 1,
         "id": _stable_id("scr", chapter_id),
@@ -171,6 +154,37 @@ def _line_from_scene_line(line: dict) -> dict:
         if field in line:
             shot_line[field] = copy.deepcopy(line[field])
     return shot_line
+
+
+def _shot_for_scene(chapter: dict, scene: dict) -> dict:
+    """按场景字段新建一个镜头（引导台本用；ID 与锚点按章节 + 序号确定性生成）。
+
+    参数:
+        chapter: 章节 dict（取章节 ID）。
+        scene: 场景 dict。
+
+    返回:
+        符合 `director-script.schema.json#/$defs/shot` 的镜头 dict。
+    """
+    chapter_id = str(chapter.get("id") or "")
+    shot_index = int(scene.get("index") or 0) + 1
+    anchor_text = str(scene.get("source_text") or scene.get("title") or "")
+    shot = {
+        "id": _stable_id("sht", f"{chapter_id}:{shot_index}"),
+        "index": shot_index,
+        "scene_label": str(scene.get("title") or f"场景 {shot_index}"),
+        "location": scene.get("location"),
+        "time_of_day": scene.get("time_of_day") or "unknown",
+        "mood": scene.get("mood"),
+        "goal": scene.get("goal"),
+        "anchor": _anchor_for(anchor_text, f"{chapter_id}:{shot_index}"),
+        "status": "ready" if scene.get("lines") else "draft",
+        "lines": [_line_from_scene_line(line) for line in scene.get("lines") or []],
+        "revision": int(scene.get("revision") or 1),
+    }
+    if scene.get("bgm"):
+        shot["bgm"] = copy.deepcopy(scene["bgm"])
+    return shot
 
 
 def scenes_from_script(chapter: dict, script: dict) -> list[dict]:
@@ -306,6 +320,204 @@ def _script_for(store: ProjectStore | None, chapter: dict) -> dict:
         except FileNotFoundError:
             pass
     return script_from_scenes(chapter)
+
+
+# ---------------- 写点：台本唯一可写，场景由台本派生 ----------------
+
+
+def ensure_script(store: ProjectStore, chapter: dict) -> dict:
+    """取本章导演脚本；没有台本时先用当前场景引导并落盘（幂等）。
+
+    只在写路径调用：旧工程第一次发生内容写入时补出台本，之后一律以台本为准。
+    读路径不调用本函数（读不写，见 `_script_for`）。
+
+    参数:
+        store: 工程。
+        chapter: 章节 dict（需含 `scenes`，用于首次引导）。
+
+    返回:
+        导演脚本 dict。
+    """
+    try:
+        return store.load_script(str(chapter.get("id") or ""))
+    except FileNotFoundError:
+        script = script_from_scenes(chapter)
+        store.save_script(script)
+        return script
+
+
+def save_lines(store: ProjectStore, chapter: dict) -> dict:
+    """唯一内容写点：把场景里的内容改动同步进台本，再由台本派生场景落盘。
+
+    调用约定：
+    1. 行编辑类用例先就地改好 `chapter["scenes"]` 里的台词行（与改造前完全一致）；
+    2. 再调用本函数，由它把内容层字段同步进台本、派生 scenes、按「有变化才写」落盘。
+
+    同步只覆盖内容层字段与场景描述字段；`tts` / `confidence` / 媒体条目 / 场景身份
+    一律不写进台本，派生时按行 ID、条目 ID 从旧场景原样保留。
+
+    参数:
+        store: 工程。
+        chapter: 章节 dict（已就地改好场景）。
+
+    返回:
+        `{"script_saved": 台本是否写盘, "chapter_saved": 章节是否写盘}`。
+    """
+    script = ensure_script(store, chapter)
+    script_changed = _sync_script_from_scenes(chapter, script)
+    scenes = scenes_from_script(chapter, script)
+    scenes_changed = scenes != (chapter.get("scenes") or [])
+    if scenes_changed:
+        chapter["scenes"] = scenes
+    if script_changed:
+        script["updated_at"] = now_iso()
+        store.save_script(script)
+    chapter_changed = scenes_changed or _chapter_changed_on_disk(store, chapter)
+    if chapter_changed:
+        store.save_chapter(chapter)
+    return {"script_saved": script_changed, "chapter_saved": chapter_changed}
+
+
+def _chapter_changed_on_disk(store: ProjectStore, chapter: dict) -> bool:
+    """判断章节除 `updated_at` 外是否与磁盘不一致（用于避免无改动的二次写盘）。
+
+    参数:
+        store: 工程。
+        chapter: 内存中的章节 dict。
+
+    返回:
+        与磁盘不同（或磁盘尚无该章）时为 True。
+    """
+    try:
+        disk = store.load_chapter(str(chapter.get("id") or ""))
+    except FileNotFoundError:
+        return True
+    disk.pop("updated_at", None)
+    current = {key: value for key, value in chapter.items() if key != "updated_at"}
+    return disk != current
+
+
+def _sync_script_from_scenes(chapter: dict, script: dict) -> bool:
+    """把场景里的内容层改动同步回台本镜头（就地改 `script`）。
+
+    对齐规则：优先按行 ID 重合度匹配镜头，匹配不到时按 `index`（场景序号 = 镜头序号 - 1）；
+    镜头里台本自有字段（锚点、音效/画面/动画、过渡等）原样保留，只覆盖内容与描述字段。
+
+    参数:
+        chapter: 已改好场景的章节 dict。
+        script: 导演脚本 dict（就地修改）。
+
+    返回:
+        台本是否发生变化。
+    """
+    scenes = list(chapter.get("scenes") or [])
+    old_shots = list(script.get("shots") or [])
+    remaining = list(old_shots)
+    matched: dict[int, dict] = {}
+    for position, scene in enumerate(scenes):
+        shot = _match_shot(scene, remaining)
+        if shot is not None:
+            remaining.remove(shot)
+            matched[position] = shot
+    new_shots = [
+        _shot_from_scene(chapter, scene, matched.get(position)) for position, scene in enumerate(scenes)
+    ]
+    if new_shots == old_shots:
+        return False
+    script["shots"] = new_shots
+    script["status"] = "ready" if new_shots else "draft"
+    return True
+
+
+def _match_shot(scene: dict, remaining: list[dict]) -> dict | None:
+    """为一个场景挑选可复用的旧镜头（行 ID 重合优先，其次 index）。
+
+    参数:
+        scene: 场景 dict。
+        remaining: 尚未匹配的旧镜头列表。
+
+    返回:
+        匹配到的镜头；没有可复用时返回 None。
+    """
+    line_ids = {line.get("id") for line in scene.get("lines") or [] if line.get("id")}
+    if line_ids:
+        best: dict | None = None
+        best_hit = 0
+        for shot in remaining:
+            hit = len(line_ids & {line.get("id") for line in shot.get("lines") or []})
+            if hit > best_hit:
+                best, best_hit = shot, hit
+        if best is not None:
+            return best
+    index = int(scene.get("index") or 0) + 1
+    for shot in remaining:
+        if int(shot.get("index") or 0) == index:
+            return shot
+    return None
+
+
+def _shot_from_scene(chapter: dict, scene: dict, shot: dict | None) -> dict:
+    """用场景的当前内容生成镜头（旧镜头存在时保留其台本自有字段）。
+
+    参数:
+        chapter: 章节 dict。
+        scene: 场景 dict。
+        shot: 可复用的旧镜头，可为空（新场景）。
+
+    返回:
+        镜头 dict。
+    """
+    if shot is None:
+        return _shot_for_scene(chapter, scene)
+    updated = copy.deepcopy(shot)
+    updated["index"] = int(scene.get("index") or 0) + 1
+    title = str(scene.get("title") or "")
+    if title:
+        # 场景标题为空时不把镜头名写入，保证「引导 → 派生」不凭空补标题
+        updated["scene_label"] = title
+    updated.setdefault("scene_label", f"场景 {updated['index']}")
+    for field in SCENE_DESCRIPTIVE_FIELDS:
+        if field in scene:
+            updated[field] = copy.deepcopy(scene[field])
+    if "time_of_day" in updated and not updated["time_of_day"]:
+        updated["time_of_day"] = "unknown"
+    if scene.get("bgm") is None:
+        updated.pop("bgm", None)
+    else:
+        updated["bgm"] = copy.deepcopy(scene["bgm"])
+    updated["lines"] = _shot_lines_from_scene(scene, shot)
+    updated["revision"] = int(scene.get("revision") or updated.get("revision") or 1)
+    return updated
+
+
+def _shot_lines_from_scene(scene: dict, shot: dict) -> list[dict]:
+    """按场景台词行生成镜头行（保留旧镜头行的锚点等台本自有字段）。
+
+    参数:
+        scene: 场景 dict。
+        shot: 旧镜头 dict（提供可复用行）。
+
+    返回:
+        镜头行列表，顺序与场景行一致。
+    """
+    old_lines = {line.get("id"): line for line in shot.get("lines") or []}
+    result = []
+    for source in scene.get("lines") or []:
+        old = old_lines.get(source.get("id"))
+        entry = copy.deepcopy(old) if old is not None else _line_from_scene_line(source)
+        entry["id"] = source.get("id")
+        entry["index"] = int(source.get("index") or 0)
+        entry["revision"] = int(source.get("revision") or entry.get("revision") or 1)
+        for field in CONTENT_LINE_FIELDS:
+            if field == "index":
+                continue
+            if field in source:
+                entry[field] = copy.deepcopy(source[field])
+        if entry.get("anchor") is None:
+            # 台本 schema 要求镜头行必带锚点：新行按原文合成，旧行沿用原锚点
+            entry["anchor"] = _anchor_for(str(source.get("text") or ""), str(source.get("id") or ""))
+        result.append(entry)
+    return result
 
 
 def read_scenes(store: ProjectStore | None, chapter: dict) -> list[dict]:
