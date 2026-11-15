@@ -37,24 +37,10 @@ var/logs/
 2026-11-12/bgm-codes-ab/outputs/A_codes_on_norm.wav
 config/config.ui.yaml
 .trae-html-share-packages
-# 文档目录默认不入库；只放行架构方案文档（docs/architecture-*.md）
+# 文档目录：顶层 Markdown（规格、方案、调研）全部入库；截图等派生资料仍不入库
 docs/*
-!docs/architecture-*.md
+!docs/*.md
 design/
-
-# 内部参考 / 功能核验资料（含来源与对照细节，不入库；原件备份在仓库外）
-docs/parity-*
-docs/*-parity.md
-docs/*competitive*
-docs/unique-capabilities.md
-docs/spec-r18-voice-bgm-preplanning.md
-docs/spec-r19-outline-and-chapter-continuation.md
-design/parity/
-design/feature-parity.md
-tools/parity/
-**/parity/
-*.parity.json
-docs/screenshots/
 
 # 本机标注验收 / 预览的临时产物（临时配置、临时工程与缓存、运行日志、预览文本，均不入库）
 config/config.annotate_check.yaml
