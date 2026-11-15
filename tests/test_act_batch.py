@@ -41,7 +41,7 @@ class ActBatchTest(unittest.TestCase):
         # 新版写作要求必须绑定视角人物与出场角色：这里显式造两个角色并写入大纲
         table = self.store.load_characters()
         lead = entities.new_character("沈砚", role="protagonist")
-        lead["speech_style"] = {"tempo": "偏慢", "pitch": "低沉", "accent": "北方口音", "catchphrases": ["先别急"]}
+        lead["speech_style"] = {"tempo": "slow", "pitch": "low", "accent": "北方口音", "catchphrases": ["先别急"]}
         peer = entities.new_character("林见夏", role="supporting")
         table["characters"].extend([lead, peer])
         self.store.save_characters(table)

@@ -20,6 +20,7 @@ from ..cancel import is_requested as _cancel_requested
 from ..cancel import register as _cancel_register
 from ..cancel import release as _cancel_release
 from ..cancel import request as _cancel_request
+from ..models.enum_check import check_ui_jobs
 from ..models.ids import new_id, now_iso
 from ..store.project_store import ProjectStore
 
@@ -80,7 +81,16 @@ def _read(store: ProjectStore) -> list[dict]:
 
 
 def _write(store: ProjectStore, jobs: list[dict]) -> None:
-    """覆盖写入任务列表（只保留最近若干条）。"""
+    """覆盖写入任务列表（先校验枚举，只保留最近若干条）。
+
+    参数:
+        store: 工程。
+        jobs: 界面任务列表。
+
+    异常:
+        EnumValueError: 任务类型或状态不是已定义值。
+    """
+    check_ui_jobs(jobs, baseline=_read(store))
     path = _file(store)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(

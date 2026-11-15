@@ -69,16 +69,54 @@ def _chinese_message(error) -> str:
     wrong_type = re.match(r"(.+?) is not of type (.+)", message)
     if wrong_type:
         return f"字段 {wrong_type.group(1)} 类型不正确：应为 {wrong_type.group(2)}"
+    if error.validator == "enum":
+        allowed = "、".join(str(item) for item in error.validator_value or ())
+        return f"字段 {_path_text(error.absolute_path)} 的取值「{error.instance}」不在允许范围；可选值：{allowed}"
     return message
 
 
-def validate(doc: dict, schema_name: str, schema_dir: Path | None = None) -> None:
+def _path_text(path) -> str:
+    """把 jsonschema 的字段路径渲染成 `a.b` 形式。
+
+    参数:
+        path: 错误位置（绝对路径）。
+
+    返回:
+        字段路径文本。
+    """
+    return ".".join(str(part) for part in path) or "<root>"
+
+
+def _path_value(doc: dict, path) -> tuple[bool, object]:
+    """按路径取值，用于判断历史值是否原样未改。
+
+    参数:
+        doc: 旧文档。
+        path: 错误位置。
+
+    返回:
+        (是否取到, 值)。
+    """
+    current = doc
+    for part in path:
+        if isinstance(current, dict) and part in current:
+            current = current[part]
+        elif isinstance(current, list) and isinstance(part, int) and 0 <= part < len(current):
+            current = current[part]
+        else:
+            return False, None
+    return True, current
+
+
+def validate(doc: dict, schema_name: str, schema_dir: Path | None = None, baseline: dict | None = None) -> None:
     """校验一个实体文档。
 
     参数:
         doc: 待校验的 dict。
         schema_name: schema 文件名，如 "line.schema.json"。
         schema_dir: 覆盖默认 schema 目录（测试用）。
+        baseline: 磁盘上的旧文档；提供时，原样未改的枚举越界值放行（历史数据可读、可修复），
+            一旦被改成新的非法值仍然报错。
 
     返回:
         无。校验通过即正常返回。
@@ -97,9 +135,27 @@ def validate(doc: dict, schema_name: str, schema_dir: Path | None = None) -> Non
     registry = _build_registry(schemas)
     validator = Draft202012Validator(schema, registry=registry) if registry is not None else Draft202012Validator(schema)
     errors = sorted(validator.iter_errors(doc), key=lambda err: list(err.absolute_path))
+    if baseline is not None:
+        errors = [err for err in errors if not _is_legacy_enum_error(err, baseline)]
     if errors:
         first = errors[0]
-        location = "/".join(str(part) for part in first.absolute_path) or "<root>"
+        location = _path_text(first.absolute_path)
         chinese = _chinese_message(first)
         detail = chinese if chinese == first.message else f"{chinese}（原文：{first.message}）"
         raise SchemaValidationError(f"{schema_name} 校验失败 @ {location}: {detail}")
+
+
+def _is_legacy_enum_error(error, baseline: dict) -> bool:
+    """判断一个枚举错误是否属于「历史数据原样未改」。
+
+    参数:
+        error: jsonschema 的 ValidationError。
+        baseline: 磁盘旧文档。
+
+    返回:
+        True 表示可以直接放行（由界面给出修复提示）。
+    """
+    if error.validator != "enum":
+        return False
+    found, old = _path_value(baseline, error.absolute_path)
+    return found and old == error.instance

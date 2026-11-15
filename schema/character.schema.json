@@ -22,7 +22,11 @@
         "aliases": { "type": "array", "items": { "type": "string", "maxLength": 60 }, "uniqueItems": true },
         "role": { "type": "string", "enum": ["protagonist", "antagonist", "supporting", "narrator", "minor"] },
         "gender": { "type": ["string", "null"], "enum": ["male", "female", "other", "unknown", null] },
-        "age_range": { "type": ["string", "null"], "maxLength": 40 },
+        "age_range": {
+          "type": ["string", "null"],
+          "enum": ["10-14", "18-25", "26-39", "40-54", "55-70", null],
+          "description": "年龄段分档，用于音色推荐；只允许枚举值，旧工程的自由文本需在界面重新选择"
+        },
         "personality": { "type": "array", "items": { "type": "string", "maxLength": 40 } },
         "background": { "type": "string", "maxLength": 2000 },
         "speech_style": { "$ref": "#/$defs/speech_style" },
@@ -126,9 +130,17 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "tempo": { "type": ["string", "null"], "maxLength": 40 },
-        "pitch": { "type": ["string", "null"], "maxLength": 40 },
-        "accent": { "type": ["string", "null"], "maxLength": 40 },
+        "tempo": {
+          "type": ["string", "null"],
+          "enum": ["slow", "medium", "fast", null],
+          "description": "语速档位；中文展示为 慢/中速/快，不允许自由文本"
+        },
+        "pitch": {
+          "type": ["string", "null"],
+          "enum": ["low", "medium", "high", null],
+          "description": "音高档位；中文展示为 偏低/中等/偏高，不允许自由文本"
+        },
+        "accent": { "type": ["string", "null"], "maxLength": 40, "description": "口音与用词习惯，属于自由文本" },
         "catchphrases": { "type": "array", "items": { "type": "string", "maxLength": 60 } }
       }
     },

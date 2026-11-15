@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 
+from ..models.enum_check import check_jobs
 from ..models.ids import now_iso
 from .project_store import ProjectStore
 
@@ -33,11 +34,15 @@ class QueueStore:
         return sorted(jobs, key=lambda job: (job.get("priority", 100), job.get("created_at") or ""))
 
     def save(self, jobs: list[dict]) -> None:
-        """覆盖写入队列快照。
+        """覆盖写入队列快照（先校验任务类型与状态）。
 
         参数:
             jobs: 任务列表。
+
+        异常:
+            EnumValueError: 任务类型或状态不是已定义值。
         """
+        check_jobs(jobs, baseline=self.load())
         self.store._write_json(self.store.queue_file, {"schema_version": 1, "jobs": jobs})
 
     def append(self, job: dict) -> tuple[dict, bool]:

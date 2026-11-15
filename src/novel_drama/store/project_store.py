@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 from ..models import entities
+from ..models.enum_check import check_chapter, check_character_table, check_project, check_script, check_voice_table
 from ..models.ids import now_iso
 from .schema_validator import SchemaValidationError, validate
 
@@ -223,6 +224,22 @@ class ProjectStore:
         """读取 JSON 文件（UTF-8）。"""
         return json.loads(path.read_text(encoding="utf-8"))
 
+    def _baseline(self, path: Path) -> dict | None:
+        """读取磁盘上的旧文档，用于放行原样未改的历史枚举值。
+
+        参数:
+            path: 目标文件。
+
+        返回:
+            旧文档；文件不存在或损坏时返回 None（按严格校验处理）。
+        """
+        if not path.exists():
+            return None
+        try:
+            return self._read_json(path)
+        except (OSError, ValueError):
+            return None
+
     @staticmethod
     def _write_json(path: Path, data: dict) -> None:
         """原子写入 JSON 文件：先写临时文件再替换。
@@ -285,7 +302,9 @@ class ProjectStore:
             project: 完整工程文档。
         """
         project.setdefault("work", {})["updated_at"] = now_iso()
-        validate(project, "project.schema.json")
+        baseline = self._baseline(self.project_file)
+        check_project(project, baseline=baseline)
+        validate(project, "project.schema.json", baseline=baseline)
         self._write_json(self.project_file, project)
 
     def settings(self) -> dict:
@@ -342,12 +361,17 @@ class ProjectStore:
         return self._read_json(self.characters_file)
 
     def save_characters(self, table: dict) -> None:
-        """保存角色表（先校验）。
+        """保存角色表（先校验枚举与 schema）。
 
         参数:
             table: 角色表文档。
+
+        异常:
+            EnumValueError: 写入了未定义的枚举值（消息含字段名与可选值）。
         """
-        validate(table, "character.schema.json")
+        baseline = self._baseline(self.characters_file)
+        check_character_table(table, baseline=baseline)
+        validate(table, "character.schema.json", baseline=baseline)
         self._write_json(self.characters_file, table)
 
     # ---------- 音色库 ----------
@@ -363,12 +387,14 @@ class ProjectStore:
         return self._read_json(self.voices_file)
 
     def save_voices(self, table: dict) -> None:
-        """保存工程音色库（先校验）。
+        """保存工程音色库（先校验枚举与 schema）。
 
         参数:
             table: 音色库文档。
         """
-        validate(table, "voice.schema.json")
+        baseline = self._baseline(self.voices_file)
+        check_voice_table(table, baseline=baseline)
+        validate(table, "voice.schema.json", baseline=baseline)
         self._write_json(self.voices_file, table)
 
     # ---------- 导演脚本 ----------
@@ -388,13 +414,16 @@ class ProjectStore:
         return self._read_json(path)
 
     def save_script(self, script: dict) -> None:
-        """保存导演脚本（先校验，再原子写入）。
+        """保存导演脚本（先校验枚举与 schema，再原子写入）。
 
         参数:
             script: 导演脚本文档。
         """
-        validate(script, "director-script.schema.json")
-        self._write_json(self.script_path(script["chapter_id"]), script)
+        path = self.script_path(script["chapter_id"])
+        baseline = self._baseline(path)
+        check_script(script, baseline=baseline)
+        validate(script, "director-script.schema.json", baseline=baseline)
+        self._write_json(path, script)
 
     # ---------- 章节 ----------
 
@@ -451,16 +480,19 @@ class ProjectStore:
             chapter: 章节 dict。
         """
         chapter["updated_at"] = now_iso()
-        validate(chapter, "chapter.schema.json")
         path = self.chapter_path(chapter["id"])
+        current: dict = {}
         if path.exists():
             try:
                 current = self._read_json(path)
             except (OSError, ValueError):
                 current = {}
-            # 旧版没有正文时不存档（新建章节的首次生成不产生无意义的 0 字版本）
-            if current and str(current.get("content") or "").strip() and current.get("content") != chapter.get("content"):
-                self._archive_chapter(chapter["id"], current)
+        baseline = current or None
+        check_chapter(chapter, baseline=baseline)
+        validate(chapter, "chapter.schema.json", baseline=baseline)
+        # 旧版没有正文时不存档（新建章节的首次生成不产生无意义的 0 字版本）
+        if current and str(current.get("content") or "").strip() and current.get("content") != chapter.get("content"):
+            self._archive_chapter(chapter["id"], current)
         self._write_json(path, chapter)
 
     def _archive_chapter(self, chapter_id: str, chapter: dict) -> None:

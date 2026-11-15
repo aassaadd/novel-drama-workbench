@@ -173,7 +173,7 @@ def _project(tmp_path: Path):
 
     table = store.load_characters()
     lead = entities.new_character("沈砚", role="protagonist")
-    lead["speech_style"] = {"tempo": "偏慢", "pitch": "低沉", "accent": "北方口音", "catchphrases": ["先别急"]}
+    lead["speech_style"] = {"tempo": "slow", "pitch": "low", "accent": "北方口音", "catchphrases": ["先别急"]}
     table["characters"].append(lead)
     store.save_characters(table)
 

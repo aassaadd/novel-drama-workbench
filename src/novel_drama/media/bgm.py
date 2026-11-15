@@ -12,6 +12,7 @@ import shutil
 from pathlib import Path
 
 from ..models import new_id
+from ..models.enum_check import check_bgm
 
 _TEMPLATE = {"schema_version": 1, "chapter_id": None, "cues": []}
 
@@ -42,7 +43,7 @@ def load_cues(root: str | Path, chapter_id: str) -> list[dict]:
 
 
 def save_cues(root: str | Path, chapter_id: str, cues: list[dict]) -> Path:
-    """原子写入章节 BGM cue 表。
+    """原子写入章节 BGM cue 表（先校验档位与状态枚举）。
 
     参数:
         root: 工程根目录。
@@ -51,10 +52,20 @@ def save_cues(root: str | Path, chapter_id: str, cues: list[dict]) -> Path:
 
     返回:
         写入路径。
+
+    异常:
+        EnumValueError: cue 的档位或状态不是已定义值。
     """
     path = cue_path(root, chapter_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {**_TEMPLATE, "chapter_id": chapter_id, "cues": cues}
+    baseline = None
+    if path.exists():
+        try:
+            baseline = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            baseline = None
+    check_bgm(payload, baseline=baseline)
     tmp = path.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     os.replace(tmp, path)

@@ -3807,10 +3807,33 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
 
     @app.get("/api/ui/characters")
     def ui_characters(path: str = Query(...)) -> dict:
-        """人物表（`character list --json`）。"""
-        _store(path)
+        """人物表（`character list --json`）。
+
+        参数:
+            path: 工程根目录。
+
+        返回:
+            `{characters, enum_issues}`；`enum_issues` 是历史数据里无法识别的枚举值，
+            每个条目带字段名、原值与可选值，供界面给出修复提示（不会被静默吞掉）。
+        """
+        from ..models.enum_check import check_character_table
+
+        store = _store(path)
         payload = _respond(_cli("--project", path, "--json", "character", "list"))
-        return {"characters": payload or []}
+        table = store.load_characters()
+        try:
+            issues = check_character_table(table, baseline=table)
+        except ValueError:
+            issues = []
+        rows = table.get("characters") or []
+        for item in issues:
+            parts = str(item.get("path") or "").split("/")
+            if len(parts) >= 2 and parts[0] == "characters" and parts[1].isdigit():
+                index = int(parts[1])
+                if 0 <= index < len(rows):
+                    item["character_id"] = rows[index].get("id")
+                    item["character_name"] = rows[index].get("name")
+        return {"characters": payload or [], "enum_issues": issues}
 
     @app.get("/api/ui/cast/check")
     def ui_cast_check(path: str = Query(...), chapter: str | None = None) -> dict:
