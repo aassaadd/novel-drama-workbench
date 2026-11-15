@@ -1,5 +1,10 @@
 # 本地有声剧工作台（novel-drama-workbench）
 
+> **主线分支：`refactor/domain-model`**
+> 本项目自 2026-11-16 起以 `refactor/domain-model` 为唯一主线（`main` 已快进到同一提交）。
+> **后续所有改动一律提交到 `refactor/domain-model`**，不要再往 `main`、`feature/audimind-local-clone` 或任何旧分支提交；
+> 新会话开工前先 `git branch --show-current` 确认当前分支，不一致就先切回来。
+
 > **项目状态：未上线（内部开发中）**
 > 未上线阶段，所有改动以**新代码为唯一实现**：不为旧工程、旧数据、旧代码做兜底、兼容分支、迁移脚本或双写逻辑；旧工程数据可直接重建或丢弃，不保证向后兼容。
 > 只有当用户明确声明「**当前项目已上线**」之后，才开始要求兜底与旧数据兼容。
