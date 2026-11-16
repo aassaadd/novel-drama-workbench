@@ -119,11 +119,14 @@ def register_voice_voices_routes(app, project_root: str | None = None, config_pa
                     "name": item["name"],
                     "role": item.get("role"),
                     "gender": item.get("gender"),
-                    # 供「按角色设定生成音色」面板带入描述，只读展示，不参与写回
                     "age_range": item.get("age_range"),
                     "personality": item.get("personality") or [],
                     "background": item.get("background"),
                     "speech_style": item.get("speech_style") or {},
+                    # 音色设计弹窗默认带入，并允许保存后覆盖角色档案
+                    "voice_description_zh": item.get("voice_description_zh") or "",
+                    "voice_description_en": item.get("voice_description_en") or "",
+                    "voice_profile": item.get("voice_profile") or {},
                     # 兼容 v2 voice_library_id、v1 voice_id、变体 ID 与旧版内置名称
                     "voice_id": _resolve_voice_binding(item.get("voice_binding"), binding_index),
                 }

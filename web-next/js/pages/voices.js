@@ -3,7 +3,7 @@
  * 只做参考产品有的音色分配，不出现自动编排 / 音色生成。
  */
 import { esc, icon, toast, openDialog, closeDialog, fmtDuration } from '../dom.js';
-import { getJSON, postJSON } from '../api.js';
+import { getJSON, postJSON, patchJSON } from '../api.js';
 import { labelOf } from '../enums.js';
 import { runMedia } from '../media-bus.js';
 import { runLlm } from '../llm.js';
@@ -436,6 +436,7 @@ function openVoiceDesign() {
       <div style="display:flex;gap:10px;align-items:center;margin-top:8px;flex-wrap:wrap">
         <button class="btn" id="vd-preview">重新生成描述</button>
         <button class="btn" id="vd-translate">中文翻译成英文</button>
+        <button class="btn" id="vd-save" title="把当前中英文描述写回角色档案，覆盖原有音色描述">保存到角色档案</button>
         <label style="font-size:11.5px;color:var(--text-3)">候选数
           <input class="input" id="vd-count" type="number" min="1" max="6" value="4"
             style="width:64px;height:26px;display:inline-block" /></label>
@@ -470,6 +471,21 @@ function openVoiceDesign() {
   const profileHost = mask.querySelector('#vd-profile');
   const resultHost = mask.querySelector('#vd-result');
   const historyHost = mask.querySelector('#vd-history');
+  // 默认带入角色档案里的音色描述，用户改完可保存回档案
+  const initialZh = String(
+    character.voice_description_zh ||
+      character.voice_profile?.design_prompt_zh ||
+      character.voice_profile?.voice_summary ||
+      ''
+  ).trim();
+  const initialEn = String(
+    character.voice_description_en || character.voice_profile?.design_prompt || ''
+  ).trim();
+  if (initialZh) promptZhNode.value = initialZh;
+  if (initialEn) promptEnNode.value = initialEn;
+  lastTranslatedZh = initialZh;
+  enEdited = Boolean(initialEn);
+  profile = character.voice_profile || null;
   promptEnNode.addEventListener('input', () => {
     enEdited = true;
   });
@@ -503,6 +519,43 @@ function openVoiceDesign() {
       return '';
     }
     return english;
+  };
+
+  /**
+   * 把当前中英文描述保存回角色档案，覆盖原有音色描述。
+   * @param {boolean} quiet 为 true 时成功不弹提示（抽卡前自动保存用）
+   * @returns {Promise<boolean>} 是否保存成功
+   */
+  const saveVoiceDescription = async (quiet = false) => {
+    const zh = promptZhNode.value.trim();
+    const en = promptEnNode.value.trim();
+    if (!zh && !en) {
+      if (!quiet) toast('先填写中文或英文音色描述', 'warn');
+      return false;
+    }
+    const nextProfile = { ...(profile || character.voice_profile || {}) };
+    if (zh) nextProfile.design_prompt_zh = zh;
+    else delete nextProfile.design_prompt_zh;
+    if (en) nextProfile.design_prompt = en;
+    else delete nextProfile.design_prompt;
+    try {
+      await patchJSON('/api/ui/characters', {
+        path: state.path,
+        id: character.id,
+        voice_description_zh: zh,
+        voice_description_en: en,
+        voice_profile: nextProfile,
+      });
+      profile = nextProfile;
+      character.voice_description_zh = zh;
+      character.voice_description_en = en;
+      character.voice_profile = nextProfile;
+      if (!quiet) toast(`已更新「${character.name}」的音色描述`, 'ok');
+      return true;
+    } catch (error) {
+      toast(`保存角色音色描述失败：${error.message}`, 'bad', 5200);
+      return false;
+    }
   };
 
   /** 候选音频地址 */
@@ -741,6 +794,19 @@ function openVoiceDesign() {
     }
   });
 
+  /** 保存描述到角色档案 */
+  mask.querySelector('#vd-save').addEventListener('click', async (event) => {
+    const button = event.currentTarget;
+    button.disabled = true;
+    button.textContent = '保存中…';
+    try {
+      await saveVoiceDescription();
+    } finally {
+      button.disabled = false;
+      button.textContent = '保存到角色档案';
+    }
+  });
+
   /** 开始抽卡：fill 复用已有就绪批次，regen 按新描述重新抽卡 */
   mask.querySelector('#vd-start').addEventListener('click', async (event) => {
     const mode = drawModeOf();
@@ -772,6 +838,8 @@ function openVoiceDesign() {
         toast('已自动把中文描述翻译成英文', 'ok');
       }
       if (!prompt) return toast('先填中文或英文音色描述，或点「重新生成描述」', 'warn');
+      // 抽卡输入就是这份描述，顺手同步回角色档案，下次打开默认带出
+      await saveVoiceDescription(true);
       resultHost.innerHTML = `<div class="dlg-note">正在启动抽卡，进度见右下角任务卡…</div>`;
       const outcome = await runMedia({
         action: 'voice.design',
