@@ -86,7 +86,9 @@ def _estimate_noise_floor_db(path: Path, fallback: float) -> float:
         门限（dBFS），限制在 -80 ~ -20 之间。
     """
     measured = _measure_floor_db(path)
-    if measured is None:
+    # 整段安静段是数字静音（约 -90dB 以下）时测不到真实底噪：若仍按测量值
+    # 会把门限压到 -80，afftdn 几乎不生效。此时改用配置门限。
+    if measured is None or measured < -60:
         return fallback
     return max(-80.0, min(-20.0, measured))
 
@@ -165,7 +167,13 @@ def denoise_wav(src: Path, dst: Path, cfg: dict | None = None, ffmpeg_binary: st
     floor_before = _measure_floor_db(src)
     floor_after = _measure_floor_db(dst)
     drop = None if floor_before is None or floor_after is None else round(floor_before - floor_after, 1)
-    note = f"已降噪（安静段 {floor_before:.1f} → {floor_after:.1f} dBFS）" if drop is not None else "已降噪"
+    if drop is not None and drop >= 0.5:
+        note = f"已降噪（安静段 {floor_before:.1f} → {floor_after:.1f} dBFS）"
+    elif attenuation >= 0.1:
+        # 整段是数字静音时安静段降噪看不出来，用整体音量变化给个可读反馈
+        note = f"已降噪（整体音量 -{attenuation:g}dB）"
+    else:
+        note = "已降噪"
     return {
         "enabled": True,
         "engine": engine,

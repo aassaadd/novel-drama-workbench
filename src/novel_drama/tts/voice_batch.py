@@ -535,6 +535,8 @@ def _run_item(store, cfg: AppConfig, job: dict, item: dict, position: int, total
             "character",
             True,
             record_undo=False,
+            denoise=cfg.get("voice.design.denoise") or cfg.get("voice.denoise") or None,
+            ffmpeg_binary=str(cfg.get("ffmpeg.binary", "ffmpeg")),
         )
     except Exception as exc:  # noqa: BLE001 - 单角色采用失败只影响该角色
         item["status"] = "ready"

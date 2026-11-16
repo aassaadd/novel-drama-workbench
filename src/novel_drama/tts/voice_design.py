@@ -15,6 +15,7 @@ import hashlib
 import json
 import os
 import queue
+import random
 import shutil
 import subprocess
 import threading
@@ -399,6 +400,8 @@ def create_batch(store, cfg: AppConfig, character: dict, prompt: str, count: int
         "profile": profile,
         "prompt": prompt,
         "script": _design_script(design),
+        # 每批随机种子基数：候选种子 = seed_base + index，保证重新抽卡得到不同结果
+        "seed_base": random.SystemRandom().randrange(1, 2**31 - 1),
         "engine": "voxcpm2",
         "model_id": "openbmb/VoxCPM2",
         "params": {
@@ -597,6 +600,8 @@ def _run_batch(
         str(int(design.get("inference_timesteps", 10))),
         "--device",
         str(design.get("device") or "auto"),
+        "--seed-base",
+        str(int(meta.get("seed_base") or 1000)),
     ]
     if indices:
         cmd.extend(["--indices", ",".join(str(int(item)) for item in indices)])
@@ -1128,6 +1133,15 @@ _REF_SILENCE_DB = -45
 #: 规整后参考音的最短可用时长（毫秒），过短则回退原始候选
 _REF_MIN_DURATION_MS = 1200
 
+#: 设计音色采用的默认降噪参数：模型底噪多集中在 -35~-25dB，
+#: 门限压太低 afftdn 几乎不生效
+_DESIGN_DENOISE_DEFAULTS = {
+    "engine": "ffmpeg_afftdn",
+    "noise_reduction_db": 18,
+    "noise_floor_db": -30,
+    "max_attenuation_db": 20,
+}
+
 
 def _reference_frames(data: bytes, frame_bytes: int, threshold: int) -> list[bool]:
     """逐帧判断是否为静音。
@@ -1280,6 +1294,8 @@ def select_candidate(
     bind,
     voice_id: str | None = None,
     record_undo: bool = True,
+    denoise: dict | bool | None = None,
+    ffmpeg_binary: str = "ffmpeg",
 ) -> dict:
     """把候选音频固化为正式参考音，并（可选）绑定角色。
 
@@ -1293,6 +1309,8 @@ def select_candidate(
         bind: 是否绑定到批次对应角色。
         voice_id: 追加到已有音色时传入；为空则新建音色。
         record_undo: 绑定前是否写撤销快照（批量任务自行写整批日志时传 False）。
+        denoise: `voice.denoise` 配置；None 按默认轻度降噪，False 跳过降噪。
+        ffmpeg_binary: ffmpeg 可执行文件（降噪用）。
 
     返回:
         `{voice, variant_id, character?}`。
@@ -1346,6 +1364,39 @@ def select_candidate(
     norm = _normalize_reference_audio(source_path, final)
     if norm.get("duration_ms"):
         duration_ms = int(norm["duration_ms"])
+    # 抽卡音频常带模型底噪：规整后再做轻度频谱降噪；失败或过度抑制时保留原音
+    conf = {**_DESIGN_DENOISE_DEFAULTS, **(denoise if isinstance(denoise, dict) else {})}
+    denoise_enabled = denoise is not False and bool(
+        conf.get("default_enabled", conf.get("enabled", True))
+    )
+    base_note = str(norm.get("note") or "")
+    denoise_info = {
+        "enabled": False,
+        "engine": conf.get("engine") or "ffmpeg_afftdn",
+        "original_audio_path": str(source_path.relative_to(store.root)),
+        "applied_at": None,
+        "note": f"{base_note}；未启用降噪" if base_note else "未启用降噪",
+    }
+    if denoise_enabled:
+        from ..adapters.media.denoise import denoise_wav
+
+        denoised = ref_dir / f".{variant_id}.denoise.tmp.wav"
+        result = denoise_wav(final, denoised, conf, ffmpeg_binary)
+        note = str(result.get("note") or "")
+        if result.get("enabled") and denoised.exists():
+            denoised.replace(final)
+            duration_ms = _probe_wav_ms(final) or duration_ms
+            denoise_info.update(
+                enabled=True,
+                engine=result.get("engine") or denoise_info["engine"],
+                applied_at=_now(),
+                note=f"{base_note}；{note}" if base_note else (note or "已降噪"),
+            )
+        else:
+            denoised.unlink(missing_ok=True)
+            denoise_info["note"] = (
+                f"{base_note}；{note}" if base_note and note else (note or denoise_info["note"])
+            )
     sha = _sha256(final)
     variant = {
         "id": variant_id,
@@ -1357,13 +1408,7 @@ def select_candidate(
             "duration_ms": duration_ms,
             "text": meta.get("script") or None,
             "sha256": sha,
-            "denoise": {
-                "enabled": False,
-                "engine": None,
-                "original_audio_path": None,
-                "applied_at": None,
-                "note": str(norm.get("note") or "模型生成样本，默认不降噪"),
-            },
+            "denoise": denoise_info,
         },
         "consent": {"confirmed": True, "note": "AI 生成音色（VoxCPM2），非真人录音"},
         "generation": {

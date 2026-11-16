@@ -465,6 +465,8 @@ def cmd_voice_design(args, config: AppConfig) -> int:
         gender,
         "manual",
         not args.no_bind,
+        denoise=config.get("voice.design.denoise") or config.get("voice.denoise") or None,
+        ffmpeg_binary=str(config.get("ffmpeg.binary", "ffmpeg")),
     )
     print(f"已入库: {result['voice']['id']} / 变体 {result['variant_id']}")
     return EXIT_OK

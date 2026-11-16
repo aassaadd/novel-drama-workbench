@@ -8,15 +8,18 @@ from __future__ import annotations
 
 import json
 import math
+import shutil
 import sys
 import tempfile
 import unittest
 import wave
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from novel_drama.adapters.media import denoise
 from novel_drama.adapters.persistence import ProjectStore
 from novel_drama.infrastructure.config import _FALLBACK
 from novel_drama.models import entities
@@ -178,6 +181,80 @@ class ReferenceAudioTest(unittest.TestCase):
                     record_undo=False,
                 )
             self.assertIn("太短", str(ctx.exception))
+
+    def test_noise_floor_falls_back_on_digital_silence(self):
+        """整段安静段是数字静音时用配置门限，否则 afftdn 门限会被压到 -80。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "tone.wav"
+            _write_tone_with_gap(path)
+            self.assertEqual(denoise._estimate_noise_floor_db(path, -30), -30)
+
+    def test_select_denoise_can_be_disabled(self):
+        """`denoise=False` 时跳过降噪，并在变体里留痕。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ProjectStore(str(root)).create("降噪关闭回归", author="ndw")
+            store = ProjectStore(str(root))
+            batch_id = self._seed_batch(store, 2900, tone_s=1.1, gap_s=0.7)
+            result = voice_design.select_candidate(
+                store,
+                batch_id,
+                1,
+                "旁白·不降噪",
+                "male",
+                "manual",
+                False,
+                record_undo=False,
+                denoise=False,
+            )
+            variant = next(
+                item
+                for item in result["voice"]["variants"]
+                if item["id"] == result["variant_id"]
+            )
+            self.assertFalse(variant["reference"]["denoise"]["enabled"])
+            self.assertIn("未启用降噪", variant["reference"]["denoise"]["note"])
+
+    def test_select_records_denoise_result(self):
+        """开启降噪且成功时，参考音写回降噪结果与原始候选路径。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ProjectStore(str(root)).create("降噪记录回归", author="ndw")
+            store = ProjectStore(str(root))
+            batch_id = self._seed_batch(store, 2900, tone_s=1.1, gap_s=0.7)
+
+            def _fake_denoise(src, dst, _cfg, _binary):
+                """模拟降噪：复制一份并返回成功信息。"""
+                shutil.copy2(src, dst)
+                return {
+                    "enabled": True,
+                    "engine": "ffmpeg_afftdn",
+                    "note": "已降噪（测试）",
+                    "attenuation_db": 4.0,
+                }
+
+            with mock.patch(
+                "novel_drama.adapters.media.denoise.denoise_wav", side_effect=_fake_denoise
+            ):
+                result = voice_design.select_candidate(
+                    store,
+                    batch_id,
+                    1,
+                    "旁白·降噪",
+                    "male",
+                    "manual",
+                    False,
+                    record_undo=False,
+                )
+            reference = next(
+                item["reference"]
+                for item in result["voice"]["variants"]
+                if item["id"] == result["variant_id"]
+            )
+            self.assertTrue(reference["denoise"]["enabled"])
+            self.assertIn("已降噪", reference["denoise"]["note"])
+            self.assertTrue(reference["denoise"]["applied_at"])
+            self.assertIn("candidates/", reference["denoise"]["original_audio_path"])
 
 
 if __name__ == "__main__":

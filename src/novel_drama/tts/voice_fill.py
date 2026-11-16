@@ -1178,6 +1178,8 @@ def _run_batch_voice(
                 "character",
                 bind,
                 record_undo=False,
+                denoise=cfg.get("voice.design.denoise") or cfg.get("voice.denoise") or None,
+                ffmpeg_binary=str(cfg.get("ffmpeg.binary", "ffmpeg")),
             )
         except Exception as exc:  # noqa: BLE001 - 采用失败只影响该角色
             return {"error": f"已生成候选，但自动采用失败：{exc}"}

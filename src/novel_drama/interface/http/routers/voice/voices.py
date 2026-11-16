@@ -784,6 +784,7 @@ def register_voice_voices_routes(app, project_root: str | None = None, config_pa
 
         path = body.get("path")
         store = _store(path)
+        cfg = _tts_config()
         try:
             result = voice_design.select_candidate(
                 store,
@@ -794,6 +795,8 @@ def register_voice_voices_routes(app, project_root: str | None = None, config_pa
                 str(body.get("gender_source") or "manual"),
                 bool(body.get("bind")),
                 body.get("voice_id"),
+                denoise=cfg.get("voice.design.denoise") or cfg.get("voice.denoise") or None,
+                ffmpeg_binary=str(cfg.get("ffmpeg.binary", "ffmpeg")),
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail={"code": 2, "message": str(exc)}) from exc

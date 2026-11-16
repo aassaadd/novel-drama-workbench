@@ -139,6 +139,13 @@ _FALLBACK = {
             "inference_timesteps": 10,
             "timeout_s": 900,
             "script": "我一直在等你回来。",
+            "denoise": {
+                "enabled": True,
+                "engine": "ffmpeg_afftdn",
+                "noise_reduction_db": 18,
+                "noise_floor_db": -30,
+                "max_attenuation_db": 20,
+            },
         },
     },
     "audio": {
