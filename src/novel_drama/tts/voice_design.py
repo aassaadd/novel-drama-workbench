@@ -776,6 +776,42 @@ def cancel_batch(store, batch_id: str) -> dict:
     return meta
 
 
+def stop_all(grace_s: float = 2.0) -> int:
+    """Web 服务退出时终止全部抽卡 worker，避免留下无主进程。
+
+    worker 以独立进程组启动（`start_new_session=True`），收不到终端的 Ctrl+C；
+    这里逐个按进程组发 SIGTERM，超时再补 SIGKILL。抽卡线程本身是守护线程，
+    随服务进程退出，不需要等待。
+
+    参数:
+        grace_s: 收到 SIGTERM 后等待退出的秒数。
+
+    返回:
+        实际发送过终止信号的 worker 数量。
+    """
+    with _RUNNING_LOCK:
+        states = list(_RUNNING.values())
+    killed = 0
+    for state in states:
+        state["cancel"].set()
+        proc = state.get("proc")
+        if proc is None or proc.poll() is not None:
+            continue
+        try:
+            os.killpg(os.getpgid(proc.pid), 15)
+        except OSError:
+            continue
+        killed += 1
+        try:
+            proc.wait(timeout=grace_s)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(os.getpgid(proc.pid), 9)
+            except OSError:
+                pass
+    return killed
+
+
 def retry_candidate(store, cfg: AppConfig, batch_id: str, index: int) -> dict:
     """单条重试：只重新生成指定序号的候选。
 

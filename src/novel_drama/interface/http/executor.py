@@ -8,9 +8,18 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
+
+#: 本进程启动的后台子进程：pid → {process, project}。Web 退出时统一按进程组回收，
+#: 避免 `start_new_session` 的子进程收不到终端信号、服务没了它还在跑。
+_CHILDREN: dict[int, dict] = {}
+#: 保护子进程登记表的进程内锁
+_CHILDREN_LOCK = threading.Lock()
 
 #: 子进程引导：从 stdin 读参数、按「模块:函数」取用例、把 JSON 结果写回 stdout。
 #: 用例里的 print 统一改到 stderr，避免污染结果通道。
@@ -110,6 +119,88 @@ def run_application(entry: str, payload: dict) -> object:
     return data.get("result")
 
 
+def _track_child(process: subprocess.Popen, project_root: str = "") -> None:
+    """登记后台子进程，并顺手清掉已退出的旧记录。
+
+    参数:
+        process: `spawn_application` 刚启动的进程。
+        project_root: 该子进程所属工程目录（回收后用于把队列行落成已取消）。
+
+    返回:
+        无。
+    """
+    with _CHILDREN_LOCK:
+        finished = [pid for pid, item in _CHILDREN.items() if item["process"].poll() is not None]
+        for pid in finished:
+            _CHILDREN.pop(pid, None)
+        _CHILDREN[process.pid] = {"process": process, "project": str(project_root or "")}
+
+
+def child_projects() -> list[str]:
+    """返回登记表中仍在运行的子进程所属工程目录（去重、按字典序）。
+
+    返回:
+        工程根目录列表；没有带工程信息的子进程时为空。
+    """
+    with _CHILDREN_LOCK:
+        roots = {
+            item["project"]
+            for item in _CHILDREN.values()
+            if item.get("project") and item["process"].poll() is None
+        }
+    return sorted(roots)
+
+
+def shutdown_children(grace_s: float = 5.0) -> int:
+    """回收本进程启动的全部后台子进程（连同各自进程组）。
+
+    Web 服务退出时调用：子进程用 `start_new_session=True` 启动，收不到终端的
+    Ctrl+C，必须显式按进程组发送 SIGTERM；超时未退出的再补 SIGKILL，
+    避免「服务已停、配音/编排子进程还在跑」。
+
+    参数:
+        grace_s: 收到 SIGTERM 后等待退出的秒数。
+
+    返回:
+        实际发送过终止信号的进程数。
+    """
+    with _CHILDREN_LOCK:
+        children = [item["process"] for item in _CHILDREN.values()]
+        _CHILDREN.clear()
+    live = [proc for proc in children if proc.poll() is None]
+    for proc in live:
+        _kill_group(proc, signal.SIGTERM)
+    deadline = time.monotonic() + max(0.0, float(grace_s))
+    for proc in live:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        try:
+            proc.wait(timeout=remaining)
+        except subprocess.TimeoutExpired:
+            break
+    for proc in live:
+        if proc.poll() is None:
+            _kill_group(proc, signal.SIGKILL)
+    return len(live)
+
+
+def _kill_group(process: subprocess.Popen, sig: int) -> None:
+    """向子进程所在进程组发信号（进程已退出时静默忽略）。
+
+    参数:
+        process: 目标进程。
+        sig: 信号值（SIGTERM / SIGKILL）。
+
+    返回:
+        无。
+    """
+    try:
+        os.killpg(os.getpgid(process.pid), sig)
+    except (ProcessLookupError, PermissionError, OSError):
+        pass
+
+
 def spawn_application(entry: str, payload: dict, log_path: Path) -> subprocess.Popen:
     """在独立子进程里后台执行应用用例（不等待），输出全部写入日志。
 
@@ -143,4 +234,6 @@ def spawn_application(entry: str, payload: dict, log_path: Path) -> subprocess.P
         if stdin is not None:
             stdin.write(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
             stdin.close()
+    # 登记到进程内清单：Web 退出时统一回收，避免子进程比服务活得更久
+    _track_child(process, str(payload.get("project_root") or ""))
     return process

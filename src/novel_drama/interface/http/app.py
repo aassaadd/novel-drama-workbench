@@ -137,14 +137,40 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         return JSONResponse(status_code=499, content={"detail": "已取消本次模型调用"})
 
     @app.on_event("shutdown")
-    def _shutdown_tts_batches() -> None:
-        """Web 服务退出时回收本次启动的配音批次，避免留下无主 CLI/worker 进程。"""
+    def _shutdown_background_work() -> None:
+        """Web 服务退出时回收后台任务，避免服务没了子进程还在跑。
+
+        - 配音批次：沿用「停止生成」逻辑终止 pid 文件对应的进程组，并把队列行落成已取消；
+        - 其它后台子进程（编排、整本补齐、单行重录等）：按登记表统一回收；
+        - 音色抽卡：终止独立进程组里的 VoxCPM2 worker。
+        """
         for root in list(_ACTIVE_TTS_PROJECTS):
             try:
                 _stop_tts_project(root)
             except Exception:  # noqa: BLE001, S110 - 退出钩子不能抛错
                 pass
             _ACTIVE_TTS_PROJECTS.discard(root)
+        try:
+            from novel_drama.interface.http.executor import (
+                child_projects,
+                shutdown_children,
+            )
+
+            # 先按工程把队列行落成「已取消」，再终止子进程：否则下次启动会一直显示运行中
+            for root in child_projects():
+                try:
+                    _stop_tts_project(root)
+                except Exception:  # noqa: BLE001, S110 - 退出钩子不能抛错
+                    pass
+            shutdown_children()
+        except Exception:  # noqa: BLE001, S110 - 退出钩子不能抛错
+            pass
+        try:
+            from novel_drama.tts import voice_design
+
+            voice_design.stop_all()
+        except Exception:  # noqa: BLE001, S110 - 退出钩子不能抛错
+            pass
 
     register_config_routes(app, project_root, config_path)
     register_story_chapters_routes(app, project_root, config_path)
