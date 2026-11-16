@@ -3015,9 +3015,9 @@ function readableMarkupItem(line) {
     }
     return { label: '指令', text };
   }
-  const match = text.match(/^([^：:]{0,80})[：:](.+)$/);
-  // 冒号前含中文标点时是句子成分，不是说话人，按旁白展示
-  if (!match || /[，。！？；、]/.test(match[1])) return { label: '旁白', text };
+  const match = text.match(/^([^：:]{0,240})[：:](.+)$/);
+  // 冒号前第一段（说话人）含中文标点时是句子成分，不是说话人，按旁白展示
+  if (!match || /[，。！？；、]/.test(match[1].split('|', 1)[0])) return { label: '旁白', text };
   const tokens = match[1].split('|');
   const speaker = (tokens[0] || '').trim() || '（未标注）';
   const emotion = (tokens[1] || '').trim();
@@ -3025,6 +3025,19 @@ function readableMarkupItem(line) {
   const notes = [];
   if (emotion && emotion !== 'neutral') notes.push(labelOf('emotion', emotion, ''));
   if (kind === 'inner_monologue') notes.push('内心独白');
+  // 行级表演参数：强度 / 语速 / 停顿 / 表演提示
+  for (const token of tokens.slice(3)) {
+    const cut = token.indexOf('=');
+    if (cut <= 0) continue;
+    const key = token.slice(0, cut).trim().toLowerCase();
+    const value = token.slice(cut + 1).trim();
+    if (!value) continue;
+    if (key === 'intensity' || key === '强度') notes.push(`强度 ${value}`);
+    else if (key === 'speed' || key === '语速') notes.push(`语速 ${value}`);
+    else if (key === 'before' || key === '前置') notes.push(`前停 ${value}ms`);
+    else if (key === 'after' || key === '后置') notes.push(`后停 ${value}ms`);
+    else if (key === 'note' || key === '说明') notes.push(value);
+  }
   const label = notes.filter(Boolean).length ? `${speaker}（${notes.filter(Boolean).join(' · ')}）` : speaker;
   return { label, text: match[2].trim() };
 }

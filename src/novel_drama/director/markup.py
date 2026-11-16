@@ -63,7 +63,20 @@ _BUILTIN_TEMPLATES = {
     "video_i2v": "minimax_h3_accel",
 }
 
-_LINE_RE = re.compile(r"^(?P<head>[^：:]{0,80})[：:](?P<body>.+)$")
+_LINE_RE = re.compile(r"^(?P<head>[^：:]{0,200})[：:](?P<body>.+)$")
+
+#: 行没写情绪时的兜底映射：镜头情绪 → 台词情绪（枚举取 line.schema.json）
+_LINE_EMOTION_FROM_MOOD = {
+    "calm": "neutral",
+    "tense": "serious",
+    "sad": "sad",
+    "romantic": "tender",
+    "mysterious": "serious",
+    "action": "excited",
+    "comedic": "joy",
+    "epic": "serious",
+    "horror": "fear",
+}
 
 
 def _sha(text: str) -> str:
@@ -428,6 +441,66 @@ def _template_ids(settings: dict) -> dict:
     return resolved
 
 
+def _parse_line_params(tokens: list[str], shot_index: int, warnings: list[str]) -> dict:
+    """解析台词行尾部的表演参数（`key=value`）。
+
+    参数:
+        tokens: 台词头部按 `|` 拆出的表演参数 token（不含说话人/情绪/类型）。
+        shot_index: 镜头序号，用于告警定位。
+        warnings: 告警收集列表。
+
+    返回:
+        可直接并入台词行的字段 dict（`emotion_intensity` / `speed` /
+        `pause_before_ms` / `pause_after_ms` / `delivery_note`），未提供的键不返回。
+    """
+    params: dict = {}
+    limits = {
+        "emotion_intensity": (0.0, 1.0),
+        "speed": (0.5, 2.0),
+        "pause_before_ms": (0, 60000),
+        "pause_after_ms": (0, 60000),
+    }
+    aliases = {
+        "intensity": "emotion_intensity",
+        "强度": "emotion_intensity",
+        "speed": "speed",
+        "语速": "speed",
+        "before": "pause_before_ms",
+        "pause-before": "pause_before_ms",
+        "前置": "pause_before_ms",
+        "after": "pause_after_ms",
+        "pause-after": "pause_after_ms",
+        "后置": "pause_after_ms",
+    }
+    for token in tokens:
+        key, sep, value = token.partition("=")
+        if not sep:
+            continue
+        key = key.strip().lower()
+        value = value.strip()
+        if not key or not value:
+            continue
+        if key in ("note", "说明"):
+            params["delivery_note"] = value[:500]
+            continue
+        field = aliases.get(key)
+        if not field:
+            continue
+        try:
+            number = float(value.rstrip("ms毫秒"))
+        except ValueError:
+            warnings.append(INFO_PREFIX + f"镜头 {shot_index} 的台词参数 {key}={value} 不是数字，已忽略")
+            continue
+        low, high = limits[field]
+        if not low <= number <= high:
+            warnings.append(
+                INFO_PREFIX + f"镜头 {shot_index} 的台词参数 {key}={value} 超出 {low:g}~{high:g}，已收敛"
+            )
+        number = max(low, min(high, number))
+        params[field] = int(number) if field.startswith("pause_") else round(number, 3)
+    return params
+
+
 def parse_markup(
     markup: str,
     chapter: dict,
@@ -471,11 +544,16 @@ def parse_markup(
     output_width = int(aspect["width"])
     output_height = int(aspect["height"])
 
-    # 已有台词行：按文本建索引，供自动挂接
+    # 已有台词行：按文本建索引，供自动挂接（精确 + 标点归一化两套）
     existing: dict[str, list[dict]] = {}
+    existing_norm: dict[str, list[dict]] = {}
     for scene in chapter.get("scenes") or []:
         for line in scene.get("lines") or []:
-            existing.setdefault((line.get("text") or "").strip(), []).append(line)
+            raw_text = (line.get("text") or "").strip()
+            existing.setdefault(raw_text, []).append(line)
+            norm_text = _normalize_for_match(raw_text)
+            if norm_text:
+                existing_norm.setdefault(norm_text, []).append(line)
 
     shots: list[dict] = []
     current: dict | None = None
@@ -759,8 +837,8 @@ def parse_markup(
 
         shot = require_shot(line_text)
         match = _LINE_RE.match(line_text)
-        if match and re.search(r"[，。！？；、]", match.group("head")):
-            # 冒号前是句子成分（含标点），不是说话人：整行按无前缀台词处理，避免误报说话人
+        if match and re.search(r"[，。！？；、]", match.group("head").split("|", 1)[0]):
+            # 冒号前第一段（说话人）含标点，是句子成分，不是说话人：整行按无前缀台词处理
             match = None
         explicit_prefix = bool(match)
         if match:
@@ -771,8 +849,28 @@ def parse_markup(
             raise ValueError(f"台词文本为空：{raw}")
         tokens = [token for token in head.split("|")] if head else []
         speaker_name = tokens[0].strip() if tokens else ""
-        emotion = (tokens[1].strip() if len(tokens) > 1 and tokens[1].strip() else "neutral")
-        kind = (tokens[2].strip() if len(tokens) > 2 and tokens[2].strip() else "")
+        emotion = "neutral"
+        emotion_explicit = False
+        kind = ""
+        param_tokens: list[str] = []
+        # 情绪/类型是可选的位置参数；一旦遇到 key=value，后面全部按表演参数解析
+        for position, token in enumerate(tokens[1:]):
+            value = token.strip()
+            if not value:
+                continue
+            if "=" in value:
+                param_tokens = tokens[position + 1 :]
+                break
+            if position == 0:
+                emotion = value
+                emotion_explicit = True
+            elif position == 1:
+                kind = value
+        kind_alias = {"旁白": "narration", "对白": "dialogue", "独白": "inner_monologue", "内心独白": "inner_monologue"}
+        kind = kind_alias.get(kind, kind)
+        if not emotion_explicit:
+            # 行没写情绪时用镜头情绪托底，避免整章台词都是 neutral
+            emotion = _LINE_EMOTION_FROM_MOOD.get(str(shot.get("mood") or ""), "neutral")
         if explicit_prefix and not normalize_speaker_name(speaker_name):
             # 模型按要求把无法判断的说话人留空：标为待校对，但不报硬告警
             speaker_id, confidence = UNKNOWN_SPEAKER_ID, 0.0
@@ -781,12 +879,22 @@ def parse_markup(
         else:
             speaker_id, confidence = _resolve_speaker(speaker_name, characters)
         if emotion not in EMOTIONS:
-            warnings.append(INFO_PREFIX + f"镜头 {shot['index']} 情绪 {emotion} 非法，已改为 neutral")
-            emotion = "neutral"
+            # 模型可能把镜头情绪（tense/horror…）写到行上，先映射到合法行情绪
+            mapped = _LINE_EMOTION_FROM_MOOD.get(emotion, "neutral")
+            warnings.append(
+                INFO_PREFIX + f"镜头 {shot['index']} 情绪 {emotion} 非法，已改为 {mapped}"
+            )
+            emotion = mapped
         if not kind:
             kind = "dialogue" if speaker_id != NARRATOR_ID else "narration"
         if kind not in ("dialogue", "narration", "inner_monologue"):
             raise ValueError(f"台词类型非法：{kind}")
+        line_params = _parse_line_params(param_tokens, shot["index"], warnings)
+        # 脚本是台词内容的唯一来源：缺省参数也要写全，避免派生时被 pop 成 UI 默认值
+        line_params.setdefault("emotion_intensity", 0.5)
+        line_params.setdefault("speed", 1.0)
+        line_params.setdefault("pause_before_ms", 0)
+        line_params.setdefault("pause_after_ms", 90 if kind == "dialogue" else 120)
         speaker_message = None
         if speaker_id == UNKNOWN_SPEAKER_ID and speaker_name and explicit_prefix and normalize_speaker_name(speaker_name):
             cleaned = normalize_speaker_name(speaker_name) or speaker_name[:20]
@@ -803,6 +911,9 @@ def parse_markup(
             info_counts[key] = info_counts.get(key, 0) + 1
         matched = None
         candidates = existing.get(text) or []
+        if not candidates:
+            # 标点/空白差异时仍尽量挂回原行，保住已有配音与人工改动
+            candidates = existing_norm.get(_normalize_for_match(text)) or []
         for candidate in candidates:
             if candidate.get("speaker_id") in (speaker_id, UNKNOWN_SPEAKER_ID):
                 matched = candidate
@@ -830,14 +941,22 @@ def parse_markup(
                 diagnostics.append(
                     _line_diagnostic("orphan", orphan_message, shot, line_index, line_id, text, anchor)
                 )
+        # 归一化命中时，存正文里的原始片段，保证「正文 ↔ 台词行」逐字可定位
+        stored_text = text
+        if anchor["state"] == "shifted":
+            exact_text = content[anchor["char_start"] : anchor["char_end"]].strip()
+            if exact_text:
+                stored_text = exact_text
+                anchor["text_hash"] = _sha(stored_text)
         shot["lines"].append(
             {
                 "id": line_id,
                 "index": len(shot["lines"]),
                 "kind": kind,
                 "speaker_id": speaker_id,
-                "text": text,
+                "text": stored_text,
                 "emotion": emotion,
+                **line_params,
                 "anchor": anchor,
                 "revision": int((matched or {}).get("revision") or 1),
             }

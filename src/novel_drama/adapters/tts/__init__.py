@@ -36,7 +36,7 @@ class ProviderTtsAdapter:
             config: AppConfig。
             provider_id: 具体 provider（全局锁定）或 "auto"。
         """
-        from ..tts import TtsService
+        from novel_drama.tts import TtsService
 
         self.service = TtsService(config)
         self.provider_id = provider_id
@@ -65,8 +65,8 @@ class ProviderTtsAdapter:
         返回:
             TtsResult（sample_rate 为模型实际输出，未做重采样）。
         """
-        from ..tts import Requirement, VoiceRef
-        from ..tts.errors import TtsError
+        from novel_drama.tts import Requirement, VoiceRef
+        from novel_drama.tts.errors import TtsError
 
         voice = self.service.default_voice
         requirement = Requirement(

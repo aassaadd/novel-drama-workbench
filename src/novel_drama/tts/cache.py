@@ -46,6 +46,7 @@ SIGNATURE_PARAM_FIELDS: tuple[str, ...] = (
     "keep_min_ms",
     "silence_threshold_dbfs",
     "hard_split_ratio",
+    "trim_single_chunk",
 )
 
 # 签名差异的展示名与分组（顺序即输出顺序）
@@ -71,6 +72,7 @@ SIGNATURE_LABELS: dict[str, tuple[str, str]] = {
     "keep_min_ms": ("保留气口", "切分"),
     "silence_threshold_dbfs": ("静音阈值", "切分"),
     "hard_split_ratio": ("硬切折扣", "切分"),
+    "trim_single_chunk": ("单块裁剪", "切分"),
     "alignment": ("对齐参数", "时长"),
 }
 

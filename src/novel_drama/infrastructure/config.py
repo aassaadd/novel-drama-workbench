@@ -109,7 +109,7 @@ _FALLBACK = {
             "silence_threshold_dbfs": -45,
             "keep_min_ms": 30,
             "hard_split_ratio": 0.5,
-            "trim_single_chunk": False,
+            "trim_single_chunk": True,
         },
         "alignment": {
             "enabled": True,

@@ -190,6 +190,7 @@
 - 无批次内业务重试：失败批次记录后保留，`resume=True` 只重试失败/未完成批次（`service.py:1896-1921`、`1983-1990`）。
 - `max_tokens`：不设人为上限；适配器按「上下文窗口 − 已用提示词」计算（窗口未知时不传）。若上游 `finish_reason=length` 按异常提示，不再当正常结束（`service.py` `_generate_validated`）。
 - 标注文本解析（`parse_markup`）是本地规则解析，不再调用 LLM（`service.py:2006-2010`、`director/markup.py:447`）。
+- 行级表演参数：`说话人|情绪|类型|intensity=0~1|speed=0.8~1.2|after=毫秒|note=短说明`；解析后写入 `emotion/emotion_intensity/speed/pause_before_ms/pause_after_ms/delivery_note`。行没写情绪时用镜头 `mood` 托底（tense→serious、horror→fear 等），避免整章台词都是 `neutral`。
 
 ### 2.8 世界生成
 

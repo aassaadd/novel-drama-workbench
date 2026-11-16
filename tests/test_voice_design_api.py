@@ -15,8 +15,17 @@ from fastapi.testclient import TestClient
 
 from novel_drama.adapters.llm.contracts import TextGenResult
 from novel_drama.adapters.persistence import ProjectStore
+from novel_drama.adapters.tts import ProviderTtsAdapter
 from novel_drama.interface.http.app import create_app
 from novel_drama.models import entities
+
+
+class _DummyTtsService:
+    """构造 ProviderTtsAdapter 时替代真实 TtsService，避免加载模型。"""
+
+    def __init__(self, config):
+        """只记录配置，不做任何初始化。"""
+        self.config = config
 
 
 class _FakeAdapter:
@@ -89,6 +98,13 @@ class VoiceDesignPreviewTest(unittest.TestCase):
         # 中英双语：中文描述与英文抽卡描述都要有
         self.assertTrue(body["prompt_zh"])
         self.assertTrue(body["profile"]["design_prompt_zh"])
+
+    def test_provider_adapter_resolves_tts_service(self):
+        """配音适配器必须能从 novel_drama.tts 导入 TtsService，不能指向自己。"""
+        with patch("novel_drama.tts.TtsService", _DummyTtsService):
+            adapter = ProviderTtsAdapter({})
+        self.assertEqual(adapter.provider_id, "auto")
+        self.assertIsInstance(adapter.service, _DummyTtsService)
 
     def test_translate_returns_english_prompt(self):
         """中文描述走 LLM 翻译接口，返回英文抽卡描述。"""

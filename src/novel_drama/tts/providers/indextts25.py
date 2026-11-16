@@ -212,6 +212,10 @@ class IndexTts25Provider(BaseProvider):
             payload["emo_alpha"] = 1.0
         if emo_audio:
             payload["emo_audio_prompt"] = emo_audio
+        # 语速走官方 duration_factor（时长缩放），不占用 emo_text 通路，避免与情绪向量互斥
+        speed = float(getattr(request, "speed", 1.0) or 1.0)
+        if abs(speed - 1.0) > 0.01:
+            payload["duration_factor"] = round(1.0 / max(0.5, min(2.0, speed)), 3)
 
         t0 = time.time()
         data = self._synthesize_payload(payload)

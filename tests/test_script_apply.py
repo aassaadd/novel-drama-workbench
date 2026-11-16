@@ -25,7 +25,8 @@ from novel_drama.models import entities
 
 _MARKUP = (
     "@shot 1 车内颠簸 location=碎石路 time=night mood=压抑\n"
-    "旁白：林九斤觉得这趟远门走得不对劲。\n"
+    "旁白|serious|narration|intensity=0.7|speed=0.92|before=0|after=90|note=压着嗓子说："
+    "林九斤觉得这趟远门走得不对劲。\n"
     "!bgm mood=tense energy=0.4 intensity=0.6 loop=1 name=荒路 "
     "function=铺垫不安 en=low+drone+wind+sparse+percussion+dark+minor\n"
 )
@@ -60,6 +61,7 @@ class ScriptApplyTest(unittest.TestCase):
         chapter["scenes"] = [scene]
         self.store.save_chapter(chapter)
         self.chapter_id = chapter["id"]
+        self.line_id = scene["lines"][0]["id"]
         self.config_path = self.root / "offline.yaml"
         self.config_path.write_text(
             "\n".join(
@@ -100,6 +102,57 @@ class ScriptApplyTest(unittest.TestCase):
         self.assertEqual(shot["location"], "碎石路")
         self.assertEqual(shot["mood"], "tense")
         self.assertEqual(shot["bgm"]["prompt_en"], "low drone wind sparse percussion dark minor")
+        line = shot["lines"][0]
+        self.assertEqual(line["emotion"], "serious")
+        self.assertEqual(line["emotion_intensity"], 0.7)
+        self.assertEqual(line["speed"], 0.92)
+        self.assertEqual(line["pause_before_ms"], 0)
+        self.assertEqual(line["pause_after_ms"], 90)
+        self.assertEqual(line["delivery_note"], "压着嗓子说")
+
+    def test_default_pause_is_short(self):
+        """没有标注表演参数时，默认后置停顿也要短。"""
+        dialogue = entities.new_line("scn_abcdef", 0, "测试对白", kind="dialogue")
+        narration = entities.new_line("scn_abcdef", 1, "测试旁白", kind="narration")
+        self.assertEqual(dialogue["pause_after_ms"], 90)
+        self.assertEqual(narration["pause_after_ms"], 120)
+
+    def test_line_emotion_falls_back_to_shot_mood(self):
+        """行没写情绪或写了镜头情绪时，都收敛到合法行情绪。"""
+        markup = (
+            "@shot 1 车内颠簸 location=碎石路 time=night mood=tense\n"
+            "旁白：林九斤觉得这趟远门走得不对劲。\n"
+            "旁白|tense：车在一条碎石路上颠簸了三个小时。\n"
+        )
+        script = parse_markup(
+            markup,
+            self._view(),
+            self.store.load_characters()["characters"],
+            self.store.settings(),
+        )
+        lines = script["shots"][0]["lines"]
+        self.assertEqual(lines[0]["emotion"], "serious")
+        self.assertEqual(lines[1]["emotion"], "serious")
+        # 缺省表演参数也要写全，避免派生时丢掉行字段
+        self.assertEqual(lines[0]["speed"], 1.0)
+        self.assertEqual(lines[0]["pause_after_ms"], 120)
+
+    def test_shifted_text_keeps_prose_and_line_id(self):
+        """模型改标点时应挂回原行，并存正文片段，避免一致性告警。"""
+        markup = (
+            "@shot 1 车内颠簸 location=碎石路 time=night mood=calm\n"
+            "旁白|neutral：林九斤觉得这趟远门，走得不对劲。\n"
+        )
+        script = parse_markup(
+            markup,
+            self._view(),
+            self.store.load_characters()["characters"],
+            self.store.settings(),
+        )
+        line = script["shots"][0]["lines"][0]
+        self.assertEqual(line["id"], self.line_id)
+        self.assertEqual(line["anchor"]["state"], "shifted")
+        self.assertIn(line["text"], self.store.load_chapter(self.chapter_id)["content"])
 
     def test_apply_endpoint_accepts_chinese_mood(self):
         """写入接口不应因中文 mood 报 500，且场景标题与情绪正确。"""
@@ -119,6 +172,11 @@ class ScriptApplyTest(unittest.TestCase):
         self.assertEqual(scene["title"], "车内颠簸")
         self.assertEqual(scene["mood"], "tense")
         self.assertEqual(scene["bgm"]["prompt_en"], "low drone wind sparse percussion dark minor")
+        line = scene["lines"][0]
+        self.assertEqual(line["emotion"], "serious")
+        self.assertEqual(line["speed"], 0.92)
+        self.assertEqual(line["pause_after_ms"], 90)
+        self.assertEqual(line["delivery_note"], "压着嗓子说")
         self.assertTrue((self.root / "scripts" / f"{self.chapter_id}.markup.txt").exists())
 
 

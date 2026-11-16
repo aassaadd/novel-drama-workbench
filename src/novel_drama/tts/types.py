@@ -212,6 +212,7 @@ class SynthesisRequest:
     emotion_intensity: int = 0  # 0~3，与 Requirement 对齐；provider 用来推导情绪强度
     instruct: str | None = None
     target_duration_ms: int | None = None
+    speed: float = 1.0  # 1.0 为原速；provider 有能力时映射到原生时长缩放
     sample_rate: int | None = None
     language: str | None = None  # 来自 Requirement.language，供 provider 选语言分支
 

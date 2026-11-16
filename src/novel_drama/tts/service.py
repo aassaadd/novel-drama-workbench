@@ -228,6 +228,22 @@ def seam_insert_ms(chunk_silence_ms: int, kept_ms: float, hard_split: bool, hard
     return max(0, int(round(value)))
 
 
+def _line_speed(params: dict | None) -> float:
+    """从行级参数中取语速，并收敛到 schema 允许的 0.5~2.0。
+
+    参数:
+        params: 行级参数快照，可为空。
+
+    返回:
+        语速倍率；缺失或非法时返回 1.0。
+    """
+    try:
+        value = float((params or {}).get("speed") or 1.0)
+    except (TypeError, ValueError):
+        return 1.0
+    return max(0.5, min(2.0, value))
+
+
 class TtsService:
     """配音服务：路由 + 合成 + 记录。"""
 
@@ -261,7 +277,7 @@ class TtsService:
         self.silence_threshold_dbfs = float(segmentation.get("silence_threshold_dbfs", -45))
         self.keep_min_ms = max(0, int(segmentation.get("keep_min_ms", 30)))
         self.hard_split_ratio = min(1.0, max(0.0, float(segmentation.get("hard_split_ratio", 0.5))))
-        self.trim_single_chunk = bool(segmentation.get("trim_single_chunk", False))
+        self.trim_single_chunk = bool(segmentation.get("trim_single_chunk", True))
         self.alignment_cfg = dict(config.get("tts.alignment") or {})
         self.project_root = Path(project_root) if project_root else None
 
@@ -361,6 +377,7 @@ class TtsService:
         chunk_silence_ms: int | None = None,
         emotion_intensity: int = 0,
         language: str | None = None,
+        speed: float = 1.0,
     ) -> dict:
         """逐块合成并拼接为单个 wav。
 
@@ -392,7 +409,7 @@ class TtsService:
         sample_rate = None
         chunk_dir = out_path.parent / f"{out_path.stem}_chunks"
         chunk_dir.mkdir(parents=True, exist_ok=True)
-        # 单块默认不裁（trim_single_chunk=false），保证与改造前逐样本一致
+        # 单块默认也裁头尾静音（trim_single_chunk=true），避免句末拖尾过长
         may_trim = len(chunks) > 1 or self.trim_single_chunk
         for idx, (chunk, hard_split) in enumerate(chunks):
             req = SynthesisRequest(
@@ -403,6 +420,7 @@ class TtsService:
                 instruct=instruct,
                 emotion_intensity=emotion_intensity,
                 language=language,
+                speed=speed,
             )
             result = provider.synthesize(req)
             data, sr = sf.read(result.audio_path)
@@ -491,6 +509,7 @@ class TtsService:
             "keep_min_ms": self.keep_min_ms,
             "silence_threshold_dbfs": self.silence_threshold_dbfs,
             "hard_split_ratio": self.hard_split_ratio,
+            "trim_single_chunk": self.trim_single_chunk,
             "trims": trims,
             "seams": seams,
             "compensation": compensation,
@@ -551,6 +570,7 @@ class TtsService:
                     chunk_limit=chunk_limit,
                     emotion_intensity=requirement.emotion_intensity,
                     language=requirement.language,
+                    speed=_line_speed(params_extra),
                 )
             except TtsError as exc:
                 errors.append(exc.to_dict())
@@ -585,6 +605,7 @@ class TtsService:
                 "keep_min_ms": info.get("keep_min_ms"),
                 "silence_threshold_dbfs": info.get("silence_threshold_dbfs"),
                 "hard_split_ratio": info.get("hard_split_ratio"),
+                "trim_single_chunk": info.get("trim_single_chunk"),
             }
             params.update(params_extra or {})
             payload = {

@@ -109,6 +109,7 @@ def engine_params(service) -> dict:
         "keep_min_ms": service.keep_min_ms,
         "silence_threshold_dbfs": service.silence_threshold_dbfs,
         "hard_split_ratio": service.hard_split_ratio,
+        "trim_single_chunk": getattr(service, "trim_single_chunk", True),
     }
 
 

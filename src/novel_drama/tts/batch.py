@@ -209,6 +209,7 @@ def _instruct_for(line: dict) -> str | None:
 
     说明:
         情绪不再自动改写成指令文本，否则会和 IndexTTS 的 8 维向量通路互斥；
+        语速单独走 provider 的时长缩放参数，不混进 instruct。
         需要「情绪→指令」的 provider（如 CosyVoice3）在自己的实现里改写。
     """
     return line.get("delivery_note") or None

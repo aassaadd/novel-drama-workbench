@@ -166,7 +166,7 @@ def new_line(
         "emotion_intensity": 0.5,
         "speed": 1.0,
         "pause_before_ms": 0,
-        "pause_after_ms": 120 if kind == "dialogue" else 200,
+        "pause_after_ms": 90 if kind == "dialogue" else 120,
         "delivery_note": None,
         "inferred": True,
         "confidence": confidence,
