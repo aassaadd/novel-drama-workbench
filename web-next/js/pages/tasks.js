@@ -12,6 +12,13 @@ import { labelOf, ENUMS } from '../enums.js';
 import { getJSON, postJSON } from '../api.js';
 import { openProgress } from '../progress.js';
 import { runLlm } from '../llm.js';
+import {
+  cancelMediaJob,
+  mediaStatusLabel,
+  mediaChannelLabel,
+  jobProgressText,
+  jobErrorSummary,
+} from '../media-bus.js';
 import { modeSwitchHTML, bindModeSwitch, getGenMode } from '../gen-mode.js';
 import { state, resetProject } from '../store.js';
 import { railbar, topbar, emptyProjectHTML, goProjects } from '../shell.js';
@@ -42,6 +49,8 @@ let produceRun = null;
 /** GPU 锁与并发明细（锁文件持有人、队列计数） */
 let gpu = null;
 let queueFilter = 'all';
+/** 通道筛选：all / audio / image / video / other */
+let channelFilter = 'all';
 let timer = null;
 let bound = false;
 /** 写作模型自查状态（进入任务页加载一次；点「检测连接」重新探测，不参与 3 秒轮询） */
@@ -60,6 +69,55 @@ function badgeClass(name) {
   return '';
 }
 
+/** 媒体任务类型 → 通道（无 channel 字段时按 kind 推断） */
+const KIND_CHANNEL = {
+  'tts.line': 'audio',
+  'tts.chapter': 'audio',
+  'tts.book': 'audio',
+  'voice.design': 'audio',
+  'voice.preview': 'audio',
+  'voice.batch': 'audio',
+  sfx: 'audio',
+  bgm: 'audio',
+  tts: 'audio',
+  voice: 'audio',
+  'voice.fill': 'audio',
+  image: 'image',
+  video: 'video',
+  anim: 'video',
+};
+
+/**
+ * 任务通道：优先用后端 channel，缺失时按 kind 推断，仍未知归入「其他」。
+ * @param {object} item 队列任务
+ * @returns {'audio'|'image'|'video'|'other'} 通道键
+ */
+function channelOf(item) {
+  const channel = String(item?.channel || '');
+  if (channel === 'audio' || channel === 'image' || channel === 'video') return channel;
+  if (channel) return 'other';
+  return KIND_CHANNEL[String(item?.kind || '')] || 'other';
+}
+
+/**
+ * 是否为媒体任务（媒体总线任务带 action 或 channel）。
+ * @param {object} item 队列任务
+ * @returns {boolean} 媒体任务返回 true
+ */
+function isMediaJob(item) {
+  return Boolean(item?.action) || Boolean(item?.ui && item?.channel);
+}
+
+/**
+ * 状态文案：媒体通道状态优先，未识别时回落到任务状态枚举。
+ * @param {object} item 队列任务
+ * @returns {string} 中文状态
+ */
+function statusText(item) {
+  const label = mediaStatusLabel(item?.status);
+  return label === '状态未知' ? labelOf('job_status', item?.status, '状态未知') : label;
+}
+
 /**
  * 把后端错误统一转成可读文本（错误可能是字符串，也可能是 {message} 对象）。
  * @param {any} value 错误值
@@ -75,22 +133,12 @@ function errorText(value) {
   return String(value);
 }
 
-/**
- * 队列错误列的简短文本：多行错误（退出码 + 日志尾部）只留前两行。
- * @param {any} value 错误值
- * @returns {string} 两行以内的错误摘要
- */
-function errorSummary(value) {
-  const text = errorText(value);
-  const rows = text.split('\n').map((row) => row.trim()).filter(Boolean);
-  return rows.slice(0, 2).join(' / ');
-}
-
-/** 过滤队列 */
+/** 过滤队列：先按通道，再按状态（两个筛选共用） */
 function visibleQueue() {
-  if (queueFilter === 'all') return queue;
-  if (queueFilter === 'active') return queue.filter((item) => ['queued', 'running'].includes(item.status));
-  return queue.filter((item) => item.status === queueFilter);
+  const byChannel = channelFilter === 'all' ? queue : queue.filter((item) => channelOf(item) === channelFilter);
+  if (queueFilter === 'all') return byChannel;
+  if (queueFilter === 'active') return byChannel.filter((item) => ['queued', 'running'].includes(item.status));
+  return byChannel.filter((item) => item.status === queueFilter);
 }
 
 /** 全链路编排卡：阶段区间 + 最近一次运行明细 */
@@ -239,10 +287,12 @@ function gpuHTML() {
 /** 队列卡：工程内所有任务的运行中 / 排队 / 完成 / 失败状态与产物 */
 function queueHTML() {
   const rows = visibleQueue();
+  // 先通道后状态：状态计数只统计当前通道内的任务
+  const inChannel = channelFilter === 'all' ? queue : queue.filter((item) => channelOf(item) === channelFilter);
   const countOf = (key) => {
-    if (key === 'all') return queue.length;
-    if (key === 'active') return queue.filter((item) => ['queued', 'running'].includes(item.status)).length;
-    return queue.filter((item) => item.status === key).length;
+    if (key === 'all') return inChannel.length;
+    if (key === 'active') return inChannel.filter((item) => ['queued', 'running'].includes(item.status)).length;
+    return inChannel.filter((item) => item.status === key).length;
   };
   const emptyText = {
     all: '任务队列是空的：大纲、正文、世界、角色、标注、素材、配音等任务开始后会出现在这里。',
@@ -265,17 +315,16 @@ function queueHTML() {
   };
 
   /**
-   * 进度列：有百分比显示百分比 + 当前项，没有则显示当前阶段。
+   * 类型列：媒体任务用后端标题，其余任务回落到任务类型枚举。
    * @param {object} item 队列任务
    */
-  const progressText = (item) => {
-    const info = item.progress || {};
-    const percent = info.percent;
-    if (typeof percent === 'number') {
-      return `${Math.round(percent)}%${info.current ? ` · ${info.current}` : ''}`;
-    }
-    return info.current || '—';
-  };
+  const kindText = (item) =>
+    String(item.title || '').trim() || labelOf('job_kind', item.kind, '任务');
+
+  /** 通道筛选计数 */
+  const channelCountOf = (key) =>
+    key === 'all' ? queue.length : queue.filter((item) => channelOf(item) === key).length;
+
   const terminalCount = queue.filter((item) =>
     ['succeeded', 'partial', 'failed', 'canceled', 'interrupted'].includes(item.status)
   ).length;
@@ -304,9 +353,26 @@ function queueHTML() {
           }
         </div>
       </div>
+      <div style="display:flex;gap:4px;align-items:center;padding:8px 12px 0;flex-wrap:wrap">
+        <span class="hint" style="margin-right:2px">通道</span>
+        ${[
+          ['all', '全部'],
+          ['audio', '声音'],
+          ['image', '图片'],
+          ['video', '视频'],
+          ['other', '其他'],
+        ]
+          .map(
+            ([key, label]) =>
+              `<button class="chip sm ${channelFilter === key ? 'on' : ''}" data-cfilter="${key}"
+                title="按媒体通道筛选队列">${label}<span class="n">${channelCountOf(key)}</span></button>`
+          )
+          .join('')}
+        <span class="hint" style="margin-left:auto">先按通道，再按状态筛选</span>
+      </div>
       <div class="card-body" style="padding:0">
         <table class="files">
-          <thead><tr><th>类型</th><th>目标</th><th>状态</th><th>进度</th><th>尝试</th><th>产物</th><th>错误</th><th>操作</th></tr></thead>
+          <thead><tr><th>类型</th><th>通道</th><th>目标</th><th>状态</th><th>进度</th><th>尝试</th><th>产物</th><th>错误</th><th>操作</th></tr></thead>
           <tbody>
             ${
               rows.length
@@ -316,16 +382,15 @@ function queueHTML() {
                       // 只有界面发起、后端能停的任务才给停止按钮（GPU 队列任务不在本进程）
                       const stoppable = Boolean(item.ui) && ['running', 'queued'].includes(item.status);
                       return `<tr>
-                        <td>${esc(labelOf('job_kind', item.kind, '任务'))}</td>
+                        <td title="${esc(kindText(item))}">${esc(kindText(item))}</td>
+                        <td><span class="badge mute">${esc(mediaChannelLabel(channelOf(item)))}</span></td>
                         <td title="${esc(targetText(item))}">${esc(targetText(item))}</td>
-                        <td><span class="badge ${badgeClass(item.status)}">${esc(
-                          labelOf('job_status', item.status, '状态未知')
-                        )}</span></td>
-                        <td style="font-size:11.5px;color:var(--text-3)">${esc(progressText(item))}</td>
+                        <td><span class="badge ${badgeClass(item.status)}">${esc(statusText(item))}</span></td>
+                        <td style="font-size:11.5px;color:var(--text-3)">${esc(jobProgressText(item))}</td>
                         <td class="mono">${Number(item.attempts || 0)}</td>
                         <td class="mono">${(item.artifacts || []).length}</td>
                         <td style="color:var(--bad);white-space:pre-line;max-width:340px"
-                          title="${esc(errorText(item.error))}">${esc(errorSummary(item.error))}</td>
+                          title="${esc(errorText(item.error))}">${esc(jobErrorSummary(item))}</td>
                         <td>${
                           stoppable
                             ? `<button class="btn sm danger" data-act="job-stop" data-job="${esc(item.id)}"
@@ -335,7 +400,7 @@ function queueHTML() {
                       </tr>`;
                     })
                     .join('')
-                : `<tr><td colspan="8" style="color:var(--text-4);padding:16px 12px">${esc(emptyText)}</td></tr>`
+                : `<tr><td colspan="9" style="color:var(--text-4);padding:16px 12px">${esc(emptyText)}</td></tr>`
             }
           </tbody>
         </table>
@@ -520,35 +585,48 @@ async function refresh({ silent = true } = {}) {
 
 /**
  * 停止一条运行中的任务。
- * 生成线程会协作取消（不再写进度/产物）；编排任务直接杀子进程；
+ * 媒体任务走统一媒体总线取消（按 job_id，幂等）；编排 / LLM 任务仍走任务取消接口；
  * 后端已无对应进程的僵尸任务可以强制标记为已取消。
  * @param {string} jobId 任务 ID
  * @param {HTMLButtonElement} [button] 触发的按钮
  */
 async function stopJob(jobId, button) {
   const item = queue.find((row) => row.id === jobId) || {};
-  const kind = labelOf('job_kind', item.kind, '任务');
-  const info = item.progress || {};
-  const progressLabel = `${typeof info.percent === 'number' ? `${Math.round(info.percent)}% · ` : ''}${
-    info.current || '—'
-  }`;
+  const media = isMediaJob(item);
+  const kind = String(item.title || '').trim() || labelOf('job_kind', item.kind, '任务');
+  const llmCalls = Array.isArray(item.meta?.llm_calls)
+    ? item.meta.llm_calls.length
+    : Number(item.meta?.llm_calls || 0);
   const mask = openDialog({
     title: '停止任务',
     body: `
       <div class="summary-line"><span>任务</span>
         <span class="right">${esc(kind)} · <span class="mono">${esc(jobId)}</span></span></div>
+      <div class="summary-line"><span>通道 / 动作</span>
+        <span class="right">${esc(mediaChannelLabel(channelOf(item)))}${
+          item.action ? ` · ${esc(item.action)}` : ''
+        }</span></div>
+      <div class="summary-line"><span>阶段</span>
+        <span class="right">${esc(item.stage || '—')}</span></div>
       <div class="summary-line"><span>当前进度</span>
-        <span class="right">${esc(progressLabel)}</span></div>
-      <div class="dlg-note">停止后会中断后台生成（编排类任务会杀掉子进程），任务落「已取消」；
-        已接收的字数、已完成批次与产物都会保留，停止后不会再写入或覆盖已有结果。
-        如果后端已经没有对应进程（僵尸任务），请用「强制标记为已取消」。</div>`,
-    foot: `<div class="right"><button class="btn" data-dlg-close>返回</button>
-      <button class="btn" id="job-stop-force">强制标记为已取消</button>
-      <button class="btn danger" id="job-stop-ok">确认停止</button></div>`,
+        <span class="right">${esc(jobProgressText(item))}</span></div>
+      <div class="summary-line"><span>嵌套模型调用</span>
+        <span class="right">${llmCalls} 次</span></div>
+      <div class="dlg-note">${
+        media
+          ? '停止后会中断这条媒体任务，任务落「已取消」；已完成的产物与批次都会保留，停止后不会再写入或覆盖已有结果。'
+          : '停止后会中断后台生成（编排类任务会杀掉子进程），任务落「已取消」；已接收的字数、已完成批次与产物都会保留，停止后不会再写入或覆盖已有结果。如果后端已经没有对应进程（僵尸任务），请用「强制标记为已取消」。'
+      }</div>`,
+    foot: media
+      ? `<div class="right"><button class="btn" data-dlg-close>返回</button>
+         <button class="btn danger" id="job-stop-ok">确认停止</button></div>`
+      : `<div class="right"><button class="btn" data-dlg-close>返回</button>
+         <button class="btn" id="job-stop-force">强制标记为已取消</button>
+         <button class="btn danger" id="job-stop-ok">确认停止</button></div>`,
   });
   /**
    * 提交停止请求并给出进行中 / 结果反馈。
-   * @param {boolean} force true=不等生成线程，直接落取消
+   * @param {boolean} force true=不等生成线程，直接落取消（媒体任务忽略该参数）
    * @param {HTMLButtonElement} target 当前点击的按钮
    */
   const submit = async (force, target) => {
@@ -557,9 +635,19 @@ async function stopJob(jobId, button) {
     buttons.forEach((node) => (node.disabled = true));
     target.textContent = force ? '正在强制取消…' : '正在停止…';
     try {
-      const result = await postJSON('/api/ui/jobs/cancel', { path: state.path, id: jobId, force });
+      const result = media
+        ? await cancelMediaJob(state.path, jobId)
+        : await postJSON('/api/ui/jobs/cancel', { path: state.path, id: jobId, force });
       closeDialog();
-      toast(result.message || (force ? '已强制标记为已取消' : '已停止任务'), result.canceled === false ? 'info' : 'ok', 4800);
+      if (media && result === null) {
+        toast('停止请求没有返回结果，请刷新任务队列确认状态', 'info', 4800);
+      } else {
+        toast(
+          result?.message || (media ? '已发出停止请求' : force ? '已强制标记为已取消' : '已停止任务'),
+          result?.canceled === false ? 'info' : 'ok',
+          4800
+        );
+      }
     } catch (error) {
       // 失败保留弹窗，恢复按钮，让用户可以重试或改用强制取消
       buttons.forEach((node) => (node.disabled = false));
@@ -570,7 +658,7 @@ async function stopJob(jobId, button) {
     await refresh({ silent: true });
   };
   mask.querySelector('#job-stop-ok').addEventListener('click', (event) => submit(false, event.currentTarget));
-  mask.querySelector('#job-stop-force').addEventListener('click', (event) => submit(true, event.currentTarget));
+  mask.querySelector('#job-stop-force')?.addEventListener('click', (event) => submit(true, event.currentTarget));
 }
 
 /** 清理已结束的队列行（不动正文/音频产物） */
@@ -629,6 +717,12 @@ async function onRootClick(event) {
   const filterButton = event.target.closest('[data-qfilter]');
   if (filterButton) {
     queueFilter = filterButton.dataset.qfilter;
+    paintRegions(['queue']);
+    return;
+  }
+  const channelButton = event.target.closest('[data-cfilter]');
+  if (channelButton) {
+    channelFilter = channelButton.dataset.cfilter;
     paintRegions(['queue']);
     return;
   }

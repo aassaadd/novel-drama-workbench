@@ -1,7 +1,7 @@
-"""配乐生成接口：项目内 Stable Audio Open / ACE-Step 两档（叙事 / 铺底）。
+"""配乐查询接口：章节 cue、生成记录与可关联的 BGM 计划。
 
-业务规则在 `media.music`，这里只做 HTTP 包装，错误统一翻成中文并带机器可读 code，
-便于页面在「本地 provider 不可用」时直接引导去设置页。
+生成逻辑已迁到 `application/production/bgm_generate.py`，由统一媒体总线
+（action=`bgm`）调度；本模块只提供页面读取与预选所需的数据。
 """
 
 from __future__ import annotations
@@ -10,59 +10,22 @@ import logging
 
 from fastapi import HTTPException
 
-from novel_drama.bgm.registry import build_providers, pick_provider
+from novel_drama.application.production.bgm_generate import (
+    COMFY_MAX_SECONDS,
+    COMFY_MIN_SECONDS,
+    local_status,
+)
 from novel_drama.composition import (
     LONG_BED_SECONDS,
-    MODE_BED,
     MODE_LABELS,
-    MODE_NARRATIVE,
-    AdapterError,
-    ErrorCode,
     ProjectStore,
     load_cues,
     load_generation_records,
-    render_bgm,
     resolve_mode,
 )
 from novel_drama.infrastructure.config import load_config
 
 logger = logging.getLogger(__name__)
-
-#: ComfyUI / ACE-Step 的时长边界，与 `media.music` 的校验保持一致
-COMFY_MIN_SECONDS = 10
-COMFY_MAX_SECONDS = 180
-
-
-def _local_status(config) -> dict:
-    """检查项目内 provider 是否可用（只查解释器与权重文件，不加载模型）。
-
-    参数:
-        config: 本机配置。
-
-    返回:
-        `{available, detail, code, max_seconds, min_seconds, model}`。
-    """
-    try:
-        providers = build_providers(config)
-        _, provider = pick_provider(config, providers)
-        health = provider.health()
-        return {
-            "available": health.ok,
-            "detail": health.detail,
-            "code": health.code,
-            "max_seconds": float(getattr(provider, "max_seconds", 47.0)),
-            "min_seconds": float(getattr(provider, "min_seconds", 5.0)),
-            "model": provider.spec.model,
-        }
-    except Exception as exc:  # noqa: BLE001 - 配置缺失也要给页面一个可读原因
-        return {
-            "available": False,
-            "detail": f"本地配乐配置不可用：{exc}",
-            "code": "PROVIDER_DISABLED",
-            "max_seconds": 47.0,
-            "min_seconds": 5.0,
-            "model": None,
-        }
 
 
 def _store(path: str | None) -> ProjectStore:
@@ -106,7 +69,7 @@ def _plans(store: ProjectStore, chapter_id: str) -> tuple[list[dict], str | None
         logger.warning("分镜文件损坏（chapter=%s）：%s", chapter_id, exc, exc_info=True)
         try:
             path = store.script_path(chapter_id)
-        except Exception:
+        except Exception:  # noqa: BLE001 - 只是给错误文案找一个可读位置，取不到就用章节 ID
             path = chapter_id
         return [], f"分镜文件损坏：{path}（{exc}），本次无法读取配乐计划"
     plans: list[dict] = []
@@ -133,7 +96,7 @@ def _plans(store: ProjectStore, chapter_id: str) -> tuple[list[dict], str | None
 
 
 def register_bgm_routes(app, config_path: str | None = None) -> None:
-    """挂载配乐生成相关接口。
+    """挂载配乐查询接口。
 
     参数:
         app: FastAPI 应用。
@@ -158,7 +121,7 @@ def register_bgm_routes(app, config_path: str | None = None) -> None:
         """
         store = _store(path)
         config = load_config(config_path)
-        local = _local_status(config)
+        local = local_status(config)
         plans, plan_error = _plans(store, chapter)
         # 显式给页面两档来源与开关来源：默认值来自配置，条目/CLI 可在生成时覆盖
         defaults = {
@@ -197,65 +160,3 @@ def register_bgm_routes(app, config_path: str | None = None) -> None:
                 },
             ],
         }
-
-    @app.post("/api/ui/bgm/generate")
-    def ui_bgm_generate(body: dict) -> dict:
-        """生成一段配乐并按档位处理。
-
-        参数:
-            body: `{path, chapter, prompt, prompt_en?, duration?, mode?, plan_id?, seed?, name?, start_ms?}`；
-            prompt_en 为页面手填英文覆盖；为空时读取关联计划的 prompt_en；
-            mode 取值 auto / narrative / bed。
-
-        返回:
-            `render_bgm` 的结果（含 mode / 两段耗时 / 响度 / cue / 记录路径）。
-        """
-        store = _store(body.get("path"))
-        chapter_id = str(body.get("chapter") or "").strip()
-        if not chapter_id:
-            raise HTTPException(status_code=400, detail="缺少 chapter 参数（章节 ID）")
-        mode = str(body.get("mode") or "auto")
-        if mode not in ("auto", MODE_NARRATIVE, MODE_BED):
-            raise HTTPException(status_code=400, detail="模式只能是 自动 / 叙事 / 铺底")
-        config = load_config(config_path)
-        duration = body.get("duration")
-        provider = str(body.get("provider") or "").strip().lower()
-        if provider not in ("local", "comfyui"):
-            provider = str(config.get("bgm.provider") or "local").strip().lower()
-        auto_switched = False
-        # 超过本地模型上限时自动改走 ACE-Step，并在响应里说明，避免用户以为走了本地
-        local_max = _local_status(config)["max_seconds"]
-        if provider == "local" and isinstance(duration, (int, float)) and duration > local_max:
-            provider = "comfyui"
-            auto_switched = True
-        try:
-            result = render_bgm(
-                store,
-                config,
-                chapter_id,
-                str(body.get("prompt") or ""),
-                duration_s=duration,
-                requested_mode=mode,
-                requested_normalize=body.get("normalize") if isinstance(body.get("normalize"), bool) else None,
-                requested_trim=body.get("trim_edges") if isinstance(body.get("trim_edges"), bool) else None,
-                plan_id=body.get("plan_id"),
-                prompt_en=body.get("prompt_en"),
-                seed=body.get("seed"),
-                name=body.get("name"),
-                start_ms=int(body.get("start_ms") or 0),
-                provider=provider,
-            )
-            result["provider_requested"] = body.get("provider") or provider
-            result["auto_switched"] = auto_switched
-            return result
-        except AdapterError as exc:
-            status = 400 if exc.code == ErrorCode.INVALID_INPUT else 503 if exc.code == ErrorCode.UNAVAILABLE else 502
-            raise HTTPException(
-                status_code=status,
-                detail={"message": f"配乐生成失败：{exc.message}", "code": exc.code, "provider": provider},
-            ) from exc
-        except ValueError as exc:
-            raise HTTPException(
-                status_code=400,
-                detail={"message": str(exc), "code": "BAD_REQUEST", "provider": provider},
-            ) from exc

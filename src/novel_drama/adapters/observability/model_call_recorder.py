@@ -20,7 +20,7 @@ import traceback
 from collections import deque
 from typing import Any
 
-from .oplog import _CFG, KIND_LLM, _clip, _enqueue, _new_id, _now, current_trace
+from .oplog import PARENT_JOB, _CFG, KIND_LLM, _clip, _enqueue, _new_id, _now, current_trace
 
 #: LLM 调用/流中断的原因码与中文标签（日志与页面共用同一份口径）。
 #: 补这些码的目的：把「调用方提前关闭流」这一句笼统文案拆成可统计的来源。
@@ -288,6 +288,8 @@ class _LlmCall:
             "action": "llm.chat",
             "label": "LLM 调用",
             "trace_id": ctx.get("trace_id") or "",
+            # 媒体任务内嵌的模型调用登记父任务，便于按父任务排查与级联取消
+            "parent_job_id": PARENT_JOB.get() or None,
             "project": ctx.get("project") or "",
             "target": f"{self.model or '未指定模型'}" + (f" · {ctx.get('action')}" if ctx.get("action") else ""),
             "summary": f"{'流式' if self.stream else '非流式'} · 提示 {system_hint or prompt_hint}",

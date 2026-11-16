@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from ...cancel import GenerationCanceled
 from ...composition import ProjectStore, check_cast
 from ...domain.shared.errors import PreconditionError
 from ...infrastructure.config import AppConfig, load_config
@@ -40,6 +42,8 @@ class BatchOptions:
         skip_cast_check: 跳过配音前的音色/BGM 门禁。
         skip_unknown_speakers: 跳过说话人未识别的行。
         human_summary: 是否打印面向人的总结（页面后台进程不需要）。
+        on_progress: 每批进度更新后的回调（媒体总线用来转进度卡）。
+        should_cancel: 取消检查回调；返回 True 时中止本批合成。
     """
 
     chapter: str | None = None
@@ -56,6 +60,8 @@ class BatchOptions:
     skip_cast_check: bool = False
     skip_unknown_speakers: bool = False
     human_summary: bool = True
+    on_progress: Callable[[dict], None] | None = None
+    should_cancel: Callable[[], bool] | None = None
 
 
 def target_chapters(
@@ -383,7 +389,7 @@ def run_batch(store: ProjectStore, config: AppConfig, options: BatchOptions) -> 
         "started_at": now_iso(),
         "finished": False,
     }
-    if progress_file or skip_ids:
+    if progress_file or skip_ids or options.on_progress:
         # 进度分母提前算好：run_chapters 是逐章规划的，不预先汇总页面就无法显示 X/Y
         counts, skipped_rows = planned_counts(
             store,
@@ -400,8 +406,20 @@ def run_batch(store: ProjectStore, config: AppConfig, options: BatchOptions) -> 
         if progress_file:
             write_progress(progress_file, progress)
 
+    def notify() -> None:
+        """把当前进度推给总线回调；回调异常绝不影响合成。"""
+        callback = options.on_progress
+        if callback is None:
+            return
+        try:
+            callback(dict(progress))
+        except Exception:  # noqa: BLE001 - 进度回调只是展示，失败必须继续合成
+            pass
+
     def reporter(chapter_no: int, chapter: dict, batch_no: int, batch_results: list[dict], stats: dict) -> None:
-        """打印章节内批次进度，并在需要时刷新进度文件。"""
+        """打印章节内批次进度，并在需要时刷新进度文件、回调总线。"""
+        if options.should_cancel is not None and options.should_cancel():
+            raise GenerationCanceled("用户已停止生成")
         ok = sum(1 for item in batch_results if item["status"] == "ready")
         failed = sum(1 for item in batch_results if item["status"] == "failed")
         reused = sum(1 for item in batch_results if item.get("decision") == "reuse")
@@ -409,7 +427,7 @@ def run_batch(store: ProjectStore, config: AppConfig, options: BatchOptions) -> 
             f"[章 {chapter_no} {chapter.get('id')} / 批 {batch_no}] 本批 {len(batch_results)} 行："
             f"成功 {ok}（复用 {reused}）失败 {failed}；累计 {stats['succeeded']}/{stats['requested']}"
         )
-        if not progress_file:
+        if not progress_file and options.on_progress is None:
             return
         progress["done"] += len(batch_results)
         progress["failed"] += failed
@@ -429,7 +447,9 @@ def run_batch(store: ProjectStore, config: AppConfig, options: BatchOptions) -> 
                 }
             )
         progress["updated_at"] = now_iso()
-        write_progress(progress_file, progress)
+        if progress_file:
+            write_progress(progress_file, progress)
+        notify()
 
     try:
         report = run_chapters(
@@ -449,11 +469,12 @@ def run_batch(store: ProjectStore, config: AppConfig, options: BatchOptions) -> 
     except Exception as exc:  # 进度文件要记录中断原因，再原样抛出
         progress.update({"finished": True, "error": str(exc), "updated_at": now_iso()})
         write_progress(progress_file, progress)
+        notify()
         raise
     finally:
         # 整批结束回收常驻 worker，避免跨命令残留进程
         service.close()
-    if progress_file:
+    if progress_file or options.on_progress is not None:
         progress.update(
             {
                 "finished": True,
@@ -464,7 +485,9 @@ def run_batch(store: ProjectStore, config: AppConfig, options: BatchOptions) -> 
                 "updated_at": now_iso(),
             }
         )
-        write_progress(progress_file, progress)
+        if progress_file:
+            write_progress(progress_file, progress)
+        notify()
     stats = report["stats"]
     skip_note = f"，跳过 {progress['skipped']} 行（说话人未识别）" if progress.get("skipped") else ""
     reuse = report.get("reuse") or {}

@@ -10,6 +10,7 @@ import logging
 from pathlib import Path
 
 from novel_drama import __version__
+from novel_drama.application.support import media_handlers
 from novel_drama.interface.http.routers.align import register_align_routes
 from novel_drama.interface.http.routers.bgm import register_bgm_routes
 from novel_drama.interface.http.routers.cast.cast import register_cast_routes
@@ -27,6 +28,7 @@ from novel_drama.interface.http.routers.config import register_config_routes
 from novel_drama.interface.http.routers.jobs import register_jobs_routes
 from novel_drama.interface.http.routers.logs import register_logs_routes
 from novel_drama.interface.http.routers.media import register_media_routes
+from novel_drama.interface.http.routers.media_bus import register_media_bus_routes
 from novel_drama.interface.http.routers.models import register_models_http_routes
 from novel_drama.interface.http.routers.models_admin import register_models_routes
 from novel_drama.interface.http.routers.script import register_script_routes
@@ -82,6 +84,8 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
         raise RuntimeError("未安装 Web 依赖：pip install fastapi uvicorn（或 pip install -e '.[web]'）") from exc
 
     app = FastAPI(title="novel-drama-workbench", version=__version__)
+    # 媒体执行器必须先登记：`/api/ui/media/run` 只查登记表，不在请求里装配执行器
+    media_handlers.register_all()
 
     @app.middleware("http")
     async def _llm_call_context(request, call_next):
@@ -190,6 +194,7 @@ def create_app(project_root: str | None = None, config_path: str | None = None):
     register_voice_tools_routes(app, config_path)
     register_script_routes(app, project_root, config_path)
     register_media_routes(app, project_root, config_path)
+    register_media_bus_routes(app, project_root, config_path)
     register_align_routes(app)
     register_bgm_routes(app, config_path)
     register_sfx_routes(app, config_path)

@@ -13,7 +13,6 @@ from novel_drama.application.production.lines_source import chapter_view
 from novel_drama.application.production.media_ops import (
     cast_warning_text,
     export_chapter,
-    run_media_kind,
 )
 from novel_drama.application.production.timeline import build_chapter_timeline
 from novel_drama.composition import (
@@ -339,33 +338,6 @@ def register_media_routes(app, project_root: str | None = None, config_path: str
                         }
                     )
         return rows
-
-    @app.post("/api/ui/media/run")
-    def ui_media_run(body: dict) -> dict:
-        """执行一类媒体生成（`media sfx|image|video run`）。"""
-        _require(
-            body,
-            "本接口需要 path（工程目录）、chapter（章节 ID）与 kind（媒体类型）",
-            path="工程目录",
-            chapter="章节 ID",
-            kind="媒体类型",
-        )
-        kind = body["kind"]
-        if kind not in ("sfx", "image", "video"):
-            raise HTTPException(status_code=400, detail={"code": 2, "message": f"未知媒体类型: {kind}"})
-        store = _store(body["path"])
-        config = load_config(config_path)
-        limit = body.get("limit")
-        return use_cases.call(
-            lambda: run_media_kind(
-                store,
-                config,
-                body["chapter"],
-                kind,
-                force=bool(body.get("force")),
-                limit=int(limit) if limit is not None else None,
-            )
-        )
 
     @app.post("/api/ui/export/jianying")
     def ui_export_jianying(body: dict) -> dict:

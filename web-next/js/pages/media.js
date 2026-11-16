@@ -5,11 +5,10 @@
 import { esc, icon, toast, fmtDuration, openDialog, closeDialog } from '../dom.js';
 import { getJSON, postJSON, fileUrl } from '../api.js';
 import { labelOf, ENUMS } from '../enums.js';
-import { openProgress } from '../progress.js';
-import { runLlm } from '../llm.js';
 import { modeSwitchHTML, bindModeSwitch, getGenMode } from '../gen-mode.js';
 import { state, resetProject } from '../store.js';
 import { railbar, topbar, chapterCtx, goChapter, goProjects, emptyProjectHTML } from '../shell.js';
+import { runMedia, cancelMediaJob, mediaJobRowsHTML, jobErrorSummary } from '../media-bus.js';
 
 const TABS = ENUMS.media_tab.options.map(([value]) => value);
 
@@ -22,6 +21,34 @@ let keyword = '';
 /** 浏览形态：list 列表 / grid 网格（参考素材库右上角切换） */
 let layout = 'list';
 let bound = false;
+/** 当前章节的媒体任务（统一任务结构，来自 `/api/ui/queue`） */
+let mediaJobs = [];
+/** 「本次媒体任务」最多展示条数，避免本章任务多时把素材列表挤下去 */
+const MEDIA_JOB_LIMIT = 8;
+
+/**
+ * 判断一条队列任务是否属于本章的媒体生成。
+ * @param {object} item 队列任务
+ * @param {string} chapterId 当前章节 ID
+ * @returns {boolean} 带通道或动作、且目标章节一致时返回 true
+ */
+function isChapterMediaJob(item, chapterId) {
+  if (!item || !(item.channel || item.action)) return false;
+  const target = item.target || {};
+  return String(target.chapter || target.chapter_id || '') === String(chapterId || '');
+}
+
+/** 「本次媒体任务」区块：复用统一任务卡片，不重复实现状态文案 */
+function mediaJobsHTML() {
+  return `<div class="card" style="margin-bottom:10px">
+    <div class="card-head"><span class="ct">本次媒体任务</span>
+      <div class="right"><span class="hint">本章最近 ${mediaJobs.length} 条 · 完成后自动刷新</span></div>
+    </div>
+    <div class="card-body" style="padding:10px 12px">
+      ${mediaJobRowsHTML(mediaJobs.slice(0, MEDIA_JOB_LIMIT), { emptyText: '本章还没有媒体任务' })}
+    </div>
+  </div>`;
+}
 
 /** 当前 tab 的条目 */
 function rowsOf() {
@@ -311,6 +338,7 @@ function mainHTML() {
         <button class="btn" data-act="reveal" title="在访达中定位工程目录">${icon('folder')} 在访达中打开工程</button>
       </div>
     </div>
+    ${mediaJobsHTML()}
     <div class="ed-filters" style="height:44px">
       ${TABS.map(
         (key) =>
@@ -363,14 +391,17 @@ function bindBgmMode() {
   });
 }
 
-/** 读取本章素材与 BGM（BGM 失败不阻断素材浏览） */
+/** 读取本章素材、BGM 与媒体任务（BGM/队列失败不阻断素材浏览） */
 async function loadChapter(path, chapterId) {
-  const [data, bgmData] = await Promise.all([
+  const [data, bgmData, queueData] = await Promise.all([
     getJSON('/api/ui/media', { path, chapter: chapterId }),
     getJSON('/api/ui/bgm', { path, chapter: chapterId }).catch(() => null),
+    getJSON('/api/ui/queue', { path }).catch(() => []),
   ]);
   payload = { sfx: data?.sfx || [], image: data?.image || [], video: data?.video || [] };
   bgm = bgmData || { cues: [], records: [], plans: [], modes: {}, providers: [] };
+  const jobs = Array.isArray(queueData) ? queueData : queueData?.jobs || [];
+  mediaJobs = jobs.filter((item) => isChapterMediaJob(item, chapterId));
 }
 
 /** 只刷新 BGM 数据 */
@@ -407,87 +438,37 @@ function openRunKindDialog(kind, button) {
   action.addEventListener('click', () => {
     const mode = readMode();
     closeDialog();
-    void runMedia(kind, mode === 'regen', button);
+    void runChapterMedia(kind, mode === 'regen', button);
   });
 }
 
 /**
- * 生成一类本章素材（音效 / 配图 / 视频）。
+ * 生成一类本章素材（音效 / 配图 / 视频），统一交给媒体总线。
  * @param {string} kind sfx / image / video
  * @param {boolean} force 是否覆盖已生成条目
  * @param {HTMLElement} button 触发的按钮，用于展示忙碌态
  */
-async function runMedia(kind, force, button) {
+async function runChapterMedia(kind, force, button) {
   const oldText = button.textContent;
   const label = labelOf('media_tab', kind, '素材');
+  const action = kind === 'sfx' ? 'sfx.chapter' : kind === 'image' ? 'image.generate' : 'video.generate';
   button.disabled = true;
   button.textContent = '生成中…';
   try {
-    if (kind === 'sfx') {
-      // 音效含模型提示词改写：走统一总线的可取消进度卡
-      const result = await runLlm({
-        action: 'media.sfx',
-        params: { path: state.path, chapter: state.chapterId, count: 1, regen: force },
-        title: `正在${force ? '重新生成' : '生成'}本章${label}…`,
-        hint: `${force ? '忽略已有产物，覆盖本章同类型全部条目' : '只生成待生成 / 失败的条目，已完成条目会跳过'} · 可随时取消`,
-        stage: '已提交生成请求，等待本机模型返回…',
-        request: ({ callId, signal }) =>
-          postJSON(
-            '/api/ui/media/run',
-            {
-              path: state.path,
-              chapter: state.chapterId,
-              kind,
-              force,
-            },
-            { timeout: 0, callId, signal }
-          ),
-        finish: async (data) => {
-          const made = (data?.generated || []).length || data?.count || 0;
-          await loadChapter(state.path, state.chapterId);
-          repaint();
-          const text = `${force ? '已重新生成' : '已生成'}本章${label}${made ? ` ${made} 条` : ''}`;
-          toast(`${text}，列表已刷新`, 'ok', 4200);
-          return {
-            message: text,
-            detail: '素材列表已刷新，可在本页逐条试听或查看。',
-            actions: [{ label: '查看列表', primary: true, onClick: () => repaint() }],
-          };
-        },
-      });
-      if (!result) return;
-      return;
-    }
-    // 配图 / 视频是本地合成，不属于 LLM 调用，保持原有长任务进度与超时
-    const panel = openProgress({
+    // 生成方式已在弹窗里确认过，这里不再叠加一层计划确认
+    await runMedia({
+      action,
+      params: { path: state.path, chapter: state.chapterId, force },
       title: `正在${force ? '重新生成' : '生成'}本章${label}…`,
       hint: force
-        ? '忽略已有产物，覆盖本章同类型全部条目'
-        : '只生成待生成 / 失败的条目，已完成条目会跳过',
-      stage: '已提交生成请求，等待本机合成…',
-    });
-    panel.update({ percent: null });
-    const result = await postJSON(
-      '/api/ui/media/run',
-      {
-        path: state.path,
-        chapter: state.chapterId,
-        kind,
-        force,
+        ? '忽略已有产物，覆盖本章同类型全部条目 · 可随时取消'
+        : '只生成待生成 / 失败的条目，已完成条目会跳过 · 可随时取消',
+      confirm: false,
+      refresh: async () => {
+        await loadChapter(state.path, state.chapterId);
+        repaint();
       },
-      { timeout: 0 }
-    );
-    const made = (result?.generated || []).length || result?.count || 0;
-    await loadChapter(state.path, state.chapterId);
-    repaint();
-    const message = `${force ? '已重新生成' : '已生成'}本章${label}${made ? ` ${made} 条` : ''}`;
-    panel.note(`${made} 条 · ${label}`);
-    panel.finish({
-      message,
-      detail: '素材列表已刷新，可在本页逐条试听或查看。',
-      actions: [{ label: '查看列表', primary: true, onClick: () => repaint() }],
     });
-    toast(`${message}，列表已刷新`, 'ok', 4200);
   } catch (error) {
     toast(error.message, 'bad', 5200);
   } finally {
@@ -497,7 +478,7 @@ async function runMedia(kind, force, button) {
 }
 
 /**
- * 生成单条音效：后台任务 + 按钮上显示进度。
+ * 生成单条音效：交给媒体总线，进度与取消由统一进度卡负责。
  * @param {HTMLElement} button 条目上的生成按钮
  */
 async function generateSfx(button) {
@@ -507,54 +488,29 @@ async function generateSfx(button) {
   const rowTitle =
     button.closest('.summary-line')?.querySelector('span[style*="color:var(--text)"]')?.textContent?.trim() || '';
   button.disabled = true;
-  button.textContent = '排队…';
-  const panel = openProgress({
-    title: '正在生成单条音效…',
-    hint: rowTitle || '按这一条的描述调用本机音效模型',
-    stage: '任务已排队，等待开始…',
-  });
-  panel.update({ percent: 0 });
+  button.textContent = '生成中…';
   try {
-    const { job_id: jobId } = await postJSON('/api/ui/sfx/generate', {
-      path: state.path,
-      chapter: state.chapterId,
-      id,
-    });
-    for (let tick = 0; tick < 160; tick += 1) {
-      await new Promise((resolve) => window.setTimeout(resolve, 1500));
-      const job = await getJSON('/api/ui/sfx/job', { job_id: jobId });
-      if (job.status === 'done') {
+    await runMedia({
+      action: 'sfx.item',
+      params: { path: state.path, chapter: state.chapterId, sfx_id: id },
+      title: '正在生成单条音效…',
+      hint: rowTitle || '按这一条的描述调用本机音效模型',
+      confirm: false,
+      refresh: async () => {
         await loadChapter(state.path, state.chapterId);
         repaint();
-        panel.finish({
-          message: '这段音效已生成',
-          detail: rowTitle ? `条目：${rowTitle}` : '',
-          actions: [{ label: '查看列表', primary: true, onClick: () => repaint() }],
-        });
-        toast('这段音效已生成', 'ok');
-        return;
-      }
-      if (job.status === 'failed') {
-        throw new Error(job.error?.message || '音效生成失败');
-      }
-      const percent = Number(job.percent || 0);
-      button.textContent = `${percent}%`;
-      panel.update({
-        stage: `正在生成${rowTitle ? `「${rowTitle}」` : ''}…`,
-        percent,
-        current: job.stage || job.message || `${percent}%`,
-      });
-    }
-    throw new Error('生成超时，请稍后点「刷新」查看结果');
+      },
+    });
   } catch (error) {
     toast(error.message, 'bad', 5200);
+  } finally {
+    // 刷新后原按钮可能已被替换，这里的恢复只对失败路径生效
     button.disabled = false;
     button.textContent = oldText;
-    panel.fail({ message: `音效生成失败：${error.message}`, retry: () => void generateSfx(button) });
   }
 }
 
-/** 生成 BGM 并刷新记录 */
+/** 生成 BGM 并刷新记录（统一走媒体总线） */
 async function generateBgm(button) {
   const genMode = getGenMode('media.bgm', 'fill');
   const planId = document.getElementById('bgm-plan')?.value || '';
@@ -579,16 +535,10 @@ async function generateBgm(button) {
   const oldText = button.textContent;
   button.textContent = '生成中…';
   if (hint) hint.textContent = '正在生成，本地模型通常需要几十秒…';
-  const panel = openProgress({
-    title: genMode === 'regen' ? '正在重新生成 BGM…' : '正在生成 BGM…',
-    hint: prompt || promptEn || '按 BGM 计划生成音乐',
-    stage: '已提交生成请求，等待本机音乐模型返回…',
-  });
-  panel.update({ percent: null });
   try {
-    const result = await postJSON(
-      '/api/ui/bgm/generate',
-      {
+    const outcome = await runMedia({
+      action: 'bgm',
+      params: {
         path: state.path,
         chapter: state.chapterId,
         prompt,
@@ -597,26 +547,25 @@ async function generateBgm(button) {
         mode,
         plan_id: planId || undefined,
       },
-      { timeout: 0 }
-    );
-    await loadBgm();
-    repaint();
-    const message = `已生成 ${Number(result?.duration_s || 0)}s BGM${
-      result?.auto_switched ? '（超过本地时长上限，已自动改用 ACE-Step）' : ''
-    }`;
-    panel.note(message);
-    panel.finish({
-      message,
-      detail: '生成记录已刷新，可在本页试听或插入 cue。',
-      actions: [{ label: '查看记录', primary: true, onClick: () => repaint() }],
+      title: genMode === 'regen' ? '正在重新生成 BGM…' : '正在生成 BGM…',
+      hint: prompt || promptEn || '按 BGM 计划生成音乐',
+      confirm: false,
+      refresh: async () => {
+        await loadBgm();
+        repaint();
+      },
     });
-    toast(message, 'ok', 4600);
+    if (hint && outcome?.job?.status === 'failed') {
+      hint.textContent = jobErrorSummary(outcome.job) || 'BGM 生成失败';
+    }
   } catch (error) {
     toast(error.message, 'bad', 5200);
     if (hint) hint.textContent = error.message;
-    button.disabled = false;
-    button.textContent = oldText;
-    panel.fail({ message: `BGM 生成失败：${error.message}`, retry: () => void generateBgm(button) });
+  } finally {
+    if (document.body.contains(button)) {
+      button.disabled = false;
+      button.textContent = oldText;
+    }
   }
 }
 
@@ -645,6 +594,21 @@ async function onRootClick(event) {
   const layoutButton = event.target.closest('[data-layout]');
   if (layoutButton) {
     layout = layoutButton.dataset.layout;
+    repaint();
+    return;
+  }
+  const cancelButton = event.target.closest('[data-media-cancel]');
+  if (cancelButton) {
+    const jobId = cancelButton.dataset.mediaCancel;
+    if (!jobId) return;
+    cancelButton.disabled = true;
+    const result = await cancelMediaJob(state.path, jobId);
+    toast(
+      result?.message || '已发出停止请求，任务会在下次检查时退出',
+      result?.canceled === false ? 'info' : 'ok',
+      4800
+    );
+    await loadChapter(state.path, state.chapterId);
     repaint();
     return;
   }

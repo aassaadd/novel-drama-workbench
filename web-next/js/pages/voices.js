@@ -5,7 +5,7 @@
 import { esc, icon, toast, openDialog, closeDialog, fmtDuration } from '../dom.js';
 import { getJSON, postJSON } from '../api.js';
 import { labelOf } from '../enums.js';
-import { openProgress } from '../progress.js';
+import { runMedia } from '../media-bus.js';
 import { runLlm } from '../llm.js';
 import { modeSwitchHTML, bindModeSwitch } from '../gen-mode.js';
 import { state, resetProject } from '../store.js';
@@ -23,6 +23,81 @@ let bound = false;
 let audio = null;
 /** 当前章节正文与切分是否一致 */
 let consistency = null;
+/** 最近一次批量生成音色任务（GET /api/ui/voices/design/batch/latest） */
+let latestBatchJob = null;
+
+/** 批量音色任务状态中文名 */
+const VOICE_BATCH_STATUS = {
+  running: '生成中',
+  ready: '已完成',
+  partial: '部分完成',
+  failed: '失败',
+  stopped: '已停止',
+};
+
+/**
+ * 「最近一次批量任务」摘要：只展示后端已有字段，不编造进度。
+ * @returns {string} HTML 片段
+ */
+function batchJobHTML() {
+  const job = latestBatchJob;
+  if (!job) return '<div class="hint">还没有批量生成记录。</div>';
+  const items = job.items || [];
+  const countOf = (status) => items.filter((item) => item.status === status).length;
+  const status = String(job.status || '');
+  const badge = status === 'ready' ? 'ok' : status === 'failed' ? 'bad' : status === 'running' ? 'run' : 'mute';
+  return `
+    <div class="summary-line">
+      <span style="min-width:0">最近一次批量任务
+        <span class="badge ${badge}" style="margin-left:6px">${esc(VOICE_BATCH_STATUS[status] || '状态未知')}</span>
+        <span style="display:block;color:var(--text-4);font-size:11px;margin-top:2px">
+          ${esc(job.created_at || '')} · 范围 ${job.scope === 'chapter' ? '指定章节' : '未绑定角色'} ·
+          成功 ${countOf('ready')} · 失败 ${countOf('failed')} · 跳过 ${countOf('skipped')} · 待生成 ${countOf('pending')}
+        </span>
+      </span>
+      <span class="right hint" style="max-width:46%;text-align:right">${esc(job.note || '')}</span>
+    </div>`;
+}
+
+/** 一键批量生成音色卡：范围 / 章节 / 候选数 + 最近一次任务摘要 */
+function batchCardHTML() {
+  const chapters = state.chapters
+    .map(
+      (item) =>
+        `<option value="${esc(item.id)}" ${item.id === state.chapterId ? 'selected' : ''}>${
+          item.index !== undefined ? `${Number(item.index) + 1}. ` : ''
+        }${esc(item.title || item.id)}</option>`
+    )
+    .join('');
+  return `
+    <div class="card" style="margin-top:14px">
+      <div class="card-head"><span class="ct">一键批量生成音色</span>
+        <div class="right"><span class="hint">已有音色、缺性别或缺描述的角色会自动跳过</span></div>
+      </div>
+      <div class="card-body">
+        <div style="display:grid;grid-template-columns:2fr 1fr 120px;gap:10px;align-items:end">
+          <div class="field"><label>生成范围</label>
+            <select class="select" id="vb-scope" title="按未绑定角色或指定章节出现的角色批量抽卡">
+              <option value="unbound">全部未绑定音色的角色</option>
+              <option value="chapter">指定章节出现的角色</option>
+            </select></div>
+          <div class="field"><label>章节（章节范围用）</label>
+            <select class="select" id="vb-chapter" title="选择要批量生成音色的章节">
+              <option value="">${chapters ? '按范围自动选择' : '工程还没有章节'}</option>${chapters}
+            </select></div>
+          <div class="field"><label>每个角色候选数</label>
+            <input class="input" id="vb-count" type="number" min="1" max="6" value="4"
+              title="每个角色抽几个候选，生成后自动采用第 1 条" /></div>
+        </div>
+        <div style="display:flex;gap:10px;align-items:center;margin-top:8px;flex-wrap:wrap">
+          <button class="btn primary" data-act="voice-batch"
+            title="逐角色生成音色候选，并自动采用第 1 条；可随时取消">批量生成音色</button>
+          <span class="hint">生成后可在角色页继续调整音色；整批可撤销。</span>
+        </div>
+        <div style="margin-top:10px">${batchJobHTML()}</div>
+      </div>
+    </div>`;
+}
 
 /** 当前选中角色 */
 function currentCharacter() {
@@ -146,6 +221,8 @@ function voiceCard(voice) {
         <button class="btn sm" data-act="bind-voice" ${bound || !character ? 'disabled' : ''}
           title="${esc(bindTitle)}">
           ${bound ? '已绑定' : '绑定给角色'}</button>
+        <button class="btn sm danger" data-act="delete-voice"
+          title="从音色池删除；正在使用它的角色会自动解绑">删除</button>
       </div>
     </div>`;
 }
@@ -241,6 +318,7 @@ function mainHTML() {
         </div>
         <div class="card-body" style="display:flex;flex-direction:column;gap:6px">${builtinRows()}</div>
       </div>
+      ${batchCardHTML()}
     </div>`;
 }
 
@@ -261,10 +339,11 @@ function repaint({ ctxOnly = false } = {}) {
 
 /** 读取数据 */
 async function loadAll(path) {
-  const [info, chapters, payload] = await Promise.all([
+  const [info, chapters, payload, batchLatest] = await Promise.all([
     getJSON('/api/project/info', { path }),
     getJSON('/api/ui/chapters', { path }),
     getJSON('/api/ui/voices', { path }),
+    getJSON('/api/ui/voices/design/batch/latest', { path }).catch(() => null),
   ]);
   state.info = info;
   state.chapters = chapters || [];
@@ -274,6 +353,7 @@ async function loadAll(path) {
   characters = payload?.characters || [];
   voices = payload?.voices || [];
   builtin = payload?.builtin || { items: [] };
+  latestBatchJob = batchLatest?.job || null;
   if (!characters.some((item) => item.id === selectedCharacter)) {
     selectedCharacter = characters[0]?.id || '';
   }
@@ -325,35 +405,21 @@ function openCompare() {
   });
 }
 
-/** 音色设计弹窗的轮询定时器（关闭弹窗后自动停止） */
-let designTimer = null;
-/** 音色抽卡进度浮层：独立于弹窗，弹窗被关掉也能继续显示到结束 */
-let designPanel = null;
-
-/** 候选批次状态文案 */
 /**
  * 打开音色设计：按角色档案生成音色描述 → 抽卡候选 → 试听 → 采用并绑定。
- * 接口：preview / batches / batches/{id} / audio / select / retry / cancel / history。
+ * 抽卡本身交给媒体总线（`voice.design`），页面不再轮询批次状态。
  */
 function openVoiceDesign() {
   const character = currentCharacter();
   if (!character) return toast('先从左侧选择一个角色', 'warn');
-  if (designTimer) {
-    window.clearTimeout(designTimer);
-    designTimer = null;
-  }
-  if (designPanel) {
-    designPanel.close();
-    designPanel = null;
-  }
   let profile = null;
   let batchId = '';
   /** 上次翻译时的中文原文；用于判断中文是否被改过 */
   let lastTranslatedZh = '';
   /** 用户是否手动改过英文描述；改过就不再自动覆盖 */
   let enEdited = false;
-  /** 复用已有批次时给进度浮层的结束文案（空串表示本次是新抽卡） */
-  let reuseMessage = '';
+  /** 历史批次缓存：查看 / 复用都从这里取，不再单独读单个批次 */
+  let historyRows = [];
   const mask = openDialog({
     title: `音色设计 · ${character.name}`,
     wide: true,
@@ -439,14 +505,6 @@ function openVoiceDesign() {
     return english;
   };
 
-  /** 停止轮询（弹窗已关闭或批次结束） */
-  const stopPoll = () => {
-    if (designTimer) {
-      window.clearTimeout(designTimer);
-      designTimer = null;
-    }
-  };
-
   /** 候选音频地址 */
   const audioUrl = (index) => {
     const query = new URLSearchParams({
@@ -457,8 +515,11 @@ function openVoiceDesign() {
     return `/api/ui/voices/design/audio?${query.toString()}`;
   };
 
-  /** 渲染批次进度与候选清单；进度浮层独立于弹窗，弹窗关闭也不影响 */
-  const paintBatch = (meta) => {
+  /**
+   * 渲染批次候选清单：进度卡由媒体总线负责，这里只画结果。
+   * @param {object} meta 批次元数据（来自历史批次或批次控制接口）
+   */
+  const renderBatch = (meta) => {
     if (!meta) return;
     batchId = meta.batch_id || batchId;
     const candidates = meta.candidates || [];
@@ -466,41 +527,7 @@ function openVoiceDesign() {
     const total = Number(meta.total || 0);
     const done = Number(meta.done || candidates.length);
     const running = ['running', 'queued'].includes(meta.status);
-    if (designPanel) {
-      if (running) {
-        designPanel.update({
-          stage: `${labelOf('voice_design_status', meta.status, '生成中')} ${done}/${total}`,
-          percent: total ? Math.round((done / total) * 100) : null,
-          current: meta.current_index ? `正在生成第 ${meta.current_index} 个候选` : '候选中…',
-        });
-      } else if (meta.status === 'failed') {
-        designPanel.fail({
-          message: `音色抽卡失败${failures.length ? `：${failures[0]?.message || '未知原因'}` : ''}`,
-          detail: failures.length ? `共有 ${failures.length} 个候选失败，可在弹窗里单独重试。` : '',
-          retry: () => {
-            designPanel = openProgress({
-              title: `正在重试「${character.name}」的音色候选…`,
-              stage: '已提交重试请求…',
-            });
-            designPanel.update({ percent: null });
-            void retryDesign();
-          },
-        });
-        designPanel = null;
-      } else {
-        designPanel.finish({
-          message: reuseMessage || `音色候选已生成：${candidates.length} 个`,
-          detail: failures.length ? `${failures.length} 个候选失败，可在弹窗里单独重试。` : '可在弹窗里试听后采用并绑定。',
-        });
-        designPanel = null;
-        reuseMessage = '';
-      }
-    }
-    // 弹窗被关掉后仍继续轮询到批次结束，保证浮层能读到最终结果
-    if (!document.body.contains(mask)) {
-      schedulePoll(running);
-      return;
-    }
+    if (!document.body.contains(mask)) return;
     if (hintNode) {
       hintNode.textContent = `${labelOf('voice_design_status', meta.status, '生成中')} ${done}/${total}${
         meta.current_index ? ` · 正在生成第 ${meta.current_index} 个` : ''
@@ -541,49 +568,86 @@ function openVoiceDesign() {
       }
       ${
         running
-          ? `<div style="margin-top:8px"><button class="btn sm danger" data-vd="cancel"
-               title="停止后续候选，已完成的候选保留">停止抽卡</button></div>`
+          ? `<div style="margin-top:8px;display:flex;gap:6px">
+               <button class="btn sm" data-vd="refresh" title="重新读取这个批次的最新候选">刷新候选</button>
+               <button class="btn sm danger" data-vd="cancel"
+                 title="停止后续候选，已完成的候选保留">停止抽卡</button>
+             </div>`
           : ''
       }`;
-    schedulePoll(running);
   };
 
-  /** 安排下一次轮询；弹窗和浮层都关闭时停止，避免后台空转 */
-  const schedulePoll = (running) => {
-    stopPoll();
-    if (!running) return;
-    if (!document.body.contains(mask) && !designPanel) return;
-    designTimer = window.setTimeout(() => void poll(batchId), 1500);
+  /** 渲染历史批次列表：数据来自 historyRows 缓存 */
+  const paintHistory = () => {
+    if (!document.body.contains(mask)) return;
+    historyHost.innerHTML = `
+      <div class="card"><div class="card-head"><span class="ct">历史批次</span>
+        <span class="hint">${historyRows.length} 个</span></div>
+        <div class="card-body" style="padding:0">
+          ${
+            historyRows
+              .map(
+                (batch) => `
+            <div class="summary-line">
+              <span style="min-width:0">${esc(batch.created_at || '')}
+                <span class="badge ${
+                  batch.status === 'ready' ? 'ok' : batch.status === 'failed' ? 'bad' : 'mute'
+                }" style="margin-left:6px">${esc(labelOf('voice_design_status', batch.status, '生成中'))}</span>
+                <span style="font-size:11px;color:var(--text-4);display:block;margin-top:2px">
+                  ${Number(batch.done || 0)}/${Number(batch.total || 0)} 候选${
+                    batch.adopted ? ' · 已采用' : ''
+                  }</span>
+              </span>
+              <span class="right" style="display:flex;gap:6px">
+                <button class="btn sm" data-vd="open" data-batch="${esc(batch.batch_id)}">查看</button>
+                <button class="btn sm danger" data-vd="delete" data-batch="${esc(batch.batch_id)}"
+                  title="清理这个批次的候选文件">清理</button>
+              </span>
+            </div>`
+              )
+              .join('') || '<div class="hint" style="padding:10px">还没有历史批次</div>'
+          }
+        </div></div>`;
   };
 
-  /** 只重试失败候选（沿用弹窗内已有的 retry 接口） */
-  const retryDesign = async () => {
-    if (!batchId) return;
+  /**
+   * 读取该角色的历史批次并选中最新批次。
+   * 抽卡由媒体总线执行，完成后由这里刷新，不再自己轮询批次进度。
+   */
+  const refreshHistory = async () => {
     try {
-      const meta = await postJSON(
-        `/api/ui/voices/design/batches/${encodeURIComponent(batchId)}/retry`,
-        { path: state.path }
-      );
-      paintBatch(meta);
-      toast('已重试失败候选', 'ok');
-    } catch (error) {
-      designPanel?.fail({ message: `重试失败：${error.message}` });
-    }
-  };
-
-  /** 轮询批次状态 */
-  const poll = async (id) => {
-    try {
-      const meta = await getJSON(`/api/ui/voices/design/batches/${encodeURIComponent(id)}`, {
+      const data = await getJSON('/api/ui/voices/design/history', {
         path: state.path,
+        character_id: character.id,
       });
-      paintBatch(meta);
+      historyRows = data.batches || [];
     } catch (error) {
-      stopPoll();
-      if (document.body.contains(mask)) resultHost.innerHTML = `<div class="dlg-note bad">${esc(error.message)}</div>`;
-      designPanel?.fail({ message: `读取抽卡进度失败：${error.message}` });
-      designPanel = null;
+      toast(`读取抽卡历史失败：${error.message}`, 'bad', 4600);
+      return;
     }
+    paintHistory();
+    if (historyRows[0]) renderBatch(historyRows[0]);
+  };
+
+  /**
+   * 只补缺失：从历史批次里找候选数量足够的就绪批次，避免重复抽卡。
+   * @param {number} wanted 需要的候选数
+   * @returns {Promise<object|null>} 可复用的批次；没有时返回 null
+   */
+  const findReuseBatch = async (wanted) => {
+    try {
+      const data = await getJSON('/api/ui/voices/design/history', {
+        path: state.path,
+        character_id: character.id,
+      });
+      historyRows = data.batches || [];
+    } catch {
+      // 历史读取失败时按「没有可复用批次」处理，继续走新抽卡
+      return null;
+    }
+    const availableCount = (batch) =>
+      (batch.candidates || []).filter((item) => item.available !== false).length;
+    return historyRows.find((batch) => batch.status === 'ready' && availableCount(batch) >= wanted) || null;
   };
 
   /** 预览音色描述：fill 保留已有描述，regen 忽略文本框旧内容按档案重写 */
@@ -683,37 +747,16 @@ function openVoiceDesign() {
     const zh = promptZhNode.value.trim();
     let prompt = promptEnNode.value.trim();
     const button = event.currentTarget;
+    const count = Number(mask.querySelector('#vd-count').value || 4);
     button.disabled = true;
     try {
       if (mode === 'fill') {
-        const wanted = Number(mask.querySelector('#vd-count').value || 4);
-        const availableCount = (batch) =>
-          (batch.candidates || []).filter((item) => item.available !== false).length;
-        let reuse = null;
-        try {
-          // 先查历史批次：已有就绪且候选数量足够的批次直接复用，不重新抽卡
-          const data = await getJSON('/api/ui/voices/design/history', {
-            path: state.path,
-            character_id: character.id,
-          });
-          reuse = (data.batches || []).find(
-            (batch) => batch.status === 'ready' && availableCount(batch) >= wanted
-          );
-        } catch {
-          // 历史读取失败时按「没有可复用批次」处理，继续走新建流程
-        }
+        const reuse = await findReuseBatch(count);
         if (reuse) {
           batchId = reuse.batch_id || '';
-          const existing = availableCount(reuse);
-          reuseMessage = `已有 ${existing} 个候选，未重新抽卡`;
-          resultHost.innerHTML = `<div class="dlg-note">已找到 ${existing} 个候选的批次，正在载入…</div>`;
-          designPanel = openProgress({
-            title: `正在载入「${character.name}」已有的音色候选…`,
-            hint: `只补缺失候选：已有 ${existing} 个，未重新抽卡`,
-            stage: '正在读取批次结果…',
-          });
-          designPanel.update({ percent: null });
-          await poll(batchId);
+          const existing = (reuse.candidates || []).filter((item) => item.available !== false).length;
+          resultHost.innerHTML = `<div class="dlg-note">已找到 ${existing} 个候选的批次，未重新抽卡。</div>`;
+          renderBatch(reuse);
           toast(`已复用批次 ${String(batchId).slice(-6)}，未重新抽卡`, 'info', 2600);
           return;
         }
@@ -729,33 +772,28 @@ function openVoiceDesign() {
         toast('已自动把中文描述翻译成英文', 'ok');
       }
       if (!prompt) return toast('先填中文或英文音色描述，或点「重新生成描述」', 'warn');
-      resultHost.innerHTML = `<div class="dlg-note">正在启动抽卡…</div>`;
-      designPanel = openProgress({
-        title:
-          mode === 'fill'
-            ? `正在补抽「${character.name}」的音色候选…`
-            : `正在重新抽卡「${character.name}」的音色候选…`,
-        hint: `候选数 ${Number(mask.querySelector('#vd-count').value || 4)} · ${
-          mode === 'fill' ? '已有候选不足，补抽缺失' : '逐个重新抽卡'
-        }`,
-        stage: '已提交抽卡请求，等待第一个候选…',
+      resultHost.innerHTML = `<div class="dlg-note">正在启动抽卡，进度见右下角任务卡…</div>`;
+      const outcome = await runMedia({
+        action: 'voice.design',
+        params: {
+          path: state.path,
+          character_id: character.id,
+          prompt,
+          count,
+          profile,
+        },
+        title: `音色抽卡 · ${character.name}`,
+        hint: `候选数 ${count} · ${mode === 'fill' ? '已有候选不足，补抽缺失' : '逐个重新抽卡'} · 可随时取消`,
+        confirm: false,
+        refresh: refreshHistory,
       });
-      designPanel.update({ percent: 0 });
-      const meta = await postJSON('/api/ui/voices/design/batches', {
-        path: state.path,
-        character_id: character.id,
-        prompt,
-        profile,
-        count: Number(mask.querySelector('#vd-count').value || 4),
-      });
-      batchId = meta.batch_id || '';
-      paintBatch(meta);
-      toast('已开始抽卡，候选会逐个出现', 'ok');
+      // 失败或取消时也刷新一次：可能已经有部分候选落盘
+      if (outcome?.job && !['succeeded', 'partial'].includes(String(outcome.job.status))) {
+        await refreshHistory();
+      }
     } catch (error) {
       toast(error.message, 'bad', 4600);
       resultHost.innerHTML = `<div class="dlg-note bad">${esc(error.message)}</div>`;
-      designPanel?.fail({ message: `启动抽卡失败：${error.message}` });
-      designPanel = null;
     } finally {
       button.disabled = false;
     }
@@ -769,35 +807,8 @@ function openVoiceDesign() {
         path: state.path,
         character_id: character.id,
       });
-      const batches = data.batches || [];
-      historyHost.innerHTML = `
-        <div class="card"><div class="card-head"><span class="ct">历史批次</span>
-          <span class="hint">${batches.length} 个</span></div>
-          <div class="card-body" style="padding:0">
-            ${
-              batches
-                .map(
-                  (batch) => `
-              <div class="summary-line">
-                <span style="min-width:0">${esc(batch.created_at || '')}
-                  <span class="badge ${
-                    batch.status === 'ready' ? 'ok' : batch.status === 'failed' ? 'bad' : 'mute'
-                  }" style="margin-left:6px">${esc(labelOf('voice_design_status', batch.status, '生成中'))}</span>
-                  <span style="font-size:11px;color:var(--text-4);display:block;margin-top:2px">
-                    ${Number(batch.done || 0)}/${Number(batch.total || 0)} 候选${
-                      batch.adopted ? ' · 已采用' : ''
-                    }</span>
-                </span>
-                <span class="right" style="display:flex;gap:6px">
-                  <button class="btn sm" data-vd="open" data-batch="${esc(batch.batch_id)}">查看</button>
-                  <button class="btn sm danger" data-vd="delete" data-batch="${esc(batch.batch_id)}"
-                    title="清理这个批次的候选文件">清理</button>
-                </span>
-              </div>`
-                )
-                .join('') || '<div class="hint" style="padding:10px">还没有历史批次</div>'
-            }
-          </div></div>`;
+      historyRows = data.batches || [];
+      paintHistory();
     } catch (error) {
       toast(error.message, 'bad', 4600);
     } finally {
@@ -825,7 +836,6 @@ function openVoiceDesign() {
           gender_source: 'manual',
           bind: true,
         });
-        stopPoll();
         closeDialog();
         toast(`已采用候选 ${index} 并绑定给 ${character.name}`, 'ok');
         await loadAll(state.path);
@@ -839,12 +849,12 @@ function openVoiceDesign() {
     if (act === 'retry') {
       button.disabled = true;
       try {
-        const meta = await postJSON(`/api/ui/voices/design/batches/${encodeURIComponent(batchId)}/retry`, {
+        const result = await postJSON(`/api/ui/voices/design/batches/${encodeURIComponent(batchId)}/retry`, {
           path: state.path,
           index,
         });
-        paintBatch(meta.batch || meta);
-        toast(`已重新生成候选 ${index}`, 'ok');
+        renderBatch(result.batch || result);
+        toast(`已开始重试候选 ${index}，完成后点「刷新候选」`, 'ok', 4200);
       } catch (error) {
         toast(error.message, 'bad', 4600);
         button.disabled = false;
@@ -858,7 +868,7 @@ function openVoiceDesign() {
           `/api/ui/voices/design/batches/${encodeURIComponent(batchId)}/cancel`,
           { path: state.path }
         );
-        paintBatch(result.batch || result);
+        renderBatch(result.batch || result);
         toast('已停止后续候选，已完成候选保留', 'info');
       } catch (error) {
         toast(error.message, 'bad', 4600);
@@ -866,18 +876,43 @@ function openVoiceDesign() {
       }
       return;
     }
+    if (act === 'refresh') {
+      button.disabled = true;
+      try {
+        const data = await getJSON('/api/ui/voices/design/history', {
+          path: state.path,
+          character_id: character.id,
+        });
+        historyRows = data.batches || [];
+        const current = historyRows.find((row) => row.batch_id === batchId) || historyRows[0];
+        if (current) renderBatch(current);
+        toast('候选已刷新', 'ok', 2000);
+      } catch (error) {
+        toast(`刷新候选失败：${error.message}`, 'bad', 4600);
+      } finally {
+        button.disabled = false;
+      }
+      return;
+    }
     if (act === 'open') {
       const id = button.dataset.batch;
       if (!id) return;
-      try {
-        const meta = await getJSON(`/api/ui/voices/design/batches/${encodeURIComponent(id)}`, {
-          path: state.path,
-        });
-        paintBatch(meta);
-        toast(`已载入批次 ${id.slice(-6)}`, 'info', 1600);
-      } catch (error) {
-        toast(error.message, 'bad', 4600);
+      if (!historyRows.length) {
+        try {
+          const data = await getJSON('/api/ui/voices/design/history', {
+            path: state.path,
+            character_id: character.id,
+          });
+          historyRows = data.batches || [];
+        } catch (error) {
+          toast(error.message, 'bad', 4600);
+          return;
+        }
       }
+      const batch = historyRows.find((item) => item.batch_id === id);
+      if (!batch) return toast('批次已不在历史里，请重新读取历史批次', 'warn', 4200);
+      renderBatch(batch);
+      toast(`已载入批次 ${id.slice(-6)}`, 'info', 1600);
       return;
     }
     if (act === 'delete') {
@@ -888,6 +923,7 @@ function openVoiceDesign() {
         await fetch(`/api/ui/voices/design/batches/${encodeURIComponent(id)}?path=${encodeURIComponent(state.path)}`, {
           method: 'DELETE',
         });
+        historyRows = historyRows.filter((item) => item.batch_id !== id);
         button.closest('.summary-line')?.remove();
         toast('批次已清理', 'ok');
       } catch (error) {
@@ -896,6 +932,46 @@ function openVoiceDesign() {
       }
     }
   });
+}
+
+/**
+ * 一键批量生成音色：交给媒体总线（voice.batch），完成后刷新角色与最近任务。
+ * @param {HTMLElement} button 触发按钮
+ */
+async function runBatchVoices(button) {
+  const scope = document.getElementById('vb-scope')?.value || 'unbound';
+  const chapterId = document.getElementById('vb-chapter')?.value || state.chapterId || '';
+  const count = Number(document.getElementById('vb-count')?.value || 4);
+  if (scope === 'chapter' && !chapterId) {
+    return toast('章节范围需要先选择一个章节', 'warn', 4200);
+  }
+  button.disabled = true;
+  const oldText = button.textContent;
+  button.textContent = '生成中…';
+  try {
+    await runMedia({
+      action: 'voice.batch',
+      params: {
+        path: state.path,
+        scope,
+        chapter_id: scope === 'chapter' ? chapterId : undefined,
+        count,
+      },
+      title: '批量生成音色',
+      hint: `${scope === 'chapter' ? '只处理本章出现的角色' : '只处理未绑定音色的角色'} · 每个角色 ${count} 个候选 · 可随时取消`,
+      refresh: async () => {
+        await loadAll(state.path);
+        repaint();
+      },
+    });
+  } catch (error) {
+    toast(error.message, 'bad', 5200);
+  } finally {
+    if (document.body.contains(button)) {
+      button.disabled = false;
+      button.textContent = oldText;
+    }
+  }
 }
 
 /** 点击事件 */
@@ -934,8 +1010,43 @@ async function onRootClick(event) {
     if (await bindVoice(null, character.id)) toast('已解除绑定', 'ok');
     return;
   }
+  if (act === 'delete-voice' && voice) {
+    const used = usedByCount(voice);
+    const name = voice.name || '未命名音色';
+    const hint = [
+      `删除音色「${name}」？`,
+      '参考音频文件会一并删除，不可恢复。',
+      used ? `它正被 ${used} 个角色使用，删除后这些角色会自动解绑，需要重新选择音色。` : '',
+    ]
+      .filter(Boolean)
+      .join('\n');
+    if (!window.confirm(hint)) return;
+    button.disabled = true;
+    try {
+      const result = await postJSON('/api/ui/voices/delete', {
+        path: state.path,
+        voice_id: voice.id,
+      });
+      const files = (result.deleted_files || []).length;
+      selectedVoices.delete(voice.id);
+      await loadAll(state.path);
+      repaint();
+      toast(
+        [
+          used ? `已删除音色，${used} 个角色已解绑` : '已删除音色',
+          files ? `参考音频 ${files} 个` : '无参考音频文件',
+        ].join('，'),
+        'ok'
+      );
+    } catch (error) {
+      toast(`删除音色失败：${error.message}`, 'bad');
+      button.disabled = false;
+    }
+    return;
+  }
   if (act === 'compare') return openCompare();
   if (act === 'design') return openVoiceDesign();
+  if (act === 'voice-batch') return void runBatchVoices(button);
   if (act === 'play-builtin') {
     const rowNode = button.closest('[data-builtin]');
     const item = (builtin?.items || []).find((entry) => entry.key === rowNode?.dataset.builtin);

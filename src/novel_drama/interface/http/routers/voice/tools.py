@@ -1,20 +1,19 @@
-"""配音页的补充能力：单行重录 / 版本对比 / Casting 试听 / 整本批量。
+"""配音页的补充能力：版本对比 / 试听清理 / 补齐缺失预演。
 
 这些接口不重写业务规则：
-- 重录仍然走应用层 `tts_run`（selected + force），只把 revision 先加一，保证旧音频不被覆盖；
-- 批量仍然走应用层 `tts_batch_run`，进度由后台进程写进度文件，页面只读不推算；
-- Casting 试听直接调用 TtsService，产物只落在 `.ndw/cast_previews/`，不写章节、不入队、不进时间轴。
+- 版本列表、上传、激活、删除都只操作已落盘的音频与章节 `tts` 记录；
+- 补齐缺失的预演仍然走应用层 `tts_plan.plan_batch_preview`；
+- Casting 试听的**生成**已迁到媒体总线（`voice.preview`），这里只保留清理临时目录。
+
+生成类接口（单行重录 / 批量配音 / 试听）统一由 `POST /api/ui/media/run` 启动。
 """
 
 from __future__ import annotations
 
 import json
-import os
 import re
-import subprocess
 import tempfile
 import threading
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -23,31 +22,17 @@ from fastapi import HTTPException, Request
 from novel_drama.application.production.lines_source import chapter_view, chapter_views
 from novel_drama.application.production.timeline import build_chapter_timeline
 from novel_drama.application.production.tts_plan import plan_batch_preview
-from novel_drama.composition import (
-    ProjectStore,
-    QueueStore,
-    check_cast,
-    unresolved_speaker_lines,
-)
+from novel_drama.composition import ProjectStore, check_cast, unresolved_speaker_lines
 from novel_drama.infrastructure.config import load_config
 from novel_drama.interface.http import use_cases
-from novel_drama.interface.http.executor import spawn_application
 from novel_drama.tts import TtsService
 
-#: 单行重录串行锁：同一时间只允许一个重录，避免两个进程同时改同一章
+#: 上传播音串行锁：同一时间只允许一个录音写入，避免两个请求同时改同一章
 _RERUN_LOCK = threading.Lock()
-
-#: Casting 试听保留条数（超出后删最旧的）
-PREVIEW_KEEP = 12
-
-#: 批量进度 / pid / 日志文件名（都放在工程内 `.ndw/`）
-PROGRESS_NAME = "tts_batch_progress.json"
-BATCH_PID_NAME = "web-tts-batch.pid"
-RERUN_PID_NAME = "web-tts.pid"
 
 
 def _now() -> str:
-    """当前 UTC 时间（ISO 8601），落进进度文件用。"""
+    """当前 UTC 时间（ISO 8601），落进录音元数据用。"""
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
@@ -250,166 +235,6 @@ def _find_scene_line(chapter: dict, line_id: str) -> dict | None:
     return None
 
 
-
-def _error_text(error: dict | None, fallback: str = "") -> str:
-    """把 provider / 批次错误翻译成中文可操作提示。
-
-    参数:
-        error: `line.tts.error` 或批次结果里的错误 dict。
-        fallback: 没有错误 dict 时的兜底文案。
-
-    返回:
-        中文原因；不吞错。
-    """
-    if not error:
-        return fallback or "合成失败，但未拿到具体原因（查看 .ndw/logs 下日志）"
-    code = str(error.get("code") or "")
-    message = str(error.get("message") or "").strip() or "未知错误"
-    lower = message.lower()
-    if code == "VOICE_MISSING" or "参考音频不存在" in message or "no such file" in lower or "not found" in lower:
-        if "不存在" in message or "no such file" in lower or "not found" in lower:
-            return f"参考音失效：{message}（请重新上传或重新选择该角色的音色）"
-        return f"缺音色或参考音：{message}（检查角色绑定的音色是否有可用参考音频）"
-    if code == "MODEL_MISSING":
-        return f"模型未就绪：{message}"
-    if code == "NOT_IMPLEMENTED":
-        return f"当前音色 provider 未实现：{message}"
-    return f"合成失败（{code or '未知错误'}）：{message}"
-
-
-def _pid_alive(pid: int) -> bool:
-    """判断 pid 是否仍存活（只做存在性检查，不判断身份）。
-
-    参数:
-        pid: 进程号。
-
-    返回:
-        True 表示存活。
-    """
-    if not pid:
-        return False
-    try:
-        os.kill(pid, 0)
-    except (ProcessLookupError, PermissionError):
-        return False
-    return True
-
-
-def _cli_process(pid: int) -> str:
-    """返回 pid 对应的配音入口；不是本工程配音进程时返回空串。
-
-    说明:
-        进程退出后若父进程未 wait，会成为僵尸并被 `os.kill(pid, 0)` 当成存活；
-        这里再用 `ps` 核对命令行，避免僵尸 pid 把「补齐」永远挡在 409。
-
-    参数:
-        pid: 进程号。
-
-    返回:
-        `run` / `batch` 表示对应的配音命令；其他情况返回空串。
-    """
-    if not _pid_alive(pid):
-        return ""
-    try:
-        result = subprocess.run(
-            ["ps", "-p", str(pid), "-o", "command="],
-            capture_output=True,
-            text=True,
-            timeout=3,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return ""
-    command = (result.stdout or "").strip()
-    # 新版走应用入口；升级前启动的进程仍是 novel_drama.cli 子进程，一并识别
-    if "novel_drama.application.production.tts_batch_run" in command:
-        return "batch"
-    if "novel_drama.application.production.tts_run" in command:
-        return "run"
-    if "novel_drama.cli" not in command:
-        return ""
-    if "tts batch" in command:
-        return "batch"
-    if "tts run" in command:
-        return "run"
-    return ""
-
-
-def _read_json(path: Path) -> dict | None:
-    """读一份 JSON 文件；不存在或损坏时返回 None。"""
-    if not path.is_file():
-        return None
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-
-
-def _log_tail(path: Path, limit: int = 20) -> str:
-    """读日志末尾若干行，供失败时在页面给出可读原因。"""
-    if not path.is_file():
-        return ""
-    try:
-        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-    except OSError:
-        return ""
-    return "\n".join(lines[-limit:])
-
-
-def _sample_line(store: ProjectStore, character_id: str, prefer_chapter: str | None) -> tuple[dict, dict] | None:
-    """给某个角色找一句已有台词（优先当前章节）。
-
-    参数:
-        store: 工程。
-        character_id: 角色 ID。
-        prefer_chapter: 优先章节 ID；为空时按章序找。
-
-    返回:
-        `(chapter, line)`；该角色没有任何台词时返回 None。
-    """
-    chapters = store.list_chapters()
-    if prefer_chapter:
-        chapters = sorted(chapters, key=lambda item: 0 if item.get("id") == prefer_chapter else 1)
-    for item in chapters:
-        try:
-            chapter = chapter_view(store, store.load_chapter(item["id"]))
-        except FileNotFoundError:
-            continue
-        for scene in chapter.get("scenes") or []:
-            for line in scene.get("lines") or []:
-                if line.get("speaker_id") == character_id and (line.get("text") or "").strip():
-                    return chapter, line
-    return None
-
-
-def _prune_previews(folder: Path, keep: int = PREVIEW_KEEP) -> int:
-    """清理试听目录，只保留最近 `keep` 条音频（连同侧车）。
-
-    参数:
-        folder: 试听目录。
-        keep: 保留条数。
-
-    返回:
-        删除的文件数。
-    """
-    if not folder.is_dir():
-        return 0
-    files = sorted(
-        (item for item in folder.iterdir() if item.is_file() and item.suffix == ".wav"),
-        key=lambda item: item.stat().st_mtime,
-        reverse=True,
-    )
-    removed = 0
-    for item in files[keep:]:
-        for target in (item, Path(str(item) + ".json")):
-            if target.exists():
-                try:
-                    target.unlink()
-                    removed += 1
-                except OSError:
-                    pass
-    return removed
-
-
 #: 音色校验错误码 → 页面上给用户看的直白说法（不出现错误码等内部术语）
 from novel_drama.interface.http.routers.voice.blockers import (
     _avg_ms_per_line,
@@ -422,7 +247,7 @@ from novel_drama.interface.http.routers.voice.blockers import (
 
 
 def register_voice_tools_routes(app, config_path: str | None = None) -> None:
-    """注册单行重录 / 版本 / Casting 试听 / 补齐缺失接口。
+    """注册版本 / 试听清理 / 补齐缺失预演接口。
 
     参数:
         app: FastAPI 实例。
@@ -455,122 +280,6 @@ def register_voice_tools_routes(app, config_path: str | None = None) -> None:
             "versions": versions,
         }
 
-    @app.post("/api/ui/line/rerun")
-    def ui_line_rerun(body: dict) -> dict:
-        """只重录一行：revision 先加一（旧文件保留）→ 合成这一行 → 重建时间轴。
-
-        参数:
-            body: `{path, chapter, line}`。
-
-        返回:
-            `{ok, line_id, previous_revision, revision, active, duration_ms, versions, timeline_rebuilt}`
-
-        异常:
-            HTTPException 409: 已有重录在进行。
-            HTTPException 500: 合成失败（中文原因，旧版本仍生效）。
-        """
-        path = body.get("path")
-        chapter_id = body.get("chapter")
-        line_id = body.get("line")
-        if not line_id:
-            raise HTTPException(status_code=400, detail="缺少 line 参数（台词行 ID）")
-        store = _store(path)
-        row = _find_line(store, chapter_id, line_id)
-
-        if not _RERUN_LOCK.acquire(blocking=False):
-            raise HTTPException(status_code=409, detail={"code": 1, "message": "已有重录任务在进行，请等它结束"})
-        try:
-            previous = {
-                "revision": int(row.get("revision") or 1),
-                "tts": dict(row.get("tts") or {}),
-            }
-            new_revision = previous["revision"] + 1
-            chapter = store.load_chapter(chapter_id)
-            target = None
-            for scene in chapter.get("scenes") or []:
-                for item in scene.get("lines") or []:
-                    if item.get("id") == line_id:
-                        target = item
-                        break
-                if target:
-                    break
-            if target is None:
-                raise HTTPException(status_code=404, detail=f"台词行不存在: {line_id}")
-            target["revision"] = new_revision
-            store.save_chapter(chapter)
-
-            log_dir = store.root / ".ndw" / "logs"
-            log_path = log_dir / f"rerun-{line_id}-{int(time.time())}.log"
-            pid_file = store.root / ".ndw" / RERUN_PID_NAME
-            process = spawn_application(
-                "novel_drama.application.production.tts_run:run_chapter_entry",
-                {
-                    "project_root": str(store.root),
-                    "config_path": config_path,
-                    "chapter_id": chapter_id,
-                    "scope": "selected",
-                    "line_ids": [line_id],
-                    "force": True,
-                    "wait": True,
-                },
-                log_path,
-            )
-            pid_file.parent.mkdir(parents=True, exist_ok=True)
-            pid_file.write_text(str(process.pid), encoding="utf-8")
-            try:
-                code = process.wait(timeout=900)
-            except subprocess.TimeoutExpired:
-                try:
-                    os.killpg(os.getpgid(process.pid), 15)
-                except OSError:
-                    pass
-                code = -1
-            finally:
-                if pid_file.is_file():
-                    try:
-                        if int(pid_file.read_text(encoding="utf-8").strip()) == process.pid:
-                            pid_file.unlink(missing_ok=True)
-                    except (OSError, ValueError):
-                        pass
-
-            fresh = store.load_chapter(chapter_id)
-            fresh_line = next(
-                (item for scene in fresh.get("scenes") or [] for item in scene.get("lines") or [] if item.get("id") == line_id),
-                None,
-            )
-            tts = (fresh_line or {}).get("tts") or {}
-            expected = f"assets/voice/lines/{line_id}_r{new_revision}.wav"
-            ok = code == 0 and tts.get("status") == "ready" and tts.get("asset_id") == expected
-            if not ok:
-                # 失败：恢复旧 revision 与旧 tts 记录，保证「旧版仍生效」，同时把原因原样带回
-                if target is not None:
-                    target["revision"] = previous["revision"]
-                    target["tts"] = previous["tts"]
-                    store.save_chapter(chapter)
-                reason = _error_text(tts.get("error"), _log_tail(log_path) or f"重录进程退出码 {code}")
-                raise HTTPException(
-                    status_code=500,
-                    detail={
-                        "code": 5,
-                        "message": f"重录失败：{reason}（旧版 r{previous['revision']} 仍生效）",
-                    },
-                )
-
-            timeline_rebuilt = _rebuild_timeline(store, chapter_id)
-            active = tts.get("asset_id")
-            return {
-                "ok": True,
-                "line_id": line_id,
-                "previous_revision": previous["revision"],
-                "revision": new_revision,
-                "active": active,
-                "duration_ms": tts.get("duration_ms"),
-                "timeline_rebuilt": timeline_rebuilt,
-                "versions": _line_versions(store, line_id, active),
-            }
-        finally:
-            _RERUN_LOCK.release()
-
     @app.post("/api/ui/line/audio/delete")
     def ui_line_audio_delete(body: dict) -> dict:
         """删除某一行的生效音频，让该行退回「待配」状态。
@@ -592,14 +301,7 @@ def register_voice_tools_routes(app, config_path: str | None = None) -> None:
             raise HTTPException(status_code=400, detail="缺少 line 参数（台词行 ID）")
         store = _store(path)
         chapter = store.load_chapter(chapter_id)
-        target = None
-        for scene in chapter.get("scenes") or []:
-            for item in scene.get("lines") or []:
-                if item.get("id") == line_id:
-                    target = item
-                    break
-            if target:
-                break
+        target = _find_scene_line(chapter, line_id)
         if target is None:
             raise HTTPException(status_code=404, detail=f"台词行不存在: {line_id}")
         if not target.get("tts"):
@@ -672,7 +374,7 @@ def register_voice_tools_routes(app, config_path: str | None = None) -> None:
                         ],
                         timeout_s=120,
                     )
-                except Exception as exc:  # noqa: BLE001 - 统一转成中文可操作提示
+                except Exception as exc:  # 转码失败统一转成中文可操作提示
                     raise HTTPException(status_code=500, detail=f"录音转码失败：{exc}") from exc
             finally:
                 raw_path.unlink(missing_ok=True)
@@ -844,121 +546,6 @@ def register_voice_tools_routes(app, config_path: str | None = None) -> None:
             "versions": _line_versions(store, line_id, active),
         }
 
-    @app.post("/api/ui/cast/preview")
-    def ui_cast_preview(body: dict) -> dict:
-        """用本书真实台词试听某个角色的候选音色。
-
-        参数:
-            body: `{path, character_id, voice_id?, chapter?}`。
-
-        返回:
-            `{audio, text, duration_ms, voice_id, voice_name, variant_id, chapter_id, line_id, kept}`
-
-        异常:
-            HTTPException 400: 角色没有台词，或候选音色没有可用参考音频。
-            HTTPException 500: 合成失败（中文原因）。
-        """
-        from novel_drama.composition import (
-            find_voice,
-            pick_variant,
-            resolve_for_character,
-            variant_ref,
-        )
-        from novel_drama.tts.errors import TtsError
-        from novel_drama.tts.service import TtsService
-        from novel_drama.tts.types import Requirement, VoiceRef
-
-        store = _store(body.get("path"))
-        character_id = str(body.get("character_id") or "").strip()
-        if not character_id:
-            raise HTTPException(status_code=400, detail="缺少 character_id 参数")
-        characters = store.load_characters().get("characters") or []
-        character = next((item for item in characters if item.get("id") == character_id), None)
-        if character is None:
-            raise HTTPException(status_code=404, detail=f"角色不存在: {character_id}")
-        sample = _sample_line(store, character_id, body.get("chapter"))
-        if sample is None:
-            raise HTTPException(status_code=400, detail="这个角色还没有已有台词，无法用本书台词试听")
-        chapter, line = sample
-
-        voice_id = str(body.get("voice_id") or "").strip()
-        if voice_id:
-            table = store.load_voices()
-            voice = find_voice(table, voice_id)
-            if voice is None:
-                raise HTTPException(status_code=404, detail=f"音色不存在: {voice_id}")
-            variant = pick_variant(voice, line.get("emotion"), require_reference=True)
-            if variant is None:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"音色「{voice.get('name') or voice_id}」没有可用参考音频（需要 ready 状态且带参考音）",
-                )
-            ref_audio, ref_text = variant_ref(store, variant)
-            resolved = {
-                "voice_id": voice.get("id"),
-                "variant_id": variant.get("id"),
-                "ref_audio": ref_audio,
-                "ref_text": ref_text,
-                "source": variant.get("source"),
-            }
-        else:
-            resolved = resolve_for_character(store, {"characters": characters}, character_id, line.get("emotion"))
-            if not resolved.get("ref_audio"):
-                raise HTTPException(
-                    status_code=400,
-                    detail="这个角色当前没有可用音色参考音频（先在音色库绑定并准备参考音）",
-                )
-            table = store.load_voices()
-            voice = find_voice(table, resolved.get("voice_id") or "")
-            voice_id = (voice or {}).get("id") or resolved.get("voice_id") or "current"
-        if not resolved.get("ref_audio") or not Path(str(resolved["ref_audio"])).exists():
-            raise HTTPException(
-                status_code=400,
-                detail=f"参考音失效：{resolved.get('ref_audio')}（请重新上传或重新选择音色）",
-            )
-
-        folder = store.root / ".ndw" / "cast_previews"
-        folder.mkdir(parents=True, exist_ok=True)
-        safe_voice = re.sub(r"[^A-Za-z0-9_-]+", "_", str(voice_id))[:40] or "voice"
-        out_path = folder / f"{character_id}_{safe_voice}_{int(time.time() * 1000)}.wav"
-        requirement = Requirement(
-            text=line["text"],
-            emotion=line.get("emotion"),
-            emotion_intensity=max(0, min(3, round(float(line.get("emotion_intensity") or 0) * 3))),
-            clone_required=True,
-            character_id=character_id,
-            line_id=None,
-        )
-        voice_ref = VoiceRef(
-            variant_id=resolved.get("variant_id"),
-            ref_audio=resolved.get("ref_audio"),
-            ref_text=resolved.get("ref_text"),
-            source=resolved.get("source") or "preset",
-        )
-        service = TtsService(load_config(config_path) if config_path else load_config(), store.root)
-        try:
-            payload = service.synthesize(line["text"], out_path, requirement=requirement, voice=voice_ref)
-        except TtsError as exc:
-            raise HTTPException(status_code=500, detail={"code": 5, "message": _error_text(exc.to_dict())}) from exc
-        finally:
-            try:
-                service.close()
-            except Exception:  # noqa: BLE001, S110 - 收尾失败不覆盖上面的成功/失败结果
-                pass
-        _prune_previews(folder)
-        return {
-            "audio": str(out_path.relative_to(store.root)),
-            "text": line["text"],
-            "duration_ms": payload.get("duration_ms"),
-            "voice_id": voice_id,
-            "voice_name": (voice or {}).get("name") or voice_id,
-            "variant_id": resolved.get("variant_id"),
-            "chapter_id": chapter.get("id"),
-            "chapter_title": chapter.get("title"),
-            "line_id": line.get("id"),
-            "kept": PREVIEW_KEEP,
-        }
-
     @app.post("/api/ui/cast/preview/clear")
     def ui_cast_preview_clear(body: dict) -> dict:
         """清空 Casting 试听临时目录。"""
@@ -1086,158 +673,4 @@ def register_voice_tools_routes(app, config_path: str | None = None) -> None:
             "reuse": reuse,
             "ready": ready,
             "ready_reason": ready_reason,
-        }
-
-    @app.post("/api/ui/tts/batch-all")
-    def ui_batch_all_start(body: dict) -> dict:
-        """启动「补齐缺失」（后台进程），只补未完成行，天然支持中断续跑。
-
-        参数:
-            body: `{path, scope?, chapter?, batch_size?, skip_unknown?}`。
-
-        返回:
-            `{started, pid, log, total, skipped_unknown}`。
-
-        异常:
-            HTTPException 409: 已有配音进程在运行。
-            HTTPException 412: provider 不可用、有阻断性音色编排错误，或有说话人未识别的行但未选择跳过。
-        """
-        store = _store(body.get("path"))
-        scope = "all" if body.get("scope") == "all" else "chapter"
-        chapter = body.get("chapter")
-        skip_unknown = bool(body.get("skip_unknown"))
-        # 用户主动启动时清掉暂停标记，避免新批次一开始就停在暂停态
-        (store.root / ".ndw" / "tts.paused").unlink(missing_ok=True)
-        QueueStore(store).set_paused(False)
-        plan = ui_batch_all_plan(str(store.root), scope, chapter)
-        if not plan["ready"]:
-            raise HTTPException(status_code=412, detail={"code": 4, "message": plan["ready_reason"]})
-        # 未指定说话人的行允许用户显式跳过，其余阻断项必须先修好
-        hard = [item for item in plan["blockers"] if not item.get("skippable")]
-        if hard:
-            detail = "\n".join(f"- {item['title']}：{item['detail']}" for item in hard[:8])
-            raise HTTPException(
-                status_code=412,
-                detail={
-                    "code": 4,
-                    "message": f"补齐配音前还有 {len(hard)} 项要处理，已取消补齐：\n{detail}",
-                },
-            )
-        if plan["unknown_total"] and not skip_unknown:
-            raise HTTPException(
-                status_code=412,
-                detail={
-                    "code": 4,
-                    "message": (
-                        f"有 {plan['unknown_total']} 行说话人未识别，默认不跳过："
-                        "请先到章节页修说话人，或选择「跳过这 N 行，先配其余行」"
-                    ),
-                },
-            )
-        if plan["total"] <= 0:
-            raise HTTPException(status_code=400, detail={"code": 2, "message": "当前范围没有缺失台词，无需补齐"})
-
-        pid_file = store.root / ".ndw" / BATCH_PID_NAME
-        if pid_file.is_file():
-            try:
-                old_pid = int(pid_file.read_text(encoding="utf-8").strip())
-            except ValueError:
-                old_pid = 0
-            if _cli_process(old_pid) == "batch":
-                raise HTTPException(status_code=409, detail={"code": 1, "message": "已有补齐任务在运行"})
-        legacy_pid = store.root / ".ndw" / RERUN_PID_NAME
-        if legacy_pid.is_file():
-            try:
-                legacy = int(legacy_pid.read_text(encoding="utf-8").strip())
-            except ValueError:
-                legacy = 0
-            if _cli_process(legacy) == "run":
-                raise HTTPException(status_code=409, detail={"code": 1, "message": "已有配音进程在运行，请先等它结束"})
-
-        progress_file = store.root / ".ndw" / PROGRESS_NAME
-        if progress_file.is_file():
-            progress_file.unlink(missing_ok=True)
-        log_dir = store.root / ".ndw" / "logs"
-        log_path = log_dir / f"batch-all-{int(time.time())}.log"
-        batch_size = body.get("batch_size")
-        process = spawn_application(
-            "novel_drama.application.production.tts_batch_run:run_batch_entry",
-            {
-                "project_root": str(store.root),
-                "config_path": config_path,
-                "chapter_id": None if scope == "all" else (str(chapter) if chapter else None),
-                "all_chapters": scope == "all",
-                # 说话人未识别的行保持原样，只配能解析的行
-                "skip_unknown": skip_unknown,
-                "batch_size": int(batch_size) if batch_size else None,
-                "progress_file": str(progress_file),
-            },
-            log_path,
-        )
-        pid_file.parent.mkdir(parents=True, exist_ok=True)
-        pid_file.write_text(str(process.pid), encoding="utf-8")
-        (store.root / ".ndw" / "tts_batch_meta.json").write_text(
-            json.dumps(
-                {"pid": process.pid, "log": str(log_path), "started_at": _now(), "total": plan["total"]},
-                ensure_ascii=False,
-            )
-            + "\n",
-            encoding="utf-8",
-        )
-        return {"started": True, "pid": process.pid, "log": str(log_path), "total": plan["total"]}
-
-    @app.get("/api/ui/tts/batch-all/progress")
-    def ui_batch_all_progress(path: str) -> dict:
-        """读取整本批量进度与失败行清单。
-
-        参数:
-            path: 工程根目录。
-
-        返回:
-            `{running, done, total, failed, skipped, reused, saved_ms, skipped_rows, finished, rows,
-              chapter, elapsed_ms, eta_ms, log_tail, report_path}`。
-        """
-        store = _store(path)
-        folder = store.root / ".ndw"
-        progress = _read_json(folder / PROGRESS_NAME) or {}
-        meta = _read_json(folder / "tts_batch_meta.json") or {}
-        pid = int(meta.get("pid") or progress.get("pid") or 0)
-        # 进程可能还在收尾（回收常驻 worker），但进度已标 finished：此时不再算「运行中」
-        running = _cli_process(pid) == "batch" and not progress.get("finished")
-        total = int(progress.get("total") or meta.get("total") or 0)
-        done = int(progress.get("done") or 0)
-        failed = int(progress.get("failed") or 0)
-        started = progress.get("started_at") or meta.get("started_at")
-        elapsed = 0
-        if started:
-            try:
-                begin = datetime.strptime(started, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
-                elapsed = int((datetime.now(timezone.utc) - begin).total_seconds() * 1000)
-            except ValueError:
-                elapsed = 0
-        eta = 0
-        if running and done > 0 and total > done:
-            eta = int(elapsed / done * (total - done))
-        finished = bool(progress.get("finished")) or (not running and bool(progress))
-        # 中途被停止/崩溃：进度还在、没标 finished，但进程已经没了
-        interrupted = bool(progress) and not running and not bool(progress.get("finished"))
-        log_path = Path(str(meta.get("log") or "")) if meta.get("log") else None
-        return {
-            "running": running,
-            "done": min(done, total) if total else done,
-            "total": total,
-            "failed": failed,
-            "skipped": int(progress.get("skipped") or 0),
-            "reused": int(progress.get("reused") or 0),
-            "saved_ms": int(progress.get("saved_ms") or 0),
-            "reused_audio_ms": int(progress.get("reused_audio_ms") or 0),
-            "skipped_rows": progress.get("skipped_rows") or [],
-            "finished": finished,
-            "interrupted": interrupted,
-            "rows": progress.get("failed_rows") or [],
-            "current_chapter": progress.get("current_chapter"),
-            "elapsed_ms": elapsed,
-            "eta_ms": eta,
-            "log_tail": "" if running else _log_tail(log_path) if log_path else "",
-            "report_path": progress.get("report_path"),
         }

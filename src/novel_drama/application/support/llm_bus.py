@@ -43,12 +43,27 @@ class LlmBus:
     settings: dict | None = None
     call_id: str = ""
     _adapter: Any = field(default=None, init=False, repr=False)
+    _parent_job: str = field(default="", init=False, repr=False)
 
     def __post_init__(self) -> None:
-        """补全 call_id 并登记取消令牌。"""
+        """补全 call_id、登记取消令牌，并挂到当前媒体任务（若有）。"""
         self.call_id = str(self.call_id or llm_cancel.current_call_id() or "")
         if self.call_id:
             llm_cancel.register(self.call_id)
+            self._attach_child()
+
+    def _attach_child(self) -> None:
+        """把本次调用登记到当前父媒体任务下（不在媒体任务内时不做任何事）。"""
+        parent = llm_cancel.current_parent_job()
+        if not parent or not self.call_id:
+            return
+        self._parent_job = parent
+        llm_cancel.register_child(parent, self.call_id)
+
+    def _release_child(self) -> None:
+        """取消子调用登记；保留父任务信息，下一次调用会重新登记。"""
+        if self.call_id and self._parent_job:
+            llm_cancel.release_child(self._parent_job, self.call_id)
 
     @classmethod
     def from_adapter(cls, adapter, action: str, call_id: str = "") -> "BusWritingAdapter":
@@ -173,6 +188,7 @@ class LlmBus:
             AdapterError: 模型配置/上游错误（文案已带动作名）。
         """
         self.spec(action)
+        self._attach_child()
         self._check()
 
         def tap(text: str) -> None:
@@ -198,6 +214,8 @@ class LlmBus:
             raise
         except AdapterError as exc:
             raise self._wrap(action, exc) from exc
+        finally:
+            self._release_child()
 
     def tool(
         self,
@@ -227,6 +245,7 @@ class LlmBus:
             AdapterError: 模型配置/上游错误（文案已带动作名）。
         """
         self.spec(action)
+        self._attach_child()
         self._check()
 
         def tap(text: str) -> None:
@@ -250,6 +269,8 @@ class LlmBus:
             raise
         except AdapterError as exc:
             raise self._wrap(action, exc) from exc
+        finally:
+            self._release_child()
 
     def stream(self, action: str, req: TextGenRequest, on_delta, ctx: dict | None = None) -> TextGenResult:
         """生成文本并把每个分片交给页面（`text` 的显式流式别名）。

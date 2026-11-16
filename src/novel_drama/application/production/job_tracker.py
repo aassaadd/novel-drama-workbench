@@ -4,10 +4,12 @@ AI 生成在 Web 进程内以 SSE / 同步请求执行，不经过 GPU 队列；
 为了让「任务」页能看到这些生成，这里单独记录一份轻量任务列表，
 由 `/api/ui/queue` 与 GPU 队列合并展示。
 
-记录只做展示：状态为 queued/running/succeeded/failed/canceled/interrupted，
-带类型、目标章节、进度与错误原因。文件写入用进程内锁串行化，避免多个 SSE
-生成同时更新时互相覆盖。Web 进程退出后，遗留的 running 任务在下次读取时
+记录只做展示：状态为 queued/running/succeeded/partial/failed/canceled/interrupted，
+带类型、通道、动作、目标、进度、阶段与错误原因。文件写入用进程内锁串行化，
+避免多个生成同时更新时互相覆盖。Web 进程退出后，遗留的 running 任务在下次读取时
 标记为 interrupted。
+
+任务结构版本为 2：旧版（`schema_version != 2`）文件直接丢弃，下次写入时覆盖重建。
 """
 
 from __future__ import annotations
@@ -24,6 +26,8 @@ from ...cancel import request as _cancel_request
 from ...models.enum_check import check_ui_jobs
 from ...models.ids import new_id, now_iso
 
+#: 任务文件结构版本；旧版本文件读取时直接丢弃
+_SCHEMA_VERSION = 2
 #: 进程内写锁：所有 UI 任务都写同一个文件
 _LOCK = threading.Lock()
 #: 已做过「进程重启中断修正」的工程根目录
@@ -35,6 +39,9 @@ _PROCESS_START = now_iso()
 #: 本进程内仍在运行的任务（任务 ID → 类型），用于阻止同类后台任务重复启动
 _ACTIVE: dict[str, str] = {}
 _ACTIVE_LOCK = threading.Lock()
+
+#: 已结束的任务状态（可清理）
+TERMINAL_STATUSES = ("succeeded", "partial", "failed", "canceled", "interrupted")
 
 
 def active_jobs(kind: str = "") -> list[str]:
@@ -63,12 +70,26 @@ def request_cancel(job_id: str) -> bool:
 
 
 def _file(store: ProjectStore):
-    """UI 任务文件路径。"""
+    """UI 任务文件路径。
+
+    参数:
+        store: 工程。
+
+    返回:
+        `.ndw/ui_jobs.json` 的 Path。
+    """
     return store.root / ".ndw" / "ui_jobs.json"
 
 
 def _read(store: ProjectStore) -> list[dict]:
-    """读取任务列表，文件损坏时按空列表处理。"""
+    """读取任务列表；旧结构或损坏文件一律按空列表处理。
+
+    参数:
+        store: 工程。
+
+    返回:
+        任务列表；`schema_version != 2` 时返回空列表（旧文件不兼容）。
+    """
     path = _file(store)
     if not path.exists():
         return []
@@ -76,7 +97,15 @@ def _read(store: ProjectStore) -> list[dict]:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return []
-    jobs = data.get("jobs", []) if isinstance(data, dict) else []
+    if not isinstance(data, dict):
+        return []
+    try:
+        version = int(data.get("schema_version") or 0)
+    except (TypeError, ValueError):
+        version = 0
+    if version != _SCHEMA_VERSION:
+        return []
+    jobs = data.get("jobs", [])
     return jobs if isinstance(jobs, list) else []
 
 
@@ -94,9 +123,57 @@ def _write(store: ProjectStore, jobs: list[dict]) -> None:
     path = _file(store)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
-        json.dumps({"schema_version": 1, "jobs": jobs[-_MAX_JOBS:]}, ensure_ascii=False),
+        json.dumps({"schema_version": _SCHEMA_VERSION, "jobs": jobs[-_MAX_JOBS:]}, ensure_ascii=False),
         encoding="utf-8",
     )
+
+
+def _sync_progress(job: dict) -> None:
+    """把顶层 percent/current 同步到 `progress`（任务页与 LLM 代码都读这个字段）。
+
+    参数:
+        job: 任务记录（原地修改）。
+
+    返回:
+        无。
+    """
+    job["progress"] = {"percent": job.get("percent"), "current": job.get("current") or ""}
+
+
+def job_snapshot(job: dict) -> dict:
+    """把任务记录整理成统一快照（补齐默认值，供任务页与媒体总线共用）。
+
+    参数:
+        job: 任务记录。
+
+    返回:
+        含 `id/job_id/kind/action/channel/parent_id/cancelable/title/target/status/percent/
+        stage/current/error/artifacts/progress/timings/created_at/meta` 的 dict。
+    """
+    progress = job.get("progress") if isinstance(job.get("progress"), dict) else {}
+    percent = job.get("percent", progress.get("percent"))
+    current = job.get("current") or progress.get("current") or ""
+    return {
+        "id": job.get("id"),
+        "job_id": job.get("job_id") or job.get("id"),
+        "kind": job.get("kind") or "",
+        "action": job.get("action") or "",
+        "channel": job.get("channel") or "",
+        "parent_id": job.get("parent_id"),
+        "cancelable": bool(job.get("cancelable", True)),
+        "title": job.get("title") or "",
+        "target": dict(job.get("target") or {}),
+        "status": job.get("status") or "",
+        "percent": percent,
+        "stage": job.get("stage") or "",
+        "current": current,
+        "error": job.get("error"),
+        "artifacts": list(job.get("artifacts") or []),
+        "progress": {"percent": percent, "current": current},
+        "timings": dict(job.get("timings") or {}),
+        "created_at": job.get("created_at") or "",
+        "meta": dict(job.get("meta") or {}),
+    }
 
 
 def load_ui_jobs(store: ProjectStore) -> list[dict]:
@@ -119,6 +196,9 @@ def load_ui_jobs(store: ProjectStore) -> list[dict]:
                 if job.get("status") in ("queued", "running") and str(job.get("created_at") or "") < _PROCESS_START:
                     job["status"] = "interrupted"
                     job["error"] = "页面进程已退出，任务中断"
+                    job["percent"] = None
+                    job["current"] = job.get("current") or "任务中断"
+                    _sync_progress(job)
                     job.setdefault("timings", {})["finished_at"] = now_iso()
                     changed = True
             if changed:
@@ -126,12 +206,11 @@ def load_ui_jobs(store: ProjectStore) -> list[dict]:
     return jobs
 
 
-#: 已结束的任务状态（可清理）
-TERMINAL_STATUSES = ("succeeded", "partial", "failed", "canceled", "interrupted")
-
-
 def update_job(store: ProjectStore, job_id: str, **fields) -> dict | None:
     """按 ID 修改任务字段（供终止/兜底使用）。
+
+    修改 status 或 error 时同步 percent/current/progress：
+    成功类固定 100%，失败/取消/中断清除百分比。
 
     参数:
         store: 工程。
@@ -144,9 +223,20 @@ def update_job(store: ProjectStore, job_id: str, **fields) -> dict | None:
     with _LOCK:
         jobs = _read(store)
         for item in jobs:
-            if item.get("id") != job_id:
+            if item.get("id") != job_id and item.get("job_id") != job_id:
                 continue
             item.update(fields)
+            if "status" in fields:
+                status = str(item.get("status") or "")
+                if status in ("succeeded", "partial"):
+                    item["percent"] = 100
+                    item["stage"] = item.get("stage") or "完成"
+                elif status in TERMINAL_STATUSES:
+                    item["percent"] = None
+                    item["stage"] = item.get("stage") or "已结束"
+                    if not item.get("current"):
+                        item["current"] = item.get("error") or "任务已结束"
+            _sync_progress(item)
             item.setdefault("timings", {})["finished_at"] = now_iso()
             _write(store, jobs)
             return item
@@ -174,19 +264,37 @@ def clear_finished(store: ProjectStore) -> int:
 class UiJob:
     """一条界面生成任务的写入器（start/progress/finish/fail/cancel）。"""
 
-    def __init__(self, store: ProjectStore, kind: str, target: dict | None = None, title: str = ""):
+    def __init__(
+        self,
+        store: ProjectStore,
+        kind: str,
+        target: dict | None = None,
+        title: str = "",
+        action: str = "",
+        channel: str = "",
+        parent_id: str | None = None,
+        cancelable: bool = True,
+    ):
         """创建任务（尚未写入）。
 
         参数:
             store: 工程。
-            kind: 任务类型（chapter / world / outline / character / script / voice / setting / produce）。
+            kind: 任务类型（UiJobKind 落盘值）。
             target: 目标信息，例如 `{chapter_id, chapter_title}`。
             title: 展示标题。
+            action: 媒体动作键（LLM 任务可留空）。
+            channel: 通道（audio/image/video/llm，可留空）。
+            parent_id: 父任务 ID（媒体任务内嵌的 LLM 调用使用）。
+            cancelable: 是否允许取消。
         """
         self.store = store
         self.kind = kind
         self.target = target or {}
         self.title = title
+        self.action = action
+        self.channel = channel
+        self.parent_id = parent_id
+        self.cancelable = bool(cancelable)
         self.job: dict | None = None
         self._last_write = 0.0
         self._done = False
@@ -217,34 +325,46 @@ class UiJob:
                 jobs.append(self.job)
             _write(self.store, jobs)
 
-    def start(self, current: str = "已提交生成请求") -> "UiJob":
+    def start(self, current: str = "已提交生成请求", stage: str = "提交") -> "UiJob":
         """写入一条运行中任务。
 
         参数:
             current: 当前进度文案。
+            stage: 当前阶段（中文文案）。
 
         返回:
             self，便于链式调用。
         """
+        job_id = new_id("job")
+        started_at = now_iso()
         self.job = {
-            "id": new_id("job"),
+            "id": job_id,
+            "job_id": job_id,
             "kind": self.kind,
+            "action": self.action,
+            "channel": self.channel,
+            "parent_id": self.parent_id,
+            "cancelable": self.cancelable,
             "title": self.title,
             "target": self.target,
             "status": "running",
-            "attempts": 0,
+            "percent": None,
+            "stage": stage,
+            "current": current,
             "artifacts": [],
             "error": None,
             "progress": {"percent": None, "current": current},
+            "meta": {},
+            "attempts": 0,
             "priority": 100,
             "idempotency_key": f"ui:{self.kind}:{new_id('key')}",
-            "created_at": now_iso(),
-            "timings": {"started_at": now_iso()},
+            "created_at": started_at,
+            "timings": {"started_at": started_at},
         }
         self._save()
         with _ACTIVE_LOCK:
-            _ACTIVE[self.job["id"]] = self.kind
-        _cancel_register(self.job["id"])
+            _ACTIVE[job_id] = self.kind
+        _cancel_register(job_id)
         return self
 
     def cancel_requested(self) -> bool:
@@ -261,6 +381,7 @@ class UiJob:
         self,
         current: str | None = None,
         percent: float | None = None,
+        stage: str | None = None,
         force: bool = False,
         clear_percent: bool = False,
     ) -> None:
@@ -269,22 +390,63 @@ class UiJob:
         参数:
             current: 当前进度文案。
             percent: 百分比；None 表示不修改。
+            stage: 当前阶段（中文文案）；None 表示不修改。
             force: True 时忽略节流立即写入。
             clear_percent: True 时把百分比置为「未知」，界面显示进行中而不是停在 0%。
         """
         if not self.job or self._done or self.cancel_requested():
             return
+        if stage is not None:
+            self.job["stage"] = str(stage)
+        if current is not None:
+            self.job["current"] = str(current)
+        if clear_percent:
+            self.job["percent"] = None
+        elif percent is not None:
+            self.job["percent"] = max(0, min(100, round(float(percent))))
+        _sync_progress(self.job)
         now = time.monotonic()
         if not force and now - self._last_write < 1.0:
             return
         self._last_write = now
-        if current is not None:
-            self.job["progress"]["current"] = str(current)
-        if clear_percent:
-            self.job["progress"]["percent"] = None
-        elif percent is not None:
-            self.job["progress"]["percent"] = max(0, min(100, round(float(percent))))
         self._save()
+
+    def stage(self, name: str) -> None:
+        """只更新阶段文案（立即写入）。
+
+        参数:
+            name: 阶段中文名，例如「载入」「合成」。
+        """
+        if not name:
+            return
+        self.progress(stage=str(name), force=True)
+
+    def set_meta(self, **fields) -> None:
+        """写入任务元数据（例如执行结果摘要、嵌套 LLM 调用次数）。
+
+        任务落成终态后仍允许补写元数据（不改变状态与进度）。
+
+        参数:
+            **fields: 要合并进 `meta` 的字段。
+
+        返回:
+            无。
+        """
+        if not self.job:
+            return
+        meta = self.job.setdefault("meta", {})
+        meta.update(fields)
+        self._save()
+
+    def snapshot(self) -> dict:
+        """返回统一任务快照。
+
+        返回:
+            字段见 `job_snapshot`；任务尚未创建时返回空 dict。
+        """
+        if not self.job:
+            return {}
+        return job_snapshot(self.job)
 
     def set_artifacts(self, items: list) -> None:
         """写入产物列表（任务队列「产物」列直接取长度）。
@@ -371,7 +533,7 @@ class UiJob:
             stage = str(data.get("stage") or data.get("message") or "").strip()
             stage = {"acts": "规划幕结构", "chapters": "补全章节", "beats": "补齐节拍"}.get(stage, stage)
             if stage:
-                self.progress(stage, force=True)
+                self.progress(stage, stage=stage, force=True)
         elif kind == "plan":
             total = _num(data.get("total"))
             if total:
@@ -390,22 +552,49 @@ class UiJob:
         """结束跟踪但不改任务状态（外部已把任务写成终态时使用）。"""
         self._retire()
 
+    def _finish_with(
+        self,
+        status: str,
+        message: str,
+        percent: int | None,
+        stage: str,
+        error: str | None = None,
+    ) -> None:
+        """把任务落成终态，并同步 percent/stage/current 与 progress。
+
+        参数:
+            status: 终态状态值。
+            message: 进度文案。
+            percent: 百分比；None 表示未知。
+            stage: 阶段文案。
+            error: 错误列文案；None 表示保留原值。
+        """
+        self._done = True
+        self._retire()
+        self.job["status"] = status
+        self.job["percent"] = percent
+        self.job["stage"] = stage
+        self.job["current"] = message
+        if error is not None:
+            self.job["error"] = error
+        _sync_progress(self.job)
+        self.job.setdefault("timings", {})["finished_at"] = now_iso()
+        self._save()
+
     def finish(self, message: str = "生成完成") -> None:
         """标记成功并保留结果摘要。
 
         若用户已点停止，则落「已取消」而不是「成功」，避免停止后仍显示完成。
+
+        参数:
+            message: 结果摘要（显示在进度列）。
         """
         if not self.job or self._done:
             return
         if self.cancel_requested():
             self.cancel("用户已停止生成")
             return
-        self._done = True
-        self._retire()
-        self.job["status"] = "succeeded"
-        self.job["progress"] = {"percent": 100, "current": message}
-        self.job["timings"]["finished_at"] = now_iso()
-        self._save()
+        self._finish_with("succeeded", str(message or "生成完成"), 100, "完成")
 
     def partial(self, message: str) -> None:
         """标记「部分完成」：有产出也有失败时使用，进度固定 100% 并写入汇总。
@@ -418,12 +607,7 @@ class UiJob:
         if self.cancel_requested():
             self.cancel("用户已停止生成")
             return
-        self._done = True
-        self._retire()
-        self.job["status"] = "partial"
-        self.job["progress"] = {"percent": 100, "current": message}
-        self.job["timings"]["finished_at"] = now_iso()
-        self._save()
+        self._finish_with("partial", str(message or "部分完成"), 100, "部分完成")
 
     def fail(self, message: str, current: str | None = None) -> None:
         """标记失败并保留中文原因。
@@ -437,13 +621,8 @@ class UiJob:
         if self.cancel_requested():
             self.cancel("用户已停止生成")
             return
-        self._done = True
-        self._retire()
-        self.job["status"] = "failed"
-        self.job["error"] = str(message or "生成失败")
-        self.job["progress"] = {"percent": None, "current": str(current or "生成失败")}
-        self.job["timings"]["finished_at"] = now_iso()
-        self._save()
+        reason = str(message or "生成失败")
+        self._finish_with("failed", str(current or "生成失败"), None, "失败", error=reason)
 
     def cancel(self, message: str | None = None) -> None:
         """标记取消（页面断开、主动停止）。
@@ -454,12 +633,8 @@ class UiJob:
         if not self.job or self._done:
             return
         requested = self.cancel_requested()
-        self._done = True
-        self._retire()
-        self.job["status"] = "canceled"
-        self.job["error"] = str(message or ("用户已停止生成" if requested else "页面连接已断开，生成已取消"))
-        self.job["timings"]["finished_at"] = now_iso()
-        self._save()
+        reason = str(message or ("用户已停止生成" if requested else "页面连接已断开，生成已取消"))
+        self._finish_with("canceled", reason, None, "已取消", error=reason)
 
 
 def _num(value) -> float:

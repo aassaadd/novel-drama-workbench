@@ -19,8 +19,62 @@ from novel_drama.interface.http.deps import store_for
 from novel_drama.interface.http.routers.common import (
     _resolve_voice_binding,
     _voice_binding_index,
-    _watch_background_job,
 )
+
+
+def _voice_reference_files(voice: dict) -> set[str]:
+    """列出一个音色所有变体引用的本地音频相对路径。
+
+    参数:
+        voice: 音色记录。
+
+    返回:
+        参考音与去噪原始音频的相对路径集合（可能为空）。
+    """
+    files: set[str] = set()
+    for variant in voice.get("variants") or []:
+        reference = variant.get("reference") or {}
+        audio_path = reference.get("audio_path")
+        if audio_path:
+            files.add(str(audio_path))
+        original = (reference.get("denoise") or {}).get("original_audio_path")
+        if original:
+            files.add(str(original))
+    return files
+
+
+def _delete_voice_assets(store: ProjectStore, doomed: list[dict], remaining: list[dict]) -> list[str]:
+    """删除被移除音色的参考音频文件。
+
+    只删除工程目录内的文件，并跳过仍被其它音色引用的路径，避免误删共享参考音；
+    文件不存在或删除失败都不影响音色记录的删除结果。
+
+    参数:
+        store: 工程。
+        doomed: 本次被移除的音色记录。
+        remaining: 删除后仍在音色池里的记录。
+
+    返回:
+        实际删除的文件相对路径列表。
+    """
+    root = store.root.resolve()
+    keep: set[str] = set()
+    for voice in remaining:
+        keep |= _voice_reference_files(voice)
+    removed: list[str] = []
+    for voice in doomed:
+        for rel in sorted(_voice_reference_files(voice) - keep):
+            target = (root / rel).resolve()
+            try:
+                target.relative_to(root)
+            except ValueError:
+                continue
+            try:
+                target.unlink()
+                removed.append(rel)
+            except (FileNotFoundError, OSError):
+                continue
+    return removed
 
 
 def register_voice_voices_routes(app, project_root: str | None = None, config_path: str | None = None) -> None:
@@ -500,80 +554,6 @@ def register_voice_voices_routes(app, project_root: str | None = None, config_pa
             raise HTTPException(status_code=400, detail={"code": 2, "message": str(exc)}) from exc
         return {"english": english, "source": "llm"}
 
-    @app.post("/api/ui/voices/design/batches")
-    def ui_voices_design_start(body: dict) -> dict:
-        """启动一次音色抽卡批次（后台线程运行，接口立即返回批次 ID）。
-
-        参数:
-            body: `{path, character_id, prompt, profile?, count?}`。
-
-        返回:
-            批次元数据。
-
-        异常:
-            HTTPException 400/404: 参数缺失、环境未就绪或人物不存在。
-        """
-        from novel_drama.tts import voice_design
-
-        store = _store(body.get("path"))
-        cfg = _tts_config()
-        design = cfg.get("voice.design") or {}
-        if not design.get("enabled", True):
-            raise HTTPException(status_code=400, detail={"code": 2, "message": "音色设计未启用"})
-        python = str(design.get("python") or "")
-        model_dir = str(design.get("model_dir") or "")
-        if not Path(python).is_file():
-            raise HTTPException(status_code=400, detail={"code": 2, "message": f"VoxCPM2 运行环境不存在：{python}"})
-        if not Path(model_dir).is_dir():
-            raise HTTPException(status_code=400, detail={"code": 2, "message": f"VoxCPM2 权重目录不存在：{model_dir}"})
-        characters = store.load_characters()["characters"]
-        character = next((item for item in characters if item["id"] == body.get("character_id")), None)
-        if character is None:
-            raise HTTPException(status_code=404, detail={"code": 3, "message": "人物不存在", "character_id": body.get("character_id")})
-        prompt = str(body.get("prompt") or "").strip()
-        if not prompt:
-            raise HTTPException(status_code=400, detail={"code": 2, "message": "缺少音色描述"})
-        count = int(body.get("count") or design.get("candidates", 4))
-        batch = voice_design.create_batch(store, cfg, character, prompt, count, body.get("profile"))
-
-        def read_batch() -> dict:
-            """读取抽卡批次并换算候选进度。"""
-            meta = voice_design.read_batch(store, batch["batch_id"])
-            candidates = meta.get("candidates") or []
-            finished = sum(1 for item in candidates if item.get("status") in ("ready", "failed", "done"))
-            return {
-                "status": meta.get("status"),
-                "stage": f"抽卡 · {character.get('name') or '角色'}",
-                "progress": {"index": finished, "total": len(candidates) or count},
-                "note": meta.get("note"),
-            }
-
-        _watch_background_job(
-            store,
-            "voice",
-            f"音色抽卡 · {character.get('name') or '角色'}",
-            read_batch,
-        )
-        return batch
-
-    @app.get("/api/ui/voices/design/batches/{batch_id}")
-    def ui_voices_design_status(batch_id: str, path: str = Query(...)) -> dict:
-        """轮询批次进度与候选清单。
-
-        参数:
-            batch_id: 批次 ID。
-            path: 工程目录。
-
-        异常:
-            HTTPException 404: 批次不存在。
-        """
-        from novel_drama.tts import voice_design
-
-        meta = voice_design.read_batch(_store(path), batch_id)
-        if not meta:
-            raise HTTPException(status_code=404, detail={"code": 3, "message": "批次不存在", "batch_id": batch_id})
-        return meta
-
     @app.post("/api/ui/voices/design/batches/{batch_id}/cancel")
     def ui_voices_design_cancel(batch_id: str, body: dict) -> dict:
         """停止批次后续候选：保留已完成候选，返回 stopped 状态。
@@ -625,42 +605,6 @@ def register_voice_voices_routes(app, project_root: str | None = None, config_pa
             return voice_batch.plan(store, str(body.get("scope") or "unbound"), body.get("chapter_id"))
         except ValueError as exc:
             raise HTTPException(status_code=400, detail={"code": 2, "message": str(exc)}) from exc
-
-    @app.post("/api/ui/voices/design/batch")
-    def ui_voices_batch_start(body: dict) -> dict:
-        """启动一键批量生成音色（逐角色串行）。
-
-        参数:
-            body: `{path, scope, chapter_id?, count?}`。
-        """
-        from novel_drama.tts import voice_batch
-
-        store = _store(body.get("path"))
-        scope = str(body.get("scope") or "unbound")
-        try:
-            job = voice_batch.start_job(
-                store,
-                _tts_config(),
-                scope,
-                body.get("chapter_id"),
-                body.get("count"),
-            )
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail={"code": 2, "message": str(exc)}) from exc
-
-        def read_batch() -> dict:
-            """读取批量任务并按条目数换算进度。"""
-            latest = voice_batch.read_job(store, job["job_id"])
-            items = latest.get("items") or []
-            return {
-                "status": latest.get("status"),
-                "stage": latest.get("current") or "批量生成音色",
-                "progress": {"index": latest.get("done") or 0, "total": len(items)},
-                "note": latest.get("note"),
-            }
-
-        _watch_background_job(store, "voice", "批量抽取音色", read_batch)
-        return job
 
     @app.get("/api/ui/voices/design/batch/latest")
     def ui_voices_batch_latest(path: str | None = None) -> dict:
@@ -874,10 +818,12 @@ def register_voice_voices_routes(app, project_root: str | None = None, config_pa
         voice_id = body.get("voice_id")
         table = store.load_voices()
         before = len(table["voices"])
+        doomed = [item for item in table["voices"] if item["id"] == voice_id]
         table["voices"] = [item for item in table["voices"] if item["id"] != voice_id]
         if len(table["voices"]) == before:
             raise HTTPException(status_code=404, detail={"code": 3, "message": "音色不存在", "voice_id": voice_id})
         store.save_voices(table)
+        removed_files = _delete_voice_assets(store, doomed, table["voices"])
         characters = store.load_characters()
         changed = False
         for item in characters["characters"]:
@@ -888,4 +834,6 @@ def register_voice_voices_routes(app, project_root: str | None = None, config_pa
                 changed = True
         if changed:
             store.save_characters(characters)
-        return _voice_board(path)
+        board = _voice_board(path)
+        board["deleted_files"] = removed_files
+        return board

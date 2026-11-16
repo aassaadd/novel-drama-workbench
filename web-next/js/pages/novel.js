@@ -10,7 +10,8 @@ import { esc, fmtClock, icon, toast, openDialog, closeDialog, reuseListHTML } fr
 import { getJSON, postJSON, streamJSON, canceledError } from '../api.js';
 import { fetchLlmPlan, runLlm, runLlmStream } from '../llm.js';
 import { labelOf, ENUMS, selectHTML } from '../enums.js';
-import { openProgress, watchProgress } from '../progress.js';
+import { openProgress } from '../progress.js';
+import { runMedia } from '../media-bus.js';
 import { modeSwitchHTML, bindModeSwitch } from '../gen-mode.js';
 import { state } from '../store.js';
 import { railbar, topbar, goChapter, goProjects } from '../shell.js';
@@ -1477,29 +1478,32 @@ function openBatchDialog() {
       button.addEventListener('click', async () => {
         button.disabled = true;
         button.textContent = '启动中…';
+        // 预检弹窗里已经确认过，统一总线不再重复弹确认框
+        const task = runMedia({
+          action: 'tts.chapter',
+          params: { path: cache.path, chapter: hit.chapter.id, skip_unknown: Boolean(skipBox?.checked) },
+          title: '正在补齐本章配音…',
+          hint: `本次 ${Number(plan.total || 0)} 行 · 已有音频自动跳过`,
+          confirm: false,
+          plan,
+          refresh: async () => {
+            cache.plan = null;
+            cache.planChapter = '';
+            paint();
+            setTimeout(() => loadPlan(hit.chapter.id), 1200);
+          },
+        });
+        // 启动后立即收起预检弹窗，进度统一由媒体总线的进度卡展示
+        closeDialog();
+        toast(`已开始补齐 ${Number(plan.total || 0)} 行，进度见浮层或章节右栏「本章任务」`, 'ok', 3200);
         try {
-          const result = await postJSON('/api/ui/tts/batch-all', {
-            path: cache.path,
-            scope: 'chapter',
-            chapter: hit.chapter.id,
-            skip_unknown: Boolean(skipBox?.checked),
-          });
-          closeDialog();
-          toast(`已开始补齐 ${Number(result?.total || 0)} 行，进度见浮层或章节右栏「本章任务」`, 'ok', 3200);
-          watchProgress({
-            path: cache.path,
-            title: '正在补齐本章配音…',
-            hint: `本次 ${Number(result?.total || 0)} 行 · 已有音频自动跳过`,
-            chapter: hit.chapter.id,
-          });
-          cache.plan = null;
-          cache.planChapter = '';
-          paint();
-          setTimeout(() => loadPlan(hit.chapter.id), 1200);
+          await task;
         } catch (error) {
-          toast(`启动失败：${error.message}`, 'bad', 3600);
-          button.disabled = false;
-          button.textContent = '开始补齐';
+          toast(error.message, 'bad', 3600);
+          if (document.body.contains(button)) {
+            button.disabled = false;
+            button.textContent = '开始补齐';
+          }
         }
       });
     },

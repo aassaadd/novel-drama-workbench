@@ -6,6 +6,7 @@
  */
 import { esc, icon, toast, openDialog, closeDialog, openMenu, fmtClock, fmtDuration, charCount } from '../dom.js';
 import { getJSON, postJSON, fileUrl } from '../api.js';
+import { runMedia } from '../media-bus.js';
 import { state, audioOf, toneFor } from '../store.js';
 import { labelOf } from '../enums.js';
 import { stateLabel, stateClass } from '../shell.js';
@@ -531,26 +532,30 @@ async function rerunRecordLine(lineId) {
   if (ui.record.busy) return toast('已有重录任务在进行，请等它结束', 'warn');
   ui.record.busy = lineId;
   paintView();
-  toast('正在重录这一行，可以继续浏览', 'info');
   try {
-    const result = await postJSON(
-      '/api/ui/line/rerun',
-      {
-        path: state.path,
-        chapter: state.chapterId,
-        line: lineId,
+    const result = await runMedia({
+      action: 'tts.line',
+      params: { path: state.path, chapter: state.chapterId, line: lineId },
+      title: '正在重录这一行…',
+      hint: '旧版本仍可在版本记录里找回',
+      // 重录是单行操作，不再额外弹确认框
+      confirm: false,
+      refresh: async () => {
+        timelineCache = { chapter: '', data: null };
+        await hooks.refresh();
+        paintView();
+        paintPanel();
       },
-      { timeout: 0 }
-    );
-    timelineCache = { chapter: '', data: null };
-    toast(`已重录 r${result?.revision ?? '?'}，旧版本仍可试听`, 'ok');
+    });
+    // 取消时不提示「已重录」；成功时用任务的当前项文案（含版本号）
+    if (result?.job && String(result.job.status) !== 'canceled') {
+      toast(result.job.current ? `${result.job.current}，旧版本仍可试听` : '已重录，旧版本仍可试听', 'ok');
+    }
   } catch (error) {
     toast(error.message, 'bad');
   } finally {
     ui.record.busy = '';
-    await hooks.refresh();
     paintView();
-    paintPanel();
   }
 }
 

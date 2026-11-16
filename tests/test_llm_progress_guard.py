@@ -32,13 +32,13 @@ _LLM_ENDPOINTS = (
     "/api/ui/produce",
     "/api/ui/script/suggest/stream",
     "/api/ui/setting/generate",
-    "/api/ui/sfx/generate",
     "/api/ui/voices/design/preview",
     "/api/ui/voices/design/translate",
     "/api/ui/worlds/generate/stream",
 )
 
-#: 当前界面里用户可触发的模型动作：每个都要有统一入口
+#: 当前界面里用户可触发的模型动作：每个都要有统一入口。
+#: 音效 / BGM / 音色抽卡等媒体生成已迁入媒体总线（`runMedia`），不再属于模型动作。
 _UI_ACTIONS = (
     "setting.section",
     "world.generate",
@@ -60,7 +60,6 @@ _UI_ACTIONS = (
     "script.suggest",
     "voice.design.preview",
     "voice.design.translate",
-    "media.sfx",
     "produce.run",
 )
 
@@ -94,16 +93,20 @@ def test_stream_pages_use_run_llm_stream():
 
 
 def test_page_actions_are_registered():
-    """页面里出现的 `action` 字面量必须是后端登记过的动作。"""
+    """页面里出现的 `action` 字面量必须是后端登记过的动作。
+
+    媒体生成（RunMedia）用媒体动作登记表校验，其余用模型动作登记表校验。
+    """
     from novel_drama.application.support.llm_plan import ACTIONS
+    from novel_drama.application.support.media_plan import ACTIONS as MEDIA_ACTIONS
 
     used: dict[str, str] = {}
     for path in _page_files():
         text = path.read_text(encoding="utf-8")
         for match in re.finditer(r"action:\s*'([^']+)'", text):
             used.setdefault(match.group(1), path.name)
-    unknown = {key: name for key, name in used.items() if key not in ACTIONS}
-    assert unknown == {}, f"页面使用了未登记的模型动作：{unknown}"
+    unknown = {key: name for key, name in used.items() if key not in ACTIONS and key not in MEDIA_ACTIONS}
+    assert unknown == {}, f"页面使用了未登记的动作：{unknown}"
 
 
 def test_every_ui_action_has_unified_entry():

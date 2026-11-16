@@ -138,7 +138,7 @@ _FALLBACK = {
             "cfg_value": 2.0,
             "inference_timesteps": 10,
             "timeout_s": 900,
-            "script": "我用了一段时间才明白，有些话不说出口，反而更清楚。你愿意听我讲完吗？",
+            "script": "我一直在等你回来。",
         },
     },
     "audio": {

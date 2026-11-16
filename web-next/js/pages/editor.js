@@ -6,7 +6,8 @@
 import { esc, icon, toast, openDialog, closeDialog, openMenu, fmtDuration, fmtClock, fmtBytes, impactListHTML, reuseListHTML } from '../dom.js';
 import { getJSON, postJSON, streamJSON, fileUrl, canceledError } from '../api.js';
 import { labelOf, selectHTML } from '../enums.js';
-import { openProgress, watchProgress } from '../progress.js';
+import { openProgress } from '../progress.js';
+import { runMedia, cancelMediaJob, mediaJobRowsHTML } from '../media-bus.js';
 import { runLlmStream } from '../llm.js';
 import { modeSwitchHTML, bindModeSwitch } from '../gen-mode.js';
 import {
@@ -342,16 +343,29 @@ function scriptPanelHTML() {
 function taskPanelHTML({ head = true } = {}) {
   const c = counts();
   const task = state.task || {};
+  const tasks = Array.isArray(state.tasks) ? state.tasks : [];
   const ratio = c.total ? Math.round((c.ready / c.total) * 100) : 0;
   const failedRows = (task.rows || []).slice(0, 4);
+  const rawPercent = task.percent === null || task.percent === undefined ? null : Number(task.percent);
+  const livePercent = Number.isFinite(rawPercent) ? Math.max(0, Math.min(100, Math.round(rawPercent))) : null;
+  const liveBadge = task.running ? (livePercent !== null ? `生成中 ${livePercent}%` : '生成中') : ratiosText(c);
+  const liveDetail = [task.stage, livePercent !== null ? `${livePercent}%` : '', task.current]
+    .filter(Boolean)
+    .join(' · ');
+  const liveRows = task.total
+    ? `${task.done || 0} / ${task.total} 行${task.failed ? ` · 失败 ${task.failed} 行` : ''}`
+    : '';
+  const liveWidth = livePercent !== null
+    ? livePercent
+    : task.total
+      ? Math.min(100, Math.round(((task.done || 0) / task.total) * 100))
+      : 0;
   return `
     ${
       head
         ? `<div class="sr-head">
       <span class="ct">本章任务</span>
-      <span class="badge ${task.running ? 'run' : 'mute'}">${
-              task.running ? `生成中 ${task.done || 0}/${task.total || 0}` : ratiosText(c)
-            }</span>
+      <span class="badge ${task.running ? 'run' : 'mute'}">${liveBadge}</span>
       <div class="right">
         <button class="btn icon sm" data-act="toggle-task" title="收起">${icon('next')}</button>
       </div>
@@ -388,15 +402,21 @@ function taskPanelHTML({ head = true } = {}) {
         </div>
         <div class="hint" style="margin-top:9px">补齐只处理未生成 / 过期 / 失败的行，可随时中断后续跑。</div>
       </div>
+      <div class="sr-sec">
+        <h4>本章媒体任务</h4>
+        ${mediaJobRowsHTML(tasks, { emptyText: '本章暂无媒体任务' })}
+      </div>
       ${
         task.running
           ? `<div class="sr-sec"><h4>正在生成</h4>
-              <div class="hint">${task.done || 0} / ${task.total || 0} 行${
-                task.eta_ms ? ` · 预计剩余 ${fmtClock(task.eta_ms)}` : ''
-              }${state.paused ? ' · 已暂停，当前行跑完后等待继续' : ''}</div>
-              <div class="bar" style="margin-top:8px"><span style="width:${
-                task.total ? Math.min(100, Math.round(((task.done || 0) / task.total) * 100)) : 0
-              }%"></span></div>
+              <div class="hint">${esc(liveDetail || '正在读取任务进度…')}</div>
+              ${liveRows ? `<div class="hint mono" style="margin-top:4px">${esc(liveRows)}</div>` : ''}
+              <div class="bar" style="margin-top:8px"><span style="width:${liveWidth}%"></span></div>
+              ${
+                state.paused
+                  ? `<div class="hint" style="margin-top:6px">已暂停，当前行跑完后等待继续</div>`
+                  : ''
+              }
             </div>`
           : ''
       }
@@ -1034,15 +1054,17 @@ async function loadData(path, chapterId) {
 /** 读取章节台词与批量任务状态 */
 async function loadChapterState() {
   if (!state.path || !state.chapterId) return;
-  const [payload, task, binding] = await Promise.all([
+  const [payload, queue, binding] = await Promise.all([
     getJSON('/api/ui/lines', { path: state.path, chapter: state.chapterId }),
-    getJSON('/api/ui/tts/batch-all/progress', { path: state.path }).catch(() => null),
+    getJSON('/api/ui/queue', { path: state.path }).catch(() => []),
     getJSON('/api/ui/chapters/binding', { path: state.path, chapter: state.chapterId }).catch(() => null),
   ]);
   state.lines = payload?.lines || [];
   state.counts = payload?.counts || {};
   state.consistency = payload?.consistency || null;
-  state.task = task;
+  const { tasks, summary } = chapterTasksFromQueue(queue);
+  state.tasks = tasks;
+  state.task = summary;
   state.binding = binding;
   state.selected = new Set();
   state.expandedLine = '';
@@ -1327,12 +1349,16 @@ async function runOne(lineId) {
   state.runningLine = lineId;
   repaintRows();
   try {
-    await postJSON(
-      '/api/ui/line/rerun',
-      { path: state.path, chapter: state.chapterId, line: lineId },
-      { timeout: 0 }
-    );
-    toast('这一行已重新生成', 'ok');
+    const { job } = await runMedia({
+      action: 'tts.line',
+      params: { path: state.path, chapter: state.chapterId, line: lineId },
+      title: '正在重录这一行…',
+      confirm: false,
+      refresh: softRefresh,
+    });
+    if (job && ['succeeded', 'partial'].includes(String(job.status || ''))) {
+      toast('已重新生成', 'ok');
+    }
   } catch (error) {
     toast(error.message, 'bad');
   } finally {
@@ -2105,27 +2131,23 @@ async function openBatchDialog(scope = 'chapter') {
     const skip = Boolean(mask.querySelector('#batch-skip-unknown')?.checked);
     startBtn.disabled = true;
     startBtn.textContent = '启动中…';
+    closeDialog();
+    toast('已开始批量配音，进度见右侧任务面板', 'ok');
+    startPolling();
     try {
-      await postJSON('/api/ui/tts/batch-all', {
-        path: state.path,
-        scope: all ? 'all' : 'chapter',
-        chapter: all ? undefined : state.chapterId,
-        skip_unknown: skip,
+      await runMedia({
+        action: all ? 'tts.book' : 'tts.chapter',
+        params: { path: state.path, chapter: all ? undefined : state.chapterId, skip_unknown: skip, force: false },
+        title: all ? '正在补齐全书配音…' : '正在补齐本章配音…',
+        hint: `本次处理 ${plan.total} 行 · 已有音频自动跳过`,
+        confirm: false,
+        refresh: async () => {
+          await refreshTask();
+          await softRefresh();
+        },
       });
-      closeDialog();
-      toast('已开始批量配音，进度见右侧任务面板', 'ok');
-      watchProgress({
-        path: state.path,
-        title: '正在补齐缺失配音…',
-        hint: `本次处理 ${Number(plan.total || 0)} 行 · 复用 ${Number((plan.reuse || {}).keep || 0) + Number((plan.reuse || {}).reuse || 0)} 行 · 重新合成 ${Number((plan.reuse || {}).regenerate || 0)} 行`,
-        chapter: state.chapterId,
-      });
-      await refreshTask();
-      startPolling();
     } catch (error) {
       toast(error.message, 'bad');
-      startBtn.disabled = false;
-      startBtn.textContent = '开始生成';
     }
   });
   await fetchPlan();
@@ -2157,23 +2179,32 @@ function confirmRegenerate() {
   });
   mask.querySelector('#regen-ok').addEventListener('click', async (event) => {
     event.currentTarget.disabled = true;
+    closeDialog();
+    toast('已开始重新生成', 'ok');
+    startPolling();
     try {
-      await postJSON('/api/ui/generate', { path: state.path, chapter: state.chapterId, mode: 'regenerate' });
-      closeDialog();
-      toast('已开始重新生成', 'ok');
-      await refreshTask();
-      startPolling();
+      await runMedia({
+        action: 'tts.chapter',
+        params: { path: state.path, chapter: state.chapterId, force: true },
+        title: '正在重新生成本章…',
+        confirm: false,
+        refresh: async () => {
+          await refreshTask();
+          await softRefresh();
+        },
+      });
     } catch (error) {
       toast(error.message, 'bad');
-      event.currentTarget.disabled = false;
     }
   });
 }
 
 /** 停止批量生成 */
 async function stopGeneration() {
+  const jobId = String(state.task?.job_id || '');
   try {
-    await postJSON('/api/ui/stop', { path: state.path });
+    if (jobId) await cancelMediaJob(state.path, jobId);
+    else await postJSON('/api/ui/stop', { path: state.path });
     toast('已停止生成', 'ok');
     await refreshTask();
   } catch (error) {
@@ -2303,16 +2334,137 @@ function playQueue(list, index) {
 
 // ---------------- 轮询 ----------------
 
+/**
+ * 统一任务列表响应：兼容数组与 `{jobs}` 两种形态。
+ * @param {*} payload `/api/ui/queue` 响应
+ * @returns {Array<object>} 任务数组
+ */
+function queueJobsOf(payload) {
+  if (Array.isArray(payload)) return payload;
+  return Array.isArray(payload?.jobs) ? payload.jobs : [];
+}
+
+/**
+ * 读取有效数字；空值或非数字返回 null。
+ * @param {*} value 原始值
+ * @returns {number|null} 有效数字或 null
+ */
+function numberOrNull(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+/**
+ * 从进度文案里解析已处理 / 总行数 / 失败行数。
+ * 文案由后端给出（如「第 3/20 行，失败 1 行」），解析不到就不猜数字。
+ * @param {string} text 进度文案
+ * @returns {{done: number|null, total: number|null, failed: number|null}} 解析结果
+ */
+function parseTtsProgressText(text) {
+  const result = { done: null, total: null, failed: null };
+  const range = /第\s*(\d+)\s*\/\s*(\d+)\s*行/.exec(text);
+  if (range) {
+    result.done = Number(range[1]);
+    result.total = Number(range[2]);
+  } else {
+    const doneOnly = /已完成\s*(\d+)\s*行/.exec(text);
+    if (doneOnly) result.done = Number(doneOnly[1]);
+  }
+  const failed = /失败\s*(\d+)\s*行/.exec(text);
+  if (failed) result.failed = Number(failed[1]);
+  return result;
+}
+
+/**
+ * 把一条运行中的声音任务整理成右栏摘要（字段兼容旧 `state.task`）。
+ * @param {object|null} job 运行中的统一任务
+ * @returns {object} 摘要；没有运行中任务时返回空态
+ */
+function summarizeTtsJob(job) {
+  const empty = {
+    running: false,
+    job_id: '',
+    done: 0,
+    total: 0,
+    failed: 0,
+    percent: null,
+    current: '',
+    stage: '',
+    eta_ms: null,
+    rows: [],
+  };
+  if (!job) return empty;
+  const meta = job.meta && typeof job.meta === 'object' ? job.meta : {};
+  const stats = meta.stats && typeof meta.stats === 'object' ? meta.stats : {};
+  const current = String(job.current || job.progress?.current || '');
+  const parsed = parseTtsProgressText(current);
+  const total = numberOrNull(stats.requested) ?? parsed.total ?? 0;
+  const failed = numberOrNull(stats.failed) ?? parsed.failed ?? 0;
+  const doneRaw = numberOrNull(stats.succeeded) ?? parsed.done ?? 0;
+  const done = total ? Math.min(doneRaw, total) : doneRaw;
+  return {
+    running: ['queued', 'running'].includes(String(job.status || '')),
+    job_id: String(job.id || job.job_id || ''),
+    done,
+    total,
+    failed,
+    percent: numberOrNull(job.percent) ?? numberOrNull(job.progress?.percent),
+    current,
+    stage: String(job.stage || ''),
+    eta_ms: null,
+    rows: Array.isArray(meta.failed_rows) ? meta.failed_rows : [],
+  };
+}
+
+/**
+ * 从统一任务列表里挑出本章媒体任务与全工程运行中的媒体任务。
+ *
+ * 本章任务用于展示本章的全部媒体类型（声音/图片/视频/音效）；
+ * 其它章节仍在运行的任务也一并显示，保证右侧面板能看到当前工程的活跃生成。
+ *
+ * @param {*} payload `/api/ui/queue` 响应（数组或 `{jobs}`）
+ * @returns {{tasks: Array<object>, runningJob: object|null, summary: object}} 任务与摘要
+ */
+function chapterTasksFromQueue(payload) {
+  const chapterId = String(state.chapterId || '');
+  const tasks = queueJobsOf(payload).filter((job) => {
+    if (!job) return false;
+    const action = String(job.action || '');
+    // 只有媒体任务带 action；LLM / 全链路任务不进入本章媒体任务列表
+    if (!action) return false;
+    const target = job.target || {};
+    const inChapter =
+      chapterId &&
+      [target.chapter, target.chapter_id].some(
+        (value) => value !== undefined && value !== null && String(value) === chapterId
+      );
+    const running = ['queued', 'running'].includes(String(job.status || ''));
+    return Boolean(inChapter) || running;
+  });
+  const isTts = (job) =>
+    ['tts.line', 'tts.chapter', 'tts.book'].includes(String(job.kind || '')) ||
+    String(job.action || '').startsWith('tts.');
+  const runningJob =
+    tasks.find((job) => isTts(job) && ['queued', 'running'].includes(String(job.status || ''))) ||
+    tasks.find((job) => ['queued', 'running'].includes(String(job.status || ''))) ||
+    null;
+  return { tasks, runningJob, summary: summarizeTtsJob(runningJob) };
+}
+
 async function refreshTask() {
   try {
-    const [progress, pause] = await Promise.all([
-      getJSON('/api/ui/tts/batch-all/progress', { path: state.path }),
+    const [queue, pause] = await Promise.all([
+      getJSON('/api/ui/queue', { path: state.path }),
       getJSON('/api/ui/tts/pause', { path: state.path }),
     ]);
-    state.task = progress;
+    const { tasks, summary } = chapterTasksFromQueue(queue);
+    state.tasks = tasks;
+    state.task = summary;
     state.paused = Boolean(pause?.paused);
   } catch {
     state.task = null;
+    state.tasks = [];
     state.paused = false;
   }
   repaintTask();
@@ -2439,6 +2591,12 @@ async function onRootClick(event) {
   const chapterRow = event.target.closest('[data-chapter]');
   if (chapterRow) {
     goChapter(state.path, chapterRow.dataset.chapter);
+    return;
+  }
+  const mediaCancel = event.target.closest('[data-media-cancel]');
+  if (mediaCancel) {
+    await cancelMediaJob(state.path, mediaCancel.dataset.mediaCancel);
+    await refreshTask();
     return;
   }
   const retry = event.target.closest('[data-retry-line]');

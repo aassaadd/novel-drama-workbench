@@ -58,6 +58,8 @@ _KV_RE = re.compile(
 
 #: 当前请求上下文：trace_id / 工程路径 / 操作名 / CLI 步骤
 _CTX: contextvars.ContextVar[dict] = contextvars.ContextVar("ndw_log_ctx", default={})
+#: 当前正在执行的媒体任务 ID：由媒体总线绑定，LLM 调用记录据此写入 `parent_job_id`
+PARENT_JOB: contextvars.ContextVar[str] = contextvars.ContextVar("ndw_parent_job", default="")
 #: CLI 步骤收集器（同一请求内多次 CLI 调用按顺序聚合）
 _STEPS: contextvars.ContextVar[list | None] = contextvars.ContextVar("ndw_log_steps", default=None)
 

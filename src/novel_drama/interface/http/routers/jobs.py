@@ -16,6 +16,7 @@ from novel_drama.application.production.job_tracker import (
     UiJob,
     active_jobs,
     clear_finished,
+    job_snapshot,
     load_ui_jobs,
     request_cancel,
     update_job,
@@ -33,6 +34,7 @@ from novel_drama.interface.http.routers.common import (
     _require,
     _stop_tts_project,
 )
+from novel_drama.models.enums import JobKind
 from novel_drama.models.ids import now_iso
 from novel_drama.tts import TtsService
 
@@ -41,6 +43,47 @@ _PRODUCE_GUARD = threading.Lock()
 _PRODUCE_PROCS: dict[str, dict] = {}
 
 _PRODUCE_PROCS_LOCK = threading.Lock()
+
+#: GPU 队列任务类型 → 统一通道（未列出的类型归到 other）
+_QUEUE_CHANNELS = {"tts": "audio", "sfx": "audio", "image": "image", "video": "video"}
+
+
+def _queue_job_snapshot(job: dict) -> dict:
+    """把 GPU 队列任务整理成与界面任务一致的结构。
+
+    参数:
+        job: `.ndw/queue.json` 里的一条任务记录。
+
+    返回:
+        与 `job_snapshot` 同字段的 dict；队列任务不可从任务页取消，
+        因此 `cancelable=False`、`ui=False`。
+    """
+    kind = str(job.get("kind") or "")
+    progress = job.get("progress") if isinstance(job.get("progress"), dict) else {}
+    percent = progress.get("percent", job.get("percent"))
+    current = str(progress.get("current") or job.get("current") or "")
+    return {
+        "id": job.get("id"),
+        "job_id": job.get("job_id") or job.get("id"),
+        "kind": kind,
+        "action": str(job.get("action") or ""),
+        "channel": _QUEUE_CHANNELS.get(kind, "other"),
+        "parent_id": job.get("parent_id"),
+        "cancelable": False,
+        "ui": False,
+        "title": JobKind.label_of(kind) or kind,
+        "target": dict(job.get("target") or {}),
+        "status": str(job.get("status") or ""),
+        "percent": percent,
+        "stage": str(job.get("stage") or ""),
+        "current": current,
+        "error": job.get("error"),
+        "artifacts": list(job.get("artifacts") or []),
+        "progress": {"percent": percent, "current": current},
+        "timings": dict(job.get("timings") or {}),
+        "created_at": str(job.get("created_at") or ""),
+        "meta": dict(job.get("meta") or {}),
+    }
 
 def _reconcile_produce_jobs(store: ProjectStore) -> None:
     """兜底：运行中但本进程已无进程句柄的编排任务，标记为已中断。
@@ -205,20 +248,21 @@ def register_jobs_routes(app, project_root: str | None = None, config_path: str 
 
     @app.get("/api/ui/queue")
     def ui_queue(path: str = Query(...)):
-        """队列快照：GPU 队列 + 界面 AI 生成任务，按创建时间倒序。
+        """统一任务列表：界面生成任务 + GPU 队列任务，按创建时间倒序。
 
         参数:
             path: 工程根目录。
 
         返回:
-            任务数组（字段与 `queue list --json` 一致，界面任务额外带 progress）。
+            统一任务数组；每条都含 `id/job_id/kind/action/channel/title/target/status/
+            percent/stage/current/error/artifacts/progress/timings/created_at/cancelable/ui`，
+            界面任务 `ui=True`，GPU 队列任务 `ui=False` 且不可从任务页取消。
         """
         store = _store(path)
-        jobs = use_cases.call(lambda: queue_jobs(store))
         _reconcile_produce_jobs(store)
-        # 打上 ui 标记：只有界面发起、能在这里停的生成任务才在「操作」列给停止按钮
-        ui_jobs = [{**item, "ui": True} for item in load_ui_jobs(store)]
-        merged = [*ui_jobs, *jobs]
+        ui_jobs = [{**job_snapshot(item), "ui": True} for item in load_ui_jobs(store)]
+        queue_rows = [_queue_job_snapshot(item) for item in use_cases.call(lambda: queue_jobs(store))]
+        merged = [*ui_jobs, *queue_rows]
         merged.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
         return merged
 
@@ -723,10 +767,11 @@ def register_jobs_routes(app, project_root: str | None = None, config_path: str 
 
     @app.post("/api/ui/jobs/cancel")
     def ui_jobs_cancel(body: dict) -> dict:
-        """停止一条界面任务：生成线程协作取消 / 编排杀子进程 / 僵尸任务强制取消。
+        """停止一条任务：媒体任务走媒体总线、编排杀子进程、LLM 任务协作取消。
 
         参数:
-            body: `{path, id, force?}`；force=True 时不等待生成线程退出，直接落「已取消」。
+            body: `{path, id 或 job_id, force?}`；`id` 与 `job_id` 等价，
+                `force=True` 时不等待生成线程退出，直接落「已取消」。
 
         返回:
             `{canceled, message, status, forced}`。
@@ -736,13 +781,21 @@ def register_jobs_routes(app, project_root: str | None = None, config_path: str 
             HTTPException 404: 任务不存在。
         """
         path = str(body.get("path") or "").strip()
-        job_id = str(body.get("id") or "").strip()
+        job_id = str(body.get("id") or body.get("job_id") or "").strip()
         if not path or not job_id:
             raise HTTPException(status_code=400, detail={"code": 2, "message": "缺少工程路径或任务 ID"})
         store = ProjectStore(path)
-        current = next((item for item in load_ui_jobs(store) if item.get("id") == job_id), None)
+        current = next(
+            (
+                item
+                for item in load_ui_jobs(store)
+                if job_id in (str(item.get("id") or ""), str(item.get("job_id") or ""))
+            ),
+            None,
+        )
         if current is None:
             raise HTTPException(status_code=404, detail={"code": 4, "message": "任务不存在，可能已被清理"})
+        job_key = str(current.get("id") or job_id)
         status = str(current.get("status") or "")
         if status in ("succeeded", "failed", "canceled", "interrupted"):
             return {
@@ -753,17 +806,24 @@ def register_jobs_routes(app, project_root: str | None = None, config_path: str 
             }
         # 编排类任务要杀子进程，交给编排取消逻辑
         if current.get("kind") == "produce":
-            result = _cancel_produce_job(store, job_id)
+            result = _cancel_produce_job(store, job_key)
+            result.setdefault("forced", False)
+            return result
+        # 媒体任务：统一走媒体总线（含级联取消内嵌的 LLM 调用）
+        if str(current.get("action") or ""):
+            from novel_drama.application.support import media_bus
+
+            result = media_bus.cancel(store, job_key)
             result.setdefault("forced", False)
             return result
 
         force = bool(body.get("force"))
         # 能找到取消登记说明本进程确有生成线程；找不到就是僵尸任务
-        running = request_cancel(job_id)
+        running = request_cancel(job_key)
         if running and not force:
             # 等生成线程在下一次模型输出 / 落盘前自行退出（最多 5 秒）
             for _ in range(50):
-                latest = next((item for item in load_ui_jobs(store) if item.get("id") == job_id), {})
+                latest = next((item for item in load_ui_jobs(store) if item.get("id") == job_key), {})
                 if latest.get("status") in ("succeeded", "failed", "canceled", "interrupted"):
                     return {
                         "canceled": True,
@@ -773,7 +833,7 @@ def register_jobs_routes(app, project_root: str | None = None, config_path: str 
                     }
                 time.sleep(0.1)
 
-        latest = next((item for item in load_ui_jobs(store) if item.get("id") == job_id), {})
+        latest = next((item for item in load_ui_jobs(store) if item.get("id") == job_key), {})
         latest_status = str(latest.get("status") or "")
         if latest_status in ("succeeded", "failed", "canceled", "interrupted"):
             return {
@@ -788,7 +848,7 @@ def register_jobs_routes(app, project_root: str | None = None, config_path: str 
         else:
             reason = "后端已无对应生成进程（僵尸任务），已强制标记为已取消；已接收进度与已有产物保留"
             message = "后端已无对应生成进程，已强制标记为已取消"
-        update_job(store, job_id, status="canceled", error=reason)
+        update_job(store, job_key, status="canceled", error=reason)
         return {"canceled": True, "status": "canceled", "forced": not running, "message": message}
 
     @app.get("/api/ui/produce/latest")

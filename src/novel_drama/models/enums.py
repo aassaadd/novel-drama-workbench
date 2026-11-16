@@ -670,6 +670,16 @@ class UiJobKind(ZhEnum):
     SCRIPT = ("script", "导演标注")
     VOICE = ("voice", "音色")
     VOICE_FILL = ("voice.fill", "补齐音色")
+    TTS_LINE = ("tts.line", "单行重录")
+    TTS_CHAPTER = ("tts.chapter", "本章批量配音")
+    TTS_BOOK = ("tts.book", "全书批量配音")
+    VOICE_DESIGN = ("voice.design", "音色设计")
+    VOICE_PREVIEW = ("voice.preview", "角色试听")
+    SFX = ("sfx", "音效")
+    BGM = ("bgm", "配乐")
+    IMAGE = ("image", "配图")
+    VIDEO = ("video", "视频")
+    ANIM = ("anim", "图生视频")
 
 
 class UiJobStatus(ZhEnum):

@@ -105,19 +105,23 @@ MEDIA_PATHS = {"sfx": ("assets/sfx", ".wav"), "image": ("assets/images", ".png")
 _FALLBACK_EXT = {"image": ".png", "video": ".mp4"}
 
 
-def _iter_items(chapter: dict, kind: str):
+def _iter_items(chapter: dict, kind: str, item_ids: list[str] | None = None):
     """遍历章节内某类媒体条目。
 
     参数:
         chapter: 章节 dict。
         kind: sfx/image/video。
+        item_ids: 只处理这些条目 ID；None 表示全部。
 
     产出:
         (scene, item) 二元组。
     """
     key = {"sfx": "sfx_events", "image": "key_images", "video": "video_segments"}[kind]
+    wanted = set(item_ids) if item_ids is not None else None
     for scene in chapter.get("scenes") or []:
         for item in scene.get(key) or []:
+            if wanted is not None and item.get("id") not in wanted:
+                continue
             yield scene, item
 
 
@@ -703,6 +707,7 @@ def _run_comfy(
     force: bool,
     limit: int | None,
     stats: dict,
+    item_ids: list[str] | None = None,
 ) -> dict:
     """用真实 ComfyUI 生成一章内的关键图或视频。
 
@@ -714,6 +719,7 @@ def _run_comfy(
         force: 已就绪项是否重跑。
         limit: 单次最多处理条数。
         stats: 统计结构（就地填充）。
+        item_ids: 只处理这些条目 ID；None 表示全部。
 
     返回:
         统计结构。
@@ -725,7 +731,7 @@ def _run_comfy(
     health = gateway.health()
     processed = 0
 
-    for scene, item in _iter_items(chapter, kind):
+    for scene, item in _iter_items(chapter, kind, item_ids):
         stats["total"] += 1
         asset = item.setdefault("asset", {"status": "pending"})
         if _existing_asset(store, item, kind) and not force:
@@ -949,6 +955,7 @@ def run_media(
     force: bool = False,
     limit: int | None = None,
     dry_run: bool = False,
+    item_ids: list[str] | None = None,
 ) -> dict:
     """执行一章内某类媒体的生成。
 
@@ -960,6 +967,7 @@ def run_media(
         force: 已就绪项是否重跑。
         limit: 单次最多处理条数。
         dry_run: 只统计不执行。
+        item_ids: 只处理这些条目 ID；None 表示全部。
 
     返回:
         {"kind", "total", "ready", "skipped", "failed", "items": [{id, status, path, error}]}。
@@ -977,7 +985,7 @@ def run_media(
 
     stats = {"kind": kind, "total": 0, "ready": 0, "skipped": 0, "failed": 0, "items": [], "dry_run": dry_run}
     if kind in ("image", "video") and not dry_run and _provider(config, kind) == "comfyui":
-        return _run_comfy(store, config, chapter, kind, force, limit, stats)
+        return _run_comfy(store, config, chapter, kind, force, limit, stats, item_ids=item_ids)
 
     processed = 0
     # 音效走 provider 时整批复用同一个常驻 worker，跑完再关闭
@@ -990,7 +998,7 @@ def run_media(
             stats["error"] = exc.message
             return stats
     try:
-        for scene, item in _iter_items(chapter, kind):
+        for scene, item in _iter_items(chapter, kind, item_ids):
             stats["total"] += 1
             asset = item.setdefault("asset", {"status": "pending"})
             asset_path = store.root / f"{rel_dir}/{item['id']}{ext}"

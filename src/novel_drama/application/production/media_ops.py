@@ -46,6 +46,7 @@ def run_media_kind(
     kind: str,
     force: bool = False,
     limit: int | None = None,
+    item_ids: list[str] | None = None,
 ) -> dict:
     """执行一类媒体生成（音效 / 关键图 / 短视频）。
 
@@ -56,6 +57,7 @@ def run_media_kind(
         kind: `sfx` / `image` / `video`。
         force: 已就绪项也重新生成。
         limit: 本次最多处理条数。
+        item_ids: 只处理这些条目 ID（图生视频等部分执行）；None 表示全部。
 
     返回:
         `run_media` 的结构化结果（就绪/跳过/失败与逐条明细）。
@@ -64,7 +66,7 @@ def run_media_kind(
         FileNotFoundError: 章节不存在。
     """
     chapter = store.load_chapter(chapter_id)
-    return run_media(store, config, chapter, kind, force=force, limit=limit)
+    return run_media(store, config, chapter, kind, force=force, limit=limit, item_ids=item_ids)
 
 
 def export_chapter(

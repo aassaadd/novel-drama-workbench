@@ -398,6 +398,7 @@ def create_batch(store, cfg: AppConfig, character: dict, prompt: str, count: int
         "character_name": character.get("name"),
         "profile": profile,
         "prompt": prompt,
+        "script": _design_script(design),
         "engine": "voxcpm2",
         "model_id": "openbmb/VoxCPM2",
         "params": {
@@ -1118,6 +1119,137 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+#: 参考音内部停顿压缩：超过该时长（毫秒）的静音会被压缩
+_REF_GAP_MIN_MS = 350
+#: 压缩后保留的停顿（毫秒），留一点自然呼吸感
+_REF_GAP_KEEP_MS = 200
+#: 静音判定阈值（dBFS）
+_REF_SILENCE_DB = -45
+#: 规整后参考音的最短可用时长（毫秒），过短则回退原始候选
+_REF_MIN_DURATION_MS = 1200
+
+
+def _reference_frames(data: bytes, frame_bytes: int, threshold: int) -> list[bool]:
+    """逐帧判断是否为静音。
+
+    参数:
+        data: PCM 音频字节。
+        frame_bytes: 每帧字节数（声道数 × 采样位宽）。
+        threshold: 静音阈值（16 位采样的绝对值上限）。
+
+    返回:
+        每帧一个布尔值，True 表示静音。
+    """
+    import array
+
+    samples = array.array("h")
+    samples.frombytes(data[: len(data) - len(data) % frame_bytes])
+    per_frame = max(1, frame_bytes // 2)
+    flags: list[bool] = []
+    for offset in range(0, len(samples), per_frame):
+        chunk = samples[offset : offset + per_frame]
+        flags.append(bool(chunk) and max(abs(value) for value in chunk) <= threshold)
+    return flags
+
+
+def _normalize_reference_audio(source: Path, target: Path) -> dict:
+    """把抽卡候选规整成适合克隆的参考音。
+
+    克隆模型会模仿参考音里的停顿：候选若在句间留下 0.5~1.2 秒气口，
+    成品也会带着同样长的气口。这里裁掉首尾静音，并把内部超过
+    `_REF_GAP_MIN_MS` 的停顿压到 `_REF_GAP_KEEP_MS`，让参考音更紧凑。
+
+    只用标准库读写 PCM wav，不依赖 ffmpeg；非 16 位 PCM 时原样复制。
+
+    参数:
+        source: 候选音频。
+        target: 正式参考音输出路径。
+
+    返回:
+        `{"normalized": 是否做了规整, "note": 中文说明, "duration_ms": 最终时长}`。
+    """
+    import wave
+
+    def _fallback(note: str) -> dict:
+        """原样复制候选并返回说明。"""
+        shutil.copy2(source, target)
+        return {"normalized": False, "note": note, "duration_ms": _probe_wav_ms(target)}
+
+    try:
+        with wave.open(str(source), "rb") as handle:
+            channels = handle.getnchannels()
+            width = handle.getsampwidth()
+            rate = handle.getframerate()
+            raw = handle.readframes(handle.getnframes())
+    except (OSError, wave.Error, EOFError):
+        return _fallback("候选音频不是可读的 wav，已保留原始参考音")
+    if width != 2 or channels not in (1, 2) or not raw:
+        return _fallback("候选音频不是 16 位 PCM，已保留原始参考音")
+
+    frame_bytes = channels * width
+    flags = _reference_frames(raw, frame_bytes, int(32768 * (10 ** (_REF_SILENCE_DB / 20))))
+    voiced = [index for index, silent in enumerate(flags) if not silent]
+    if not voiced:
+        return _fallback("候选音频没有检测到有效人声，已保留原始参考音")
+    first, last = voiced[0], voiced[-1] + 1
+
+    keep = max(1, int(rate * _REF_GAP_KEEP_MS / 1000))
+    min_gap = max(keep + 1, int(rate * _REF_GAP_MIN_MS / 1000))
+    picked: list[int] = []
+    index = first
+    while index < last:
+        if flags[index]:
+            run_end = index
+            while run_end < last and flags[run_end]:
+                run_end += 1
+            run_len = run_end - index
+            # 只保留短气口；长停顿压到 keep 帧，避免克隆学到过长停顿
+            picked.extend(range(index, index + (run_len if run_len <= min_gap else keep)))
+            index = run_end
+            continue
+        picked.append(index)
+        index += 1
+
+    normalized = {
+        "normalized": True,
+        "note": "模型生成样本，已裁首尾静音并压缩长气口",
+        "duration_ms": int(len(picked) / rate * 1000),
+    }
+    if normalized["duration_ms"] < _REF_MIN_DURATION_MS:
+        return _fallback(
+            f"规整后参考音仅 {normalized['duration_ms']}ms，过短会影响克隆，已保留原始候选"
+        )
+    try:
+        with wave.open(str(target), "wb") as out:
+            out.setnchannels(channels)
+            out.setsampwidth(width)
+            out.setframerate(rate)
+            out.writeframes(b"".join(raw[item * frame_bytes : (item + 1) * frame_bytes] for item in picked))
+    except OSError as exc:
+        target.unlink(missing_ok=True)
+        return _fallback(f"参考音规整写入失败，已保留原始候选：{exc}")
+    return normalized
+
+
+def _probe_wav_ms(path: Path) -> int:
+    """读取 wav 时长（毫秒），失败返回 0。
+
+    参数:
+        path: wav 路径。
+
+    返回:
+        时长毫秒。
+    """
+    import wave
+
+    try:
+        with wave.open(str(path), "rb") as handle:
+            rate = handle.getframerate() or 1
+            return int(handle.getnframes() / rate * 1000)
+    except (OSError, wave.Error, EOFError):
+        return 0
+
+
 def _f0_hint(path: Path, gender: str) -> dict:
     """估计基频中位数，给出与设定性别的冲突提示（只提示，不改标签）。"""
     try:
@@ -1204,7 +1336,10 @@ def select_candidate(
     ref_dir = store.voice_asset_dir("ref")
     ref_dir.mkdir(parents=True, exist_ok=True)
     final = ref_dir / f"{variant_id}.wav"
-    shutil.copy2(source_path, final)
+    # 参考音直接决定克隆出的气口长短：裁首尾静音并把长停顿压短后再固化
+    norm = _normalize_reference_audio(source_path, final)
+    if norm.get("duration_ms"):
+        duration_ms = int(norm["duration_ms"])
     sha = _sha256(final)
     variant = {
         "id": variant_id,
@@ -1214,9 +1349,15 @@ def select_candidate(
         "reference": {
             "audio_path": str(final.relative_to(store.root)),
             "duration_ms": duration_ms,
-            "text": None,
+            "text": meta.get("script") or None,
             "sha256": sha,
-            "denoise": {"enabled": False, "engine": None, "original_audio_path": None, "applied_at": None, "note": "模型生成样本，默认不降噪"},
+            "denoise": {
+                "enabled": False,
+                "engine": None,
+                "original_audio_path": None,
+                "applied_at": None,
+                "note": str(norm.get("note") or "模型生成样本，默认不降噪"),
+            },
         },
         "consent": {"confirmed": True, "note": "AI 生成音色（VoxCPM2），非真人录音"},
         "generation": {
