@@ -6,15 +6,18 @@
 
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from novel_drama.adapters.errors import AdapterError
+from novel_drama.adapters.llm.contracts import TextGenResult
 from novel_drama.adapters.persistence import ProjectStore
 from novel_drama.adapters.persistence.settings_store import SettingsStore
 from novel_drama.application.cast.character_crud import (
@@ -37,6 +40,33 @@ from novel_drama.application.story.outline_bind import (
 from novel_drama.infrastructure.config import load_config
 from novel_drama.models import entities
 from novel_drama.text.context import ContextAssembler
+
+
+class _StubAdapter:
+    """返回固定一致性 JSON 的桩适配器。"""
+
+    def __init__(self, payload: dict) -> None:
+        """绑定要返回的 JSON。
+
+        参数:
+            payload: 模型输出结构（会被序列化成文本）。
+        """
+        self.payload = payload
+
+    def generate(self, req) -> TextGenResult:
+        """返回固定 JSON（忽略请求）。
+
+        参数:
+            req: 文本请求。
+
+        返回:
+            TextGenResult。
+        """
+        return TextGenResult(
+            text=json.dumps(self.payload, ensure_ascii=False),
+            finish_reason="stop",
+            model="stub",
+        )
 
 
 class CharacterLinkageTest(unittest.TestCase):
@@ -256,6 +286,8 @@ class CharacterLinkageTest(unittest.TestCase):
     def test_binding_audit_derives_actual_from_scenes_and_lines(self):
         """实际出场从场景与台词派生，计划 vs 实际能对账。"""
         chapter = self.store.load_chapter(self.chapter_id)
+        # 正文刻意不含角色姓名，确保 POV 判定只依赖场景/台词
+        chapter["content"] = "有人站在档案楼门口，听见脚步声。\n"
         scene_id = "scn_000000000001"
         chapter["scenes"] = [
             self._scene(
@@ -274,6 +306,30 @@ class CharacterLinkageTest(unittest.TestCase):
         self.assertEqual(peer["scenes"], 1)
         self.assertTrue(binding["audit"]["pov_not_in_prose"])
         self.assertEqual(binding["audit"]["unknown_speakers"][0]["speaker_id"], entities.UNKNOWN_SPEAKER_ID)
+
+    def test_prose_mention_counts_as_appearance(self):
+        """正文写了姓名但 scenes/lines 为空时，同样算已出场，不再误报计划未出场。"""
+        table = self.store.load_characters()
+        zhou = entities.new_character("周也", role="supporting")
+        table["characters"].append(zhou)
+        self.store.save_characters(table)
+        settings = SettingsStore(self.tmp.name)
+        bible = settings.load()
+        entry = next(ch for ch in bible["outline"]["acts"][0]["chapters"] if ch["id"] == self.chapter_id)
+        entry["beats"][0]["character_ids"] = [self.lead["id"], zhou["id"]]
+        settings.save(bible)
+
+        chapter = self.store.load_chapter(self.chapter_id)
+        chapter["content"] = "周也听见了。\n"
+        chapter["scenes"] = []
+        self.store.save_chapter(chapter)
+
+        binding = chapter_binding(self.store, self.chapter_id)
+        planned_names = [row["name"] for row in binding["audit"]["planned_not_used"]]
+        self.assertNotIn("周也", planned_names)
+        row = next(item for item in binding["characters"] if item["id"] == zhou["id"])
+        self.assertGreaterEqual(row["mentioned"], 1)
+        self.assertTrue(any(item["id"] == zhou["id"] for item in binding["audit"]["prose_mentions"]))
 
     def test_character_updates_require_confirmation(self):
         """回流提案只落预览；确认后才改角色卡。"""
@@ -312,6 +368,78 @@ class CharacterLinkageTest(unittest.TestCase):
         self.assertIn("unplanned", kinds)
         self.assertIn("other", kinds)
         self.assertGreaterEqual(record["counts"]["total"], 2)
+
+    def test_character_updates_scope_includes_prose_linked_character(self):
+        """大纲未安排但正文出现且已关联的角色，进入回流提案范围。"""
+        table = self.store.load_characters()
+        zhou = entities.new_character("周也", role="supporting")
+        table["characters"].append(zhou)
+        self.store.save_characters(table)
+
+        chapter = self.store.load_chapter(self.chapter_id)
+        chapter["content"] = "周也听见了。沈砚回头。\n"
+        chapter["scenes"] = []
+        self.store.save_chapter(chapter)
+
+        record = propose_character_updates(self.store, self.config, self.chapter_id)
+        scope_ids = [item["character_id"] for item in record["scope"]]
+        self.assertIn(zhou["id"], scope_ids)
+        self.assertEqual(record["scope_source"], "prose")
+
+    def test_consistency_scope_includes_prose_linked_character(self):
+        """大纲未计划但正文出现且已关联的角色，进入一致性检查范围。"""
+        table = self.store.load_characters()
+        zhou = entities.new_character("周也", role="supporting")
+        table["characters"].append(zhou)
+        self.store.save_characters(table)
+
+        chapter = self.store.load_chapter(self.chapter_id)
+        chapter["content"] = "周也听见了。沈砚回头。\n"
+        chapter["scenes"] = []
+        self.store.save_chapter(chapter)
+
+        record = check_chapter_consistency(self.store, self.config, self.chapter_id)
+        scope_ids = [item["character_id"] for item in record["characters"]]
+        self.assertIn(zhou["id"], scope_ids)
+        self.assertEqual(record["scope_source"], "prose")
+        self.assertTrue(record["prose_cast"]["exists"])
+        self.assertGreaterEqual(record["prose_cast"]["linked"], 2)
+        self.assertIn("counts", record)
+
+    def test_consistency_new_kinds_need_evidence(self):
+        """性别问题带正文证据才采纳；年龄问题缺少证据直接丢弃。"""
+        from novel_drama.application.story import consistency as consistency_module
+
+        chapter = self.store.load_chapter(self.chapter_id)
+        chapter["content"] = "沈砚站在门口，她抬起头。\n"
+        chapter["scenes"] = []
+        self.store.save_chapter(chapter)
+
+        stub = _StubAdapter(
+            {
+                "issues": [
+                    {
+                        "character_id": self.lead["id"],
+                        "kind": "gender",
+                        "level": "high",
+                        "message": "性别称谓与角色卡冲突",
+                        "evidence": "她抬起头。",
+                    },
+                    {
+                        "character_id": self.lead["id"],
+                        "kind": "age",
+                        "level": "medium",
+                        "message": "年龄言行与角色卡不符",
+                        "evidence": "",
+                    },
+                ]
+            }
+        )
+        with patch.object(consistency_module, "build_writing_adapter", return_value=stub):
+            record = check_chapter_consistency(self.store, self.config, self.chapter_id)
+        model_kinds = [item["kind"] for item in record["issues"] if item.get("source") == "model"]
+        self.assertIn("gender", model_kinds)
+        self.assertNotIn("age", model_kinds)
 
 
 class CleanSpeechStyleTest(unittest.TestCase):

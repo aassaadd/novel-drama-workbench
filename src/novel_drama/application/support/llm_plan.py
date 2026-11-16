@@ -335,6 +335,15 @@ _action(
     calls=lambda store, config, ctx: _capture_calls(store, ctx),
 )
 _action(
+    "cast.extract",
+    title="从正文抽取角色",
+    what="从本章正文识别有姓名的人物：已有角色按姓名/别名关联，新人先预览、确认后才建卡",
+    stages=("characters",),
+    seconds=8,
+    cancelable=True,
+    calls=lambda store, config, ctx: 1,
+)
+_action(
     "consistency",
     title="一致性审校",
     what="检查本章正文与设定、角色状态是否一致，只出问题清单",

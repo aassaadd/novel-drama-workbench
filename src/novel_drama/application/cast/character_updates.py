@@ -19,6 +19,7 @@ from ...infrastructure.config import AppConfig, resolve_temperature
 from ...models.ids import now_iso
 from ..story.outline_bind import chapter_binding
 from ..support.llm_calls import build_writing_adapter
+from .prose_cast import ensure_prose_cast, scope_character_ids
 
 #: 提案中允许写回的角色状态字段
 UPDATE_FIELDS = ("situation", "knowledge_add", "relations")
@@ -164,10 +165,13 @@ def propose_character_updates(
     ]
     cast_ids = {str(item.get("id")) for item in characters if item.get("id")}
     binding = chapter_binding(store, chapter_id)
-    focus_ids = {
-        row["id"] for row in binding.get("characters") or [] if row.get("planned") or row.get("is_pov")
-    }
+    try:
+        prose_record = ensure_prose_cast(store, config, chapter_id)
+    except Exception:  # noqa: BLE001 - 抽取异常不能阻断回流，退化为绑定范围
+        prose_record = None
+    focus_ids, scope_source = scope_character_ids(binding, prose_record)
     focus = [item for item in characters if str(item.get("id")) in focus_ids] or characters
+    scope = [{"character_id": item.get("id"), "name": item.get("name")} for item in focus]
     settings = SettingsStore(store.root)
     bible = settings.ensure()
     adapter = build_writing_adapter(config, bible, action="character.updates")
@@ -191,7 +195,7 @@ def propose_character_updates(
         '"relations":[{"target_id":"chr_yyy","label":"关系名","sentiment":"ally|enemy|family|romance|neutral",'
         '"note":"变化说明"}],"arc_note":"本章的角色弧线变化"}]}\n'
         "约束：只使用下面给出的 character_id；没有变化的角色不要输出；不要新增角色；"
-        "没有把握的内容不要编造。\n\n"
+        "角色范围以正文抽取结果为准；没有把握的内容不要编造。\n\n"
         f"角色当前状态：{json.dumps(state_brief, ensure_ascii=False)}\n\n"
         f"本章正文：\n{content[:excerpt_chars]}"
     )
@@ -222,6 +226,8 @@ def propose_character_updates(
         "created_at": now_iso(),
         "applied": False,
         "model": result.model,
+        "scope_source": scope_source,
+        "scope": scope,
         "updates": updates,
     }
     updates_file(store, chapter_id).write_text(

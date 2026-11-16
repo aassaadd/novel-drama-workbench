@@ -6,6 +6,7 @@ from ...adapters.persistence import ProjectStore
 from ...adapters.persistence.settings_store import SettingsStore
 from ...adapters.persistence.world_store import WorldStore
 from ...models import entities
+from ..cast.prose_cast import scan_mentions
 from ..production.lines_source import chapter_view
 
 
@@ -266,7 +267,8 @@ def bind_beat_characters(store: ProjectStore, chapter_id: str, beat_id: str, cha
 def chapter_binding(store: ProjectStore, chapter_id: str) -> dict:
     """汇总本章的角色绑定、实际出场与对账结果（只读派生，不落盘）。
 
-    实际出场从 `scenes[].character_ids` 与 `lines[].speaker_id` 现算；计划出场只读大纲节拍。
+    实际出场从三个来源现算：`scenes[].character_ids`、`lines[].speaker_id` 与正文姓名/别名提及；
+    计划出场只读大纲节拍。
 
     参数:
         store: 工程。
@@ -276,7 +278,8 @@ def chapter_binding(store: ProjectStore, chapter_id: str) -> dict:
         {
           chapter_id, pov: {id,name}|null, pov_mode, blocking: [...], warnings: [...],
           beats: [...], characters: [...],
-          audit: {planned_not_used, unplanned_appeared, pov_not_in_prose, missing_refs, unknown_speakers}
+          audit: {planned_not_used, unplanned_appeared, pov_not_in_prose, missing_refs,
+                  unknown_speakers, prose_mentions}
         }。
     """
     settings = SettingsStore(store.root)
@@ -344,11 +347,18 @@ def chapter_binding(store: ProjectStore, chapter_id: str) -> dict:
         cid for cid, count in scenes_by_char.items() if count
     }
     actual_ids = {cid for cid in actual_ids if cid not in (entities.UNKNOWN_SPEAKER_ID,)}
+    # 正文姓名/别名提及同样算「已出场」：台词与场景尚未切分时也能对上账
+    mention_rows = scan_mentions(str(chapter.get("content") or ""), characters)
+    mentions_by_id = {str(row.get("character_id") or ""): row for row in mention_rows}
+    mentioned_ids = {cid for cid, row in mentions_by_id.items() if int(row.get("mentions") or 0) > 0}
     rows: list[dict] = []
-    for cid in sorted(set(cast_by_id) | set(planned_counts) | actual_ids | ({pov_id} if pov_id else set())):
+    for cid in sorted(
+        set(cast_by_id) | set(planned_counts) | actual_ids | mentioned_ids | ({pov_id} if pov_id else set())
+    ):
         if cid in (entities.NARRATOR_ID, entities.UNKNOWN_SPEAKER_ID):
             continue
         item = cast_by_id.get(cid) or {}
+        mention = mentions_by_id.get(cid) or {}
         rows.append(
             {
                 "id": cid,
@@ -358,6 +368,7 @@ def chapter_binding(store: ProjectStore, chapter_id: str) -> dict:
                 "planned_beats": planned_counts.get(cid, 0),
                 "lines": lines_by_char.get(cid, 0),
                 "scenes": scenes_by_char.get(cid, 0),
+                "mentioned": int(mention.get("mentions") or 0),
                 "is_pov": cid == pov_id,
             }
         )
@@ -394,7 +405,7 @@ def chapter_binding(store: ProjectStore, chapter_id: str) -> dict:
     planned_not_used = [
         {"id": row["id"], "name": row["name"]}
         for row in rows
-        if row["planned"] and row["lines"] == 0 and row["scenes"] == 0
+        if row["planned"] and row["lines"] == 0 and row["scenes"] == 0 and row["mentioned"] == 0
     ]
     if planned_not_used:
         warnings.append(
@@ -406,7 +417,7 @@ def chapter_binding(store: ProjectStore, chapter_id: str) -> dict:
     unplanned = [
         {"id": row["id"], "name": row["name"]}
         for row in rows
-        if not row["planned"] and (row["lines"] or row["scenes"]) and row["id"] in cast_by_id
+        if not row["planned"] and (row["lines"] or row["scenes"] or row["mentioned"]) and row["id"] in cast_by_id
     ]
     if unplanned:
         warnings.append(
@@ -416,7 +427,9 @@ def chapter_binding(store: ProjectStore, chapter_id: str) -> dict:
             }
         )
     pov_row = next((row for row in rows if row["id"] == pov_id), None) if pov_id else None
-    pov_not_in_prose = bool(pov_id and pov_row and pov_row["lines"] == 0 and pov_row["scenes"] == 0)
+    pov_not_in_prose = bool(
+        pov_id and pov_row and pov_row["lines"] == 0 and pov_row["scenes"] == 0 and pov_row["mentioned"] == 0
+    )
     if pov_not_in_prose:
         warnings.append(
             {"code": "POV_NOT_IN_PROSE", "message": f"视角人物「{pov_row['name']}」没有在正文场景或台词里出现"}
@@ -443,6 +456,15 @@ def chapter_binding(store: ProjectStore, chapter_id: str) -> dict:
             "pov_not_in_prose": pov_not_in_prose,
             "missing_refs": missing_refs,
             "unknown_speakers": list(unknown.values()),
+            "prose_mentions": [
+                {
+                    "id": row.get("character_id"),
+                    "name": row.get("name"),
+                    "mentions": int(row.get("mentions") or 0),
+                    "evidence": row.get("evidence") or "",
+                }
+                for row in mention_rows
+            ],
         },
     }
 

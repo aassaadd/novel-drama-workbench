@@ -17,11 +17,26 @@ from ...adapters.persistence import ProjectStore
 from ...adapters.persistence.settings_store import SettingsStore
 from ...infrastructure.config import AppConfig, resolve_temperature
 from ...models.ids import now_iso
+from ..cast.prose_cast import ensure_prose_cast, scope_character_ids
 from ..support.llm_calls import build_writing_adapter
 from .outline_bind import chapter_binding
 
 #: 问题类型（与页面展示的中文标签对应）
-ISSUE_KINDS = ("speech", "knowledge", "relation", "unplanned", "pov", "other")
+ISSUE_KINDS = (
+    "speech",
+    "knowledge",
+    "relation",
+    "gender",
+    "age",
+    "appearance",
+    "personality",
+    "unplanned",
+    "pov",
+    "other",
+)
+
+#: 必须有正文原句证据才采纳的问题类型（避免凭空指控）
+EVIDENCE_REQUIRED_KINDS = ("gender", "age", "appearance", "personality")
 
 #: 问题级别
 LEVELS = ("high", "medium", "low")
@@ -153,6 +168,48 @@ def _derived_issues(binding: dict) -> list[dict]:
     return issues
 
 
+def _relations_brief(item: dict, by_id: dict[str, dict]) -> list[str]:
+    """把角色的关系备注与关系条目整理成「对方姓名：说明」列表。
+
+    参数:
+        item: 角色 dict。
+        by_id: 角色 ID → 角色 dict（用于把关系目标 ID 换成姓名）。
+
+    返回:
+        关系文本列表（去空、去重）。
+    """
+
+    def _name(target: str) -> str:
+        """把关系目标 ID 换成姓名；找不到时保留原值。"""
+        return str((by_id.get(target) or {}).get("name") or target)
+
+    rows: list[str] = []
+    state = item.get("state") or {}
+    notes = state.get("relationship_notes") or {}
+    if isinstance(notes, dict):
+        for target, note in notes.items():
+            text = str(note or "").strip()
+            label = f"{_name(str(target))}：{text}" if text else _name(str(target))
+            if label and label not in rows:
+                rows.append(label)
+    for relation in state.get("relations") or []:
+        if not isinstance(relation, dict):
+            continue
+        target = str(relation.get("target_id") or "").strip()
+        if not target:
+            continue
+        label = str(relation.get("label") or "").strip()
+        note = str(relation.get("note") or "").strip()
+        text = _name(target)
+        if label:
+            text += f"（{label}）"
+        if note:
+            text += f"：{note}"
+        if text not in rows:
+            rows.append(text)
+    return rows
+
+
 def check_chapter_consistency(
     store: ProjectStore,
     config: AppConfig,
@@ -184,33 +241,58 @@ def check_chapter_consistency(
         for item in store.load_characters()["characters"]
         if item.get("role") != "narrator"
     ]
-    cast_ids = {str(item.get("id")) for item in characters if item.get("id")}
-    focus_ids = {row["id"] for row in binding.get("characters") or [] if row.get("planned") or row.get("is_pov")}
+    by_id = {str(item.get("id")): item for item in characters if item.get("id")}
+    try:
+        prose_record = ensure_prose_cast(store, config, chapter_id)
+    except Exception:  # noqa: BLE001 - 抽取异常不能阻断一致性检查，退化为绑定范围
+        prose_record = None
+    focus_ids, scope_source = scope_character_ids(binding, prose_record)
     focus = [item for item in characters if str(item.get("id")) in focus_ids] or characters
+    prose_rows = (prose_record or {}).get("characters") or []
+    prose_summary = {
+        "exists": bool((prose_record or {}).get("exists", prose_record is not None)),
+        "stale": bool((prose_record or {}).get("stale", False)),
+        "linked": sum(
+            1 for row in prose_rows if isinstance(row, dict) and row.get("status") == "linked"
+        ),
+        "pending": sum(
+            1 for row in prose_rows if isinstance(row, dict) and row.get("status") == "new"
+        ),
+    }
     brief = [
         {
             "character_id": item.get("id"),
             "name": item.get("name"),
+            "gender": item.get("gender"),
+            "age_range": item.get("age_range"),
             "personality": item.get("personality") or [],
+            "background": item.get("background") or "",
+            "appearance": item.get("appearance_desc_zh") or item.get("appearance_prompt") or "",
             "speech_style": item.get("speech_style") or {},
             "situation": (item.get("state") or {}).get("situation"),
             "knowledge": (item.get("state") or {}).get("knowledge") or [],
-            "relationships": (item.get("state") or {}).get("relationship_notes") or {},
+            "relationships": _relations_brief(item, by_id),
         }
         for item in focus
     ]
     pov_mode = binding.get("pov_mode")
     pov = binding.get("pov") or {}
     prompt = (
-        "请对照角色卡检查本章正文是否有角色一致性问题。只输出 JSON，不要改正文：\n"
-        '{"issues":[{"character_id":"chr_xxx","kind":"speech|knowledge|relation|other",'
+        "请对照角色卡逐项检查本章正文是否有角色一致性问题。只输出 JSON，不要改正文：\n"
+        '{"issues":[{"character_id":"chr_xxx",'
+        '"kind":"gender|age|appearance|personality|speech|knowledge|relation|other",'
         '"level":"high|medium|low","message":"问题描述","evidence":"正文原句（不超过60字）"}]}\n'
-        "检查点：\n"
-        "1) 说话方式：语速、用词、口音、口头禅是否明显偏离角色卡；不同角色口吻是否雷同；\n"
-        "2) 已知信息：角色是否说出自己不可能知道的事实；\n"
-        "3) 关系：言行是否与关系备注矛盾（盟友互相出卖、仇敌突然交心都要指出）；\n"
-        "4) 视角：是否越界写了非视角人物的内心。\n"
-        "只使用下面给出的 character_id；没有问题时输出 {\"issues\":[]}。\n\n"
+        "检查项（逐项检查，发现问题就输出一条）：\n"
+        "1) 性别与称谓：他/她、男人/女人、先生/小姐、父亲/母亲等称谓是否与角色卡性别冲突；\n"
+        "2) 年龄与身份：年龄段的言行、长辈/晚辈、职务身份称谓是否与角色卡冲突；\n"
+        "3) 外貌：发色、伤疤、体型、衣着等描写是否与角色卡的外貌设定冲突；\n"
+        "4) 性格行为：关键行为是否明显违背角色卡的性格；\n"
+        "5) 说话方式：语速、音高、口音、用词、口头禅是否偏离角色卡，是否与其他角色雷同；\n"
+        "6) 人物关系：言行是否与关系备注矛盾（盟友互相出卖、仇敌突然交心都要指出）；\n"
+        "7) 已知信息：是否越界说出自己不可能知道的事实；\n"
+        "8) 视角：是否越界写了非视角人物的内心。\n"
+        "每条问题都必须给出正文原句作为 evidence；性别/年龄/外貌/性格问题缺少 evidence 视为无效；\n"
+        "character_id 只能使用下面给出的角色范围；没有问题时输出 {\"issues\":[]}。\n\n"
         f"本章视角：{pov_mode}；视角人物：{pov.get('name') or '未绑定'}\n"
         f"角色卡：{json.dumps(brief, ensure_ascii=False)}\n\n"
         f"本章正文：\n{content[:excerpt_chars]}"
@@ -242,23 +324,28 @@ def check_chapter_consistency(
         if not isinstance(raw, dict):
             continue
         character_id = str(raw.get("character_id") or "").strip()
-        if character_id and character_id not in cast_ids:
+        if character_id and character_id not in focus_ids:
             continue
         kind = str(raw.get("kind") or "other").strip()
+        kind = kind if kind in ISSUE_KINDS else "other"
         level = str(raw.get("level") or "medium").strip()
         message = str(raw.get("message") or "").strip()[:300]
         if not message:
             continue
+        evidence = str(raw.get("evidence") or "").strip()[:200]
+        # 性别/年龄/外貌/性格必须引用正文原句，避免凭空指控
+        if kind in EVIDENCE_REQUIRED_KINDS and not evidence:
+            continue
         issues.append(
             {
-                "kind": kind if kind in ISSUE_KINDS else "other",
+                "kind": kind,
                 "level": level if level in LEVELS else "medium",
                 "character_id": character_id or None,
                 "name": next(
                     (item.get("name") for item in characters if item.get("id") == character_id), ""
                 ),
                 "message": message,
-                "evidence": str(raw.get("evidence") or "").strip()[:200],
+                "evidence": evidence,
                 "source": "model",
             }
         )
@@ -274,6 +361,11 @@ def check_chapter_consistency(
         "model": result.model,
         "issues": issues,
         "counts": counts,
+        "characters": [
+            {"character_id": item.get("id"), "name": item.get("name")} for item in focus
+        ],
+        "scope_source": scope_source,
+        "prose_cast": prose_summary,
     }
     consistency_file(store, chapter_id).write_text(
         json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8"

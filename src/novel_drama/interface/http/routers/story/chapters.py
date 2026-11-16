@@ -235,6 +235,71 @@ def register_story_chapters_routes(app, project_root: str | None = None, config_
             "chapters": per_chapter,
         }
 
+    @app.get("/api/ui/chapters/prose-cast")
+    def ui_prose_cast_get(path: str = Query(...), chapter: str = Query(...)) -> dict:
+        """读取本章的正文角色抽取记录（含 `exists` / `stale`）。
+
+        参数:
+            path: 工程目录。
+            chapter: 章节 ID。
+
+        返回:
+            抽取记录；没有时返回空骨架。
+        """
+        from novel_drama.application.cast.prose_cast import load_prose_cast
+
+        return load_prose_cast(_store(path), chapter)
+
+    @app.post("/api/ui/chapters/prose-cast")
+    def ui_prose_cast_create(body: dict) -> dict:
+        """从本章正文抽取角色并落盘（只预览，不建卡）。
+
+        参数:
+            body: `{path, chapter, force?}`；`force` 为真时显式强制重抽，
+            否则正文未改时直接复用缓存。
+
+        返回:
+            抽取记录。
+
+        异常:
+            HTTPException 400: 缺少 chapter、正文为空或抽取失败。
+        """
+        from novel_drama.application.cast.prose_cast import extract_prose_cast
+
+        store = _store(body.get("path"))
+        chapter = str(body.get("chapter") or "")
+        if not chapter:
+            raise HTTPException(status_code=400, detail={"code": 2, "message": "缺少 chapter 参数"})
+        try:
+            return extract_prose_cast(store, load_config(config_path), chapter, force=bool(body.get("force")))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"code": 2, "message": str(exc)}) from exc
+
+    @app.post("/api/ui/chapters/prose-cast/apply")
+    def ui_prose_cast_apply(body: dict) -> dict:
+        """按作者勾选把待新建候选建成角色卡并关联本章。
+
+        参数:
+            body: `{path, chapter, selections?: [{name, character_id?}]}`；
+            selections 缺省表示全部待新建候选。
+
+        返回:
+            `{chapter_id, created, reused, linked_ids, skipped, record}`。
+
+        异常:
+            HTTPException 400: 缺少 chapter 或本章还没有抽取记录。
+        """
+        from novel_drama.application.cast.prose_cast import apply_prose_cast
+
+        store = _store(body.get("path"))
+        chapter = str(body.get("chapter") or "")
+        if not chapter:
+            raise HTTPException(status_code=400, detail={"code": 2, "message": "缺少 chapter 参数"})
+        try:
+            return apply_prose_cast(store, chapter, body.get("selections"))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"code": 2, "message": str(exc)}) from exc
+
     @app.get("/api/ui/chapters/character-updates")
     def ui_character_updates_get(path: str = Query(...), chapter: str = Query(...)) -> dict:
         """读取本章角色状态回流提案（只读，不自动改角色卡）。

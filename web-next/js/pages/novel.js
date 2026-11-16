@@ -53,6 +53,9 @@ const cache = {
   bindingChapter: '',
   /** 角色表（绑定下拉与节拍选角共用） */
   cast: [],
+  /** 本章正文角色抽取记录（含 linked / new 候选与 applied 状态） */
+  proseCast: null,
+  proseCastChapter: '',
   /** 生成后的角色状态回流提案 */
   updates: null,
   updatesChapter: '',
@@ -1663,7 +1666,68 @@ function bindingCardHTML(chapter) {
 }
 
 /**
- * 生成后角色状态回流卡：先提案、逐条勾选、确认后才写回角色卡。
+ * 正文角色区：先从正文抽取（只预览），作者勾选后才建卡并关联本章。
+ * 作为「角色状态回流」卡内的一个分区渲染，不单独占一张卡。
+ * @param {object} chapter 大纲章
+ * @returns {string} HTML
+ */
+function proseCastSectionHTML(chapter) {
+  const record = cache.proseCastChapter === chapter.id ? cache.proseCast : null;
+  const all = record?.characters || [];
+  const linked = all.filter((item) => item.status === 'linked');
+  const pending = all.filter((item) => item.status === 'new');
+  const linkedHTML = linked
+    .map(
+      (item) => `<div class="summary-line">
+        <b>${esc(item.name || item.character_id)}</b>
+        <span class="hint" style="margin-left:8px">提及 ${Number(item.mentions || 0)} 次</span>
+      </div>${item.evidence ? `<div class="hint">证据：${esc(item.evidence)}</div>` : ''}`
+    )
+    .join('');
+  const pendingHTML = pending
+    .map(
+      (item) => `<div class="arc-row">
+        <label class="checkline"><input type="checkbox" data-prose-pick value="${esc(item.name)}" checked />
+          <b>${esc(item.name)}</b></label>
+        ${item.evidence ? `<div class="hint">证据：${esc(item.evidence)}</div>` : ''}
+      </div>`
+    )
+    .join('');
+  const bodyHTML = record
+    ? `${
+        linked.length
+          ? `<div class="field"><label>已关联角色（${linked.length}）</label>${linkedHTML}</div>`
+          : ''
+      }
+      ${
+        pending.length
+          ? `<div class="field"><label>待新建候选（${pending.length}，勾选后才建卡）</label>${pendingHTML}</div>
+            <div class="right"><button class="btn sm primary" data-act="novel-prose-cast-apply">确认建卡并关联</button></div>`
+          : ''
+      }
+      ${
+        linked.length || pending.length
+          ? ''
+          : '<div class="hint">本章正文里没有识别到有姓名的角色。</div>'
+      }`
+    : '<div class="hint">先抽取正文角色：已有角色会直接关联，新人物需你确认后才建卡。</div>';
+  return `
+    <div class="field" style="display:grid;gap:8px;margin:0">
+      <div style="display:flex;align-items:center;gap:8px">
+        <label style="margin:0">正文角色</label>
+        ${record?.applied ? '<span class="badge ok">已关联</span>' : ''}
+        ${record?.stale ? '<span class="badge warn">正文已改，需重新抽取</span>' : ''}
+        <div class="right">
+          <button class="btn sm" data-act="novel-prose-cast">从正文抽取角色</button>
+        </div>
+      </div>
+      ${bodyHTML}
+    </div>`;
+}
+
+/**
+ * 生成后角色状态回流卡：卡内先放「正文角色」区，再放状态变化提案；
+ * 提案逐条勾选，确认后才写回角色卡。
  * @param {object} chapter 大纲章
  * @returns {string} HTML
  */
@@ -1681,6 +1745,8 @@ function updatesCardHTML(chapter) {
         </div>
       </div>
       <div class="card-body" style="display:grid;gap:8px">
+        ${proseCastSectionHTML(chapter)}
+        <div class="hint" style="border-top:1px solid var(--line);padding-top:8px">状态变化</div>
         ${
           updates.length
             ? updates
@@ -1726,6 +1792,8 @@ function updatesCardHTML(chapter) {
 function consistencyCardHTML(chapter) {
   const record = cache.consistencyChapter === chapter.id ? cache.consistency : null;
   const issues = record?.issues || [];
+  const scope = record?.characters || [];
+  const scopeSource = record?.scope_source === 'prose' ? '正文抽取' : '大纲绑定';
   return `
     <div class="card" id="novel-consistency-card">
       <div class="card-head">
@@ -1736,6 +1804,14 @@ function consistencyCardHTML(chapter) {
         </div>
       </div>
       <div class="card-body" style="display:grid;gap:6px">
+        ${
+          scope.length
+            ? `<div class="hint">本次检查 ${scope.length} 个角色（来源：${scopeSource}）：
+                ${scope
+                  .map((item) => `<span class="badge mute">${esc(item.name || item.character_id)}</span>`)
+                  .join(' ')}</div>`
+            : ''
+        }
         ${
           issues.length
             ? issues
@@ -1764,16 +1840,17 @@ function consistencyCardHTML(chapter) {
 }
 
 /**
- * 读取本章角色绑定、角色表、回流提案与一致性结果。
+ * 读取本章角色绑定、角色表、正文角色抽取、回流提案与一致性结果。
  * @param {string} chapterId 章节 ID
  * @param {boolean} [force] 忽略缓存强制刷新
  */
 async function loadBinding(chapterId, force = false) {
   if (!force && cache.bindingChapter === chapterId && cache.binding) return;
   try {
-    const [binding, castResp, updates, consistency] = await Promise.all([
+    const [binding, castResp, proseCast, updates, consistency] = await Promise.all([
       getJSON('/api/ui/chapters/binding', { path: cache.path, chapter: chapterId }),
       getJSON('/api/ui/characters', { path: cache.path }).catch(() => ({ characters: [] })),
+      getJSON('/api/ui/chapters/prose-cast', { path: cache.path, chapter: chapterId }).catch(() => null),
       getJSON('/api/ui/chapters/character-updates', { path: cache.path, chapter: chapterId }).catch(() => null),
       getJSON('/api/ui/chapters/consistency', { path: cache.path, chapter: chapterId }).catch(() => null),
     ]);
@@ -1781,6 +1858,8 @@ async function loadBinding(chapterId, force = false) {
     cache.binding = binding;
     cache.bindingChapter = chapterId;
     cache.cast = (castResp?.characters || []).filter((item) => item.role !== 'narrator');
+    cache.proseCast = proseCast;
+    cache.proseCastChapter = chapterId;
     cache.updates = updates;
     cache.updatesChapter = chapterId;
     cache.consistency = consistency;
@@ -1932,6 +2011,82 @@ function addArcRow() {
   const hint = wrap.querySelector('.hint');
   if (hint) hint.remove();
   wrap.insertAdjacentHTML('beforeend', html);
+}
+
+/** 从本章正文抽取角色：已有角色直接关联，新人物只预览，等作者确认后才建卡 */
+async function extractProseCast() {
+  const hit = findOutlineChapter(ui.sel.id);
+  if (!hit) return;
+  try {
+    const data = await runLlm({
+      action: 'cast.extract',
+      params: { path: cache.path, chapter: hit.chapter.id },
+      title: '正在从正文抽取角色…',
+      hint: '已有关联直接复用；新人物先预览，确认后才建卡',
+      request: ({ callId, signal }) =>
+        postJSON(
+          '/api/ui/chapters/prose-cast',
+          { path: cache.path, chapter: hit.chapter.id },
+          { timeout: 0, callId, signal }
+        ),
+      finish: (result) => {
+        const rows = result?.characters || [];
+        const linked = rows.filter((item) => item.status === 'linked').length;
+        const pending = rows.filter((item) => item.status === 'new').length;
+        return {
+          message: `已关联 ${linked} 个已有角色${pending ? `，还有 ${pending} 个新人物待确认` : ''}`,
+          detail: '新人物不会自动建卡：勾选后点「确认建卡并关联」才会写入角色库。',
+        };
+      },
+    });
+    // null 表示用户在确认框或进度卡上取消了本次调用
+    if (!data) return;
+    cache.proseCast = data;
+    cache.proseCastChapter = hit.chapter.id;
+    refreshBindingCards();
+    const rows = cache.proseCast?.characters || [];
+    const linked = rows.filter((item) => item.status === 'linked').length;
+    const pending = rows.filter((item) => item.status === 'new').length;
+    toast(
+      pending
+        ? `已关联 ${linked} 个已有角色，${pending} 个新人物请确认后建卡`
+        : `已关联 ${linked} 个已有角色`,
+      pending ? 'warn' : 'ok'
+    );
+  } catch {
+    // 进度卡已展示失败原因与重试入口，这里不再重复弹错
+  }
+}
+
+/** 按勾选把待新建候选建成角色卡并关联本章（不勾选即不建卡） */
+async function applyProseCast() {
+  const hit = findOutlineChapter(ui.sel.id);
+  if (!hit) return;
+  const names = [...document.querySelectorAll('[data-prose-pick]')]
+    .filter((node) => node.checked)
+    .map((node) => node.value)
+    .filter(Boolean);
+  if (!names.length) return toast('没有勾选任何新人物，角色库未改动', 'warn');
+  try {
+    const result = await postJSON('/api/ui/chapters/prose-cast/apply', {
+      path: cache.path,
+      chapter: hit.chapter.id,
+      selections: names.map((name) => ({ name })),
+    });
+    if (result?.record) {
+      cache.proseCast = result.record;
+      cache.proseCastChapter = hit.chapter.id;
+    }
+    // 建卡后角色表有新增，重新拉取供绑定下拉与节拍选角使用
+    cache.cast = (await getJSON('/api/ui/characters', { path: cache.path })).characters || cache.cast;
+    refreshBindingCards();
+    toast(
+      `已建卡 ${(result?.created || []).length} 个 / 复用 ${(result?.reused || []).length} 个`,
+      'ok'
+    );
+  } catch (error) {
+    toast(`建卡失败：${error.message}`, 'bad', 3600);
+  }
 }
 
 /** 检测本章角色状态回流（只生成提案，不写角色卡） */
@@ -5714,6 +5869,8 @@ async function onClick(event) {
     el.closest('[data-arc]')?.remove();
     return;
   }
+  if (act === 'novel-prose-cast') return extractProseCast();
+  if (act === 'novel-prose-cast-apply') return applyProseCast();
   if (act === 'novel-updates-detect') return detectUpdates();
   if (act === 'novel-updates-apply') return applyUpdates();
   if (act === 'novel-consistency-check') return checkConsistency();

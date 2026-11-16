@@ -201,11 +201,13 @@ class OfflineWritingAdapter:
         elif task == "cast_capture":
             # 角色识别补跑：离线不造角色，返回空 cast 让调用方走「未识别到」分支
             text = json.dumps({"cast": []}, ensure_ascii=False)
+        elif task == "cast_extract":
+            text = self._cast_extract(meta)
         elif task == "freeform":
             text = self._freeform(req)
         else:
             raise ValueError(
-                f"离线写作不支持的 task={task!r}（可选 outline/chapter/chapter_compress/chapter_supplement/summarize/recap/character_updates/consistency/script/image_prompt/setting/character/polish/cast_capture/freeform）"
+                f"离线写作不支持的 task={task!r}（可选 outline/chapter/chapter_compress/chapter_supplement/summarize/recap/character_updates/consistency/script/image_prompt/setting/character/polish/cast_capture/cast_extract/freeform）"
             )
         return TextGenResult(
             text=text,
@@ -730,6 +732,59 @@ class OfflineWritingAdapter:
                 }
             ]
         return json.dumps({"updates": updates}, ensure_ascii=False, indent=2)
+
+    def _cast_extract(self, meta: dict) -> str:
+        """离线从正文抽取角色（只关联现有角色，不新造人物）。
+
+        参数:
+            meta: {characters, content, chapter_id}；characters 每项含 id/name/aliases。
+
+        返回:
+            JSON 字符串（`{"characters": [{existing_id, name, mentions, evidence}]}`）。
+        """
+        content = str(meta.get("content") or "")
+        rows: list[dict] = []
+        for item in meta.get("characters") or []:
+            if not isinstance(item, dict):
+                continue
+            character_id = str(item.get("id") or item.get("character_id") or "")
+            name = str(item.get("name") or "").strip()
+            if not character_id or not name:
+                continue
+            terms = [name, *[str(alias).strip() for alias in (item.get("aliases") or []) if str(alias).strip()]]
+            hit = next((term for term in terms if term and term in content), "")
+            if not hit:
+                continue
+            rows.append(
+                {
+                    "existing_id": character_id,
+                    "name": name,
+                    "mentions": content.count(hit),
+                    "evidence": self._evidence_sentence(content, hit),
+                }
+            )
+        return json.dumps({"characters": rows}, ensure_ascii=False, indent=2)
+
+    @staticmethod
+    def _evidence_sentence(content: str, needle: str, limit: int = 60) -> str:
+        """截取命中词所在句子作为证据。
+
+        参数:
+            content: 正文。
+            needle: 命中的姓名或别名。
+            limit: 最大字数。
+
+        返回:
+            句子文本（去空白、截断）；未命中返回空串。
+        """
+        position = content.find(needle)
+        if position < 0:
+            return ""
+        start = max((content.rfind(mark, 0, position) for mark in "。！？\n"), default=-1) + 1
+        ends = [content.find(mark, position) for mark in "。！？\n"]
+        ends = [end for end in ends if end >= 0]
+        end = min(ends) + 1 if ends else len(content)
+        return content[start:end].strip()[:limit]
 
     def _consistency(self, meta: dict) -> str:
         """离线做角色一致性检查（确定性，覆盖口吻/计划/视角）。
