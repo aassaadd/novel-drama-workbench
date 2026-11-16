@@ -2919,38 +2919,226 @@ function scriptSavedHTML(data) {
         : ''
     }
     <div id="sa-progress" style="margin-top:10px"></div>
-    <details style="margin-top:12px">
-      <summary style="cursor:pointer;font-size:11.5px;color:var(--text-3)">查看已保存的标注（${(
-        data.markup || ''
-      ).length} 字）</summary>
-      <pre style="max-height:240px;overflow:auto;margin-top:8px;padding:10px;border-radius:6px;
-        background:var(--bg-2);font-size:11.5px;line-height:1.6;white-space:pre-wrap">${esc(
-          data.markup || '（本集还没有保存标注）'
-        )}</pre>
-    </details>`;
+    ${readableSavedMarkupHTML(data.markup || '')}`;
 }
 
 /**
- * 把标注原文按 `@shot` 切成镜头块，供预览逐条浏览。
- * @param {string} markup 标注原文
- * @returns {Array<{head: string, body: string}>} 镜头块（没有 @shot 时整段返回）
+ * 把 `key=value` token 解析成对象，供标注反显读取。
+ * @param {string[]} tokens 空白分隔的 token
+ * @returns {Object<string,string>} 键值对
  */
-function splitShotBlocks(markup) {
-  const blocks = [];
-  let current = null;
-  for (const line of String(markup || '').split('\n')) {
-    if (/^@shot\b/.test(line.trim())) {
-      current = { head: line.trim(), body: [] };
-      blocks.push(current);
-    } else if (current) {
-      current.body.push(line);
+function parseMarkupKv(tokens) {
+  const kv = {};
+  for (const token of tokens || []) {
+    const at = String(token).indexOf('=');
+    if (at > 0) kv[token.slice(0, at)] = token.slice(at + 1);
+  }
+  return kv;
+}
+
+/**
+ * 毫秒数转成界面可读的秒数。
+ * @param {*} value 毫秒
+ * @returns {string} 如「8.0 秒」；非法值返回空串
+ */
+function markupSeconds(value) {
+  const ms = Number(value);
+  return Number.isFinite(ms) ? `${(ms / 1000).toFixed(1)} 秒` : '';
+}
+
+/**
+ * 把 `after-line=3` 等位置标记翻成中文。
+ * @param {string} token 位置标记
+ * @returns {string} 中文位置描述
+ */
+function markupPositionText(token) {
+  const text = String(token || '').trim();
+  if (text === 'shot-start' || text === 'shot_start') return '镜头开始';
+  if (text === 'shot-end' || text === 'shot_end') return '镜头结束';
+  const match = text.match(/^(before|after|during)[_-]line=(-?\d+)$/);
+  if (!match) return text || '镜头内';
+  const where = { before: '前', after: '后', during: '中' }[match[1]];
+  return `第 ${match[2]} 句台词${where}`;
+}
+
+/**
+ * 把一行 NDW 标注翻成中文可读条目。
+ * @param {string} line 标注原文的一行
+ * @returns {{label: string, text: string}} 左侧标签与右侧内容
+ */
+function readableMarkupItem(line) {
+  const text = String(line || '').trim();
+  if (text.startsWith('!')) {
+    const body = text.slice(1).trim();
+    const cut = body.search(/\s/);
+    const head = (cut === -1 ? body : body.slice(0, cut)).toLowerCase();
+    const rest = cut === -1 ? '' : body.slice(cut + 1).trim();
+    if (head === 'sfx') {
+      const [zhPart] = rest.split('||');
+      const parts = zhPart.trim().split(/\s+/);
+      const pieces = [
+        labelOf('sfx_kind', parts[0], '音效'),
+        markupSeconds(parts[1]),
+        markupPositionText(parts[2]),
+        parts.slice(3).join(' '),
+      ];
+      return { label: '音效', text: pieces.filter(Boolean).join(' · ') };
     }
+    if (head === 'bgm' || head === 'bgm-seg') {
+      const kv = parseMarkupKv(rest.split(/\s+/));
+      const pieces = [];
+      if (kv.mood) pieces.push(labelOf('scene_mood', kv.mood, ''));
+      if (kv.energy) pieces.push(`能量 ${kv.energy}`);
+      if (kv.intensity) pieces.push(`强度 ${kv.intensity}`);
+      if (kv.loop !== undefined) {
+        pieces.push(['0', 'false', 'no'].includes(String(kv.loop)) ? '不循环' : '循环');
+      }
+      if (kv.name) pieces.push(kv.name.replace(/\+/g, ' '));
+      if (kv.function) pieces.push(kv.function.replace(/\+/g, ' '));
+      return { label: head === 'bgm-seg' ? '配乐变化' : '配乐', text: pieces.filter(Boolean).join(' · ') || rest };
+    }
+    if (head === 'visual') return { label: '画面', text: rest };
+    if (head === 'anim') {
+      const parts = rest.split(/\s+/);
+      const pieces = [
+        labelOf('anim_mode', parts[0], ''),
+        markupSeconds(parts[1]),
+        labelOf('camera_move', parts[2], ''),
+        parts.slice(3).join(' '),
+      ];
+      return { label: '动画', text: pieces.filter(Boolean).join(' · ') };
+    }
+    if (head === 'silence') {
+      const parts = rest.split(/\s+/);
+      const pieces = [markupSeconds(parts[0]), markupPositionText(parts[1]), parts.slice(2).join(' ')];
+      return { label: '静音', text: pieces.filter(Boolean).join(' · ') };
+    }
+    return { label: '指令', text };
   }
-  if (!blocks.length) {
-    const text = String(markup || '').trim();
-    return text ? [{ head: '标注原文', body: text }] : [];
+  const match = text.match(/^([^：:]{0,80})[：:](.+)$/);
+  // 冒号前含中文标点时是句子成分，不是说话人，按旁白展示
+  if (!match || /[，。！？；、]/.test(match[1])) return { label: '旁白', text };
+  const tokens = match[1].split('|');
+  const speaker = (tokens[0] || '').trim() || '（未标注）';
+  const emotion = (tokens[1] || '').trim();
+  const kind = (tokens[2] || '').trim();
+  const notes = [];
+  if (emotion && emotion !== 'neutral') notes.push(labelOf('emotion', emotion, ''));
+  if (kind === 'inner_monologue') notes.push('内心独白');
+  const label = notes.filter(Boolean).length ? `${speaker}（${notes.filter(Boolean).join(' · ')}）` : speaker;
+  return { label, text: match[2].trim() };
+}
+
+/**
+ * 把标注原文按 `@shot` 拆成可读镜头块。
+ * @param {string} markup 标注原文
+ * @returns {Array<{title: string, meta: string[], items: Array<{label: string, text: string}>, raw: string[]}>} 镜头块
+ */
+function readableMarkupBlocks(markup) {
+  const blocks = [];
+  const loose = [];
+  let current = null;
+  for (const rawLine of String(markup || '').split('\n')) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('#')) continue;
+    if (/^@shot\b/.test(line)) {
+      const tokens = line.split(/\s+/);
+      let cut = tokens.length;
+      for (let i = 2; i < tokens.length; i += 1) {
+        if (tokens[i].includes('=')) {
+          cut = i;
+          break;
+        }
+      }
+      const kv = parseMarkupKv(tokens.slice(cut));
+      const label = tokens.slice(2, cut).join(' ');
+      const meta = [];
+      if (kv.location) meta.push(`地点：${kv.location}`);
+      meta.push(`时间：${labelOf('time_of_day', kv.time || 'unknown', '未指定')}`);
+      if (kv.mood) meta.push(`情绪：${labelOf('scene_mood', kv.mood, '')}`);
+      if (kv.goal) meta.push(`目标：${kv.goal}`);
+      current = {
+        title: `镜头 ${tokens[1] || '?'}${label ? ` · ${label}` : ''}`,
+        meta,
+        items: [],
+        raw: [line],
+      };
+      blocks.push(current);
+      continue;
+    }
+    if (!current) {
+      loose.push(line);
+      continue;
+    }
+    current.raw.push(line);
+    current.items.push(readableMarkupItem(line));
   }
-  return blocks.map((block) => ({ head: block.head, body: block.body.join('\n').trim() }));
+  if (loose.length) {
+    blocks.unshift({
+      title: '镜头声明之前的内容',
+      meta: [],
+      items: loose.map(readableMarkupItem),
+      raw: loose,
+    });
+  }
+  return blocks;
+}
+
+/**
+ * 渲染可读镜头块（标签 + 中文内容），供预览与已保存标注复用。
+ * @param {Array<object>} blocks `readableMarkupBlocks` 的结果
+ * @returns {string} HTML
+ */
+function readableShotBlocksHTML(blocks) {
+  return blocks
+    .map(
+      (block) => `
+    <details open style="margin-bottom:6px;background:var(--bg-2);border-radius:6px;padding:6px 10px">
+      <summary style="cursor:pointer;font-size:12px;color:var(--text)">${esc(block.title)}</summary>
+      ${
+        block.meta.length
+          ? `<div style="margin-top:4px;font-size:11px;color:var(--text-4)">${esc(block.meta.join(' · '))}</div>`
+          : ''
+      }
+      <div style="margin-top:6px;font-size:11.5px;line-height:1.7">
+        ${
+          block.items.length
+            ? block.items
+                .map(
+                  (item) => `<div style="display:flex;gap:8px;align-items:flex-start;padding:1px 0">
+            <span class="badge mute" style="flex:none;min-width:56px;text-align:center">${esc(item.label)}</span>
+            <span style="min-width:0;white-space:pre-wrap">${esc(item.text)}</span>
+          </div>`
+                )
+                .join('')
+            : '<div style="color:var(--text-4)">（这个镜头没有标注内容）</div>'
+        }
+      </div>
+    </details>`
+    )
+    .join('');
+}
+
+/**
+ * 已保存标注的可读视图：中文镜头块 + 可展开的原始语法。
+ * @param {string} markup 标注原文
+ * @returns {string} HTML
+ */
+function readableSavedMarkupHTML(markup) {
+  const text = String(markup || '').trim();
+  if (!text) return '';
+  const blocks = readableMarkupBlocks(text);
+  return `
+    <div class="summary-line" style="margin-top:12px;border-top:1px solid var(--line);padding-top:10px">
+      <span>已保存的标注（可读视图）</span>
+      <span class="right badge mute">${blocks.length} 个镜头</span>
+    </div>
+    <div style="max-height:320px;overflow:auto;margin-top:8px;padding-right:4px">${readableShotBlocksHTML(blocks)}</div>
+    <details style="margin-top:8px">
+      <summary style="cursor:pointer;font-size:11.5px;color:var(--text-3)">查看原始标注文本（${text.length} 字）</summary>
+      <pre style="max-height:240px;overflow:auto;margin-top:8px;padding:10px;border-radius:6px;
+        background:var(--bg-2);font-size:11.5px;line-height:1.6;white-space:pre-wrap">${esc(text)}</pre>
+    </details>`;
 }
 
 /**
@@ -2962,7 +3150,7 @@ function splitShotBlocks(markup) {
 function scriptPreviewHTML(preview, markupPath) {
   const markup = String(preview.markup || '').trim();
   const failures = preview.failures || [];
-  const shots = splitShotBlocks(markup);
+  const shots = readableMarkupBlocks(markup);
   const canAdopt = Boolean(markup) && !failures.length;
   const failureRows = failures
     .map(
@@ -2994,20 +3182,19 @@ function scriptPreviewHTML(preview, markupPath) {
     <div style="max-height:320px;overflow:auto;margin-top:8px;padding-right:4px">
       ${
         shots.length
-          ? shots
-              .map(
-                (shot) => `
-        <details open style="margin-bottom:6px;background:var(--bg-2);border-radius:6px;padding:6px 10px">
-          <summary style="cursor:pointer;font-size:12px;color:var(--text)">${esc(shot.head)}</summary>
-          <pre style="margin:6px 0 0;font-size:11.5px;line-height:1.6;white-space:pre-wrap">${esc(
-            shot.body || '（这个镜头没有内容）'
-          )}</pre>
-        </details>`
-              )
-              .join('')
+          ? readableShotBlocksHTML(shots)
           : '<div class="dlg-note bad">没有拿到可展示的标注内容</div>'
       }
     </div>
+    ${
+      markup
+        ? `<details style="margin-top:8px">
+            <summary style="cursor:pointer;font-size:11.5px;color:var(--text-3)">查看原始标注文本（${markup.length} 字）</summary>
+            <pre style="max-height:240px;overflow:auto;margin-top:8px;padding:10px;border-radius:6px;
+              background:var(--bg-2);font-size:11.5px;line-height:1.6;white-space:pre-wrap">${esc(markup)}</pre>
+          </details>`
+        : ''
+    }
     <div class="summary-line" style="margin-top:8px">
       <span>写入位置</span>
       <span class="right mono" style="max-width:70%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
@@ -3056,12 +3243,13 @@ async function runScriptSuggest(mask, mode = 'fill') {
               // 后端 index 是 1 基批次序号；进度只表示已完成批次，done 时才到 100%
               const total = Math.max(1, Number(payload.total) || 1);
               const index = Math.min(Math.max(1, Number(payload.index) || 1), total);
-              const text = ` 第 ${index}/${total} 批（镜头 ${Number(payload.start) + 1}–${Number(payload.end)}）`;
+              // 后端 start/end 已经是 1 基镜头号，这里不再 +1
+              const text = ` 第 ${index}/${total} 批（镜头 ${Number(payload.start)}–${Number(payload.end)}）`;
               if (label) label.textContent = text;
               panel.update({
                 stage: `正在标注第 ${index}/${total} 批镜头…`,
                 percent: total > 1 ? Math.round(((index - 1) / total) * 100) : 0,
-                current: `镜头 ${Number(payload.start) + 1}–${Number(payload.end)}`,
+                current: `镜头 ${Number(payload.start)}–${Number(payload.end)}`,
               });
             } else if (event === 'chars') {
               const text = ` 已接收 ${Number(payload.chars || 0)} 字`;

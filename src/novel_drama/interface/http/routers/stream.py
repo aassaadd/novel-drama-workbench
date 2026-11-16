@@ -1011,19 +1011,19 @@ def register_stream_routes(app, config_path: str | None = None) -> None:
                 on_progress=on_progress,
             )
             if not body.get("dry_run"):
+                # 有失败批次时不应用，避免把不完整的标注写入章节
+                if body.get("apply") and not result.get("partial"):
+                    from novel_drama.application.script.apply_script import (
+                        apply_script_to_chapter,
+                    )
+                    from novel_drama.composition import validate
+
+                    validate(result["script"], "director-script.schema.json")
+                    result["apply"] = apply_script_to_chapter(store, store.load_chapter(chapter_id), result["script"])
                 out_path = store.root / "scripts" / f"{chapter_id}.markup.txt"
                 out_path.parent.mkdir(parents=True, exist_ok=True)
                 out_path.write_text(str(result.get("markup") or "") + "\n", encoding="utf-8")
                 result["markup_path"] = str(out_path)
-            # 有失败批次时不应用，避免把不完整的标注写入章节
-            if body.get("apply") and not result.get("partial"):
-                from novel_drama.application.script.apply_script import (
-                    apply_script_to_chapter,
-                )
-                from novel_drama.composition import validate
-
-                validate(result["script"], "director-script.schema.json")
-                result["apply"] = apply_script_to_chapter(store, store.load_chapter(chapter_id), result["script"])
             return result
 
         return _progress_response(
@@ -1052,25 +1052,32 @@ def register_stream_routes(app, config_path: str | None = None) -> None:
         if not markup:
             raise HTTPException(status_code=400, detail="没有可写入的标注内容：请先生成预览")
 
+        from novel_drama.application.production.lines_source import chapter_view
         from novel_drama.application.script.apply_script import apply_script_to_chapter
         from novel_drama.composition import validate
         from novel_drama.director.markup import parse_markup
 
         chapter = store.load_chapter(chapter_id)
+        view = chapter_view(store, chapter)
         characters = store.load_characters()["characters"]
         warning_items: list[dict] = []
         try:
             script = parse_markup(
-                markup, chapter, characters, store.settings(), diagnostics=warning_items
+                markup, view, characters, store.settings(), diagnostics=warning_items
             )
             validate(script, "director-script.schema.json")
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=f"标注无法写入：{exc}") from exc
 
+        try:
+            applied = apply_script_to_chapter(store, chapter, script)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=f"标注无法写入：{exc}") from exc
+
+        # 章节与台本都写成功后再落标注原文，避免失败时留下「有标注、没同步」的半截状态
         out_path = store.root / "scripts" / f"{chapter_id}.markup.txt"
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(markup + "\n", encoding="utf-8")
-        applied = apply_script_to_chapter(store, chapter, script)
         return {
             "markup_path": str(out_path),
             "script_path": str(store.script_path(chapter_id)),

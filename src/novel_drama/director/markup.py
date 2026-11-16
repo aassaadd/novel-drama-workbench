@@ -2,7 +2,7 @@
 
 标注语法（逐行，缩进无关，空行与 `#` 开头行忽略）：
 
-    @shot 1 书房夜雨 location=书房 time=night mood=压抑 goal=等一个解释
+    @shot 1 书房夜雨 location=书房 time=night mood=tense goal=等一个解释
     旁白：夜色渐深，雨点敲在窗上。
     林晚|angry：你为什么要骗我？
     林晚|whisper|inner_monologue：别出声。
@@ -31,6 +31,7 @@ import re
 from ..infrastructure.config import load_config
 from ..models import new_id
 from ..models.entities import EMOTIONS, NARRATOR_ID, UNKNOWN_SPEAKER_ID
+from ..models.enums import SceneMood
 from ..models.ids import now_iso
 from ..text.names import match_speaker, normalize_speaker_name
 
@@ -497,19 +498,37 @@ def parse_markup(
                 index = int(tokens[1])
             except ValueError as exc:
                 raise ValueError(f"镜头序号必须是整数：{raw}") from exc
-            extras = _parse_kv(tokens[3:])
+            # 镜头名只取第一个 key=value 之前的 token，避免把 location/time/mood 写进标题
+            split_at = len(tokens)
+            for offset, token in enumerate(tokens[2:], start=2):
+                if "=" in token:
+                    split_at = offset
+                    break
+            label_tokens = tokens[2:split_at]
+            if not label_tokens:
+                raise ValueError(f"镜头声明缺少名称：{raw}")
+            scene_label = " ".join(label_tokens)
+            extras = _parse_kv(tokens[split_at:])
             time_of_day = extras.get("time") or "unknown"
             if time_of_day not in TIMES:
                 warnings.append(INFO_PREFIX + f"镜头 {index} 的 time={time_of_day} 非法，已改为 unknown")
                 time_of_day = "unknown"
-            anchor, search_from, _ = _anchor(content, blocks, " ".join(tokens[2:]), search_from, normalized)
+            mood = SceneMood.normalize(extras.get("mood"))
+            if extras.get("mood") and mood is None:
+                warnings.append(
+                    INFO_PREFIX
+                    + f"镜头 {index} 的 mood={extras.get('mood')} 非法，已改为 calm"
+                    f"（可选 {'/'.join(SceneMood.values())}）"
+                )
+                mood = "calm"
+            anchor, search_from, _ = _anchor(content, blocks, scene_label, search_from, normalized)
             current = {
                 "id": new_id("sht"),
                 "index": index,
-                "scene_label": " ".join(tokens[2:]),
+                "scene_label": scene_label,
                 "location": extras.get("location"),
                 "time_of_day": time_of_day,
-                "mood": extras.get("mood"),
+                "mood": mood,
                 "goal": extras.get("goal"),
                 "anchor": anchor,
                 "transition_in": {"type": extras.get("in") or "cut"},
@@ -740,6 +759,9 @@ def parse_markup(
 
         shot = require_shot(line_text)
         match = _LINE_RE.match(line_text)
+        if match and re.search(r"[，。！？；、]", match.group("head")):
+            # 冒号前是句子成分（含标点），不是说话人：整行按无前缀台词处理，避免误报说话人
+            match = None
         explicit_prefix = bool(match)
         if match:
             head, text = match.group("head").strip(), match.group("body").strip()

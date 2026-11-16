@@ -41,6 +41,7 @@
         "id": { "type": "string", "pattern": "^bgp_[0-9A-Za-z]{6,32}$" },
         "scope": { "type": "string", "enum": ["chapter", "shot"] },
         "name": { "type": ["string", "null"], "maxLength": 200 },
+        "prompt_en": { "type": ["string", "null"], "maxLength": 1000, "description": "英文配乐提示词（从台本派生，供 BGM 生成使用）" },
         "narrative_function": { "type": ["string", "null"], "maxLength": 300 },
         "mood_family": {
           "type": "string",

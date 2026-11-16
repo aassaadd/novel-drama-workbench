@@ -131,6 +131,48 @@ export const ENUMS = {
       ['inner_monologue', '内心独白'],
     ],
   },
+  scene_mood: {
+    label: '场景情绪',
+    options: [
+      ['calm', '平静'],
+      ['tense', '紧张'],
+      ['sad', '悲情'],
+      ['romantic', '浪漫'],
+      ['mysterious', '神秘'],
+      ['action', '动作'],
+      ['comedic', '喜剧'],
+      ['epic', '史诗'],
+      ['horror', '恐怖'],
+    ],
+  },
+  time_of_day: {
+    label: '时间',
+    options: [
+      ['dawn', '黎明'],
+      ['morning', '早晨'],
+      ['day', '白天'],
+      ['dusk', '黄昏'],
+      ['night', '夜晚'],
+      ['unknown', '未指定'],
+    ],
+  },
+  camera_move: {
+    label: '镜头运动',
+    options: [
+      ['static', '固定'],
+      ['slow_push_in', '缓慢推近'],
+      ['pan_left', '向左摇镜'],
+      ['pan_right', '向右摇镜'],
+      ['handheld', '手持'],
+    ],
+  },
+  anim_mode: {
+    label: '动画方式',
+    options: [
+      ['i2v', '图生视频'],
+      ['t2v', '文生视频'],
+    ],
+  },
   line_state: {
     label: '配音状态',
     options: [
@@ -522,12 +564,23 @@ const ALIASES = {
     严肃: 'serious', 郑重: 'serious',
   },
   line_kind: { 对白: 'dialogue', 对话: 'dialogue', 旁白: 'narration', 叙述: 'narration', 内心独白: 'inner_monologue', 独白: 'inner_monologue' },
+  scene_mood: {
+    平静: 'calm', 宁静: 'calm', 安静: 'calm', 舒缓: 'calm', 温和: 'calm', 沉思: 'calm', 克制: 'calm',
+    紧张: 'tense', 压抑: 'tense', 压迫: 'tense', 紧绷: 'tense', 不安: 'tense', 悬疑: 'tense',
+    悲情: 'sad', 悲伤: 'sad', 悲凉: 'sad', 凄凉: 'sad', 忧郁: 'sad', 沉重: 'sad', 哀伤: 'sad',
+    浪漫: 'romantic', 甜蜜: 'romantic', 温馨: 'romantic', 温柔: 'romantic',
+    神秘: 'mysterious', 诡异: 'mysterious', 诡秘: 'mysterious', 怪诞: 'mysterious',
+    动作: 'action', 激烈: 'action', 打斗: 'action', 追击: 'action', 冲突: 'action',
+    喜剧: 'comedic', 搞笑: 'comedic', 幽默: 'comedic', 轻松: 'comedic',
+    史诗: 'epic', 宏大: 'epic', 壮阔: 'epic',
+    恐怖: 'horror', 惊悚: 'horror', 阴森: 'horror', 骇人: 'horror',
+  },
   bgm_mode: { 叙事: 'narrative', 叙事型: 'narrative', 铺底: 'bed', 铺底型: 'bed', 垫底: 'bed' },
   line_state: { 待配: 'pending', 待生成: 'pending', 合成中: 'running', 已配: 'ready', 就绪: 'ready', 失败: 'failed', 已过期: 'stale' },
   asset_status: { 待生成: 'pending', 排队: 'queued', 生成中: 'running', 就绪: 'ready', 失败: 'failed', 跳过: 'skipped' },
   chapter_status: { 草稿: 'draft', 已成文: 'written', 已切分: 'split', 已标注: 'scripted', 已配音: 'voiced', 已出画: 'visualized', 已混音: 'composed', 已过期: 'stale' },
   pov: { 第一人称: 'first', 第二人称: 'second', 第三人称有限: 'third_limited', 第三人称全知: 'third_omniscient' },
-  time_of_day: { 黎明: 'dawn', 清晨: 'morning', 早晨: 'morning', 白天: 'day', 黄昏: 'dusk', 傍晚: 'dusk', 夜晚: 'night', 夜里: 'night' },
+  time_of_day: { 黎明: 'dawn', 清晨: 'morning', 早晨: 'morning', 白天: 'day', 黄昏: 'dusk', 傍晚: 'dusk', 夜晚: 'night', 夜里: 'night', 未指定: 'unknown' },
 };
 
 /** 已告警过的「枚举键:值」，避免同一处反复刷控制台 */

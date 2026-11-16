@@ -8,7 +8,9 @@ from ...adapters.persistence import ProjectStore
 from ...adapters.persistence.settings_store import SettingsStore
 from ...director.markup import parse_markup
 from ...infrastructure.config import AppConfig
+from ...models.enums import SceneMood
 from ...models.ids import now_iso
+from ..production.lines_source import chapter_view
 from ..story.chapter_context import _project_context
 from ..story.chapter_rounds import (
     _script_work_load,
@@ -63,7 +65,7 @@ def suggest_script(
         ValueError: 章节没有场景或台词行。
         AdapterError: 全部批次失败，或模型输出完全无法解析。
     """
-    chapter = store.load_chapter(chapter_id)
+    chapter = chapter_view(store, store.load_chapter(chapter_id))
     scenes = chapter.get("scenes") or []
     if not scenes:
         raise ValueError(f"章节 {chapter_id} 还没有场景：先执行 ndw scene split")
@@ -93,7 +95,7 @@ def suggest_script(
                 "title": scene.get("title") or scene.get("scene_label") or f"场景 {(scene.get('index') or 0) + 1}",
                 "location": scene.get("location") or "未标注",
                 "time_of_day": scene.get("time_of_day") or "unknown",
-                "mood": scene.get("mood") or "克制",
+                "mood": SceneMood.normalize(scene.get("mood")) or "calm",
                 "lines": lines,
             }
         )
@@ -108,14 +110,15 @@ def suggest_script(
         f"作品《{chapter.get('title')}》导演标注任务：按镜头输出 NDW 标注文本"
         "（@shot / !sfx / !visual / !anim / !bgm），保留台词原文与顺序，不要解释。\n"
         "严格格式：\n"
-        "@shot 1 镜头名 location=验尸房 time=night mood=压抑\n"
+        "@shot 1 镜头名 location=验尸房 time=night mood=tense\n"
         "旁白：夜色渐深。\n"
-        "沈砚秋|calm：执照可以收，尸体不能白躺。\n"
+        "沈砚秋|serious：执照可以收，尸体不能白躺。\n"
         "!sfx ambience 8000 after-line=1 雨声敲窗 || Gentle rain tapping a window, close perspective, wet glass resonance\n"
         "!visual 画面描述\n"
         "!bgm mood=tense energy=0.4 intensity=0.6 loop=1 name=夜雨独行 style=低音弦乐+稀疏钢琴 function=铺垫危机 en=tense+low+strings+sparse+piano+slow+clock+ticks+dark+minor\n"
         "!anim i2v 5000 slow_push_in 镜头运动\n"
         "规则：@shot 后必须是整数序号与镜头名；time 取 dawn/morning/day/dusk/night/unknown；"
+        "mood 只能是 calm/tense/sad/romantic/mysterious/action/comedic/epic/horror，不要写中文情绪；"
         "!sfx 的 kind 只能是 ambience/foley/impact/transition/music_sting，第二个参数是毫秒数，位置写 after-line=N；"
         "!sfx 的中文描述后必须用「||」跟一段英文提示词：写清声源、材质、动作、空间感与音色，不是逐字直译，也不要写时长；"
         "!visual 直接跟画面提示词，不写画幅；"

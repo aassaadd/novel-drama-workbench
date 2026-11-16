@@ -91,14 +91,19 @@ def apply_script_to_chapter(store: ProjectStore, chapter: dict, script: dict) ->
             ):
                 updated += 1
 
-    # 台本是唯一可写源：先落盘，再派生场景；场景里按行 ID / 条目 ID 保留生产态与媒体
-    store.save_script(script)
+    # 台本是唯一可写源：先派生场景并归档旧版本，章节写成功后再写台本；
+    # 顺序反了会在章节枚举校验失败时留下「新台本 + 旧章节」的半截状态。
     chapter["scenes"] = scenes_from_script(chapter, script)
     bump_revision(chapter)
     chapter["updated_at"] = now_iso()
     # 把镜头里的音效/画面/动画物化进场景，供时间轴与渲染使用
     media = materialize_media(chapter, script, store.settings())
-    store.save_chapter(chapter)
+    try:
+        old_script = store.load_script(str(chapter["id"]))
+    except FileNotFoundError:
+        old_script = None
+    store.save_chapter(chapter, archive_script=old_script)
+    store.save_script(script)
     return {
         "scenes_created": created,
         "lines_added": added,

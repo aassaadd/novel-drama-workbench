@@ -20,6 +20,7 @@ import os
 from ...adapters.persistence import ProjectStore
 from ...domain.production.line_fields import CONTENT_LINE_FIELDS, SCENE_DESCRIPTIVE_FIELDS
 from ...models import entities
+from ...models.enums import SceneMood
 from ...models.ids import now_iso
 
 #: 空章节内容的占位哈希输入（保证 `content_hash` 始终是合法 sha256）
@@ -225,7 +226,13 @@ def scenes_from_script(chapter: dict, script: dict) -> list[dict]:
         else:
             scene["title"] = label or scene.get("title") or default_label
         for field in SCENE_DESCRIPTIVE_FIELDS:
-            scene[field] = copy.deepcopy(shot.get(field)) if field in shot else scene.get(field)
+            if field not in shot:
+                continue
+            value = copy.deepcopy(shot.get(field))
+            if field == "mood" and value:
+                # 旧台本可能存着模型写的中文情绪；派生到场景前先收敛到枚举，避免整章校验失败
+                value = SceneMood.normalize(value) or "calm"
+            scene[field] = value
         if "time_of_day" in shot and not shot.get("time_of_day"):
             scene["time_of_day"] = "unknown"
         if "bgm" in shot:
