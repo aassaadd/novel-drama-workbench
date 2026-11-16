@@ -44,6 +44,7 @@
   "pace": "slow",
   "temperament": ["沉稳", "压抑"],
   "accent": "北方口音",
+  "design_prompt_zh": "三十岁出头、低沉克制的男声，略带沙哑，语速偏慢，带一点北方口音，适合自然可信的影视对白。",
   "design_prompt": "A low-pitched, slightly raspy male voice in his early 30s, slow and restrained, subtle northern Chinese accent, calm and serious tone.",
   "negative_prompt": ["童声", "播音腔", "过度甜美"],
   "confidence": 0.82,
@@ -51,9 +52,10 @@
 }
 ```
 
-- `design_prompt` 是**唯一喂给模型**的字段，其余字段用于展示、复现与二次微调。
+- `design_prompt` 是**唯一喂给模型**的字段；`design_prompt_zh` 是同一描述的中文版本，仅用于界面阅读确认。其余字段用于展示、复现与二次微调。
 - 输出走 `WritingAdapter.generate_tool`（现有结构化工具调用能力），失败则回退到规则模板（性别+年龄+音区+语速拼句），保证功能不因 LLM 不可用而中断。
 - LLM 不允许写真实人名、明星、主播名字；提示词里显式禁止。
+- 用户在界面改写中文后，可调用 `POST /api/ui/voices/design/translate`（`{path, text}` → `{english}`）用 LLM 翻成英文；直接抽卡时若中文有变更也会自动翻译，英文被手动改过则不覆盖。
 
 ### 1.3 存放位置
 
@@ -181,7 +183,7 @@
 
 ### 6.2 交互与进度
 
-- 点击后先展示确认弹层：显示 LLM 生成的 `voice_summary` 与可编辑的 `design_prompt`、候选条数，确认才开始。
+- 点击后先展示确认弹层：显示 LLM 生成的中英双语描述（`design_prompt_zh` / `design_prompt`，均可编辑）、候选条数，确认才开始；中文改动后可用「中文翻译成英文」或直接抽卡自动翻译。
 - 生成走**异步任务 + 轮询**（模型加载与 4 条生成可能 1~3 分钟，同步请求容易超时）：
   - `POST /api/ui/voices/design/batches` → `{batch_id}`
   - `GET  /api/ui/voices/design/batches/{batch_id}` → `{status, stage, done, total, candidates[]}`

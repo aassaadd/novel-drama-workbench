@@ -34,6 +34,7 @@ _LLM_ENDPOINTS = (
     "/api/ui/setting/generate",
     "/api/ui/sfx/generate",
     "/api/ui/voices/design/preview",
+    "/api/ui/voices/design/translate",
     "/api/ui/worlds/generate/stream",
 )
 
@@ -58,6 +59,7 @@ _UI_ACTIONS = (
     "character.updates",
     "script.suggest",
     "voice.design.preview",
+    "voice.design.translate",
     "media.sfx",
     "produce.run",
 )

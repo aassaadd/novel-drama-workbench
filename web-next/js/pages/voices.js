@@ -2,7 +2,7 @@
  * 音色视图（V4）：音色池、内置音色、试听、绑定到角色、候选对比。
  * 只做参考产品有的音色分配，不出现自动编排 / 音色生成。
  */
-import { esc, icon, toast, openDialog, fmtDuration } from '../dom.js';
+import { esc, icon, toast, openDialog, closeDialog, fmtDuration } from '../dom.js';
 import { getJSON, postJSON } from '../api.js';
 import { labelOf } from '../enums.js';
 import { openProgress } from '../progress.js';
@@ -348,6 +348,10 @@ function openVoiceDesign() {
   }
   let profile = null;
   let batchId = '';
+  /** 上次翻译时的中文原文；用于判断中文是否被改过 */
+  let lastTranslatedZh = '';
+  /** 用户是否手动改过英文描述；改过就不再自动覆盖 */
+  let enEdited = false;
   /** 复用已有批次时给进度浮层的结束文案（空串表示本次是新抽卡） */
   let reuseMessage = '';
   const mask = openDialog({
@@ -356,12 +360,16 @@ function openVoiceDesign() {
     body: `
       ${modeSwitchHTML('voice.desc', { fallback: 'regen' })}
       ${modeSwitchHTML('voice.draw', { fallback: 'regen' })}
-      <div class="dlg-note">按角色档案生成中文音色描述，再由本机 VoxCPM2 抽卡候选；采用后可直接绑定给该角色。</div>
-      <div class="field" style="margin-top:8px"><label>音色描述（可手动改写）</label>
-        <textarea class="textarea" id="vd-prompt" rows="3"
+      <div class="dlg-note">按角色档案生成中英双语音色描述；中文可手动改写，抽卡前会用模型自动翻译成英文（VoxCPM2 只使用英文描述）。</div>
+      <div class="field" style="margin-top:8px"><label>中文音色描述（可手动改写）</label>
+        <textarea class="textarea" id="vd-prompt-zh" rows="3"
           placeholder="例如：中年男性，低沉沙哑，语速偏慢，带一点疲惫感"></textarea></div>
+      <div class="field" style="margin-top:8px"><label>英文音色描述（VoxCPM2 抽卡用，可手动改写）</label>
+        <textarea class="textarea" id="vd-prompt-en" rows="3"
+          placeholder="例如：A middle-aged male voice, low and slightly hoarse, slow pace, weary but restrained"></textarea></div>
       <div style="display:flex;gap:10px;align-items:center;margin-top:8px;flex-wrap:wrap">
         <button class="btn" id="vd-preview">重新生成描述</button>
+        <button class="btn" id="vd-translate">中文翻译成英文</button>
         <label style="font-size:11.5px;color:var(--text-3)">候选数
           <input class="input" id="vd-count" type="number" min="1" max="6" value="4"
             style="width:64px;height:26px;display:inline-block" /></label>
@@ -390,11 +398,46 @@ function openVoiceDesign() {
     labels: { fill: '只补缺失候选', regen: '重新抽卡' },
   });
 
-  const promptNode = mask.querySelector('#vd-prompt');
+  const promptZhNode = mask.querySelector('#vd-prompt-zh');
+  const promptEnNode = mask.querySelector('#vd-prompt-en');
   const hintNode = mask.querySelector('#vd-hint');
   const profileHost = mask.querySelector('#vd-profile');
   const resultHost = mask.querySelector('#vd-result');
   const historyHost = mask.querySelector('#vd-history');
+  promptEnNode.addEventListener('input', () => {
+    enEdited = true;
+  });
+  /** 调模型把中文描述翻成英文；失败或取消时返回空串 */
+  const translateToEnglish = async (zh) => {
+    let data = null;
+    try {
+      data = await runLlm({
+        action: 'voice.design.translate',
+        confirm: false,
+        params: { path: state.path, text: zh },
+        title: `正在翻译「${character.name}」的音色描述…`,
+        hint: '中文 → 英文，供 VoxCPM2 抽卡使用 · 可随时取消',
+        stage: '正在调用写作模型翻译…',
+        request: ({ callId, signal }) =>
+          postJSON(
+            '/api/ui/voices/design/translate',
+            { path: state.path, text: zh },
+            { timeout: 0, callId, signal }
+          ),
+        finish: () => ({ message: '音色描述已翻译成英文', detail: '已写回英文文本框，可直接抽卡或手动改写。' }),
+      });
+    } catch (error) {
+      toast(`翻译失败：${error.message}`, 'bad', 5200);
+      return '';
+    }
+    if (!data) return ''; // 用户取消或确认弹窗被关闭
+    const english = String(data.english || '').trim();
+    if (!english) {
+      toast('翻译结果为空，请手动填写英文描述', 'warn', 4200);
+      return '';
+    }
+    return english;
+  };
 
   /** 停止轮询（弹窗已关闭或批次结束） */
   const stopPoll = () => {
@@ -547,8 +590,8 @@ function openVoiceDesign() {
   mask.querySelector('#vd-preview').addEventListener('click', async (event) => {
     const button = event.currentTarget;
     const mode = descModeOf();
-    if (mode === 'fill' && promptNode.value.trim()) {
-      return toast('已有音色描述，已保留；要覆盖请选重新生成', 'info', 3200);
+    if (mode === 'fill' && promptZhNode.value.trim() && promptEnNode.value.trim()) {
+      return toast('已有中英文音色描述，已保留；要覆盖请选重新生成', 'info', 3200);
     }
     const idleLabel = mode === 'fill' ? '补缺失' : '重新生成描述';
     button.disabled = true;
@@ -577,7 +620,12 @@ function openVoiceDesign() {
           ),
         finish: (data) => {
           profile = data.profile || null;
-          promptNode.value = data.prompt || promptNode.value;
+          const zh = String(data.prompt_zh || data.profile?.design_prompt_zh || '').trim();
+          const en = String(data.prompt || '').trim();
+          if (zh) promptZhNode.value = zh;
+          if (en) promptEnNode.value = en;
+          lastTranslatedZh = promptZhNode.value.trim();
+          enEdited = false;
           if (data.candidates) mask.querySelector('#vd-count').value = String(data.candidates);
           profileHost.innerHTML = `
             <div class="summary-line"><span>描述来源</span>
@@ -587,15 +635,16 @@ function openVoiceDesign() {
                 ? `<div class="dlg-note warn" style="margin-top:6px">${esc(data.note)}</div>`
                 : ''
             }
+            <div class="hint" style="margin-top:6px">中文用于阅读确认，英文用于 VoxCPM2 抽卡；改中文后点「中文翻译成英文」或直接抽卡会自动翻译。</div>
             ${
               data.script
                 ? `<div class="hint" style="margin-top:6px">试听台词：${esc(data.script)}</div>`
                 : ''
             }`;
-          toast('音色描述已生成', 'ok');
+          toast('中英双语音色描述已生成', 'ok');
           return {
             message: mode === 'fill' ? '音色描述已补全' : '音色描述已重新生成',
-            detail: '已写回文本框，可直接抽卡或手动改写。',
+            detail: '中英文已分别写回两个文本框，可直接抽卡或手动改写。',
           };
         },
       });
@@ -608,10 +657,31 @@ function openVoiceDesign() {
     }
   });
 
+  /** 手动把中文描述翻译成英文，写回英文文本框 */
+  mask.querySelector('#vd-translate').addEventListener('click', async (event) => {
+    const button = event.currentTarget;
+    const zh = promptZhNode.value.trim();
+    if (!zh) return toast('先填写中文音色描述', 'warn');
+    button.disabled = true;
+    button.textContent = '翻译中…';
+    try {
+      const english = await translateToEnglish(zh);
+      if (!english) return;
+      promptEnNode.value = english;
+      lastTranslatedZh = zh;
+      enEdited = false;
+      toast('已翻译成英文', 'ok');
+    } finally {
+      button.disabled = false;
+      button.textContent = '中文翻译成英文';
+    }
+  });
+
   /** 开始抽卡：fill 复用已有就绪批次，regen 按新描述重新抽卡 */
   mask.querySelector('#vd-start').addEventListener('click', async (event) => {
     const mode = drawModeOf();
-    const prompt = promptNode.value.trim();
+    const zh = promptZhNode.value.trim();
+    let prompt = promptEnNode.value.trim();
     const button = event.currentTarget;
     button.disabled = true;
     try {
@@ -648,7 +718,17 @@ function openVoiceDesign() {
           return;
         }
       }
-      if (!prompt) return toast('先填音色描述，或点「按档案生成描述」', 'warn');
+      // 中文改过或英文为空时，自动用模型翻成英文；用户手动改过英文则不覆盖
+      if (zh && (!prompt || (zh !== lastTranslatedZh && !enEdited))) {
+        const english = await translateToEnglish(zh);
+        if (!english) return;
+        prompt = english;
+        promptEnNode.value = english;
+        lastTranslatedZh = zh;
+        enEdited = false;
+        toast('已自动把中文描述翻译成英文', 'ok');
+      }
+      if (!prompt) return toast('先填中文或英文音色描述，或点「重新生成描述」', 'warn');
       resultHost.innerHTML = `<div class="dlg-note">正在启动抽卡…</div>`;
       designPanel = openProgress({
         title:

@@ -46,7 +46,7 @@ _SCRIPT_CHARS_KEY = "script_chars"
 _PROFILE_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["voice_summary", "gender", "age_range", "pitch", "timbre", "pace", "temperament", "accent", "design_prompt"],
+    "required": ["voice_summary", "gender", "age_range", "pitch", "timbre", "pace", "temperament", "accent", "design_prompt_zh", "design_prompt"],
     "properties": {
         "voice_summary": {"type": "string", "maxLength": 200},
         "gender": {"type": "string", "enum": ["male", "female", "other", "unknown"]},
@@ -56,6 +56,7 @@ _PROFILE_SCHEMA = {
         "pace": {"type": "string", "enum": ["slow", "medium", "fast"]},
         "temperament": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 4},
         "accent": {"type": "string", "maxLength": 40},
+        "design_prompt_zh": {"type": "string", "maxLength": 600},
         "design_prompt": {"type": "string", "maxLength": 600},
         "negative_prompt": {"type": "array", "items": {"type": "string"}, "maxItems": 5},
         "confidence": {"type": "number", "minimum": 0, "maximum": 1},
@@ -78,8 +79,16 @@ _SYSTEM_PROMPT = """你是拟音导演。根据人物设定，设计一条能用
 1. 只描述「能发出声音的生理与语言习惯」：性别、年龄感、音区、音色质感、语速、气质、口音。
 2. 不写外貌形容词，不写剧情，不写真实人名、明星或主播。
 3. design_prompt 用英文写，一句话，包含性别、年龄、音区、质感、语速、气质、口音；不要出现负面词。
-4. 性别必须服从人物设定的 gender；设定为 unknown 时按背景合理推断为 male 或 female，不要返回 other。
-5. timbre 用 2~4 个中文质感词（如：低沉、略带沙哑、清亮）。"""
+4. design_prompt_zh 用中文写同一段描述，语义与 design_prompt 对应，供用户阅读确认。
+5. 性别必须服从人物设定的 gender；设定为 unknown 时按背景合理推断为 male 或 female，不要返回 other。
+6. timbre 用 2~4 个中文质感词（如：低沉、略带沙哑、清亮）。"""
+
+_TRANSLATE_SYSTEM = """你是影视拟音翻译。把用户给出的中文音色描述翻译成英文音色设计提示词。
+
+要求：
+1. 只输出一行英文描述，不要解释、不要引号、不要 Markdown。
+2. 保留性别、年龄感、音区、音色质感、语速、气质、口音等全部信息。
+3. 不要新增剧情、外貌、真实人名或明星；不要出现负面词。"""
 
 
 def _now() -> str:
@@ -164,6 +173,25 @@ def _character_brief(character: dict) -> str:
     return "\n".join(parts)
 
 
+def _compose_zh_prompt(profile: dict) -> str:
+    """按结构化字段拼出一段中文音色描述（模型没给中文时兜底）。
+
+    参数:
+        profile: 已归一化的音色描述（含 gender/age_range/pitch/timbre/pace/temperament/accent）。
+
+    返回:
+        中文音色描述，供界面展示与「中文翻译成英文」使用。
+    """
+    gender = {"male": "男声", "female": "女声"}.get(profile.get("gender"), "中性声线")
+    pitch = SpeechPitch.label_of(profile.get("pitch")) or "中等音区"
+    pace = SpeechTempo.label_of(profile.get("pace")) or "中速"
+    timbre = "、".join(profile.get("timbre") or []) or "自然"
+    temperament = "、".join(profile.get("temperament") or []) or "沉稳"
+    age = profile.get("age_range") or "年龄未标注"
+    accent = profile.get("accent") or "标准普通话"
+    return f"{age}{gender}，{pitch}，音色{timbre}，气质{temperament}，{pace}，{accent}，适合自然可信的影视对白。"
+
+
 def _rule_profile(character: dict) -> dict:
     """LLM 不可用时的规则模板（保证功能可用）。"""
     gender = character.get("gender") if character.get("gender") in {"male", "female", "other"} else "unknown"
@@ -174,7 +202,7 @@ def _rule_profile(character: dict) -> dict:
     age = character.get("age_range") or "30s"
     accent = (style.get("accent") or "").strip() or "standard Mandarin"
     prompt = f"A {pitch}-pitched {gender_en} voice in {age}, clear natural timbre, {pace} pace, {accent}, restrained and believable."
-    return {
+    profile = {
         "voice_summary": f"{age}{'男' if gender == 'male' else '女' if gender == 'female' else ''}声，"
         f"{SpeechPitch.label_of(pitch) or '中等'}，{SpeechTempo.label_of(pace) or '中速'}",
         "gender": gender,
@@ -189,6 +217,8 @@ def _rule_profile(character: dict) -> dict:
         "confidence": 0.4,
         "evidence": ["规则模板：LLM 不可用，未做语义推断"],
     }
+    profile["design_prompt_zh"] = _compose_zh_prompt(profile)
+    return profile
 
 
 def build_profile(adapter, character: dict, config=None) -> dict:
@@ -268,14 +298,48 @@ def _normalize_profile(raw: dict, character: dict) -> tuple[dict, str | None]:
         "pace": raw.get("pace") if raw.get("pace") in {"slow", "medium", "fast"} else "medium",
         "temperament": [str(item)[:20] for item in (raw.get("temperament") or [])][:4] or ["沉稳"],
         "accent": str(raw.get("accent") or "")[:40],
+        "design_prompt_zh": str(raw.get("design_prompt_zh") or "").strip()[:600],
         "design_prompt": str(raw.get("design_prompt") or "").strip()[:600],
         "negative_prompt": [str(item)[:20] for item in (raw.get("negative_prompt") or [])][:5],
         "confidence": max(0.0, min(1.0, float(raw.get("confidence") or 0.6))),
         "evidence": [str(item)[:80] for item in (raw.get("evidence") or [])][:6],
     }
+    if not profile["design_prompt_zh"]:
+        profile["design_prompt_zh"] = _compose_zh_prompt(profile)
     if not profile["design_prompt"]:
         raise ValueError("模型未返回 design_prompt")
     return profile, note
+
+
+def translate_to_english(adapter, text: str) -> str:
+    """把中文音色描述翻译成英文抽卡提示词。
+
+    参数:
+        adapter: 写作适配器（需实现 generate）。
+        text: 中文音色描述。
+
+    返回:
+        单行英文音色描述。
+
+    异常:
+        ValueError: 翻译为空或模型调用失败。
+    """
+    req = TextGenRequest(
+        task="freeform",
+        system=_TRANSLATE_SYSTEM,
+        messages=[Message(role="user", content=text.strip())],
+        temperature=0.2,
+        stream=False,
+        metadata={"purpose": "voice_design_translate", "thinking_stage": "voice_translate"},
+    )
+    try:
+        result = adapter.generate(req)
+        english = str(getattr(result, "text", result) or "").strip().strip('"').strip()
+    except Exception as exc:  # 统一转成可直接展示的翻译失败
+        raise ValueError(f"模型翻译失败：{exc}") from exc
+    if not english:
+        raise ValueError("模型没有返回英文描述")
+    return english[:600]
 
 
 def batch_dir(store, batch_id: str) -> Path:

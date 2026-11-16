@@ -430,7 +430,6 @@ def register_voice_voices_routes(app, project_root: str | None = None, config_pa
         异常:
             HTTPException 400/404: 功能未启用或人物不存在。
         """
-        from novel_drama.composition import build_adapters
         from novel_drama.tts import voice_design
 
         store = _store(body.get("path"))
@@ -444,19 +443,62 @@ def register_voice_voices_routes(app, project_root: str | None = None, config_pa
             raise HTTPException(status_code=404, detail={"code": 3, "message": "人物不存在", "character_id": body.get("character_id")})
         manual = str(body.get("prompt") or "").strip()
         if manual:
-            result = {"profile": None, "source": "manual", "note": None, "prompt": manual}
+            has_cjk = any("\u4e00" <= char <= "\u9fff" for char in manual)
+            result = {
+                "profile": None,
+                "source": "manual",
+                "note": None,
+                "prompt": manual,
+                "prompt_zh": manual if has_cjk else "",
+            }
         else:
-            from ....application.support.llm_calls import build_writing_adapter
+            from novel_drama.application.support.llm_calls import build_writing_adapter
 
             adapter = build_writing_adapter(cfg, store.settings(), action="voice.design.preview")
             built = voice_design.build_profile(adapter, character, cfg)
-            result = {**built, "prompt": built["profile"]["design_prompt"]}
+            result = {
+                **built,
+                "prompt": built["profile"]["design_prompt"],
+                "prompt_zh": built["profile"].get("design_prompt_zh") or "",
+            }
         return {
             **result,
             "script": design.get("script"),
             "candidates": int(design.get("candidates", 4)),
             "max_keep_days": int(design.get("max_keep_days", 7)),
         }
+
+    @app.post("/api/ui/voices/design/translate")
+    def ui_voices_design_translate(body: dict) -> dict:
+        """把中文音色描述翻译成英文，供 VoxCPM2 抽卡使用。
+
+        参数:
+            body: `{path, text}`；text 为中文音色描述。
+
+        返回:
+            `{english, source}`。
+
+        异常:
+            HTTPException 400: 功能未启用、文本为空或模型翻译失败。
+        """
+        from novel_drama.tts import voice_design
+
+        store = _store(body.get("path"))
+        cfg = _tts_config()
+        design = cfg.get("voice.design") or {}
+        if not design.get("enabled", True):
+            raise HTTPException(status_code=400, detail={"code": 2, "message": "音色设计未启用"})
+        text = str(body.get("text") or "").strip()
+        if not text:
+            raise HTTPException(status_code=400, detail={"code": 2, "message": "缺少中文音色描述"})
+        from novel_drama.application.support.llm_calls import build_writing_adapter
+
+        adapter = build_writing_adapter(cfg, store.settings(), action="voice.design.translate")
+        try:
+            english = voice_design.translate_to_english(adapter, text)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"code": 2, "message": str(exc)}) from exc
+        return {"english": english, "source": "llm"}
 
     @app.post("/api/ui/voices/design/batches")
     def ui_voices_design_start(body: dict) -> dict:

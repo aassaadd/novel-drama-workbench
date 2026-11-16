@@ -380,6 +380,15 @@ _action(
     calls=lambda store, config, ctx: 1,
 )
 _action(
+    "voice.design.translate",
+    title="翻译音色描述",
+    what="把中文音色描述翻译成英文音色设计提示词，供 VoxCPM2 抽卡使用",
+    stages=("voice_translate",),
+    seconds=10,
+    cancelable=False,
+    calls=lambda store, config, ctx: 1,
+)
+_action(
     "media.sfx",
     title="生成音效",
     what="按本章场景需要生成音效；缺少描述时会先让模型改写音效提示词",
