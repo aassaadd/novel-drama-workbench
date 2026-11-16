@@ -1330,8 +1330,14 @@ def select_candidate(
     if not source_path.exists():
         raise ValueError("候选音频已过期或被清理")
     duration_ms = int(candidate.get("duration_ms") or 0)
-    if duration_ms < 2000 or duration_ms > 20000:
-        raise ValueError(f"候选音频时长 {duration_ms}ms 不在 2000~20000ms 范围，建议重新抽卡")
+    if not duration_ms:
+        # 旧批次的元数据可能没记时长，直接读文件补齐
+        duration_ms = _probe_wav_ms(source_path)
+    # 下限与参考音规整保持一致：短句试听文案生成的候选可能只有 1.7~2 秒
+    if duration_ms < _REF_MIN_DURATION_MS or duration_ms > 20000:
+        raise ValueError(
+            f"候选音频时长 {duration_ms}ms 太短或过长（可用范围 {_REF_MIN_DURATION_MS}~20000ms），建议重新抽卡"
+        )
     variant_id = entities.new_id("vav")
     ref_dir = store.voice_asset_dir("ref")
     ref_dir.mkdir(parents=True, exist_ok=True)

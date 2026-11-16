@@ -131,9 +131,9 @@
         "audio_path": { "type": "string", "description": "参考音频相对路径" },
         "duration_ms": {
           "type": "integer",
-          "minimum": 2000,
+          "minimum": 1200,
           "maximum": 20000,
-          "description": "克隆最少 3 秒；按情绪准备建议 5~15 秒"
+          "description": "克隆最少 1.2 秒；短句试听文案生成的参考音通常 1.7~3 秒"
         },
         "text": { "type": ["string", "null"], "maxLength": 2000, "description": "参考音频对应文本（可选）" },
         "snr_db": { "type": ["number", "null"] },
